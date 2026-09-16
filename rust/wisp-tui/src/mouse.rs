@@ -348,6 +348,10 @@ impl LiveUi {
                 .theme_picker
                 .as_mut()
                 .is_some_and(|view| view.select_mouse(index)),
+            OverlayKind::Logo => self
+                .logo_picker
+                .as_mut()
+                .is_some_and(|view| view.select_mouse(index)),
             OverlayKind::PromptHistory => self
                 .prompt_history_view
                 .as_mut()

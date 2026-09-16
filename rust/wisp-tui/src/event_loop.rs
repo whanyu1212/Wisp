@@ -55,6 +55,7 @@ struct ActivationTarget {
     rendered_file: Option<usize>,
     rendered_completion: Option<String>,
     rendered_theme: Option<usize>,
+    rendered_logo: Option<usize>,
     rendered_history: Option<u64>,
     rendered_skill: Option<String>,
     composer_copy: bool,
@@ -79,6 +80,10 @@ impl ActivationTarget {
             rendered_completion: ui.completion.rendered_selection().map(str::to_owned),
             rendered_theme: ui
                 .theme_picker
+                .as_ref()
+                .and_then(|view| view.rendered_selection()),
+            rendered_logo: ui
+                .logo_picker
                 .as_ref()
                 .and_then(|view| view.rendered_selection()),
             rendered_history: ui

@@ -9,8 +9,9 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 10] = [
+const KINDS: [OverlayKind; 11] = [
     OverlayKind::Theme,
+    OverlayKind::Logo,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
     OverlayKind::Context,
@@ -90,6 +91,9 @@ fn tree(id: &str) -> reducer::SessionTreePage {
 fn open(ui: &mut LiveUi, kind: OverlayKind) {
     match kind {
         OverlayKind::Theme => ui.theme_picker = Some(ThemePicker::new(ui.theme.active)),
+        OverlayKind::Logo => {
+            ui.logo_picker = Some(LogoPicker::new(ui.logo_choice, ui.startup_logo))
+        }
         OverlayKind::PromptHistory => {
             ui.prompt_history.record("earlier prompt".into());
             ui.open_prompt_history();

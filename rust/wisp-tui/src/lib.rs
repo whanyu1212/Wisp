@@ -19,6 +19,7 @@ mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
 mod keybindings;
+mod logo_picker;
 mod markdown;
 mod model_picker;
 mod mouse;
@@ -36,6 +37,7 @@ mod prompt_history_view;
 pub mod reducer;
 mod session_picker;
 mod session_tree_picker;
+mod startup_logo;
 mod syntax;
 mod terminal;
 mod theme;
@@ -72,6 +74,7 @@ use transport::{
 };
 
 use keybindings::{Action as KeyAction, Bindings};
+use logo_picker::{LogoPicker, LogoPickerAction};
 use model_picker::{ModelCommand, ModelPicker, ModelPickerAction};
 use nix::sys::signal::Signal;
 use process::{BackendProcess, CleanupOutcome};
@@ -87,6 +90,7 @@ use reducer::{
 };
 use session_picker::{SessionPicker, SessionPickerAction};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
+use startup_logo::LogoChoice;
 use std::collections::{HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::pending;
@@ -484,6 +488,7 @@ enum RenderedDecisionContext {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OverlayKind {
     Theme,
+    Logo,
     PromptHistory,
     Discovery,
     Context,
@@ -528,6 +533,9 @@ struct LiveUi {
     theme: ThemeSelection,
     theme_preferences: Option<ThemePreferences>,
     theme_picker: Option<ThemePicker>,
+    logo_choice: LogoChoice,
+    startup_logo: LogoChoice,
+    logo_picker: Option<LogoPicker>,
     no_color: bool,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
@@ -572,6 +580,9 @@ impl Default for LiveUi {
             theme: ThemeSelection::default(),
             theme_preferences: None,
             theme_picker: None,
+            logo_choice: LogoChoice::Random,
+            startup_logo: LogoChoice::AdalBlocks,
+            logo_picker: None,
             no_color: false,
             mouse_enabled: false,
             mouse_frame: None,
@@ -772,6 +783,7 @@ impl LiveUi {
                 }
                 UiEffect::ShowConnectionPanel(catalog) => {
                     self.theme_picker = None;
+                    self.logo_picker = None;
                     self.invalidate_overlay(OverlayKind::Connection);
                     self.prompt_history_view = None;
                     self.session_picker = None;
@@ -788,6 +800,7 @@ impl LiveUi {
                 }
                 UiEffect::ShowModelPicker => {
                     self.theme_picker = None;
+                    self.logo_picker = None;
                     self.invalidate_overlay(OverlayKind::Model);
                     self.prompt_history_view = None;
                     self.rendered_model_picker = false;
@@ -858,6 +871,7 @@ impl LiveUi {
                             challenge.user_code,
                         ) {
                             self.theme_picker = None;
+                            self.logo_picker = None;
                             self.render_pending = true;
                         }
                     }
@@ -890,6 +904,7 @@ impl LiveUi {
                     } else {
                         if outcome.changed {
                             self.theme_picker = None;
+                            self.logo_picker = None;
                             self.recovered_queue_recovery = true;
                         }
                         self.notice = if outcome.ignored_controls > 0 {
@@ -913,6 +928,7 @@ impl LiveUi {
                     selected_session_id,
                 } => {
                     self.theme_picker = None;
+                    self.logo_picker = None;
                     self.invalidate_overlay(OverlayKind::Session);
                     self.prompt_history_view = None;
                     self.session_tree_picker = None;
@@ -930,6 +946,7 @@ impl LiveUi {
                                 self.notice = Some(notice.into());
                             } else {
                                 self.theme_picker = None;
+                                self.logo_picker = None;
                             }
                         } else {
                             self.notice = Some(
@@ -939,6 +956,7 @@ impl LiveUi {
                         }
                     } else {
                         self.theme_picker = None;
+                        self.logo_picker = None;
                         self.session_tree_picker = Some(SessionTreePicker::new(page));
                     }
                     self.render_pending = true;
@@ -952,6 +970,7 @@ impl LiveUi {
                     let outcome = self.editor.insert_paste(&content);
                     if outcome.changed {
                         self.theme_picker = None;
+                        self.logo_picker = None;
                     }
                     self.notice = if outcome.rejected_limit {
                         Some(
@@ -1030,6 +1049,7 @@ impl LiveUi {
                     {
                         self.detail_view.open(entry_id, &presentation);
                         self.theme_picker = None;
+                        self.logo_picker = None;
                         self.browse_selected = None;
                         self.render_pending = true;
                     }
@@ -1145,6 +1165,7 @@ impl LiveUi {
             self.completion.dismiss();
             self.file_picker.dismiss();
             self.theme_picker = None;
+            self.logo_picker = None;
             self.state.project_files.set_open(false);
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1341,6 +1362,8 @@ impl LiveUi {
         }
         if self.theme_picker.is_some() {
             Some(OverlayKind::Theme)
+        } else if self.logo_picker.is_some() {
+            Some(OverlayKind::Logo)
         } else if self.prompt_history_view.is_some() {
             Some(OverlayKind::PromptHistory)
         } else if self.discovery_view.is_some() {
@@ -1393,6 +1416,9 @@ impl LiveUi {
         if let Some(picker) = &mut self.theme_picker {
             picker.invalidate();
         }
+        if let Some(picker) = &mut self.logo_picker {
+            picker.invalidate();
+        }
         if let Some(view) = &mut self.discovery_view {
             view.invalidate_selection();
         }
@@ -1424,6 +1450,7 @@ impl LiveUi {
                 self.activity_frame,
                 palette,
                 &self.bindings,
+                self.startup_logo,
             );
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
@@ -1470,6 +1497,12 @@ impl LiveUi {
             painted.popup = Some(area);
             painted.rows = match kind {
                 OverlayKind::Theme => self.theme_picker.as_mut().expect("active theme").render(
+                    frame,
+                    area,
+                    palette,
+                    self.no_color,
+                ),
+                OverlayKind::Logo => self.logo_picker.as_mut().expect("active logo").render(
                     frame,
                     area,
                     palette,
@@ -2217,12 +2250,25 @@ impl LiveUi {
             }
             Command::Theme(selection) => {
                 self.editor.clear();
+                self.logo_picker = None;
                 if let Some(theme) = selection {
                     self.theme.select(theme);
                     self.finish_theme_change();
                 } else {
                     self.theme_picker = Some(ThemePicker::new(self.theme.active));
                     self.invalidate_theme_presentation();
+                }
+                Ok(LoopControl::Continue)
+            }
+            Command::Logo(selection) => {
+                self.editor.clear();
+                self.theme_picker = None;
+                if let Some(choice) = selection {
+                    self.apply_logo_choice(choice);
+                } else {
+                    self.logo_picker = Some(LogoPicker::new(self.logo_choice, self.startup_logo));
+                    self.rendered_overlay = None;
+                    self.render_pending = true;
                 }
                 Ok(LoopControl::Continue)
             }
@@ -3219,6 +3265,37 @@ impl LiveUi {
         self.invalidate_theme_presentation();
     }
 
+    fn apply_logo_choice(&mut self, choice: LogoChoice) {
+        let resolved = match choice {
+            LogoChoice::Random if self.logo_choice == LogoChoice::Random => self.startup_logo,
+            LogoChoice::Random => LogoChoice::choose_random(),
+            selected => selected,
+        };
+        self.apply_resolved_logo_choice(choice, resolved);
+    }
+
+    fn apply_resolved_logo_choice(&mut self, choice: LogoChoice, resolved: LogoChoice) {
+        self.logo_choice = choice;
+        self.startup_logo = resolved;
+        let saved = self
+            .theme_preferences
+            .as_ref()
+            .is_some_and(|store| store.save_logo(choice).is_ok());
+        if !self.unsendable_current_response() {
+            self.notice = Some(format!(
+                "Startup logo: {}{}",
+                choice.label(),
+                if saved {
+                    ""
+                } else {
+                    " (could not save; active for this run)"
+                }
+            ));
+        }
+        self.rendered_overlay = None;
+        self.render_pending = true;
+    }
+
     async fn handle_focused_input(
         &mut self,
         input: Input,
@@ -3254,6 +3331,7 @@ impl LiveUi {
                     }
                     OverlayKind::Model
                     | OverlayKind::Theme
+                    | OverlayKind::Logo
                     | OverlayKind::Session
                     | OverlayKind::PromptHistory => key.code == KeyCode::Enter,
                     OverlayKind::Discovery => self
@@ -3293,6 +3371,25 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Paste(_) if overlay == Some(OverlayKind::Theme) => Ok(LoopControl::Continue),
+            Input::Key(key) if overlay == Some(OverlayKind::Logo) => {
+                let action = self
+                    .logo_picker
+                    .as_mut()
+                    .expect("open logo picker")
+                    .handle_key(key);
+                match action {
+                    LogoPickerAction::Close => self.logo_picker = None,
+                    LogoPickerAction::Apply { choice, resolved } => {
+                        self.logo_picker = None;
+                        self.apply_resolved_logo_choice(choice, resolved);
+                    }
+                    LogoPickerAction::None => {}
+                }
+                self.rendered_overlay = None;
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::Logo) => Ok(LoopControl::Continue),
             Input::Key(key) if overlay == Some(OverlayKind::PromptHistory) => {
                 self.handle_prompt_history_key(key);
                 Ok(LoopControl::Continue)
@@ -3828,7 +3925,18 @@ async fn run(cli: Cli) -> Result<(), Error> {
             }
 
             let theme_preferences = ThemePreferences::from_environment();
-            let theme = theme_preferences.as_ref().map(ThemePreferences::load).unwrap_or_default();
+            let theme = theme_preferences
+                .as_ref()
+                .map(ThemePreferences::load)
+                .unwrap_or_default();
+            let logo_choice = theme_preferences
+                .as_ref()
+                .map(ThemePreferences::load_logo)
+                .unwrap_or_default();
+            let startup_logo = match logo_choice {
+                LogoChoice::Random => LogoChoice::choose_random(),
+                selected => selected,
+            };
             let no_color = std::env::var_os("NO_COLOR").is_some();
             let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
             let mut terminal = TerminalGuard::enter(mouse_enabled)?;
@@ -3840,7 +3948,17 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 protocol_version: protocol,
                 event_schema_version: events,
             };
-            let mut live_ui = LiveUi { bindings, notice: binding_warning, theme, theme_preferences, no_color, mouse_enabled, ..LiveUi::default() };
+            let mut live_ui = LiveUi {
+                bindings,
+                notice: binding_warning,
+                theme,
+                theme_preferences,
+                logo_choice,
+                startup_logo,
+                no_color,
+                mouse_enabled,
+                ..LiveUi::default()
+            };
             let mut transport_closed_diagnostic = None;
             let mut ready_event = None;
             let loop_result = async {
