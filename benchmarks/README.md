@@ -67,6 +67,39 @@ The renderer decision and the measurements that could not run are recorded in
 `benchmarks/rust_tui_acceptance_evidence.md`. Refresh the in-process transcript snapshot below when
 repeating that gate. Do not treat Textual-only input-latency numbers as a Rust comparison.
 
+## Rust and Textual end-to-end TUI comparison
+
+Build the Rust frontend, then run the same source-checkout CLI and deterministic fake-provider
+prompt through each production renderer:
+
+```bash
+mkdir -p profiles
+cargo +1.85.0 build --release -p wisp-tui
+uv run python -m benchmarks.rust_tui_e2e \
+  --rust-binary "$PWD/target/release/wisp-tui" \
+  --runs 3 --prompt-words 64 \
+  --output profiles/rust-tui-e2e.json
+```
+
+The harness alternates renderer order and records launch-to-ready, prompt echo, first response,
+complete response, settled composer, total runtime, emitted terminal bytes, and direct child
+resource observations. The Rust condition includes the Python launcher, JSONL-RPC backend and
+production event coalescer, pipe transport, Rust event admission, and Ratatui terminal writes. The
+Textual condition includes the same launcher and provider through the maintained Python frontend.
+Every run checks response sentinels, a clean exit, and restoration of terminal settings.
+The initial matched baseline and its interpretation are recorded in
+`benchmarks/rust_tui_e2e_evidence.md`.
+
+Startup timing includes the one-column resize used to request a complete post-hydration frame from
+each differential renderer. "First response" is when the complete fake-provider response-prefix and
+opening sentinel become observable in PTY output; it is not a one-byte time-to-first-token measure.
+
+The visible-response timestamps are PTY-output proxies. They do not include a real terminal
+emulator's parsing, compositing, or display latency. On platforms where a launcher creates child
+processes, `wait4` resource usage for the directly observed process is not a whole-process-tree RSS
+measurement. Compare timings only on the same machine and build, keep individual samples with the
+summary, and do not add machine-specific timing thresholds to CI.
+
 ## Rust TUI Transcript
 
 Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,

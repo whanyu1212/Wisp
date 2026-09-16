@@ -24,6 +24,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 - Coalesced adjacent compatible `message.delta` events at the JSONL-RPC output boundary, reducing
   framing and parsing work for the Rust TUI while preserving bounded streaming latency and exact
   text, thinking, turn, content-index, and event-order boundaries.
+- Added a matched end-to-end PTY benchmark for the Rust and Textual frontends, covering source-CLI
+  startup, fake-provider streaming, visible response progress, clean shutdown, and terminal restore.
 
 ## 0.2.0rc2 — release preparation
 
