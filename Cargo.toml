@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust/wisp-protocol", "rust/wisp-tui"]
+members = ["rust/wisp-process-text", "rust/wisp-protocol", "rust/wisp-tui"]
 resolver = "2"
 
 [workspace.package]

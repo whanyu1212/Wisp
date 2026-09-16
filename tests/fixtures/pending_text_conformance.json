@@ -1,0 +1,523 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "empty_and_repeated_noop_drains",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        },
+        { "type": "append", "hex": "" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "ascii_at_exact_byte_cap",
+      "max_bytes": 5,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "68656c6c6f" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "hello",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 5,
+            "source_byte_lengths": [1, 1, 1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "ascii_over_byte_cap",
+      "max_bytes": 5,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "616263646566" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "bcdef",
+            "dropped_bytes": 1,
+            "retained_source_bytes": 5,
+            "source_byte_lengths": [1, 1, 1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "logical_line_tail",
+      "max_bytes": 100,
+      "max_lines": 2,
+      "actions": [
+        { "type": "append", "hex": "6f6e650a74776f0a7468726565" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "two\nthree",
+            "dropped_bytes": 4,
+            "retained_source_bytes": 9,
+            "source_byte_lengths": [1, 1, 1, 1, 1, 1, 1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "all_splitlines_separators",
+      "max_bytes": 100,
+      "max_lines": 3,
+      "actions": [
+        {
+          "type": "append",
+          "hex": "610a620b630c641c651d661e67c28568e280a869e280a97461696c"
+        },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "h\u2028i\u2029tail",
+            "dropped_bytes": 15,
+            "retained_source_bytes": 12,
+            "source_byte_lengths": [1, 3, 1, 3, 1, 1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "each_splitlines_separator_enforces_line_cap",
+      "max_bytes": 100,
+      "max_lines": 1,
+      "actions": [
+        { "type": "append", "hex": "610a62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "610d62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "610b62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "610c62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "611c62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "611d62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "611e62" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 2, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "61c28562" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 3, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "61e280a862" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 4, "retained_source_bytes": 1, "source_byte_lengths": [1] } },
+        { "type": "append", "hex": "61e280a962" },
+        { "type": "drain", "expected": { "text": "b", "dropped_bytes": 4, "retained_source_bytes": 1, "source_byte_lengths": [1] } }
+      ]
+    },
+    {
+      "name": "split_crlf_is_one_boundary",
+      "max_bytes": 100,
+      "max_lines": 2,
+      "actions": [
+        { "type": "append", "hex": "6f6e650d" },
+        { "type": "append", "hex": "0a74776f" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "one\r\ntwo",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 8,
+            "source_byte_lengths": [1, 1, 1, 1, 1, 1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "split_cr_non_lf_finishes_line",
+      "max_bytes": 100,
+      "max_lines": 1,
+      "actions": [
+        { "type": "append", "hex": "6f6e650d" },
+        { "type": "append", "hex": "58" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "X",
+            "dropped_bytes": 4,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "split_valid_two_byte_scalar",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "c2" },
+        { "type": "append", "hex": "a2" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "¢",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [2]
+          }
+        }
+      ]
+    },
+    {
+      "name": "split_valid_three_byte_scalar",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "e282" },
+        { "type": "append", "hex": "ac" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "€",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 3,
+            "source_byte_lengths": [3]
+          }
+        }
+      ]
+    },
+    {
+      "name": "split_valid_four_byte_scalar",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "f09f" },
+        { "type": "append", "hex": "9982" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "🙂",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 4,
+            "source_byte_lengths": [4]
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid_lead_byte",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "ff", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "invalid_continuation_byte",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "80", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "overlong_encoding_replaces_each_invalid_lead",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "c0af", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "��",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "truncated_final_sequence_is_one_replacement",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "e282", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [2]
+          }
+        }
+      ]
+    },
+    {
+      "name": "malformed_sequence_preserves_error_grouping",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "f09f2880", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�(�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 4,
+            "source_byte_lengths": [2, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "incomplete_sequence_followed_by_bad_ascii",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "e2" },
+        { "type": "append", "hex": "41" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�A",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "byte_trim_removes_whole_multibyte_scalars",
+      "max_bytes": 4,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "61f09f998262" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "b",
+            "dropped_bytes": 5,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "replacement_at_exact_encoded_byte_cap",
+      "max_bytes": 3,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "ff", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "replacement_over_encoded_byte_cap",
+      "max_bytes": 2,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "ff", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 1,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "byte_trim_through_replacement",
+      "max_bytes": 3,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "ff61", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "a",
+            "dropped_bytes": 1,
+            "retained_source_bytes": 1,
+            "source_byte_lengths": [1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "zero_byte_cap",
+      "max_bytes": 0,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "68656c6c6f" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 5,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "zero_line_cap",
+      "max_bytes": 100,
+      "max_lines": 0,
+      "actions": [
+        { "type": "append", "hex": "68656c6c6f" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 5,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        }
+      ]
+    },
+    {
+      "name": "multiple_drains_reset_accounting",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "616263" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "abc",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 3,
+            "source_byte_lengths": [1, 1, 1]
+          }
+        },
+        { "type": "append", "hex": "646566" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "def",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 3,
+            "source_byte_lengths": [1, 1, 1]
+          }
+        }
+      ]
+    },
+    {
+      "name": "pending_utf8_survives_drain",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "f09f" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 0,
+            "source_byte_lengths": []
+          }
+        },
+        { "type": "append", "hex": "9982" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "🙂",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 4,
+            "source_byte_lengths": [4]
+          }
+        }
+      ]
+    },
+    {
+      "name": "final_empty_append_flushes_pending_utf8",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "e282" },
+        { "type": "append", "hex": "", "final": true },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "�",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [2]
+          }
+        }
+      ]
+    },
+    {
+      "name": "drain_resets_pending_carriage_return",
+      "max_bytes": 100,
+      "max_lines": 10,
+      "actions": [
+        { "type": "append", "hex": "610d" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "a\r",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [1, 1]
+          }
+        },
+        { "type": "append", "hex": "0a62" },
+        {
+          "type": "drain",
+          "expected": {
+            "text": "\nb",
+            "dropped_bytes": 0,
+            "retained_source_bytes": 2,
+            "source_byte_lengths": [1, 1]
+          }
+        }
+      ]
+    }
+  ]
+}
