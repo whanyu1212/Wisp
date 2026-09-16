@@ -3428,6 +3428,72 @@ def test_grep_tool_python_fallback_supports_literal_ignore_case_and_glob(
     assert result.text == "alpha.txt:1:Needle here"
 
 
+def test_grep_tool_prepares_glob_once_and_reuses_display_path(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    path = tmp_path / "alpha.txt"
+    path.write_text("before\nneedle\nafter\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+    expanded: list[str] = []
+    displayed: list[Path] = []
+    original_expand = search_tools_module._expand_brace_alternatives
+    original_display = search_tools_module.display_tool_path
+
+    def tracking_expand(pattern: str) -> tuple[str, ...]:
+        expanded.append(pattern)
+        return original_expand(pattern)
+
+    def tracking_display(candidate: Path, tool_context: ToolContext) -> str:
+        displayed.append(candidate)
+        return original_display(candidate, tool_context)
+
+    monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
+    monkeypatch.setattr(search_tools_module, "display_tool_path", tracking_display)
+
+    result = run_tool(
+        GrepTool(),
+        {
+            "pattern": "needle",
+            "path": ".",
+            "glob": "*.{txt,md}",
+            "literal": True,
+            "context": 1,
+        },
+        context,
+    )
+
+    assert result.text == "alpha.txt-1-before\nalpha.txt:2:needle\nalpha.txt-3-after"
+    assert result.data["matches"] == [
+        "alpha.txt-1-before",
+        "alpha.txt:2:needle",
+        "alpha.txt-3-after",
+    ]
+    assert expanded == ["*.{txt,md}"]
+    assert displayed == [path]
+
+
+def test_grep_tool_no_match_without_glob_skips_display_path_work(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    (tmp_path / "alpha.txt").write_text("haystack\n", encoding="utf-8")
+
+    def unexpected_display(_candidate: Path, _context: ToolContext) -> str:
+        raise AssertionError("a no-match grep should not compute a display path")
+
+    monkeypatch.setattr(search_tools_module, "display_tool_path", unexpected_display)
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == "No matches"
+    assert result.data == {"count": 0, "matches": []}
+
+
 def test_grep_tool_ripgrep_treats_option_like_pattern_as_literal(tmp_path: Path) -> None:
     if shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")
@@ -4148,6 +4214,42 @@ def test_find_tool_python_fallback_filters_glob(tmp_path: Path, monkeypatch: Mon
 
     assert result.text == "pkg/one.py"
     assert result.data["files"] == ["pkg/one.py"]
+
+
+def test_find_tool_prepares_glob_once_and_reuses_display_paths(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    paths = [tmp_path / name for name in ("alpha.py", "beta.txt", "gamma.md")]
+    for path in paths:
+        path.write_text("", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+    expanded: list[str] = []
+    displayed: list[Path] = []
+    original_expand = search_tools_module._expand_brace_alternatives
+    original_display = search_tools_module.display_tool_path
+
+    def tracking_expand(pattern: str) -> tuple[str, ...]:
+        expanded.append(pattern)
+        return original_expand(pattern)
+
+    def tracking_display(candidate: Path, tool_context: ToolContext) -> str:
+        displayed.append(candidate)
+        return original_display(candidate, tool_context)
+
+    monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
+    monkeypatch.setattr(search_tools_module, "display_tool_path", tracking_display)
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.{py,txt}"},
+        context,
+    )
+
+    assert result.text == "alpha.py\nbeta.txt"
+    assert result.data["files"] == ["alpha.py", "beta.txt"]
+    assert expanded == ["*.{py,txt}"]
+    assert displayed == paths
 
 
 def test_find_tool_python_fallback_skips_hidden_entries(

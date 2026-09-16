@@ -394,6 +394,21 @@ comparison results and the integration boundary are recorded in
 
 ## Built-in Tools
 
+To compare search changes on an existing checkout, run the public direct `find` and
+`grep` paths on the same project root before and after the change:
+
+```bash
+uv run python -m benchmarks.repository_search --root . --iterations 3 \
+  --output profiles/repository-search.json
+```
+
+`--root` must be inside the current working directory. The tool's normal protected-path,
+ignore, and symlink rules apply. The report records the observed Python-file count (capped
+at 10,001), result counts and truncation, and wall/CPU time per iteration. It contains no
+matched source text. `--common-token` (default `def `) and `--max-results` (default 100)
+select the capped literal-grep workload; keep these and the output bounds identical between
+runs. Warmup and file discovery are outside the measured intervals.
+
 Measure deterministic read, directory listing, find, and grep workloads through both the public
 `tool.run` interface and `ConfiguredToolExecutor`:
 
