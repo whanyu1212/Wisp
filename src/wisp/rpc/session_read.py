@@ -25,7 +25,9 @@ from wisp.rpc.coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
+from wisp.rpc.framing import RpcFrameError, encode_rpc_frame
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
+from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.rpc.session_state import rpc_selected_session_state, updated_rpc_session_state
 from wisp.sessions.jsonl import (
     JsonlSession,
@@ -195,7 +197,9 @@ async def run_rpc_messages_command(
     try:
         with cancel_scope:
             selected_read = session_id is None
-            if session_id is None:
+            if session_id is None or (
+                selected_session is not None and session_id == selected_session.session_id
+            ):
                 session = selected_session
             else:
                 session = await _run_abandonable_session_read(sessions.load, session_id)
@@ -245,17 +249,21 @@ async def run_rpc_messages_command(
                 refreshed_history = None
                 refreshed_entry_count = selected_entry_count
             else:
-                write_event(
-                    RpcMessagesReported(
-                        command_id=command_id,
-                        session_id=page.session_id,
-                        session_path=page.path,
-                        active_leaf_id=page.active_leaf_id,
-                        messages=page.messages,
-                        truncated=page.truncated,
-                        next_before_entry_id=page.next_before_entry_id,
-                        next_after_entry_id=page.next_after_entry_id,
-                    )
+                report = RpcMessagesReported(
+                    command_id=command_id,
+                    session_id=page.session_id,
+                    session_path=page.path,
+                    active_leaf_id=page.active_leaf_id,
+                    messages=page.messages,
+                    truncated=page.truncated,
+                    next_before_entry_id=page.next_before_entry_id,
+                    next_after_entry_id=page.next_after_entry_id,
+                )
+                _write_messages_page(
+                    report,
+                    write_event=write_event,
+                    forward=after_entry_id is not None,
+                    exact=bool(entry_ids),
                 )
                 ok = True
         if cancel_scope.cancel_called and error is None:
@@ -284,6 +292,47 @@ async def run_rpc_messages_command(
             )
         )
         await send.aclose()
+
+
+def _write_messages_page(
+    report: RpcMessagesReported,
+    *,
+    write_event: RpcEventWriter,
+    forward: bool,
+    exact: bool,
+    max_frame_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
+) -> None:
+    """Fit a history transfer to the transport by deferring whole messages.
+
+    Args:
+        report (RpcMessagesReported): Unclipped messages in chronological order.
+        write_event (RpcEventWriter): Event publisher, which may defer serialization.
+        forward (bool): Whether the request traverses toward newer messages.
+        exact (bool): Whether every requested entry must be returned together.
+        max_frame_bytes (int): Transport ceiling for a serialized report.
+
+    Raises:
+        RpcFrameError: An exact lookup or single message exceeds the frame limit.
+    """
+    while True:
+        try:
+            encode_rpc_frame(report, max_frame_bytes=max_frame_bytes)
+        except RpcFrameError:
+            if exact or len(report.messages) <= 1:
+                raise
+            count = max(len(report.messages) // 2, 1)
+            messages = report.messages[:count] if forward else report.messages[-count:]
+            report = report.model_copy(
+                update={
+                    "messages": messages,
+                    "truncated": True,
+                    "next_after_entry_id": messages[-1].entry_id if forward else None,
+                    "next_before_entry_id": None if forward else messages[0].entry_id,
+                }
+            )
+        else:
+            write_event(report)
+            return
 
 
 async def run_rpc_sessions_command(

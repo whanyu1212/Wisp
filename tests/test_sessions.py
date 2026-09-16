@@ -992,23 +992,13 @@ def test_session_message_page_complete_structure_preserves_every_tool_call(
 
     assert len(message.tool_calls) == message.tool_calls_original_count == 20
     assert message.tool_calls_truncated is False
-    assert all(tool_call.arguments_truncated for tool_call in message.tool_calls)
-    assert (
-        _message_page_text_bytes(
-            SessionMessagePage(
-                session_id=session.session_id,
-                path=session.path,
-                active_leaf_id=message.entry_id,
-                messages=(message,),
-                truncated=False,
-                next_before_entry_id=None,
-            )
-        )
-        <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert all(not tool_call.arguments_truncated for tool_call in message.tool_calls)
+    assert all(
+        tool_call.arguments == {"command": tool_argument} for tool_call in message.tool_calls
     )
 
 
-def test_session_message_page_complete_structure_reserves_process_identity(
+def test_session_message_page_complete_structure_preserves_process_arguments(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -1049,9 +1039,11 @@ def test_session_message_page_complete_structure_reserves_process_identity(
     assert process_call.arguments == {
         "operation": "poll",
         "process_id": process_id,
+        "wait_seconds": 30,
     }
-    assert process_call.arguments_truncated is True
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert process_call.arguments_truncated is False
+    assert all(not message.content_truncated for message in page.messages)
+    assert _message_page_text_bytes(page) > jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_exact_full_content_bypasses_preview_limits(
@@ -1107,8 +1099,10 @@ def test_session_message_page_exact_full_content_bypasses_preview_limits(
         session.read_message_page(entry_ids=(entry_id, entry_id), full_content=True)
 
 
-def test_session_message_page_applies_aggregate_budget_newest_first(
+@pytest.mark.parametrize("complete_structure", [False, True])
+def test_session_message_page_applies_aggregate_budget_only_to_previews(
     tmp_path: Path,
+    complete_structure: bool,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
     oversized = "x" * 70_000
@@ -1121,16 +1115,21 @@ def test_session_message_page_applies_aggregate_budget_newest_first(
 
     anyio.run(write)
 
-    page = session.read_message_page(limit=11)
+    page = session.read_message_page(limit=11, complete_structure=complete_structure)
 
     assert len(page.messages) == 11
     assert page.messages[-2].content == "latest user"
     assert page.messages[-2].content_truncated is False
     assert page.messages[-1].content == "latest assistant"
     assert page.messages[-1].content_truncated is False
-    assert page.messages[0].content == ""
-    assert page.messages[0].content_truncated is True
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    if complete_structure:
+        assert page.messages[0].content == oversized
+        assert all(not message.content_truncated for message in page.messages)
+        assert _message_page_text_bytes(page) > jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    else:
+        assert page.messages[0].content == ""
+        assert page.messages[0].content_truncated is True
+        assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_budgets_serialized_truncated_argument_wrapper(

@@ -1,6 +1,6 @@
-//! Bounded, renderer-neutral projection of one validated RPC history page.
+//! Renderer-neutral projection of validated RPC history pages.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -15,9 +15,7 @@ use crate::transcript::{SharedTranscript, TranscriptEntryId};
 
 pub const HISTORY_MESSAGE_LIMIT: usize = 200;
 pub const HISTORY_PAGE_LIMIT: usize = 75;
-const HISTORY_TOOL_CALL_LIMIT: usize = 128;
 const HISTORY_ENTRY_ID_MAX_BYTES: usize = 4 * 1024;
-const HISTORY_PROCESS_CALL_LIMIT: usize = 1024;
 const CONTENT_TRUNCATED_MARKER: &str = "[content truncated]";
 const EMPTY_ASSISTANT_MESSAGE: &str = "(empty assistant message)";
 const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
@@ -26,7 +24,7 @@ const MISSING_TOOL_RESULT: &str = "No persisted tool result.";
 pub enum HistoryProjectionError {
     #[error("history page has more than {HISTORY_MESSAGE_LIMIT} messages")]
     TooManyMessages,
-    #[error("history message {index} has more than {HISTORY_TOOL_CALL_LIMIT} tool calls")]
+    #[error("history message {index} has incomplete tool calls")]
     TooManyToolCalls { index: usize },
     #[error("history message {index} has an invalid {field} field")]
     InvalidField { index: usize, field: &'static str },
@@ -68,11 +66,20 @@ pub fn project_rpc_message_page_with_origins(
         return Err(HistoryProjectionError::TooManyMessages);
     }
 
+    project_chronological_history(messages.iter())
+}
+
+/// Project a complete chronological history in one pass, settling tools only at the end.
+/// Incoming RPC pages retain their own wire-size validation before reaching this helper.
+pub(crate) fn project_chronological_history<'a>(
+    messages: impl Iterator<Item = &'a Value>,
+) -> Result<ProjectedHistoryPage, HistoryProjectionError> {
     let mut transcript = SharedTranscript::default();
-    let mut durable_entry_ids = Vec::with_capacity(messages.len());
+    transcript.begin_history_projection();
+    let mut durable_entry_ids = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut process_ids = VecDeque::new();
-    for (index, message) in messages.iter().enumerate() {
+    let mut process_ids = HashMap::new();
+    for (index, message) in messages.enumerate() {
         let durable_entry_id = string(message, index, "entry_id")?;
         if durable_entry_id.is_empty() || durable_entry_id.len() > HISTORY_ENTRY_ID_MAX_BYTES {
             return Err(HistoryProjectionError::InvalidField {
@@ -127,8 +134,7 @@ pub fn project_rpc_message_page_with_origins(
         }
         durable_entry_ids.push(durable_entry_id.to_owned());
     }
-    transcript.settle_unresolved_tools(MISSING_TOOL_RESULT);
-    transcript.complete_history_entries();
+    transcript.finish_history_projection(MISSING_TOOL_RESULT);
     Ok(ProjectedHistoryPage {
         transcript,
         durable_entry_ids,
@@ -155,7 +161,7 @@ pub fn project_rpc_exact_tool_result(
 
 fn project_assistant(
     transcript: &mut SharedTranscript,
-    process_ids: &mut VecDeque<(String, String)>,
+    process_ids: &mut HashMap<String, String>,
     message: &Value,
     index: usize,
 ) -> Result<Vec<TranscriptEntryId>, HistoryProjectionError> {
@@ -169,9 +175,7 @@ fn project_assistant(
         .get("tool_calls_truncated")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if tool_calls.len() > HISTORY_TOOL_CALL_LIMIT
-        || tool_calls_truncated
-        || original_count > u64::try_from(tool_calls.len()).unwrap_or(u64::MAX)
+    if tool_calls_truncated || original_count > u64::try_from(tool_calls.len()).unwrap_or(u64::MAX)
     {
         return Err(HistoryProjectionError::TooManyToolCalls { index });
     }
@@ -184,15 +188,9 @@ fn project_assistant(
     for tool_call in tool_calls {
         let tool_call = tool_call_input(tool_call, index)?;
         if let Some(process) = process_call_identity(&tool_call.name, &tool_call.arguments) {
-            process_ids.retain(|(call_id, _)| call_id != &tool_call.call_id);
-            if process_ids.len() == HISTORY_PROCESS_CALL_LIMIT {
-                process_ids.pop_front();
-            }
-            process_ids.push_back((tool_call.call_id.clone(), process.process_id));
+            process_ids.insert(tool_call.call_id.clone(), process.process_id);
         }
-        let call_id = tool_call.call_id.clone();
         let entry_id = transcript.observe_historical_tool_call(tool_call);
-        transcript.record_history_call(entry_id, &call_id);
         entries.push(entry_id);
     }
     Ok(entries)
@@ -278,20 +276,13 @@ fn tool_call_input(value: &Value, index: usize) -> Result<ToolCallInput, History
 
 fn project_tool_result(
     transcript: &mut SharedTranscript,
-    process_ids: &mut VecDeque<(String, String)>,
+    process_ids: &mut HashMap<String, String>,
     message: &Value,
     index: usize,
 ) -> Result<(TranscriptEntryId, Option<ToolResultInput>), HistoryProjectionError> {
     let mut result = tool_result(message, index)?;
     let request_missing = !transcript.has_unresolved_tool_call(&result.call_id);
-    result.process_id = process_ids
-        .iter()
-        .position(|(call_id, _)| call_id == &result.call_id)
-        .and_then(|position| {
-            process_ids
-                .remove(position)
-                .map(|(_, process_id)| process_id)
-        });
+    result.process_id = process_ids.remove(&result.call_id);
     if let Some(process_id) = result.process_id.clone() {
         project_historical_process_result(&mut result, &process_id);
     }
@@ -307,11 +298,7 @@ fn project_tool_result(
         transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
     }
     let pending_result = request_missing.then(|| result.clone());
-    let call_id = result.call_id.clone();
     let entry_id = transcript.observe_tool_result(result);
-    if !request_missing {
-        transcript.resolve_history_call(entry_id, &call_id);
-    }
     Ok((entry_id, pending_result))
 }
 
@@ -486,11 +473,14 @@ fn historical_process_streams(output: &str) -> Option<(Option<&str>, Option<&str
 }
 
 fn content_for_history(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
-    Ok(bounded_content(
-        string(message, index, "content")?,
-        bool(message, index, "content_truncated")?,
-    )
-    .0)
+    let mut content = string(message, index, "content")?.to_owned();
+    if bool(message, index, "content_truncated")? {
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        content.push_str(CONTENT_TRUNCATED_MARKER);
+    }
+    Ok(content)
 }
 
 fn bounded_content(source: &str, backend_truncated: bool) -> (String, bool) {
@@ -746,6 +736,19 @@ mod tests {
                 .contains(CONTENT_TRUNCATED_MARKER)
         );
         assert_eq!(transcript.entries()[2].content, EMPTY_ASSISTANT_MESSAGE);
+    }
+
+    #[test]
+    fn conversation_history_preserves_large_and_multiline_messages() {
+        let content = format!(
+            "HEAD\n{}TAIL",
+            "界".repeat(80_000) + &"\nline".repeat(1_000)
+        );
+        let transcript =
+            project_rpc_messages(&[message("user", &content), message("assistant", &content)])
+                .unwrap();
+        assert_eq!(transcript.entries()[0].content, content);
+        assert_eq!(transcript.entries()[1].content, content);
     }
 
     #[test]
@@ -1655,10 +1658,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_schema_valid_tool_call_overflow_truthfully() {
+    fn projects_every_tool_call_in_a_large_message() {
         let mut assistant = message("assistant", "");
         assistant["tool_calls"] = Value::Array(
-            (0..=HISTORY_TOOL_CALL_LIMIT)
+            (0..129)
                 .map(|index| {
                     json!({
                         "call_id": format!("call-{index}"),
@@ -1669,9 +1672,7 @@ mod tests {
                 .collect(),
         );
 
-        assert!(matches!(
-            project_rpc_messages(&[assistant]),
-            Err(HistoryProjectionError::TooManyToolCalls { index: 0 })
-        ));
+        let transcript = project_rpc_messages(&[assistant]).unwrap();
+        assert_eq!(transcript.entries().len(), 129);
     }
 }

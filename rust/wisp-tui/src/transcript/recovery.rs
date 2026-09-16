@@ -17,6 +17,7 @@ pub(crate) struct LiveHistoryGap {
 }
 
 impl Transcript {
+    #[cfg(test)]
     pub(super) fn prune_live_origins(&mut self) {
         let retained = self
             .entries
@@ -94,6 +95,7 @@ impl Transcript {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn record_live_eviction(&mut self, index: usize) {
         let entry = &self.entries[index];
         let mut origins = entry

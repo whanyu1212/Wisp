@@ -5931,6 +5931,7 @@ mod tests {
             restore_editor_text: None,
             committed_operation: "Session clone",
             report: None,
+            loaded: None,
             completion: None,
         });
         let command =

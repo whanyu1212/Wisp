@@ -77,6 +77,14 @@ pub struct SessionMessages {
     pub transcript: SharedTranscript,
 }
 
+/// Raw pages arrive newest first; the transcript is built once after the oldest page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HistoryHydration {
+    report: SessionMessages,
+    pages: Vec<std::sync::Arc<[Value]>>,
+    seen_entry_ids: std::collections::HashSet<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionTreeNodeKind {
     Message,
@@ -153,7 +161,8 @@ pub struct SessionTreeUnrevert {
     pub entry_count: u32,
 }
 
-pub const TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT: usize = 1_200;
+#[cfg(test)]
+const TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT: usize = 1_200;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActiveExactDetail {
@@ -264,6 +273,7 @@ pub enum SessionOperation {
     StartupHydration {
         command_id: String,
         report: Option<SessionMessages>,
+        loaded: Option<HistoryHydration>,
         completion: Option<SessionCompletion>,
     },
     LoadingCatalog {
@@ -284,6 +294,7 @@ pub enum SessionOperation {
         restore_editor_text: Option<String>,
         committed_operation: &'static str,
         report: Option<SessionMessages>,
+        loaded: Option<HistoryHydration>,
         completion: Option<SessionCompletion>,
     },
     NamingSession {
@@ -327,7 +338,7 @@ pub enum SessionOperation {
 impl SessionOperation {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::StartupHydration { .. } => "Loading latest session history…",
+            Self::StartupHydration { .. } => "Loading session history…",
             Self::LoadingCatalog { .. } => "Loading sessions…",
             Self::SelectingSession { .. } => "Selecting session…",
             Self::HydratingSelection { .. } => "Loading session history…",
@@ -1278,21 +1289,6 @@ pub fn reduce(
     action: UiAction,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    let enforce_retention = matches!(
-        &action,
-        UiAction::Init
-            | UiAction::Submit(_)
-            | UiAction::SubmitPresented { .. }
-            | UiAction::BackendEvent(
-                BackendEvent::MessageCompleted { .. }
-                    | BackendEvent::MessageOrigin { .. }
-                    | BackendEvent::ToolResult(_)
-                    | BackendEvent::ToolApprovalResolved { .. }
-                    | BackendEvent::QueueMessageInjected { .. }
-                    | BackendEvent::CommandFinished { .. }
-            )
-            | UiAction::TransportClosed { .. }
-    );
     let mut effects = match action {
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
@@ -1412,14 +1408,6 @@ pub fn reduce(
             Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
         }
     }?;
-    let protected_entry = state
-        .history
-        .active_exact_detail
-        .as_ref()
-        .map(|detail| detail.target);
-    if enforce_retention && state.transcript.enforce_live_retention(protected_entry) {
-        sync_represented_history(state);
-    }
     effects.extend(context::refresh_if_ready(state, ids)?);
     effects.extend(project_files::refresh_if_ready(state, ids)?);
     Ok(effects)
@@ -1731,6 +1719,7 @@ fn start_startup_hydration(
     state.session_operation = Some(SessionOperation::StartupHydration {
         command_id: id,
         report: None,
+        loaded: None,
         completion: None,
     });
     Ok(vec![
@@ -2616,6 +2605,7 @@ fn commit_session_and_hydrate(
         restore_editor_text,
         committed_operation,
         report: None,
+        loaded: None,
         completion: None,
     });
     Ok(vec![
@@ -2680,6 +2670,7 @@ fn handle_session_backend_event(
             command_id,
             report,
             completion,
+            ..
         } => match event {
             BackendEvent::MessagesReported {
                 command_id: received,
@@ -2973,9 +2964,39 @@ fn handle_session_backend_event(
         } if !completion.ok => session_failure(state, "startup history", completion.error),
         SessionOperation::StartupHydration {
             report: Some(report),
+            loaded,
             completion: Some(_),
             ..
         } => {
+            let hydration = match merge_hydration_page(loaded, report) {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(Some(session_failure(state, "startup history", Some(error))));
+                }
+            };
+            if let Some(cursor) = &hydration.report.next_before_entry_id {
+                let id = ids.next_id(CommandKind::GetMessages);
+                let command = WispTypedClientRpcCommands::get_messages_older(
+                    &id,
+                    hydration
+                        .report
+                        .session
+                        .as_ref()
+                        .map(|session| session.session_id.as_str()),
+                    cursor,
+                )?;
+                state.session_operation = Some(SessionOperation::StartupHydration {
+                    command_id: id,
+                    report: None,
+                    loaded: Some(hydration),
+                    completion: None,
+                });
+                return Ok(Some(vec![
+                    UiEffect::SendCommand(command),
+                    UiEffect::RequestRender,
+                ]));
+            }
+            let report = hydration.report;
             state.selected_session = report.session.clone();
             state.last_session = state
                 .selected_session
@@ -3055,12 +3076,50 @@ fn handle_session_backend_event(
             )),
         ),
         SessionOperation::HydratingSelection {
-            report: Some(mut report),
+            report: Some(report),
+            loaded,
             completion: Some(_),
             restore_editor_text,
             selected,
+            committed_operation,
             ..
         } => {
+            let hydration = match merge_hydration_page(loaded, report) {
+                Ok(report) => report,
+                Err(error) => {
+                    return Ok(Some(committed_hydration_failure(
+                        state,
+                        &selected,
+                        committed_operation,
+                        error,
+                    )));
+                }
+            };
+            if let Some(cursor) = &hydration.report.next_before_entry_id {
+                let id = ids.next_id(CommandKind::GetMessages);
+                let command = WispTypedClientRpcCommands::get_messages_older(
+                    &id,
+                    Some(&selected.session_id),
+                    cursor,
+                )?;
+                state.session_operation = Some(SessionOperation::HydratingSelection {
+                    command_id: id,
+                    selected: selected.clone(),
+                    restore_editor_text,
+                    committed_operation,
+                    report: None,
+                    loaded: Some(hydration),
+                    completion: None,
+                });
+                return Ok(Some(vec![
+                    UiEffect::SendCommittedHydration {
+                        command,
+                        session_id: selected.session_id,
+                    },
+                    UiEffect::RequestRender,
+                ]));
+            }
+            let mut report = hydration.report;
             if let Some(history_session) = report
                 .session
                 .as_mut()
@@ -3286,27 +3345,78 @@ fn committed_hydration_failure(
     )
 }
 
+/// Accumulate source pages privately without rebuilding the growing transcript.
+fn merge_hydration_page(
+    loaded: Option<HistoryHydration>,
+    mut page: SessionMessages,
+) -> Result<HistoryHydration, String> {
+    if page.next_after_entry_id.is_some()
+        || page.truncated != page.next_before_entry_id.is_some()
+        || page
+            .next_before_entry_id
+            .as_ref()
+            .is_some_and(|cursor| page.durable_entry_ids.first() != Some(cursor))
+    {
+        return Err("backend returned a malformed history cursor".into());
+    }
+    let mut hydration = if let Some(mut loaded) = loaded {
+        if !same_optional_session(&loaded.report.session, &page.session)
+            || loaded.report.active_leaf_id != page.active_leaf_id
+            || page.durable_entry_ids.is_empty()
+            || page.next_before_entry_id == loaded.report.next_before_entry_id
+        {
+            return Err("history changed or the backend returned a duplicate page".into());
+        }
+        loaded.report = page;
+        loaded
+    } else {
+        // A single page is already projected and needs no second pass.
+        if !page.truncated {
+            page.source_messages = Default::default();
+            return Ok(HistoryHydration {
+                report: page,
+                pages: Vec::new(),
+                seen_entry_ids: Default::default(),
+            });
+        }
+        HistoryHydration {
+            report: page,
+            pages: Vec::new(),
+            seen_entry_ids: Default::default(),
+        }
+    };
+    for id in std::mem::take(&mut hydration.report.durable_entry_ids) {
+        if !hydration.seen_entry_ids.insert(id) {
+            return Err("history changed or the backend returned a duplicate page".into());
+        }
+    }
+    hydration
+        .pages
+        .push(std::mem::take(&mut hydration.report.source_messages));
+    // Page projections are only used for validation; keep raw pages until final assembly.
+    hydration.report.transcript = SharedTranscript::default();
+    if !hydration.report.truncated {
+        let projected = crate::history::project_chronological_history(
+            hydration.pages.iter().rev().flat_map(|page| page.iter()),
+        )
+        .map_err(|error| error.to_string())?;
+        hydration.report.transcript = projected.transcript;
+        hydration.report.durable_entry_ids = projected.durable_entry_ids;
+        hydration.pages.clear();
+        hydration.seen_entry_ids.clear();
+    }
+    Ok(hydration)
+}
+
 fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
     state.transcript = report.transcript;
-    let prefix_evicted = !state
-        .transcript
-        .retain_historical_entries_in_order(
-            TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
-            false,
-            &report.durable_entry_ids,
-        )
-        .unwrap_or_default()
-        .is_empty();
     let represented_durable_entry_ids = state.transcript.represented_durable_entry_ids();
     let represented_durable_entry_order = report
         .durable_entry_ids
         .into_iter()
         .filter(|entry_id| represented_durable_entry_ids.contains(entry_id))
         .collect::<Vec<_>>();
-    let oldest_cursor = prefix_evicted
-        .then(|| represented_durable_entry_order.first().cloned())
-        .flatten()
-        .or(report.next_before_entry_id);
+    let oldest_cursor = report.next_before_entry_id;
     state.history = HistoryWindow {
         session: report.session,
         active_leaf_id: report.active_leaf_id,
@@ -3517,31 +3627,8 @@ fn handle_history_backend_event(
             if evict_newest {
                 state.history.oldest_cursor = next;
             }
-            let evicted = !state
-                .transcript
-                .retain_historical_entries_in_order(
-                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
-                    evict_newest,
-                    &state.history.represented_durable_entry_order,
-                )
-                .unwrap_or_default()
-                .is_empty();
             sync_represented_history(state);
-            if evicted && !evict_newest {
-                state.history.oldest_cursor = state
-                    .history
-                    .represented_durable_entry_order
-                    .first()
-                    .cloned();
-            }
-            if evicted && evict_newest {
-                state.history.tail_evicted = true;
-                state.history.newest_cursor = state
-                    .history
-                    .represented_durable_entry_order
-                    .last()
-                    .cloned();
-            }
+
             clear_evicted_exact_detail(state);
             let mut effects = Vec::new();
             if let Some((from, to)) = anchor {
@@ -3603,24 +3690,8 @@ fn handle_history_backend_event(
                 .represented_durable_entry_order
                 .splice(0..0, report.durable_entry_ids);
             state.history.oldest_cursor = report.next_before_entry_id;
-            let tail_evicted = !state
-                .transcript
-                .retain_historical_entries_in_order(
-                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
-                    true,
-                    &state.history.represented_durable_entry_order,
-                )
-                .unwrap_or_default()
-                .is_empty();
             sync_represented_history(state);
-            if tail_evicted {
-                state.history.tail_evicted = true;
-                state.history.newest_cursor = state
-                    .history
-                    .represented_durable_entry_order
-                    .last()
-                    .cloned();
-            }
+
             clear_evicted_exact_detail(state);
             Some(vec![
                 UiEffect::HistoryWindowChanged { older: true },
@@ -3640,23 +3711,8 @@ fn handle_history_backend_event(
                 .extend(report.durable_entry_ids);
             state.history.newest_cursor = report.next_after_entry_id;
             state.history.tail_evicted = state.history.newest_cursor.is_some();
-            let prefix_evicted = !state
-                .transcript
-                .retain_historical_entries_in_order(
-                    TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT,
-                    false,
-                    &state.history.represented_durable_entry_order,
-                )
-                .unwrap_or_default()
-                .is_empty();
             sync_represented_history(state);
-            if prefix_evicted {
-                state.history.oldest_cursor = state
-                    .history
-                    .represented_durable_entry_order
-                    .first()
-                    .cloned();
-            }
+
             clear_evicted_exact_detail(state);
             Some(vec![
                 UiEffect::HistoryWindowChanged { older: false },
@@ -3942,6 +3998,7 @@ fn handle_connection_backend_event(
             command_type,
             report,
             completion,
+            ..
         } => match event {
             BackendEvent::ConnectionCatalogReported {
                 command_id: received,
@@ -5168,7 +5225,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_origin_does_not_resolve_and_evict_before_presentation() {
+    fn tool_result_with_many_origins_remains_visible_after_completion() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
         let call_id = bounded_identity("poll-final");
@@ -5179,8 +5236,7 @@ mod tests {
         .unwrap();
         reduce(&mut state, UiAction::BackendEvent(call), &mut ids).unwrap();
         let target = state.transcript.tool_entry_for_call(&call_id).unwrap();
-        // A long-lived process can accumulate more origins than the row budget
-        // while its final poll still protects it from eviction.
+        // Completing a long-lived process must retain its entire transcript row.
         for index in 0..1_200 {
             state
                 .transcript
@@ -5210,18 +5266,11 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert!(state.transcript.entry(target).is_none());
-        assert_eq!(
-            state.transcript.live_history_gap().unwrap().newest,
-            "final-result"
-        );
-        // Only the recovery marker remains, with no orphan result card.
+        assert!(state.transcript.entry(target).is_some());
+        assert!(state.transcript.live_history_gap().is_none());
+        assert!(!state.transcript.has_unresolved_tool_call(&call_id));
         assert_eq!(state.transcript.entries().len(), 1);
-        assert!(
-            state
-                .transcript
-                .is_live_history_marker(state.transcript.entries()[0].id)
-        );
+        assert!(!state.transcript.is_live_history_marker(target));
     }
 
     #[test]
@@ -7673,38 +7722,251 @@ mod tests {
         );
     }
 
-    #[test]
-    fn startup_history_keeps_the_older_cursor_without_inserting_a_notice() {
-        let event = BackendEvent::from_projection_value(&serde_json::json!({
-            "type": "rpc.messages",
-            "command_id": "get_messages-1",
-            "session_id": null,
-            "session_path": null,
-            "truncated": true,
-            "next_before_entry_id": "entry-1",
-            "messages": [{
-                "entry_id": "entry-1",
-                "role": "user",
-                "content": "retained",
-                "content_truncated": false,
-            }],
+    fn hydration_page(command_id: &str, start: usize, end: usize) -> BackendEvent {
+        BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.messages", "command_id": command_id,
+            "session_id": "active", "session_path": "/sessions/active.jsonl",
+            "active_leaf_id": "leaf", "truncated": start > 0,
+            "next_before_entry_id": (start > 0).then(|| format!("entry-{start}")),
+            "messages": (start..end).map(|index| serde_json::json!({
+                "entry_id": format!("entry-{index}"), "role": "user",
+                "content": format!("message-{index}"), "content_truncated": false,
+            })).collect::<Vec<_>>()
         }))
-        .unwrap();
+        .unwrap()
+    }
 
-        let mut state = UiState::unconfigured();
-        let mut ids = DeterministicIds::default();
-        reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
-        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
-        reduce(
-            &mut state,
-            UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
-            &mut ids,
-        )
-        .unwrap();
+    #[test]
+    fn session_open_loads_every_page_before_exposing_the_transcript() {
+        for selecting in [false, true] {
+            let mut state = UiState::new("fake".into(), None, None);
+            let mut ids = DeterministicIds::default();
+            if selecting {
+                commit_session_and_hydrate(
+                    &mut state,
+                    session("active"),
+                    Some("draft".into()),
+                    "Session selection",
+                    &mut ids,
+                )
+                .unwrap();
+                state.input_ready = false;
+            } else {
+                reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+            }
+            let mut end: usize = 15_001;
+            let mut request = 1;
+            while end > 0 {
+                let start = end.saturating_sub(75);
+                let command_id = format!("get_messages-{request}");
+                let report = hydration_page(&command_id, start, end);
+                let finish = finished(&command_id, "get_messages", true);
+                let events = if request % 2 == 0 {
+                    [finish, report]
+                } else {
+                    [report, finish]
+                };
+                let mut effects = Vec::new();
+                for event in events {
+                    effects = reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+                }
+                if start > 0 {
+                    assert!(!state.input_ready);
+                    assert!(state.transcript.entries().is_empty());
+                    let Some(
+                        SessionOperation::StartupHydration {
+                            loaded: Some(loaded),
+                            ..
+                        }
+                        | SessionOperation::HydratingSelection {
+                            loaded: Some(loaded),
+                            ..
+                        },
+                    ) = &state.session_operation
+                    else {
+                        panic!("hydration must remain pending")
+                    };
+                    // Pages are retained without rebuilding any accumulated transcript or ID Vec.
+                    assert!(loaded.report.transcript.entries().is_empty());
+                    assert!(loaded.report.durable_entry_ids.is_empty());
+                    assert_eq!(loaded.pages.len(), request);
+                    assert_eq!(loaded.seen_entry_ids.len(), 15_001 - start);
+                    let command = effects.iter().find_map(command_value).unwrap();
+                    assert_eq!(command["before_entry_id"], format!("entry-{start}"));
+                } else if selecting {
+                    assert!(effects.iter().any(|effect| matches!(effect, UiEffect::RestoreSessionDraft(text) if text == "draft")));
+                }
+                end = start;
+                request += 1;
+            }
+            assert!(state.input_ready);
+            assert!(state.session_operation.is_none());
+            assert_eq!(state.transcript.entries().len(), 15_001);
+            assert!(state.history.oldest_cursor.is_none());
+            assert_eq!(state.history.represented_durable_entry_order.len(), 15_001);
+            for (index, entry) in state.transcript.entries().iter().enumerate() {
+                assert_eq!(entry.content, format!("message-{index}"));
+            }
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::MessageCompleted {
+                    turn: 1,
+                    content: "new reply".into(),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.transcript.entries().len(), 15_002);
+        }
+    }
 
-        assert_eq!(state.history.oldest_cursor.as_deref(), Some("entry-1"));
-        assert_eq!(state.transcript.entries().len(), 1);
-        assert_eq!(state.transcript.entries()[0].content, "retained");
+    #[test]
+    fn full_hydration_preserves_process_calls_across_page_boundaries() {
+        for (polls, process_count, completed) in
+            [(1_500, 1, true), (260, 129, true), (260, 129, false)]
+        {
+            let messages = (0..polls)
+            .flat_map(|index| {
+                let status = if completed {
+                    "completed with exit code 0"
+                } else {
+                    "is still running"
+                };
+                [
+                    serde_json::json!({
+                        "entry_id": format!("call-{index}"), "role": "assistant",
+                        "content": "", "content_truncated": false,
+                        "tool_calls": [{"call_id": format!("poll-{index}"), "name": "bash",
+                            "arguments": {"operation": "poll", "process_id": format!("process-{}", index % process_count)}}],
+                    }),
+                    serde_json::json!({
+                        "entry_id": format!("result-{index}"), "role": "tool",
+                        "tool_call_id": format!("poll-{index}"), "tool_name": "bash",
+                        "content": format!("Process process-{} {status}\nstdout:\noutput-{index}\n", index % process_count),
+                        "content_truncated": false, "tool_result": {"status": "done"},
+                    }),
+                ]
+            })
+            .collect::<Vec<_>>();
+            let mut loaded = None;
+            // Odd page lengths split calls from their results as well as process operations.
+            for start in (0..messages.len()).step_by(75).rev() {
+                let end = (start + 75).min(messages.len());
+                let event = BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.messages", "command_id": "history",
+                "session_id": "active", "session_path": "/sessions/active.jsonl",
+                "active_leaf_id": "leaf", "truncated": start > 0,
+                "next_before_entry_id": (start > 0).then(|| messages[start]["entry_id"].clone()),
+                "messages": &messages[start..end],
+            }))
+            .unwrap();
+                let BackendEvent::MessagesReported { messages: page, .. } = event else {
+                    panic!("expected a valid history page")
+                };
+                loaded = Some(merge_hydration_page(loaded, page).unwrap());
+            }
+            let loaded = loaded.unwrap();
+            assert!(loaded.pages.is_empty());
+            assert!(loaded.seen_entry_ids.is_empty());
+            assert!(loaded.report.source_messages.is_empty());
+            assert_eq!(loaded.report.durable_entry_ids.len(), polls * 2);
+            let mut transcript = loaded.report.transcript;
+            assert_eq!(transcript.entries().len(), process_count);
+            assert_eq!(transcript.represented_durable_entry_ids().len(), polls * 2);
+            for (index, entry) in transcript.entries().iter().enumerate() {
+                let card = entry
+                    .process_card()
+                    .expect("every process keeps its historical card");
+                let expected_polls = (polls - 1 - index) / process_count + 1;
+                assert_eq!(card.call_count, expected_polls as u32);
+                assert_eq!(card.poll_count, expected_polls as u32);
+                assert_eq!(
+                    card.display_state,
+                    if completed {
+                        crate::tool_cards::ProcessDisplayState::Completed
+                    } else {
+                        crate::tool_cards::ProcessDisplayState::Running
+                    }
+                );
+                let last_poll = index + (expected_polls - 1) * process_count;
+                assert!(
+                    card.retained_output
+                        .text
+                        .contains(&format!("output-{last_poll}"))
+                );
+                if process_count == 1 {
+                    let output = &card.retained_output.text;
+                    assert!(
+                        output.find("output-1498").unwrap() < output.find("output-1499").unwrap()
+                    );
+                }
+            }
+            let existing = transcript.entries()[0].id;
+            let resumed = transcript.observe_tool_call(ToolCallInput {
+                call_id: "live-poll".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"operation": "poll", "process_id": bounded_identity("process-0")}),
+                detail_source: ToolDetailSource::None,
+            });
+            assert_eq!(
+                resumed, existing,
+                "resume reuses a recently polled process card"
+            );
+            assert_eq!(transcript.entries().len(), process_count);
+        }
+    }
+
+    #[test]
+    fn hydration_rejects_stale_duplicate_and_failed_later_pages_atomically() {
+        for failure in ["duplicate", "scope", "leaf", "cursor", "failure"] {
+            let mut state = UiState::unconfigured();
+            state.transcript.append_prompt("existing".into());
+            let mut ids = DeterministicIds::default();
+            reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(hydration_page("get_messages-1", 2, 4)),
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+                &mut ids,
+            )
+            .unwrap();
+            let mut event = hydration_page("get_messages-2", 0, 2);
+            let BackendEvent::MessagesReported { messages, .. } = &mut event else {
+                unreachable!()
+            };
+            match failure {
+                "duplicate" => messages.durable_entry_ids[0] = "entry-2".into(),
+                "scope" => messages.session = Some(session("other")),
+                "leaf" => messages.active_leaf_id = Some("other".into()),
+                "cursor" => messages.next_before_entry_id = Some("entry-2".into()),
+                _ => {}
+            }
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished(
+                    "get_messages-2",
+                    "get_messages",
+                    failure != "failure",
+                )),
+                &mut ids,
+            )
+            .unwrap();
+            assert!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, UiEffect::Notice(_)))
+            );
+            assert!(state.session_operation.is_none());
+            assert!(state.input_ready);
+            assert_eq!(state.transcript.entries().len(), 1);
+            assert_eq!(state.transcript.entries()[0].content, "existing");
+        }
     }
 
     #[test]
@@ -8518,7 +8780,7 @@ mod tests {
                 .iter()
                 .any(|entry| entry.content == "message-1")
         );
-        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-1"));
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-0"));
         reduce(&mut state, UiAction::RecoverLiveHistory, &mut ids).unwrap();
         recovery_page(
             &mut state,
@@ -8528,7 +8790,7 @@ mod tests {
             Some("message-0"),
         );
         assert!(state.transcript.live_history_gap().is_none());
-        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-2"));
+        assert_eq!(state.history.oldest_cursor.as_deref(), Some("prefix-0"));
         assert!(
             state
                 .transcript
@@ -8537,8 +8799,7 @@ mod tests {
                 .any(|entry| entry.content == "message-0")
         );
         assert_eq!(
-            &state.history.represented_durable_entry_order
-                [TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT - 2..],
+            &state.history.represented_durable_entry_order[TUI_TRANSCRIPT_RETAINED_ENTRY_LIMIT..],
             ["message-0", "message-1"]
         );
     }
@@ -8847,7 +9108,7 @@ mod tests {
     }
 
     #[test]
-    fn tail_eviction_uses_persisted_order_for_parallel_tool_results() {
+    fn loading_history_keeps_the_tail_and_parallel_tool_result_origins() {
         let selected = session("active");
         let mut state = UiState::new("fake".into(), None, None);
         state.history.session = Some(selected.clone());
@@ -8923,10 +9184,11 @@ mod tests {
         )
         .unwrap();
 
-        assert!(state.history.tail_evicted);
-        assert_eq!(state.history.newest_cursor.as_deref(), Some("entry-1196"));
-        assert_eq!(state.transcript.entries().len(), 1_198);
-        assert_eq!(state.history.represented_durable_entry_ids.len(), 1_198);
+        assert!(!state.history.tail_evicted);
+        assert!(state.history.newest_cursor.is_none());
+        assert_eq!(state.transcript.entries().len(), 1_201);
+        assert_eq!(state.history.represented_durable_entry_ids.len(), 1_202);
+        assert_eq!(state.transcript.entries().last().unwrap().content, "tail");
     }
 
     #[test]

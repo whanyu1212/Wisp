@@ -21,6 +21,13 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 - Rust TUI: match the composer background to the transcript and provide a four-choice permission
   dialog. `/permissions` manages project defaults saved outside the repository; once/session
   approvals remain temporary.
+- Added bounded, theme-derived semantic coloring across the Rust composer and transcript: headings,
+  lists, inline/fenced code, tool labels, statuses, commands, paths, and generic tool arguments now
+  share a restrained palette while preserving exact editable, submitted, and restored text.
+- Rust TUI: load the complete saved transcript on session open and retain all conversation entries.
+  History transfers preserve message text and tool arguments instead of exhausting a shared preview
+  budget; transport batches load automatically. Large conversation messages remain readable as plain
+  text, with bounded rendering caches and compact tool previews.
 
 ## 0.2.0rc1 — 2026-09-10
 
