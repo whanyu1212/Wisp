@@ -318,17 +318,32 @@ def _run_sample(
             str(session_dir),
         )
         launched_ns = time.perf_counter_ns()
-        child_pid, terminal_fd = pty.fork()
+        start_reader, start_writer = os.pipe()
+        try:
+            child_pid, terminal_fd = pty.fork()
+        except BaseException:
+            os.close(start_reader)
+            os.close(start_writer)
+            raise
         if child_pid == 0:
-            os.chdir(project_dir)
-            os.execve(sys.executable, list(command), child_environment)
+            try:
+                os.close(start_writer)
+                try:
+                    start_token = os.read(start_reader, 1)
+                finally:
+                    os.close(start_reader)
+                if start_token != b"\0":
+                    os._exit(125)
+                os.chdir(project_dir)
+                os.execve(sys.executable, list(command), child_environment)
+            except BaseException:
+                try:
+                    os.write(2, b"Wisp TUI benchmark child launch failed\n")
+                except OSError:
+                    pass
+                os._exit(126)
 
-        fcntl.ioctl(
-            terminal_fd,
-            termios.TIOCSWINSZ,
-            struct.pack("HHHH", config.height, config.width - 1, 0, 0),
-        )
-        initial_terminal = termios.tcgetattr(terminal_fd)
+        os.close(start_reader)
         output = bytearray()
         phase_output = bytearray()
         terminal_output_bytes = 0
@@ -341,8 +356,19 @@ def _run_sample(
         settled_ns: int | None = None
         quit_sent = False
         wait_result: _WaitResult | None = None
+        initial_terminal: list[int | list[bytes]] | None = None
+        start_writer_open = True
         deadline = time.monotonic() + config.timeout_seconds
         try:
+            fcntl.ioctl(
+                terminal_fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", config.height, config.width - 1, 0, 0),
+            )
+            initial_terminal = termios.tcgetattr(terminal_fd)
+            os.write(start_writer, b"\0")
+            os.close(start_writer)
+            start_writer_open = False
             while time.monotonic() < deadline:
                 chunk = _read_available(terminal_fd)
                 if chunk:
@@ -422,10 +448,18 @@ def _run_sample(
                     f"terminal tail={_diagnostic_tail(output)!r}"
                 )
         finally:
+            if start_writer_open:
+                os.close(start_writer)
             if wait_result is None:
                 _kill_process_group(child_pid, terminal_fd)
                 wait_result = _wait_for_child(child_pid, block=True)
-            restored = termios.tcgetattr(terminal_fd) == initial_terminal
+            try:
+                restored = (
+                    initial_terminal is not None
+                    and termios.tcgetattr(terminal_fd) == initial_terminal
+                )
+            except (OSError, termios.error):
+                restored = False
             os.close(terminal_fd)
 
         completed_ns = time.perf_counter_ns()

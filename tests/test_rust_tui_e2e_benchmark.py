@@ -121,6 +121,38 @@ def test_terminal_drain_rejects_a_writer_that_outlives_the_cli(
 
 
 @pytest.mark.process
+def test_post_fork_setup_failure_reaps_the_blocked_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    child_pids: list[int] = []
+    real_fork = rust_tui_e2e.pty.fork
+
+    def recording_fork() -> tuple[int, int]:
+        child_pid, terminal_fd = real_fork()
+        if child_pid > 0:
+            child_pids.append(child_pid)
+        return child_pid, terminal_fd
+
+    def fail_resize(*_args: object) -> None:
+        raise OSError("injected resize failure")
+
+    monkeypatch.setattr(rust_tui_e2e.pty, "fork", recording_fork)
+    monkeypatch.setattr(rust_tui_e2e.fcntl, "ioctl", fail_resize)
+
+    with pytest.raises(OSError, match="injected resize failure"):
+        rust_tui_e2e._run_sample(
+            BenchmarkConfig(renderers=("textual",), runs=1),
+            renderer="textual",
+            run=1,
+            order=1,
+        )
+
+    assert len(child_pids) == 1
+    with pytest.raises(ChildProcessError):
+        os.waitpid(child_pids[0], os.WNOHANG)
+
+
+@pytest.mark.process
 def test_source_cli_benchmark_completes_both_renderers() -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
