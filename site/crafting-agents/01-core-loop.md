@@ -221,7 +221,12 @@ def _is_cancelled(config: AgentLoopConfig) -> bool:
     return token is not None and token.is_cancelled()
 ```
 
-At well-defined boundaries (before starting a turn, before executing a tool, and after tool completion), the loop checks the token. If cancelled, it cleans up open resources, emits `ErrorEvent("Agent run cancelled")`, and finishes with `TurnCompleted(outcome="cancelled")`. The outer harness can then cleanly decide what to save to disk.
+At well-defined boundaries (before starting a turn, before executing a tool, and after tool completion), the loop checks the token. Cancellation is cooperative and its observable shape depends on timing:
+
+- If the token is already cancelled before the first turn starts, the loop emits `ErrorEvent("Agent run cancelled")` and exits — no turn ever begins, so no completion event is produced.
+- If cancellation lands mid-run (during an unfinished turn), the loop cleans up open resources, emits `ErrorEvent("Agent run cancelled")`, and finishes with `TurnCompleted(turn=N, outcome="cancelled")`.
+
+In both cases the outer harness can then cleanly decide what to save to disk; but consumers of the event stream should not assume a completion event always arrives — only that `ErrorEvent` signals the cancelled terminal state.
 
 ---
 
@@ -242,7 +247,7 @@ print(agent.history)
 - By making `run_agent_loop` a stateless event generator, the loop becomes trivial to test: pass mock messages, collect yielded events, and assert ordering.
 
 **The Cost:**
-- The caller (`AgentHarness` in `wisp/agent/harness/runner.py`) must do extra work. It must listen to `MessageCompleted` and `ToolResultReady` events and manually project them into its durable transcript.
+- The caller (`AgentHarness` in `wisp/agent/harness/runner.py`) must do extra work. It must listen to `MessageCompleted` and `ToolExecutionEnded` events and manually project them into its durable transcript. (`ToolResultReady` is a later, provider-facing copy of the same result — it is not the event the harness retains.)
 
 ### Trade-off 2: Turn-Based Batching vs. Async Reactive Actors
 In Wisp, tools are executed in coordinated batches per turn. If a model requests 3 tool calls, Wisp evaluates and schedules the batch, waits for them to settle, and packages their results for the next turn.
@@ -266,4 +271,4 @@ Running tools in an uncontrolled reactive stream risks running tests before file
 - Production loops require strict separation of concerns: keep provider-neutral streaming in the loop, while delegating persistence and user steering to outer harnesses.
 - Event-driven streams give frontends complete observability without entangling the agent loop with UI or database code.
 
-In the next chapter, we will explore giving the model hands: **Chapter 2: Giving the Model Hands — Tool Execution, Filesystem Operations, and Safety Gates**.
+A future chapter will explore giving the model hands: tool execution, filesystem operations, and safety gates.
