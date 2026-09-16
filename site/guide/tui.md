@@ -8,19 +8,23 @@ title: TUI
 wisp
 ```
 
-A fullscreen Textual TUI built on the same RPC controller other integrations use. While a command is
-active, a spinning `Working…` row stays at the live transcript tail until visible assistant output
-begins. It remains through tool-only work, returns after the final tool result while the next model
-step is pending, and changes labels for retries, approvals, trust, or compaction.
+Wisp's fullscreen terminal clients share the same Python RPC controller.
 
-::: info Two terminal frontends
-Wisp maintains two terminal clients over the same Python runtime. Textual is the default and
-supported product TUI. The Rust client is an experimental macOS/Linux opt-in for presentation
-performance, with no silent fallback. Existing published wheels remain source-build only; #566
-prepares verified native wheels for a later approved release. It is not a rewrite of the agent, and it is
-not the default until a later explicit decision. See the
-[terminal frontend boundary](../architecture/rust-tui-boundary).
+::: info RC2 frontend selection
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
+
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
 :::
+
+The following footer description applies to Textual; Rust controls are described below.
 
 The footer shows the working directory plus plan/queued state on the left, the active shortcut in the
 center, and the model, billing route, and context percentage on the right. At narrow widths it
@@ -35,21 +39,18 @@ compact billing and context fields.
   `session unpriced` when no request can be priced. This keeps earlier usage honest after switching
   providers. Estimates are not invoices.
 
-## Experimental Rust TUI
+## Rust TUI
 
-The two frontends coexist during this period. Features may land in Rust first without changing the
-default. [#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the supported
-product TUI; Rust stays an experimental opt-in on macOS and Linux, with no fallback and no stage-3
-supported-opt-in claim. [#468](https://github.com/whanyu1212/Wisp/issues/468) and
-[#469](https://github.com/whanyu1212/Wisp/issues/469) are closed; [#566](https://github.com/whanyu1212/Wisp/issues/566)
-prepares their production distribution follow-up. A default switch requires a new explicit issue.
+Rust is the RC2 default for native-wheel installs, with Textual retained as a maintained fallback.
+This release does not claim complete feature parity.
 
 The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
 model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
 completion, themes, mouse navigation, configurable bindings, keyboard selection, undo/redo, composer
 clipboard actions, and compact paste presentation.
 Rust uses external update instructions instead of Textual's install/restart flow, as described below.
-Published native artifacts, rollout feedback, and a new explicit support decision remain required before supported opt-in.
+Published-artifact validation and terminal/accessibility feedback remain release acceptance work;
+the RC trial does not establish stable promotion.
 
 During a backend output burst, Rust waits up to five seconds for inbound queue capacity while
 continuing to give input and redraws turns. Sustained transport stalls and failed command writes
@@ -116,12 +117,13 @@ strip instead of a five-row args panel.
 
 The Rust TUI negotiates and validates live RPC v8/event schema v39, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
-and bounded session history.
+and complete saved session history.
 `/resume` opens a picker for up to 50 persisted sessions (or accepts
 one exact session ID); `/new` deselects the current session and clears the local transcript after the
-backend confirms it. Startup and resumed history install the newest 200-message page atomically;
-reaching an edge loads additional 75-message pages while retaining at most 1,200 logical transcript
-rows. An omission row marks history that remains outside the retained window.
+backend confirms it. Startup and resumed history collect every transport page and build the
+complete transcript once before enabling input. Conversation entries are retained without a history
+cap; rendering caches and compact tool previews remain bounded. Large messages render in full as
+plain text. Very large sessions therefore require more startup time and memory.
 
 `/connect` opens a provider connection panel. Use arrow keys to select a provider,
 `Enter` to start its available API-key or device-code flow, `d` to disconnect stored credentials,
@@ -137,9 +139,9 @@ starts again from the first page. Forking restores the selected prompt after the
 history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
-This is still experimental and source-build only: current Python distributions do not include the Rust
-binary. Native transcript selection/copy and transcript search remain unavailable; composer selection
-and clipboard actions are keyboard-driven. Mouse navigation is experimental opt-in as described below.
+RC2 prepares native wheels for the three packaged targets. Transcript search and arbitrary drag
+selection remain follow-ups; composer selection and clipboard actions are keyboard-driven.
+See the mouse controls below; transcript copying still relies on terminal-native selection.
 Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
 Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
 enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
@@ -398,7 +400,7 @@ is not saved. These choices do not change project trust or protected paths.
 ## Steering and follow-ups
 
 The composer remains active while a prompt runs. In the Textual, prompt-toolkit fullscreen, and
-experimental Rust TUIs:
+Rust TUIs:
 
 - `Enter` sends a steering message for the active run. It is injected at the next safe request
   boundary, after any current assistant/tool batch.
@@ -499,7 +501,7 @@ stays anchored; select the `↓ new` indicator or press `End` to return to the l
 ### Resuming long sessions
 
 In Textual, selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the
-complete active-path transcript before revealing the replacement. The experimental Rust TUI installs
+complete active-path transcript before revealing the replacement. The Rust TUI installs
 the latest page first, then loads older history with `PageUp` or `Ctrl+Home`; `PageDown` or `Ctrl+End`
 returns through an evicted tail to the latest page. Plain `Home` remains available to the prompt
 editor. Paging preserves surviving viewport anchors; older-page and exact-detail requests can run
@@ -562,7 +564,7 @@ wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
-wisp tui --renderer rust                 # experimental source-build Rust TUI
+wisp tui --renderer rust                 # explicitly select Rust
 wisp tui --no-synchronized-output        # disable atomic Textual frame presentation
 ```
 

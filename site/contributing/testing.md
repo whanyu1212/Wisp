@@ -64,7 +64,7 @@ see [Agent runtime architecture](../architecture/agent-runtime.md).
 
 ## Rust workspace and handoff
 
-Use the repository's pinned Rust 1.85.0 toolchain for the Rust protocol and experimental TUI gates:
+Use the repository's pinned Rust 1.85.0 toolchain for the Rust protocol and TUI gates:
 
 ```bash
 uv run python -m wisp.rpc.protocol_schema --check

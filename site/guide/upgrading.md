@@ -4,28 +4,31 @@ title: Upgrading to Wisp 0.2
 
 # Upgrading to Wisp 0.2
 
-**0.2.0rc1 was published on September 10, 2026.** It is an opt-in release candidate, not a stable
-release. See the [release notes](https://github.com/whanyu1212/Wisp/releases/tag/v0.2.0rc1)
-and [PyPI package](https://pypi.org/project/wisp-ai/0.2.0rc1/).
-The latest stable release remains 0.1.0.
-This page describes the candidate's upgrade impact and the checks to complete before 0.2.0.
+**0.2.0rc2 is being prepared; this PR does not publish it.** The latest published candidate is
+[0.2.0rc1](https://github.com/whanyu1212/Wisp/releases/tag/v0.2.0rc1), and stable remains 0.1.0.
+This guide describes the RC2 changes and the checks required before stable promotion.
 
 ## What changes for terminal users
 
-Textual remains the default TUI. The candidate improves streaming order when scrolling away from
-the live tail, input responsiveness during Markdown rendering, and file-picker responsiveness.
-It also fixes stale results when reopening a bare `@` mention and stale expand/collapse arrows.
-Supported terminals can use synchronized output to reduce partial-frame flicker.
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
 
-The Rust frontend remains experimental. The already published 0.2.0rc1 wheels do not contain a Rust
-binary; the release workflow now prepares verified native wheels for a later approved release on
-manylinux x86_64 and macOS x86_64/arm64. Explicit Rust selection never silently falls back to
-Textual. There is no need to switch renderers to benefit from this release.
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
+
+RC2 includes the native-wheel release pipeline, composer selection/undo/clipboard, semantic colors,
+and complete saved-history loading. It is a trial of Rust as the default on the packaged platforms,
+not a claim of complete Textual feature parity or universal terminal performance.
 
 Existing supported JSONL sessions remain readable without manual migration. Python continues to
-load historical data and provides current-version snapshots to frontends. As with any upgrade,
-keep backups of important sessions; forward readability does not promise that an older Wisp version
-can read new records written by a newer one.
+own persistence. Back up important sessions before testing a candidate; older releases are not
+promised to understand newly written records.
 
 ## Python integrations
 
@@ -60,16 +63,16 @@ Historical bundles remain immutable. These live-connection requirements do not c
 backward-readability policy for persisted sessions.
 
 The in-process Python SDK has no serialization boundary and does not perform a wire handshake.
-The experimental Rust TUI requires the exact Python package release. Source builds use the matching
-checkout; future native wheels are built and published in lockstep with the same Python release.
+The Rust TUI requires the exact Python package release. Source builds use the matching
+checkout; native wheels are built and published in lockstep with the Python release.
 
 ## Trying the candidate
 
-An explicit version pin opts into the published candidate:
+After RC2 is published and its artifacts are verified, use an explicit version pin:
 
 ```bash
-uvx --from "wisp-ai==0.2.0rc1" wisp --version
-uvx --from "wisp-ai==0.2.0rc1" wisp
+uvx --from "wisp-ai==0.2.0rc2" wisp --version
+uvx --from "wisp-ai==0.2.0rc2" wisp
 ```
 
 This avoids replacing an existing persistent `uv tool` installation, but the running application
@@ -79,10 +82,13 @@ if you do not want to opt into prerelease testing.
 
 ## Before promoting to 0.2.0
 
+Use the [RC2 release checklist](https://github.com/whanyu1212/Wisp/blob/main/site/contributing/rc2-release.md)
+for candidate publication, platform installation, long-session measurements, and rollback gates.
+
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.
 - Verify wheel and source-distribution metadata, installed SDK imports, `wisp --version`, and a
   fake-provider prompt outside the source checkout.
-- Exercise Textual in a real terminal: long streaming output while typing and scrolling,
+- Exercise Rust and the Textual fallback in real terminals: long streaming output while typing and scrolling,
   file-picker navigation, cancellation, approvals, and session resume.
 - Dogfood the published candidate and resolve release blockers before updating stable version
   pins or creating the final tag. Passing headless tests is not evidence of native-terminal

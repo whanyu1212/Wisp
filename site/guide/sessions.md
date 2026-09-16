@@ -60,7 +60,7 @@ The typed session API can derive a new session without rewriting its source:
 - A **fork** copies the path before a selected user message and returns that prompt for editing.
 
 Copied entries retain stable IDs, parent links, timestamps, and accounting metadata under a new
-session ID. RPC clients use `clone_session` / `fork_session`. The experimental Rust TUI exposes
+session ID. RPC clients use `clone_session` / `fork_session`. The Rust TUI exposes
 `/clone` and a keyboard-only `/tree` picker: `Enter` navigates to a node, `f` forks a selected user
 message, and `/unrevert` reverses the latest eligible navigation. Fork and user-message navigation
 restore the editable prompt only after the authoritative target history loads. The picker requests

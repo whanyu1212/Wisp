@@ -41,24 +41,25 @@ request-boundary handshake, and source navigation.
 
 ## Terminal frontend boundary
 
-Wisp is in a dual-frontend period, not a rewrite of the agent in Rust. Textual is the default and
-supported interactive TUI. An experimental Rust client talks to the same Python JSONL-RPC runtime.
-The experiment changes presentation ownership, not runtime authority: Python continues to own
-providers, tools, trust, approvals, sessions, configuration, and every durable or safety-sensitive
-decision. Features may land in Rust first without changing the default.
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
 
-The [Rust terminal frontend boundary](./rust-tui-boundary) records the process topology, subsystem
-ownership, migration map, compatibility rules, failure ownership, and the closed [#470](https://github.com/whanyu1212/Wisp/issues/470)
-renderer decision. Textual remains the default and supported frontend. Rust is an experimental
-opt-in, not a shipped or default interface. Supported opt-in (stage 3) requires
-[#468](https://github.com/whanyu1212/Wisp/issues/468), and
-[#469](https://github.com/whanyu1212/Wisp/issues/469). A later default switch requires a new
-explicit issue.
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
+
+See the [Rust terminal frontend boundary](./rust-tui-boundary) for the RC2 decision and ownership.
 
 ## Resumed transcript hydration
 
 The Textual TUI completely hydrates the selected session's active path after an explicit interactive
-`/resume`. Startup hydration and non-Textual renderers remain bounded. This is an intentional UX
+`/resume`. Rust startup and session selection also load the entire saved active path, projecting it once
+in chronological order; transport and rendering caches remain bounded. This is an intentional UX
 tradeoff: a long session takes longer to select, but upward scrolling no longer crosses asynchronous
 page-mount boundaries that can change scroll geometry underneath the reader.
 

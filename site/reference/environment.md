@@ -9,7 +9,7 @@ title: Environment variables
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
-| `WISP_TUI_RENDERER` | TUI renderer for top-level TUI selection: `line`, `fullscreen`, `textual`, or experimental `rust` |
+| `WISP_TUI_RENDERER` | TUI selection for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default), `line`, `fullscreen`, `textual`, or `rust` |
 | `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used only when the Rust renderer is selected |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
@@ -53,18 +53,20 @@ project files, and `WISP_TRUST` is never persisted — see
 example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
 `wisp -p "hello" --mode json` for a machine-readable prompt run.
 
-`WISP_TUI_RENDERER=rust` opts a top-level TUI invocation into the experimental macOS/Linux Rust
-frontend. An explicit `--tui-renderer` takes precedence. The dedicated `wisp tui` command instead
-uses `--renderer rust`. Rust selection never falls back to Textual on failure.
-[#470](https://github.com/whanyu1212/Wisp/issues/470) closed with Textual as the default; Rust stays
-experimental opt-in. [#468](https://github.com/whanyu1212/Wisp/issues/468) and
-[#469](https://github.com/whanyu1212/Wisp/issues/469) are closed; [#566](https://github.com/whanyu1212/Wisp/issues/566)
-prepares verified native artifacts without changing rollout status. Stage 3 supported opt-in still
-requires an explicit future decision.
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
+
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
 
 `WISP_RUST_TUI_BINARY` is a source-development override, not a general executable search path. It
 must name an existing, executable absolute path and is removed from the environment passed to the
-Python RPC backend. Without an override, future native-wheel installations resolve `wisp-tui` only
-from the active Python environment's scripts directory; Wisp never searches `PATH`. Existing
-published distributions do not include the binary; see
+Python RPC backend. Without an override, native-wheel installations resolve `wisp-tui` only
+from the active Python environment's scripts directory; Wisp never searches `PATH`. RC1 distributions do not include the binary; RC2 prepares native wheels. See
 [Development setup](../contributing/development#rust-tui-scaffold).

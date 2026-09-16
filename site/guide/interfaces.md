@@ -10,17 +10,25 @@ consumed—not because it has a different agent implementation.
 
 | Interface | Start it | Output | Best for |
 |---|---|---|---|
-| Textual TUI | `wisp` or `wisp tui` | Fullscreen terminal UI | Interactive repository work (default) |
-| Experimental Rust TUI | `wisp tui --renderer rust` | Fullscreen terminal UI | Source-build presentation client; same Python runtime |
+| Rust TUI | `wisp` or `wisp tui` | Fullscreen terminal UI | Default in RC2 native-wheel installations |
+| Textual TUI | `wisp tui --renderer textual` | Fullscreen terminal UI | Maintained fallback; default without a native binary |
 | Line TUI | `wisp tui --line` | Incremental terminal text | Simple terminals and debugging |
 | Print | `wisp -p "PROMPT"` | Assistant text on stdout; events on stderr | One-shot prompts and scripts |
 | JSON | `wisp -p "PROMPT" --mode json` | One `WispEvent` JSON object per line | Typed one-shot automation |
 | JSONL RPC | `wisp --mode rpc` | Commands on stdin; typed events/results on stdout | Long-lived clients and custom UIs |
 | Python SDK | Import `InProcessWisp` | Typed async Python API | In-process applications and tests |
 
-The fullscreen TUI currently has two clients. Textual is the default. The Rust renderer is an
-experimental opt-in over the same Python JSONL-RPC backend: it does not replace the agent, and it
-does not become the default until a later explicit decision. See [TUI](./tui) for how they coexist.
+In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
+on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
+Native wheels cover macOS arm64/x86_64 and Linux glibc 2.28+ x86_64. Pure/source installs and
+other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
+which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
+macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
+failures report an error; they never silently switch frontends.
+
+Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
+fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
+Both clients use the same Python runtime, permissions, providers, and saved sessions.
 
 ## Shared semantics, different controls
 

@@ -18,13 +18,73 @@ import termios
 import time
 from pathlib import Path
 
+_HISTORY_READY = b"RC2 saved history ready"
 
-def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
+
+def _seed_history(session_dir: Path, count: int) -> int:
+    """Write a disposable active path with conversation and completed read tools.
+
+    Args:
+        session_dir: Disposable session directory supplied by the caller.
+        count: Number of fixture messages, in complete four-message turns.
+
+    Returns:
+        Fixture file size in bytes, excluding later smoke-test messages.
+    """
+    from wisp.agent.messages import Message
+    from wisp.events import ToolCallSnapshot
+    from wisp.sessions import JsonlSessionStore, MessageSessionEntry
+    from wisp.sessions.entries import session_entry_to_json
+
+    session_dir.mkdir(parents=True, exist_ok=True)
+    session = JsonlSessionStore(session_dir).create()
+    parent_id = None
+    with session.path.open("x", encoding="utf-8") as stream:
+        for index in range(count + 1):
+            turn = index // 4
+            messages = (
+                Message(role="user", content=f"Inspect module {turn}. " + "source context " * 16),
+                Message(
+                    role="assistant",
+                    content="Inspecting the source.",
+                    tool_calls=(
+                        ToolCallSnapshot(
+                            call_id=f"read-{turn}",
+                            name="read",
+                            arguments={"path": f"module-{turn}.py"},
+                        ),
+                    ),
+                ),
+                Message(
+                    role="tool",
+                    content="def example(): return 42\n" * 20,
+                    tool_call_id=f"read-{turn}",
+                    tool_name="read",
+                ),
+                Message(
+                    role="assistant", content=f"Module {turn} inspected. " + "Result details. " * 16
+                ),
+            )
+            message = (
+                Message(role="assistant", content=_HISTORY_READY.decode())
+                if index == count
+                else messages[index % 4]
+            )
+            entry = MessageSessionEntry(
+                session_id=session.session_id, parent_id=parent_id, message=message
+            )
+            stream.write(session_entry_to_json(entry) + "\n")
+            parent_id = entry.id
+    return session.path.stat().st_size
+
+
+def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, float | int]:
     """Submit one fake-provider prompt through the installed Rust TUI.
 
     Args:
         wisp: Installed Wisp console script.
         session_dir: Disposable session directory.
+        history_messages: Optional saved-history fixture size, divisible by four.
 
     Returns:
         Ready-frame, total runtime, and child-process peak RSS measurements.
@@ -33,6 +93,9 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
         RuntimeError: If startup, response, exit, or terminal restoration fails.
     """
 
+    if history_messages < 0 or history_messages % 4:
+        raise ValueError("history_messages must be nonnegative and divisible by four")
+    history_bytes = _seed_history(session_dir, history_messages) if history_messages else 0
     started = time.monotonic()
     ready_seconds: float | None = None
     child_pid, terminal_fd = pty.fork()
@@ -43,17 +106,18 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
             "WISP_MODEL": "",
             "WISP_TRUST": "1",
             "WISP_TUI_MOUSE": "0",
+            "WISP_AUTO_COMPACTION": "0",
         }
         environment.pop("WISP_RUST_TUI_BINARY", None)
+        environment.pop("WISP_TUI_RENDERER", None)
         os.execve(
             str(wisp),
             [
                 str(wisp),
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
+                *(["--continue"] if history_messages else []),
             ],
             environment,
         )
@@ -68,7 +132,7 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
     settled_at: float | None = None
     quit_sent = False
     status: int | None = None
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + (120 if history_messages else 30)
     try:
         while time.monotonic() < deadline:
             readable, _, _ = select.select([terminal_fd], [], [], 0.05)
@@ -92,7 +156,8 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
             if (
                 not prompt_sent
                 and startup_redraw_offset is not None
-                and b"Type a prompt or / for commands." in output[startup_redraw_offset:]
+                and (_HISTORY_READY if history_messages else b"Type a prompt or / for commands.")
+                in output[startup_redraw_offset:]
             ):
                 ready_seconds = time.monotonic() - started
                 os.write(terminal_fd, b"installed wheel smoke\r")
@@ -143,6 +208,8 @@ def run(wisp: Path, session_dir: Path) -> dict[str, float | int]:
         rss = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
         rss_bytes = int(rss if sys.platform == "darwin" else rss * 1024)
         return {
+            "history_messages": history_messages + 1 if history_messages else 0,
+            "history_bytes": history_bytes,
             "binary_bytes": (wisp.parent / "wisp-tui").stat().st_size,
             "ready_frame_seconds": ready_seconds,
             "total_seconds": time.monotonic() - started,
@@ -168,8 +235,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wisp", type=Path, required=True)
     parser.add_argument("--session-dir", type=Path, required=True)
+    parser.add_argument("--history-messages", type=int, default=0)
     arguments = parser.parse_args()
-    print(json.dumps(run(arguments.wisp, arguments.session_dir), sort_keys=True))
+    print(
+        json.dumps(
+            run(arguments.wisp, arguments.session_dir, arguments.history_messages), sort_keys=True
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -683,7 +683,7 @@ def test_cli_tui_mode_rejects_invalid_env_renderer_default() -> None:
     )
 
     assert result.exit_code == 1
-    assert "WISP_TUI_RENDERER must be one of: line, fullscreen" in result.output
+    assert "WISP_TUI_RENDERER must be one of: auto, line, fullscreen" in result.output
 
 
 def test_cli_tui_mode_validates_provider_before_prompting() -> None:

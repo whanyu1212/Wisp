@@ -17,7 +17,7 @@ from wisp.cli import app
 from wisp.cli.types import TuiFrontendKind
 from wisp.config import WispConfig
 from wisp.settings import ResolvedSettings
-from wisp.tui import rust_launcher
+from wisp.tui import rust_binary, rust_launcher
 from wisp.tui.launch import TuiOptions
 from wisp.tui.rust_launcher import RustTuiLaunchError
 
@@ -38,21 +38,103 @@ def _options(tmp_path: Path) -> TuiOptions:
     )
 
 
-def test_bare_interactive_wisp_defaults_to_textual(
+@pytest.mark.parametrize("arguments", [[], ["tui"], ["--mode", "tui"]])
+@pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
+@pytest.mark.parametrize("native", [False, True])
+def test_default_frontend_follows_installed_distribution(
+    arguments: list[str],
+    platform: str,
+    native: bool,
+    tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     launched: dict[str, object] = {}
     monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: True)
     monkeypatch.setattr(
-        cli_module,
-        "_run_tui_from_cli_options",
-        lambda **kwargs: launched.update(kwargs),
+        cli_module, "_run_tui_from_cli_options", lambda **kwargs: launched.update(kwargs)
+    )
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
+    monkeypatch.delenv("WISP_TUI_RENDERER", raising=False)
+    # Discovery uses ownership metadata, even if the declared executable is missing.
+    # A damaged native installation must reach Rust launch validation, not Textual.
+    binary = SimpleNamespace(name="wisp-tui", locate=lambda: tmp_path / "missing")
+    monkeypatch.setattr(
+        rust_binary.metadata,
+        "distribution",
+        lambda _: SimpleNamespace(files=(binary,) if native else ()),
+    )
+    result = CliRunner().invoke(app, arguments, env=_cli_env())
+    assert result.exit_code == 0, result.output
+    expected = TuiFrontendKind.rust if native and platform != "win32" else TuiFrontendKind.textual
+    assert launched["renderer"] is expected
+
+
+@pytest.mark.parametrize("arguments", [["tui"], ["--mode", "tui"]])
+@pytest.mark.parametrize("selection", ["textual", "rust", "line"])
+def test_frontend_environment_choice_precedes_automatic_default(
+    arguments: list[str],
+    selection: str,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    launched: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module, "_run_tui_from_cli_options", lambda **kwargs: launched.update(kwargs)
+    )
+    result = CliRunner().invoke(app, arguments, env={**_cli_env(), "WISP_TUI_RENDERER": selection})
+    assert result.exit_code == 0, result.output
+    assert launched["renderer"] is TuiFrontendKind(selection)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["tui", "--renderer", "textual"],
+        ["--mode", "tui", "--tui-renderer", "textual"],
+        ["tui", "--line"],
+    ],
+)
+def test_explicit_frontend_precedes_environment_and_native_override(
+    arguments: list[str],
+    monkeypatch: MonkeyPatch,
+) -> None:
+    launched: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module, "_run_tui_from_cli_options", lambda **kwargs: launched.update(kwargs)
+    )
+    result = CliRunner().invoke(
+        app,
+        arguments,
+        env={**_cli_env(), "WISP_TUI_RENDERER": "rust", "WISP_RUST_TUI_BINARY": "/missing/binary"},
+    )
+    assert result.exit_code == 0, result.output
+    assert launched["renderer"] is (
+        TuiFrontendKind.line if "--line" in arguments else TuiFrontendKind.textual
     )
 
-    result = CliRunner().invoke(app, [], env=_cli_env())
 
-    assert result.exit_code == 0, result.output
-    assert launched["renderer"] is TuiFrontendKind.textual
+@pytest.mark.parametrize("failure", ["missing", "nonexecutable", "exit"])
+def test_automatic_rust_failure_does_not_fall_back(
+    failure: str,
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    binary = tmp_path / "wisp-tui"
+    if failure != "missing":
+        binary.write_bytes(b"invalid executable")
+        binary.chmod(0o600)
+    monkeypatch.setattr(
+        rust_binary.metadata,
+        "distribution",
+        lambda _: SimpleNamespace(files=(SimpleNamespace(name="wisp-tui", locate=lambda: binary),)),
+    )
+    monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
+    monkeypatch.delenv("WISP_TUI_RENDERER", raising=False)
+    if failure == "exit":
+        monkeypatch.setattr(rust_launcher, "run_rust_tui", lambda _: 23)
+    result = CliRunner().invoke(app, ["tui"], env=_cli_env())
+    assert result.exit_code == (23 if failure == "exit" else 1)
+    assert "wisp tui --renderer textual" in result.output
 
 
 def test_bare_interactive_wisp_honors_rust_environment_selection(
@@ -277,7 +359,7 @@ def test_binary_resolution_uses_active_environment_scripts_not_path(
     monkeypatch.setenv("PATH", str(hostile))
     installed_binary = SimpleNamespace(name="wisp-tui", locate=lambda: binary)
     monkeypatch.setattr(
-        rust_launcher.metadata,
+        rust_binary.metadata,
         "distribution",
         lambda name: SimpleNamespace(files=(installed_binary,)),
     )
@@ -291,7 +373,7 @@ def test_missing_environment_binary_is_actionable(
 ) -> None:
     monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
     monkeypatch.setattr(
-        rust_launcher.metadata,
+        rust_binary.metadata,
         "distribution",
         lambda name: SimpleNamespace(files=()),
     )
