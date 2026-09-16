@@ -745,7 +745,6 @@ pub(crate) mod tests {
         for name in [
             "random",
             "classic",
-            "adal-blocks",
             "adal-braille",
             "adal-mark-braille",
             "wisp-braille",

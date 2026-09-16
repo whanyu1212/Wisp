@@ -5,7 +5,6 @@ use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthStr;
 
-const ADAL_FOREGROUND: Color = Color::Rgb(5, 5, 5);
 const ADAL_BACKGROUND: Color = Color::Rgb(255, 88, 152);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -13,26 +12,23 @@ pub(crate) enum LogoChoice {
     #[default]
     Random,
     Classic,
-    AdalBlocks,
     AdalBraille,
     AdalMarkBraille,
     WispBraille,
 }
 
 impl LogoChoice {
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 5] = [
         Self::Random,
         Self::Classic,
         Self::WispBraille,
-        Self::AdalBlocks,
         Self::AdalBraille,
         Self::AdalMarkBraille,
     ];
 
-    const NAMED: [Self; 5] = [
+    const NAMED: [Self; 4] = [
         Self::Classic,
         Self::WispBraille,
-        Self::AdalBlocks,
         Self::AdalBraille,
         Self::AdalMarkBraille,
     ];
@@ -41,7 +37,6 @@ impl LogoChoice {
         match self {
             Self::Random => "random",
             Self::Classic => "classic",
-            Self::AdalBlocks => "adal-blocks",
             Self::AdalBraille => "adal-braille",
             Self::AdalMarkBraille => "adal-mark-braille",
             Self::WispBraille => "wisp-braille",
@@ -52,7 +47,6 @@ impl LogoChoice {
         match self {
             Self::Random => "Random",
             Self::Classic => "Classic WISP",
-            Self::AdalBlocks => "Adal Blocks",
             Self::AdalBraille => "Adal Braille",
             Self::AdalMarkBraille => "Adal Mark Braille",
             Self::WispBraille => "Wisp Braille",
@@ -93,7 +87,6 @@ struct LogoArt {
 #[derive(Clone, Copy)]
 enum ColorTreatment {
     ThemeForeground,
-    AdalPanel,
     AdalForeground,
 }
 
@@ -103,51 +96,6 @@ const CLASSIC: [&str; 5] = [
     "█ █ █   █   ████  ████",
     "██ ██   █      █  █   ",
     "█   █  ███  ████  █   ",
-];
-
-const ADAL_BLOCKS_MINI: [&str; 5] = [
-    "   ▄▄█████████▄",
-    " ▄████████ ▄██▀█",
-    "██████████▄",
-    "████████████  ▄",
-    "  ▀▀▀▀▀▀██▀███",
-];
-const ADAL_BLOCKS_NORMAL: [&str; 10] = [
-    "     ▄▄▄██████▄▄",
-    "   ▄█████▀▄██████",
-    "  █████████  ██▀█▄",
-    " ██████████ ▄▄▄  ▀",
-    "▄██████████ ▀▀▀",
-    "████████████",
-    "████████████▄      ▄",
-    "█████████████▄ ▄▀▀",
-    " ▀▀▀██████████▄▀",
-    "        ▀▀▀ ▀██▄",
-];
-const ADAL_BLOCKS_FULL: [&str; 23] = [
-    "                 ▄▄▄▄█████████▄▄",
-    "             ▄▄███████████████████▄▄",
-    "          ▄█████████████▀████████████▄",
-    "       ▄█████████████▀  ███████████████",
-    "      ████████████▀ ▄▄█████▀▀███████████",
-    "     ██████████▀█▄▄███████       ▀▀█▀███▄",
-    "    █████████▀▄███████████   ▄▄██▀▀▀  ███",
-    "   ██████████████████████   ▀▀    ▄▄   ██",
-    "  ███████████████████████   ▄▄▄███▀▀    ▀▀▀ ▄",
-    "  ███████████████████████  ███████▄▄       ▄▀",
-    " ████████████████████████                  █▄",
-    " █████████████████████████                 ▄█",
-    " ██████████████████████████                 █",
-    " ███████████████████████████                █",
-    "████████████████████████████▄               ▀▄",
-    "█████████████████████████████▄▄           ▄▄▄▀",
-    "██████████████████████████████ ▀     ▄▄█▀▀▀",
-    "███████████████████████████████    ▄██▀",
-    "▀▀██████████████████████████████   ██",
-    "    ▀▀▀▀▀████████████████▀███████  █",
-    "             ▀███████████▄▀████████",
-    "                  ▀▀▀▀▀███▄ ███████",
-    "                             ▀▀█████",
 ];
 
 const ADAL_BRAILLE_MINI: [&str; 5] = [
@@ -277,22 +225,7 @@ const WISP_BRAILLE_FULL: [&str; 22] = [
 
 fn art(choice: LogoChoice) -> LogoArt {
     match choice {
-        LogoChoice::Random | LogoChoice::AdalBlocks => LogoArt {
-            mini: LogoSize {
-                rows: &ADAL_BLOCKS_MINI,
-                width: 16,
-            },
-            normal: LogoSize {
-                rows: &ADAL_BLOCKS_NORMAL,
-                width: 20,
-            },
-            full: LogoSize {
-                rows: &ADAL_BLOCKS_FULL,
-                width: 46,
-            },
-            treatment: ColorTreatment::AdalPanel,
-        },
-        LogoChoice::Classic => LogoArt {
+        LogoChoice::Random | LogoChoice::Classic => LogoArt {
             mini: LogoSize {
                 rows: &CLASSIC,
                 width: 22,
@@ -376,10 +309,6 @@ pub(crate) fn preview_lines(
     let monochrome = no_color || palette.is_monochrome();
     let style = match art.treatment {
         ColorTreatment::ThemeForeground => Style::default().fg(palette.primary),
-        ColorTreatment::AdalPanel if monochrome => {
-            Style::default().fg(palette.background).bg(palette.primary)
-        }
-        ColorTreatment::AdalPanel => Style::default().fg(ADAL_FOREGROUND).bg(ADAL_BACKGROUND),
         ColorTreatment::AdalForeground if monochrome => Style::default().fg(palette.primary),
         ColorTreatment::AdalForeground => Style::default().fg(ADAL_BACKGROUND),
     };
@@ -416,13 +345,8 @@ mod tests {
     }
 
     #[test]
-    fn adal_block_keeps_its_panel_and_other_adal_marks_use_transparent_pink() {
+    fn adal_marks_use_transparent_pink() {
         let palette = Palette::default();
-        let blocks = preview_lines(LogoChoice::AdalBlocks, 80, 30, palette, false);
-        let panel = &blocks[0].spans[1];
-        assert_eq!(panel.style.fg, Some(ADAL_FOREGROUND));
-        assert_eq!(panel.style.bg, Some(ADAL_BACKGROUND));
-
         for choice in [LogoChoice::AdalBraille, LogoChoice::AdalMarkBraille] {
             let lines = preview_lines(choice, 80, 30, palette, false);
             let mark = &lines[0].spans[1];
@@ -449,6 +373,7 @@ mod tests {
             LogoChoice::resolve(" ADAL-BRAILLE "),
             Some(LogoChoice::AdalBraille)
         );
+        assert_eq!(LogoChoice::resolve("adal-blocks"), None);
         assert_eq!(LogoChoice::resolve("adal-mark-blocks"), None);
         assert_eq!(LogoChoice::resolve("wisp-color"), None);
         assert_eq!(LogoChoice::resolve("unknown"), None);

@@ -581,7 +581,7 @@ impl Default for LiveUi {
             theme_preferences: None,
             theme_picker: None,
             logo_choice: LogoChoice::Random,
-            startup_logo: LogoChoice::AdalBlocks,
+            startup_logo: LogoChoice::AdalBraille,
             logo_picker: None,
             no_color: false,
             mouse_enabled: false,
