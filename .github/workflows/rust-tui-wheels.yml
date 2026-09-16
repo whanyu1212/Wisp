@@ -15,12 +15,14 @@ on:
       - "rust/wisp-process-text/**"
       - "rust/wisp-protocol/**"
       - "rust/wisp-python/**"
+      - "rust/wisp-search/**"
       - "rust/wisp-tui/**"
       - "scripts/smoke_installed_rust_tui.py"
       - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"
       - "src/wisp/**"
       - "tests/test_pending_text_conformance.py"
+      - "tests/test_native_grep_conformance.py"
       - "tests/test_process_manager.py"
       - "tests/test_rust_tui_wheel.py"
 
@@ -87,7 +89,8 @@ jobs:
             /tmp/wisp-wheel/bin/python -m pip install --quiet pytest==9.1.1 pytest-asyncio==1.4.0
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pytest -q \
-              "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py")
+              "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py" \
+              "$GITHUB_WORKSPACE/tests/test_native_grep_conformance.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
@@ -151,6 +154,7 @@ jobs:
           "$python" -m pip install --quiet "${wheel[0]}"
           "$python" -m pip install --quiet pytest==9.1.1 pytest-asyncio==1.4.0
           (cd "$RUNNER_TEMP" && "$python" -m pytest -q \
+            "$GITHUB_WORKSPACE/tests/test_native_grep_conformance.py" \
             "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py" \
             "$GITHUB_WORKSPACE/tests/test_process_manager.py")
 
@@ -226,6 +230,7 @@ jobs:
               pytest==9.1.1 pytest-asyncio==1.4.0
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pytest -q \
+              "$GITHUB_WORKSPACE/tests/test_native_grep_conformance.py" \
               "$GITHUB_WORKSPACE/tests/test_pending_text_conformance.py" \
               "$GITHUB_WORKSPACE/tests/test_process_manager.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'

@@ -67,8 +67,9 @@ def _resolve_installed_binary(python: Path, expected: Path) -> None:
 
 def _verify_native_extension(python: Path) -> Path:
     script = r"""
+import tempfile
 from pathlib import Path
-from wisp._native import PendingText
+from wisp._native import GrepCancellation, PendingText, scan_literal_fd
 
 pending = PendingText(100, 10)
 assert not pending.has_text
@@ -89,6 +90,28 @@ assert pending.text == ""
 assert not pending.has_text
 assert pending.retained_source_bytes == 0
 assert pending.dropped_bytes == 0
+
+with tempfile.TemporaryFile() as source:
+    source.write(b"before\nneedle\nafter\n")
+    source.flush()
+    source.seek(0)
+    scan = scan_literal_fd(
+        source.fileno(),
+        "needle",
+        "data.txt",
+        context_lines=1,
+        remaining_matches=10,
+        prior_lines=0,
+        prior_bytes=0,
+        prefix_separator=False,
+        max_output_lines=100,
+        max_output_bytes=10_000,
+        max_line_chars=1_000_000,
+        cancellation=GrepCancellation(),
+    )
+assert scan.status == "complete"
+assert scan.lines == ["data.txt-1-before", "data.txt:2:needle", "data.txt-3-after"]
+assert scan.match_count == 1
 import wisp._native as native
 print(Path(native.__file__).resolve())
 """

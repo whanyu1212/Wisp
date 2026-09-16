@@ -14,6 +14,9 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 
 - Replaced the VitePress documentation site with an mdBook, preserving the published guide,
   reference, architecture, and contributor routes while removing the Node and TypeScript toolchain.
+- Added an optional Rust scanner for case-sensitive literal `grep` searches in native-wheel
+  installations, while keeping repository traversal, filesystem policy, regex matching, and a
+  pure-Python fallback in Python.
 
 ## 0.2.0rc2 — release preparation
 

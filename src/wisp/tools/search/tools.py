@@ -6,12 +6,15 @@ import codecs
 import heapq
 import os
 import stat
+import sys
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
+from importlib import import_module
 from pathlib import Path
 from threading import Event
+from typing import Literal, Protocol, cast
 
 import anyio
 import regex as bounded_regex
@@ -71,6 +74,79 @@ class _BinaryFileDetected(Exception):
     """Stop grep and discard pending output when a streamed file contains NUL."""
 
 
+type _GrepScannerBackend = Literal["auto", "python", "native"]
+
+
+class _NativeGrepCancellation(Protocol):
+    """Cancellation flag shared with a native scan after it releases the GIL."""
+
+    def cancel(self) -> None: ...
+
+
+class _NativeGrepScanResult(Protocol):
+    """Bounded per-file result returned by the optional native scanner."""
+
+    @property
+    def lines(self) -> list[str]: ...
+
+    @property
+    def byte_count(self) -> int: ...
+
+    @property
+    def match_count(self) -> int: ...
+
+    @property
+    def had_extra_match(self) -> bool: ...
+
+    @property
+    def exhausted(self) -> bool: ...
+
+    @property
+    def status(self) -> str: ...
+
+
+class _NativeGrepModule(Protocol):
+    """Subset of ``wisp._native`` used by descriptor-safe literal grep."""
+
+    def GrepCancellation(self) -> _NativeGrepCancellation: ...
+
+    def scan_literal_fd(
+        self,
+        fd: int,
+        pattern: str,
+        display_path: str,
+        *,
+        context_lines: int,
+        remaining_matches: int,
+        prior_lines: int,
+        prior_bytes: int,
+        prefix_separator: bool,
+        max_output_lines: int,
+        max_output_bytes: int,
+        max_line_chars: int,
+        cancellation: _NativeGrepCancellation,
+    ) -> _NativeGrepScanResult: ...
+
+
+def _load_native_grep() -> _NativeGrepModule | None:
+    """Load the optional native grep API without making pure wheels depend on it."""
+
+    try:
+        native_module = import_module("wisp._native")
+    except ModuleNotFoundError as exc:
+        if exc.name == "wisp._native":
+            return None
+        raise
+    if not hasattr(native_module, "GrepCancellation") or not hasattr(
+        native_module, "scan_literal_fd"
+    ):
+        return None
+    return cast(_NativeGrepModule, native_module)
+
+
+_NATIVE_GREP = _load_native_grep()
+
+
 class GrepTool:
     """Search file contents."""
 
@@ -91,8 +167,16 @@ class GrepTool:
         "required": ["pattern"],
     }
 
-    def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
+    def __init__(
+        self,
+        process_supervisor: ProcessSupervisor | None = None,
+        *,
+        _scanner_backend: _GrepScannerBackend = "auto",
+    ) -> None:
+        if _scanner_backend not in {"auto", "python", "native"}:
+            raise ValueError(f"unknown grep scanner backend: {_scanner_backend}")
         self._process_supervisor = process_supervisor or ProcessSupervisor()
+        self._scanner_backend = _scanner_backend
 
     async def aclose(self) -> None:
         """Retry and release any retained search-process cleanup."""
@@ -112,6 +196,22 @@ class GrepTool:
         if max_results is None or max_results < 1:
             raise ToolArgumentError("grep.max_results must be greater than or equal to 1")
 
+        native_module = _select_native_grep(
+            self._scanner_backend,
+            literal=literal,
+            ignore_case=ignore_case,
+        )
+        if not _native_arguments_supported(
+            pattern,
+            max_results,
+            context_lines,
+            context.max_output_lines,
+            context.max_output_bytes,
+        ):
+            native_module = None
+        native_cancellation = (
+            native_module.GrepCancellation() if native_module is not None else None
+        )
         cancel_event = Event()
         try:
             return await anyio.to_thread.run_sync(
@@ -125,11 +225,15 @@ class GrepTool:
                     max_results=max_results,
                     context=context,
                     cancel_event=cancel_event,
+                    native_module=native_module,
+                    native_cancellation=native_cancellation,
                 ),
                 abandon_on_cancel=True,
             )
         finally:
             cancel_event.set()
+            if native_cancellation is not None:
+                native_cancellation.cancel()
 
 
 class FindTool:
@@ -207,6 +311,34 @@ def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext
     return min(requested_context_lines, max(0, (context.max_output_lines - 1) // 2))
 
 
+def _select_native_grep(
+    backend: _GrepScannerBackend,
+    *,
+    literal: bool,
+    ignore_case: bool,
+) -> _NativeGrepModule | None:
+    """Select the native kernel only where its matching semantics are exact."""
+
+    supported = literal and not ignore_case
+    if backend == "python" or not supported:
+        return None
+    if _NATIVE_GREP is None:
+        if backend == "native":
+            raise RuntimeError("the native grep backend is not installed")
+        return None
+    return _NATIVE_GREP
+
+
+def _native_arguments_supported(pattern: str, *limits: int) -> bool:
+    """Return whether PyO3 can represent the scanner inputs without changing semantics."""
+
+    try:
+        pattern.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return all(0 <= limit <= sys.maxsize for limit in limits)
+
+
 def _python_grep(
     *,
     pattern: str,
@@ -218,16 +350,23 @@ def _python_grep(
     max_results: int,
     context: ToolContext,
     cancel_event: Event | None = None,
+    native_module: _NativeGrepModule | None = None,
+    native_cancellation: _NativeGrepCancellation | None = None,
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
-    matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+    matcher = (
+        None
+        if native_module is not None
+        else _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+    )
     effective_context_lines = _bounded_rg_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
     output: list[str] = []
     output_bytes = 0
     match_count = 0
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
+    native_display_root = context.cwd.resolve(strict=False) if native_module is not None else None
     cached_file_path: Path | None = None
     cached_display_path = ""
 
@@ -267,6 +406,17 @@ def _python_grep(
 
         file_match_start = match_count
         file_had_extra_match = False
+        file_native_module = native_module
+        if file_native_module is not None:
+            if file_display_path is None:
+                if native_display_root is None:  # pragma: no cover - internal invariant
+                    raise RuntimeError("native grep display root was not initialized")
+                file_display_path = _display_walked_path(file_path, native_display_root)
+            try:
+                file_display_path.encode("utf-8")
+            except UnicodeEncodeError:
+                file_native_module = None
+                matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
         file_buffer = _BoundedGrepFileOutput(
             prior_lines=len(output),
             prior_bytes=output_bytes,
@@ -276,56 +426,104 @@ def _python_grep(
         )
 
         try:
-            preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
-            group_end = 0
-            last_emitted_line = 0
             candidate = secure_tool_path(str(file_path), context)
             with open_file(candidate) as descriptor:
-                lines = _iter_utf8_splitlines(descriptor)
-                for line_number, line in enumerate(lines, start=1):
-                    if cancel_event is not None and cancel_event.is_set():
-                        return ToolResult(
-                            text="Search cancelled",
-                            data={"count": 0, "matches": []},
+                if file_native_module is not None:
+                    if native_cancellation is None:  # pragma: no cover - internal invariant
+                        raise RuntimeError("native grep cancellation was not initialized")
+                    if file_display_path is None:  # pragma: no cover - internal invariant
+                        raise RuntimeError("native grep display path was not initialized")
+                    try:
+                        native_result = file_native_module.scan_literal_fd(
+                            descriptor,
+                            pattern,
+                            file_display_path,
+                            context_lines=effective_context_lines,
+                            remaining_matches=max_results - match_count,
+                            prior_lines=len(output),
+                            prior_bytes=output_bytes,
+                            prefix_separator=bool(output and effective_context_lines),
+                            max_output_lines=context.max_output_lines,
+                            max_output_bytes=context.max_output_bytes,
+                            max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
+                            cancellation=native_cancellation,
                         )
-                    if file_buffer.exhausted or file_had_extra_match:
-                        break
+                    except ValueError as exc:
+                        raise ToolError(str(exc)) from exc
+                    except (OSError, RuntimeError):
+                        # Some Linux sandboxes do not mount /proc, and unsupported
+                        # targets cannot duplicate a descriptor for Rust. Keep the
+                        # optional accelerator transparent in those environments.
+                        file_native_module = None
+                        matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+                    if file_native_module is not None:
+                        if native_result.status == "cancelled":
+                            return ToolResult(
+                                text="Search cancelled",
+                                data={"count": 0, "matches": []},
+                            )
+                        if native_result.status == "binary":
+                            continue
+                        if native_result.status != "complete":
+                            raise RuntimeError(
+                                f"native grep returned unknown status: {native_result.status}"
+                            )
+                        match_count += native_result.match_count
+                        file_had_extra_match = native_result.had_extra_match
+                        file_buffer.lines = list(native_result.lines)
+                        file_buffer.byte_count = native_result.byte_count
+                        file_buffer.exhausted = native_result.exhausted
+                if file_native_module is None:
+                    if matcher is None:  # pragma: no cover - internal invariant
+                        raise RuntimeError("Python grep matcher was not initialized")
+                    preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
+                    group_end = 0
+                    last_emitted_line = 0
+                    lines = _iter_utf8_splitlines(descriptor)
+                    for line_number, line in enumerate(lines, start=1):
+                        if cancel_event is not None and cancel_event.is_set():
+                            return ToolResult(
+                                text="Search cancelled",
+                                data={"count": 0, "matches": []},
+                            )
+                        if file_buffer.exhausted or file_had_extra_match:
+                            break
 
-                    is_match = matcher(line)
-                    if is_match:
-                        if match_count >= max_results:
-                            file_had_extra_match = True
-                        else:
-                            match_count += 1
+                        is_match = matcher(line)
+                        if is_match:
+                            if match_count >= max_results:
+                                file_had_extra_match = True
+                            else:
+                                match_count += 1
+                                if file_display_path is None:
+                                    file_display_path = display_path(file_path)
+                                if line_number > group_end:
+                                    for number, text in preceding:
+                                        if number > last_emitted_line:
+                                            file_buffer.append(
+                                                _format_grep_record(
+                                                    file_display_path, number, text, False
+                                                )
+                                            )
+                                            last_emitted_line = number
+                                            if file_buffer.exhausted:
+                                                break
+                                file_buffer.append(
+                                    _format_grep_record(file_display_path, line_number, line, True),
+                                    preserve_match=True,
+                                )
+                                last_emitted_line = line_number
+                                group_end = max(group_end, line_number + effective_context_lines)
+                        elif line_number <= group_end:
                             if file_display_path is None:
                                 file_display_path = display_path(file_path)
-                            if line_number > group_end:
-                                for number, text in preceding:
-                                    if number > last_emitted_line:
-                                        file_buffer.append(
-                                            _format_grep_record(
-                                                file_display_path, number, text, False
-                                            )
-                                        )
-                                        last_emitted_line = number
-                                        if file_buffer.exhausted:
-                                            break
                             file_buffer.append(
-                                _format_grep_record(file_display_path, line_number, line, True),
-                                preserve_match=True,
+                                _format_grep_record(file_display_path, line_number, line, False)
                             )
                             last_emitted_line = line_number
-                            group_end = max(group_end, line_number + effective_context_lines)
-                    elif line_number <= group_end:
-                        if file_display_path is None:
-                            file_display_path = display_path(file_path)
-                        file_buffer.append(
-                            _format_grep_record(file_display_path, line_number, line, False)
-                        )
-                        last_emitted_line = line_number
-                    preceding.append((line_number, line))
-                    if file_buffer.exhausted or file_had_extra_match:
-                        break
+                        preceding.append((line_number, line))
+                        if file_buffer.exhausted or file_had_extra_match:
+                            break
         except (_BinaryFileDetected, UnicodeDecodeError):
             match_count = file_match_start
             continue
@@ -358,6 +556,15 @@ def _python_grep(
 _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
 _PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+
+
+def _display_walked_path(path: Path, resolved_cwd: Path) -> str:
+    """Display a secure-walk candidate without resolving the same file again."""
+
+    try:
+        return str(path.relative_to(resolved_cwd))
+    except ValueError:
+        return str(path)
 
 
 @dataclass(slots=True)
@@ -411,7 +618,9 @@ def _iter_utf8_splitlines(
                 pending_cr = False
                 if decoded.startswith("\n"):
                     decoded = decoded[1:]
-            pending_cr = yield from _yield_splitline_chunk(decoded, line_parts)
+            pending_cr = yield from _yield_splitline_chunk(
+                decoded, line_parts, max_line_chars=max_line_chars
+            )
             if sum(map(len, line_parts)) > max_line_chars:
                 raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
         decoded = decoder.decode(b"", final=True)
@@ -422,7 +631,9 @@ def _iter_utf8_splitlines(
         line_parts.clear()
         if decoded.startswith("\n"):
             decoded = decoded[1:]
-    _ = yield from _yield_splitline_chunk(decoded, line_parts, final=True)
+    _ = yield from _yield_splitline_chunk(
+        decoded, line_parts, max_line_chars=max_line_chars, final=True
+    )
     if sum(map(len, line_parts)) > max_line_chars:
         raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
     if line_parts:
@@ -433,6 +644,7 @@ def _yield_splitline_chunk(
     text: str,
     line_parts: list[str],
     *,
+    max_line_chars: int,
     final: bool = False,
 ) -> Generator[str, None, bool]:
     start = 0
@@ -443,6 +655,8 @@ def _yield_splitline_chunk(
             index += 1
             continue
         line_parts.append(text[start:index])
+        if sum(map(len, line_parts)) > max_line_chars:
+            raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
         if character == "\r" and index + 1 == len(text) and not final:
             return True
         yield "".join(line_parts)

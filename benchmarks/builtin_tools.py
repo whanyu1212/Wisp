@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 
 import anyio
 
@@ -44,6 +45,7 @@ class BenchmarkConfig:
     iterations: int = 3
     include_executor: bool = True
     track_memory: bool = False
+    grep_backend: Literal["auto", "python", "native"] = "auto"
 
 
 @dataclass(frozen=True)
@@ -219,7 +221,7 @@ def _file_content(index: int, size: int) -> bytes:
 
 def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, ...]:
     read_tool = ReadTool()
-    grep_tool = GrepTool()
+    grep_tool = GrepTool(_scanner_backend=config.grep_backend)
     find_tool = FindTool()
     ls_tool = LsTool()
     return (
@@ -276,6 +278,19 @@ def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, .
             arguments={
                 "path": "tree",
                 "pattern": r"needle-\d+",
+                "max_results": _MAX_RESULTS,
+            },
+            input_bytes=fixture.input_bytes,
+            expected_count=min(fixture.file_count, _MAX_RESULTS),
+            expected_truncated=fixture.file_count > _MAX_RESULTS,
+        ),
+        _Scenario(
+            name="grep_literal_capped",
+            tool=grep_tool,
+            arguments={
+                "path": "tree",
+                "pattern": "needle-",
+                "literal": True,
                 "max_results": _MAX_RESULTS,
             },
             input_bytes=fixture.input_bytes,
@@ -404,6 +419,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--iterations", type=int, default=BenchmarkConfig.iterations)
     parser.add_argument("--tool-only", action="store_true")
     parser.add_argument("--track-memory", action="store_true")
+    parser.add_argument(
+        "--grep-backend",
+        choices=("auto", "python", "native"),
+        default="auto",
+        help="grep scanner used for controlled Python/native comparisons",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -419,6 +440,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             iterations=parsed.iterations,
             include_executor=not parsed.tool_only,
             track_memory=parsed.track_memory,
+            grep_backend=parsed.grep_backend,
         )
     )
     print(report.to_json())
