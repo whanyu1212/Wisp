@@ -266,4 +266,4 @@ Running tools in an uncontrolled reactive stream risks running tests before file
 - Production loops require strict separation of concerns: keep provider-neutral streaming in the loop, while delegating persistence and user steering to outer harnesses.
 - Event-driven streams give frontends complete observability without entangling the agent loop with UI or database code.
 
-In the next chapter, we will give the model hands: **[Chapter 2: Giving the Model Hands — Tool Execution, Filesystem Operations, and Safety Gates](./02-tool-execution.md)**.
+In the next chapter, we will explore giving the model hands: **Chapter 2: Giving the Model Hands — Tool Execution, Filesystem Operations, and Safety Gates**.
