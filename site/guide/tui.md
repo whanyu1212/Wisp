@@ -115,7 +115,7 @@ starts again from the first page. Forking restores the selected prompt after the
 history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
-RC2 prepares native wheels for the two packaged targets. Transcript search and arbitrary drag
+RC3 retains native wheels for the two packaged targets. Transcript search and arbitrary drag
 selection remain follow-ups; composer selection and clipboard actions are keyboard-driven.
 See the mouse controls below; transcript copying still relies on terminal-native selection.
 

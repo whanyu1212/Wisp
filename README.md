@@ -59,6 +59,11 @@ To run it without installing: `uvx --from "wisp-ai==0.1.0" wisp`. If `wisp` is n
 See [Installation](https://whanyu1212.github.io/Wisp/guide/installation) for the update policy and
 troubleshooting.
 
+The RC3 candidate moves to a Rust-only TUI. Once published, use an exact `wisp-ai==0.2.0rc3` pin to
+try it; the stable command above remains pinned to 0.1.0. See the
+[0.2 upgrade guide](https://whanyu1212.github.io/Wisp/guide/upgrading) for availability, platform
+support, and rollback.
+
 ## Quickstart
 
 Run Wisp from the project you want it to work on:

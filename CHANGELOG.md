@@ -10,8 +10,24 @@ contract lives in `src/wisp/events.py`.
 The event history below covers every explicit schema version in the merged contract. The first
 versioned event contract was v2; earlier events were unversioned, so there is no schema v1 to infer.
 
-## Unreleased
+## 0.2.0rc3 — release preparation
 
+RC3 makes Rust the sole terminal interface. This section describes the candidate under preparation;
+publication requires a separate tagged release. The Python runtime remains authoritative for agent
+behavior, providers, tools, permissions, and saved sessions.
+
+- Removed the Textual and Python fullscreen renderers and their `prompt-toolkit` dependency. `wisp`,
+  `wisp tui`, and `wisp --mode tui` now select Rust. Native wheels for macOS arm64 and Linux glibc
+  2.28+ x86_64 bundle the TUI; pure/source installs retain print, JSON, RPC, and SDK, while
+  interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
+  `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
+  drops RC2's Intel macOS native wheel.
+- Moved native TUI launch and binary resolution into the Python CLI, retaining the `auto` and `rust`
+  selector spellings for compatibility and exact Python/Rust version checks.
+- Added selectable Rust startup logos and native Rust pending-text handling in packaged wheels.
+- Improved Rust TUI full-history hydration without capping saved transcript content. The matched
+  streaming and long-session benchmarks remain workload observations, not general performance
+  guarantees.
 - Replaced the VitePress documentation site with an mdBook, preserving the published guide,
   reference, architecture, and contributor routes while removing the Node and TypeScript toolchain.
 - Added an optional Rust scanner for case-sensitive literal `grep` searches in native-wheel
@@ -29,9 +45,11 @@ versioned event contract was v2; earlier events were unversioned, so there is no
 - Extended matched TUI evidence to paced streaming and long saved sessions, with interactive input
   latency and sampled process-tree CPU and memory observations for both renderers.
 
-## 0.2.0rc2 — release preparation
+## 0.2.0rc2 — 2026-09-16
 
-RC2 trials Rust as the default on native-wheel installations. Publication is a separate step.
+RC2 trialed Rust as the default on native-wheel installations and was published with three native
+wheels, including Intel macOS.
+The notes below describe that candidate's behavior; RC3 removes its Python TUI fallback.
 
 - Added automatic renderer selection shared by `wisp`, `wisp tui`, and `wisp --mode tui`.
   macOS/Linux installations with a declared native binary prefer Rust; pure/source installations
@@ -552,4 +570,5 @@ breadcrumb constant beside it, and record the change here under a new `## Schema
 what a consumer must do differently — new fields, changed meanings, dropped compatibility — not the
 implementation detail.
 
-Changes that do not touch the wire format go under `## Unreleased`.
+Changes that do not touch the wire format go under the current release-preparation heading, or under
+`## Unreleased` after that release is published.

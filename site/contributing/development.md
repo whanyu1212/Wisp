@@ -40,14 +40,14 @@ WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" \
   uv run wisp tui
 ```
 
-The tag-gated release flow now assembles verified platform-wheel candidates under #566. Installed
+The tag-gated release flow assembles verified platform-wheel candidates. Installed
 native wheels place `wisp-tui` in the active Python environment's scripts directory; the launcher
 never searches `PATH`. Source development uses the explicit override above. A relative
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 
 The Rust frontend is exact-lockstep with the Python runtime. The current package and crate
-versions are `0.2.0rc2` (Python) and `0.2.0-rc.2` (Cargo); only the prerelease spelling differs.
+versions are `0.2.0rc3` (Python) and `0.2.0-rc.3` (Cargo); only the prerelease spelling differs.
 Rust translates `-alpha.N`, `-beta.N`, and `-rc.N` to Python's `aN`, `bN`, and `rcN` before the
 exact version comparison. The only accepted transport is live RPC v8 with event schema v39.
 Python's models and committed schemas remain authoritative, and `wisp-protocol` generates its
