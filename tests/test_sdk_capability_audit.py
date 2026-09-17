@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+from tests.paths import REPO_ROOT
+
+_REPOSITORY_ROOT = REPO_ROOT
 _AUDIT_PATH = _REPOSITORY_ROOT / "site" / "reference" / "sdk-capability-audit.md"
 _AUDIT = _AUDIT_PATH.read_text(encoding="utf-8")
 _PI_RELEASE = "v0.84.2"

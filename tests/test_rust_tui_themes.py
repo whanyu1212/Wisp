@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.paths import REPO_ROOT
+
+ROOT = REPO_ROOT
 CATALOG = ROOT / "rust/wisp-tui/src/theme_catalog.json"
 THEMES = json.loads(CATALOG.read_text(encoding="utf-8"))["themes"]
 

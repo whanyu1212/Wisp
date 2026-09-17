@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from tests.paths import REPO_ROOT
+
+ROOT = REPO_ROOT
 SPEC = importlib.util.spec_from_file_location(
     "prepare_fuzz_corpus", ROOT / "scripts/prepare_fuzz_corpus.py"
 )

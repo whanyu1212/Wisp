@@ -16,8 +16,9 @@ from scripts.verify_rust_tui_wheel import (
     verify_versions,
     verify_wheel,
 )
+from tests.paths import REPO_ROOT
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = REPO_ROOT
 _VERSION = verify_versions(_ROOT)
 _DIST_INFO = f"wisp_ai-{_VERSION}.dist-info"
 
@@ -85,7 +86,7 @@ def test_repository_versions_are_lockstep() -> None:
 
 
 def test_candidate_wheel_contract(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     wheel = _wheel(tmp_path)
     verify_wheel(wheel, expected_tag="cp312-abi3-test_platform", root=root)
 
@@ -103,7 +104,7 @@ def test_candidate_wheel_contract(tmp_path: Path) -> None:
 
 
 def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     candidate = _wheel(tmp_path / "candidate")
     reference = _wheel(
         tmp_path / "reference",
@@ -156,7 +157,7 @@ def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
 
 
 def test_record_covers_candidate_files(tmp_path: Path) -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     wheel = _wheel(tmp_path)
     rewritten = tmp_path / "broken" / wheel.name
     rewritten.parent.mkdir()

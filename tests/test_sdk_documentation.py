@@ -5,12 +5,12 @@ from __future__ import annotations
 import inspect
 import re
 from dataclasses import fields
-from pathlib import Path
 
+from tests.paths import REPO_ROOT
 from wisp.rpc import RpcController
 from wisp.sdk import InProcessOptions
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_REPOSITORY_ROOT = REPO_ROOT
 _REFERENCE = (_REPOSITORY_ROOT / "site" / "reference" / "sdk.md").read_text(encoding="utf-8")
 
 

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.paths import REPO_ROOT
+
 _PURE_AGENT_MODULES = (
     "validation.py",
     "context_budget.py",
@@ -120,7 +122,7 @@ def _module_imports(path: Path) -> set[str]:
 
 
 def test_pure_agent_modules_do_not_import_application_layers() -> None:
-    agent_dir = Path(__file__).parents[1] / "src" / "wisp" / "agent"
+    agent_dir = REPO_ROOT / "src" / "wisp" / "agent"
 
     violations: list[str] = []
     for filename in _PURE_AGENT_MODULES:
@@ -149,14 +151,14 @@ def test_agent_public_packages_export_the_implementation(
 
 
 def test_obsolete_agent_compatibility_modules_are_removed() -> None:
-    agent_dir = Path(__file__).parents[1] / "src" / "wisp" / "agent"
+    agent_dir = REPO_ROOT / "src" / "wisp" / "agent"
 
     for filename in ("configuration.py", "context.py", "execution.py", "transcript.py"):
         assert not (agent_dir / filename).exists()
 
 
 def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> None:
-    wisp_dir = Path(__file__).parents[1] / "src" / "wisp"
+    wisp_dir = REPO_ROOT / "src" / "wisp"
 
     for relative in (
         "tools/process.py",
@@ -170,7 +172,7 @@ def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> Non
 
 
 def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:
-    coding_dir = Path(__file__).parents[1] / "src" / "wisp" / "coding"
+    coding_dir = REPO_ROOT / "src" / "wisp" / "coding"
 
     violations: list[str] = []
     for filename in _CODING_MODULES:
@@ -182,7 +184,7 @@ def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:
 
 
 def test_frontends_import_coding_session_directly() -> None:
-    wisp_dir = Path(__file__).parents[1] / "src" / "wisp"
+    wisp_dir = REPO_ROOT / "src" / "wisp"
 
     for module in _FRONTEND_MODULES:
         imports = _module_imports(wisp_dir / module)
@@ -191,7 +193,7 @@ def test_frontends_import_coding_session_directly() -> None:
 
 
 def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
-    path = Path(__file__).parents[1] / "src" / "wisp" / "rpc" / "coordinator.py"
+    path = REPO_ROOT / "src" / "wisp" / "rpc" / "coordinator.py"
 
     violations = [
         imported
@@ -213,7 +215,7 @@ def test_rpc_layers_preserve_dependency_direction(
     relative_path: Path,
     forbidden: tuple[str, ...],
 ) -> None:
-    path = Path(__file__).parents[1] / "src" / "wisp" / relative_path
+    path = REPO_ROOT / "src" / "wisp" / relative_path
 
     violations = [
         imported for imported in sorted(_module_imports(path)) if imported.startswith(forbidden)
@@ -223,7 +225,7 @@ def test_rpc_layers_preserve_dependency_direction(
 
 
 def test_cli_rpc_adapter_does_not_reimplement_shared_runtime_policy() -> None:
-    path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "rpc.py"
+    path = REPO_ROOT / "src" / "wisp" / "cli" / "rpc.py"
 
     violations = [
         imported
@@ -235,7 +237,7 @@ def test_cli_rpc_adapter_does_not_reimplement_shared_runtime_policy() -> None:
 
 
 def test_obsolete_cli_rpc_compatibility_modules_are_removed() -> None:
-    cli_dir = Path(__file__).parents[1] / "src" / "wisp" / "cli"
+    cli_dir = REPO_ROOT / "src" / "wisp" / "cli"
 
     assert not (cli_dir / "rpc_configuration.py").exists()
     assert not (cli_dir / "rpc_coordinator.py").exists()
@@ -245,7 +247,7 @@ def test_obsolete_cli_rpc_compatibility_modules_are_removed() -> None:
 def test_cli_package_init_only_re_exports_the_application() -> None:
     """Keep the CLI implementation in ``wisp.cli.application``, not the package marker."""
 
-    init_path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "__init__.py"
+    init_path = REPO_ROOT / "src" / "wisp" / "cli" / "__init__.py"
     tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
 
     definitions = [
@@ -261,7 +263,7 @@ def test_cli_package_init_only_re_exports_the_application() -> None:
 def test_legacy_agent_compatibility_exports_are_removed() -> None:
     import wisp.agent.loop as agent_loop
 
-    compat_path = Path(__file__).parents[1] / "src" / "wisp" / "agent" / "compat.py"
+    compat_path = REPO_ROOT / "src" / "wisp" / "agent" / "compat.py"
 
     assert not compat_path.exists()
     assert not hasattr(agent_loop, "Agent")
@@ -314,7 +316,7 @@ def _fresh_import_failure(module: str, *, root: Path, pythonpath: str) -> str | 
 
 @pytest.mark.slow
 def test_layer_modules_import_cleanly_in_fresh_processes() -> None:
-    root = Path(__file__).parents[1]
+    root = REPO_ROOT
     existing_pythonpath = os.environ.get("PYTHONPATH")
     pythonpath = str(root / "src")
     if existing_pythonpath:

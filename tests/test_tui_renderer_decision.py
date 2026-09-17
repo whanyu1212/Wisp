@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from tests.paths import REPO_ROOT
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_REPOSITORY_ROOT = REPO_ROOT
 _ARCHITECTURE = (_REPOSITORY_ROOT / "site" / "architecture" / "rust-tui-boundary.md").read_text(
     encoding="utf-8"
 )

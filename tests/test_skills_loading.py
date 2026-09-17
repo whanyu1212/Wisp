@@ -8,6 +8,7 @@ import anyio
 import pytest
 
 import wisp.skills.loading as loading_module
+from tests.paths import REPO_ROOT
 from wisp.runtime.api import ExtensionAPI
 from wisp.skills.discovery import discover_skills
 from wisp.skills.loading import load_skill_resource
@@ -110,9 +111,7 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
     delivery = (
         root / "github-pr-delivery" / "references" / "preflight-and-packaging.md"
     ).read_text(encoding="utf-8")
-    skills_guide = (Path(__file__).parents[1] / "site" / "guide" / "skills.md").read_text(
-        encoding="utf-8"
-    )
+    skills_guide = (REPO_ROOT / "site" / "guide" / "skills.md").read_text(encoding="utf-8")
 
     development_entry = catalog.get("wisp-development")
     delivery_entry = catalog.get("github-pr-delivery")

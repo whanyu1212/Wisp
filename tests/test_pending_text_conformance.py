@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 import wisp.tools.shell.supervisor as supervisor_module
+from tests.paths import FIXTURES_DIR
 from wisp.tools.shell.supervisor import _pending_text_backends
 
-_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "pending_text_conformance.json"
+_FIXTURE_PATH = FIXTURES_DIR / "pending_text_conformance.json"
 
 
 @pytest.mark.parametrize(

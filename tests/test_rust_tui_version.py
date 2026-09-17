@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import tomllib
-from pathlib import Path
 
 from packaging.version import Version
 
+from tests.paths import REPO_ROOT
 from wisp import __version__
 
 
 def test_rust_tui_package_version_matches_python_distribution() -> None:
-    root = Path(__file__).resolve().parents[1]
+    root = REPO_ROOT
     cargo_manifest = tomllib.loads((root / "rust/wisp-tui/Cargo.toml").read_text(encoding="utf-8"))
 
     version = Version(__version__)

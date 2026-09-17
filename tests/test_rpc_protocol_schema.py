@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
 import wisp.rpc.protocol_schema as protocol_schema
+from tests.paths import FIXTURES_DIR, REPO_ROOT
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
     BillableTokenUsage,
@@ -71,7 +72,7 @@ _SCHEMA_FILES = (
     "rust-commands.schema.json",
     "rust-events.schema.json",
 )
-_REPOSITORY_SCHEMA_ROOT = Path(__file__).parents[1] / "schemas" / "live-rpc"
+_REPOSITORY_SCHEMA_ROOT = REPO_ROOT / "schemas" / "live-rpc"
 _REPOSITORY_SCHEMA_DIRECTORY = protocol_schema_directory(_REPOSITORY_SCHEMA_ROOT)
 
 
@@ -399,7 +400,7 @@ def test_conformance_fixtures_cover_and_round_trip_every_wire_discriminator() ->
 
 
 def test_rust_discovery_fixtures_round_trip_through_python_models() -> None:
-    fixture_path = Path(__file__).parent / "fixtures" / "rust_tui_discovery.json"
+    fixture_path = FIXTURES_DIR / "rust_tui_discovery.json"
     fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
     assert set(fixtures) == {"rpc.skills", "skill.catalog.updated", "rpc.mcp"}
     validator = Draft202012Validator(_artifact("events.schema.json"))

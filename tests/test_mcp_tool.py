@@ -19,6 +19,7 @@ from mcp.types import (
     Tool as McpToolDefinition,
 )
 
+from tests.paths import TESTS_DIR
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.tool import (
     McpToolDefinitionError,
@@ -445,4 +446,4 @@ def _provider_safe(name: str) -> bool:
 
 
 def _test_cwd() -> Path:
-    return Path(__file__).parent
+    return TESTS_DIR

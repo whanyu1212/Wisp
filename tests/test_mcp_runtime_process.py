@@ -11,6 +11,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
+from tests.paths import FIXTURES_DIR
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.transport import MAX_MCP_FRAME_BYTES
 from wisp.runtime.extensions import build_runtime
@@ -27,7 +28,7 @@ def _fixture_server(
     env_from: tuple[str, ...] = (),
     fixture_args: tuple[str, ...] = (),
 ) -> McpServerConfig:
-    fixture = Path(__file__).parent / "fixtures" / "mcp_stdio_server.py"
+    fixture = FIXTURES_DIR / "mcp_stdio_server.py"
     return McpServerConfig(
         name=name,
         command=sys.executable,

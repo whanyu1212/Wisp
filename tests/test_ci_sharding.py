@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_ci_shards import verify_shards
+from tests.paths import TESTS_DIR
 
 pytest_plugins = ["pytester"]
 
@@ -13,7 +14,7 @@ pytest_plugins = ["pytester"]
 def test_shards_partition_filtered_collection_and_preserve_default(
     pytester: pytest.Pytester,
 ) -> None:
-    plugin = Path(__file__).with_name("ci_sharding.py").read_text()
+    plugin = (TESTS_DIR / "ci_sharding.py").read_text()
     pytester.makeconftest(plugin)
     pytester.makeini("[pytest]\nmarkers = excluded: filtered out")
     pytester.makepyfile("""
@@ -67,7 +68,7 @@ def test_other(): pass
     ],
 )
 def test_invalid_shard_options_fail_collection(pytester: pytest.Pytester, args: list[str]) -> None:
-    pytester.makeconftest(Path(__file__).with_name("ci_sharding.py").read_text())
+    pytester.makeconftest((TESTS_DIR / "ci_sharding.py").read_text())
     pytester.makepyfile("def test_example(): pass")
     assert pytester.runpytest_subprocess(*args).ret == pytest.ExitCode.USAGE_ERROR
 

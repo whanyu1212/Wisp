@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from pathlib import Path
 from typing import get_args
 
+from tests.paths import REPO_ROOT
 from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.events import (
@@ -21,7 +21,7 @@ from wisp.sessions import (
     SESSION_ENTRY_SCHEMA_VERSION,
 )
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+_REPOSITORY_ROOT = REPO_ROOT
 _CHANGELOG = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 _POLICY = (_REPOSITORY_ROOT / "site" / "reference" / "compatibility.md").read_text(encoding="utf-8")
 

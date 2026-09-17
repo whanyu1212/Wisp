@@ -15,6 +15,7 @@ from mcp.types import Tool as McpToolDefinition
 from pytest import MonkeyPatch
 
 import wisp.mcp.runtime as mcp_runtime_module
+from tests.paths import FIXTURES_DIR
 from wisp.cli import application as cli_module
 from wisp.cli.native_tui.launch import TuiOptions, _preflight_tui_options
 from wisp.config import WispConfig
@@ -37,7 +38,7 @@ def _fixture_server(
     env: dict[str, str] | None = None,
     env_from: tuple[str, ...] = (),
 ) -> McpServerConfig:
-    fixture = Path(__file__).parent / "fixtures" / "mcp_stdio_server.py"
+    fixture = FIXTURES_DIR / "mcp_stdio_server.py"
     values = {
         "WISP_MCP_TEST_CLOSED_FILE": str(tmp_path / f"{name}-closed"),
         **(env or {}),

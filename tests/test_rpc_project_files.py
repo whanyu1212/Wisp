@@ -12,6 +12,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
+from tests.paths import FIXTURES_DIR
 from tests.rpc_support import build_rpc_executor_fixture
 from wisp.events import (
     ProjectFilesInvalidated,
@@ -230,7 +231,7 @@ def test_close_cancels_discovery_waiting_for_policy(tmp_path: Path, shutdown: bo
 
 
 def test_cross_language_project_files_fixture() -> None:
-    fixtures = json.loads((Path(__file__).parent / "fixtures/rpc_project_files.json").read_text())
+    fixtures = json.loads((FIXTURES_DIR / "rpc_project_files.json").read_text())
     assert RpcProjectFilesReported.model_validate(fixtures["report"]).entries
     assert ProjectFilesInvalidated.model_validate(fixtures["invalidated"]).generation == 2
 

@@ -13,6 +13,7 @@ from anyio.abc import Process
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
+from tests.paths import REPO_ROOT
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
     ProjectConfigApplied,
@@ -138,7 +139,7 @@ class RecordingTransport:
 
 
 def test_changelog_documents_current_event_schema() -> None:
-    changelog = (Path(__file__).parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert f"## Schema v{EVENT_SCHEMA_VERSION} — current" in changelog
     assert f"Events at schema v5 through v{EVENT_SCHEMA_VERSION} remain readable." in changelog

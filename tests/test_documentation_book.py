@@ -1,7 +1,8 @@
 import re
-from pathlib import Path
 
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+from tests.paths import REPO_ROOT
+
+_REPOSITORY_ROOT = REPO_ROOT
 _SITE_ROOT = _REPOSITORY_ROOT / "site"
 _SUMMARY = _SITE_ROOT / "SUMMARY.md"
 

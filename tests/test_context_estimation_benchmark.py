@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -12,6 +11,7 @@ from benchmarks.context_estimation import (
     run_accuracy_benchmark,
     run_benchmark,
 )
+from tests.paths import REPO_ROOT
 
 pytestmark = pytest.mark.benchmark
 
@@ -70,7 +70,7 @@ def test_context_estimation_module_entrypoint_reports_accuracy() -> None:
         check=True,
         capture_output=True,
         text=True,
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=REPO_ROOT,
     )
 
     payload = json.loads(completed.stdout)
