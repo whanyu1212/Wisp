@@ -1,3 +1,3 @@
 """Wisp: a terminal-first coding agent."""
 
-__version__ = "0.2.0rc2"
+__version__ = "0.2.0rc3"

@@ -20,10 +20,11 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
-In the current development tree, native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle
-the Rust TUI and Python backend. One install command selects a compatible wheel. Pure-wheel installs
-retain print, JSON, RPC, and SDK use, but interactive `wisp` / `wisp tui` reports how to obtain or
-build a matching Rust binary. Source checkouts build the binary separately; see
+The RC3 candidate has native wheels for macOS arm64 and Linux glibc 2.28+ x86_64. A compatible wheel
+bundles the Rust TUI and Python backend in one install. RC3 removes the
+Python TUI: pure-wheel installs retain print, JSON, RPC, and SDK use, but interactive `wisp` /
+`wisp tui` reports how to obtain or build a matching Rust binary. Source checkouts build the binary
+separately; see
 [Development setup](../contributing/development#rust-tui-scaffold). Check the
 [0.2 upgrade guide](./upgrading) and
 [release page](https://github.com/whanyu1212/Wisp/releases) for the behavior and availability of a

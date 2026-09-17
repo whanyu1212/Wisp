@@ -46,4 +46,5 @@
 - [Overview](contributing/index.md)
 - [Development setup](contributing/development.md)
 - [Testing](contributing/testing.md)
+- [RC3 release](contributing/rc3-release.md)
 - [RC2 release](contributing/rc2-release.md)
