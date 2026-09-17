@@ -69,6 +69,7 @@ class BenchmarkConfig:
     width: int = 100
     height: int = 24
     timeout_seconds: float = 120.0
+    profile: bool = True
 
 
 @dataclass(frozen=True)
@@ -280,6 +281,8 @@ def validate_profile_coverage(records: Sequence[ProfileRecord], history_messages
             )
     if expected > 200 and "rust.final_projection" not in totals:
         raise RuntimeError("hydration profile is missing final transcript projection")
+    if history_messages and "python.session_refresh" not in totals:
+        raise RuntimeError("hydration profile is missing selected-session refresh")
 
 
 def summarize_samples(samples: Sequence[SessionSample]) -> tuple[ConditionSummary, ...]:
@@ -380,7 +383,10 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         child_env = _child_environment(
             E2EConfig(rust_binary=config.rust_binary), renderer="rust", home=home
         )
-        child_env["WISP_HYDRATION_PROFILE_DIR"] = str(profile_dir)
+        if config.profile:
+            child_env["WISP_HYDRATION_PROFILE_DIR"] = str(profile_dir)
+        else:
+            child_env.pop("WISP_HYDRATION_PROFILE_DIR", None)
         child_env["WISP_AUTO_COMPACTION"] = "0"
         command = [
             sys.executable,
@@ -514,8 +520,9 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             raise RuntimeError("rust process-tree sampling produced no resource evidence")
         if not restored:
             raise RuntimeError("rust did not restore the terminal")
-        records = read_profile_records(profile_dir)
-        validate_profile_coverage(records, history_messages)
+        records = read_profile_records(profile_dir) if config.profile else ()
+        if config.profile:
+            validate_profile_coverage(records, history_messages)
         return SessionSample(
             history_messages=history_messages,
             history_bytes=history_bytes,
@@ -556,6 +563,9 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parser.add_argument("--width", type=int, default=BenchmarkConfig.width)
     parser.add_argument("--height", type=int, default=BenchmarkConfig.height)
     parser.add_argument("--timeout-seconds", type=float, default=BenchmarkConfig.timeout_seconds)
+    parser.add_argument(
+        "--no-profile", action="store_true", help="measure startup without profile I/O"
+    )
     parser.add_argument("--output", type=Path)
     parsed = parser.parse_args(arguments)
     report = run_benchmark(
@@ -566,6 +576,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             width=parsed.width,
             height=parsed.height,
             timeout_seconds=parsed.timeout_seconds,
+            profile=not parsed.no_profile,
         )
     )
     payload = report.to_json()

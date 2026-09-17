@@ -270,11 +270,15 @@ async def run_rpc_messages_command(
             _record_hydration_profile("python.page_read", read_started, len(page.messages))
 
             if selected_read and session is not None:
+                refresh_started = time.perf_counter()
                 refreshed_entry_count, refreshed_history = await _run_abandonable_session_read(
                     updated_rpc_session_state,
                     session,
                     (),
                     selected_entry_count,
+                )
+                _record_hydration_profile(
+                    "python.session_refresh", refresh_started, refreshed_entry_count
                 )
             if cancel_scope.cancel_called:
                 error = "RPC get_messages command cancelled"

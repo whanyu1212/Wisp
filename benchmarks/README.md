@@ -133,10 +133,11 @@ uv run python -m benchmarks.rust_tui_hydration \
 ```
 
 The harness uses an opt-in `WISP_HYDRATION_PROFILE_DIR` directory for content-free Python and Rust
-stage timings. It records each page read, report publication, Rust page projection and clone, final
-transcript projection, and history installation alongside launch-to-ready and observed process-tree
-CPU/RSS. Stage totals omit RPC scheduling, process startup, transport, and drawing, so they do not
-sum to launch-to-ready. The before/after evidence and limitations are in
+stage timings. It records each page read, selected-session refresh, report publication, Rust page
+projection and clone, final transcript projection, and history installation alongside
+launch-to-ready and observed process-tree CPU/RSS. Use `--no-profile` for the wall-clock comparison
+without per-page profile file writes. Stage totals omit RPC scheduling, process startup, transport,
+and drawing, so they do not sum to launch-to-ready. The before/after evidence and limitations are in
 `benchmarks/rust_tui_hydration_evidence.md`.
 
 ## Rust TUI Transcript

@@ -121,6 +121,7 @@ def test_summary_rejects_missing_stage_in_repeated_condition() -> None:
 def test_profile_coverage_requires_both_processes_and_all_saved_messages() -> None:
     stages = (
         "python.page_read",
+        "python.session_refresh",
         "python.page_publish",
         "rust.page_projection",
         "rust.page_clone",
@@ -140,6 +141,8 @@ def test_profile_coverage_requires_both_processes_and_all_saved_messages() -> No
     validate_profile_coverage(records, 200)
     with pytest.raises(RuntimeError, match="missing stages"):
         validate_profile_coverage(records[:2], 200)
+    with pytest.raises(RuntimeError, match="missing selected-session refresh"):
+        validate_profile_coverage(records[0:1] + records[2:], 200)
     with pytest.raises(
         RuntimeError, match="rust.page_projection counted 201 messages; expected 202"
     ):
