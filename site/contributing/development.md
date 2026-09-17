@@ -23,11 +23,11 @@ The project uses strict mypy checking and Ruff with a 100-character line length 
 `E`, `F`, `I`, `UP`, and `B` rule sets. Prefer async-first APIs with `anyio`, frozen dataclasses for
 internal value objects, and Pydantic models for serialized boundaries.
 
-## Experimental Rust TUI {#rust-tui-scaffold}
+## Rust TUI {#rust-tui-scaffold}
 
 The Rust frontend is a Cargo workspace member and remains available for source
 development on macOS and Linux. RC2 native-wheel installations prefer Rust automatically; pure/source
-installs keep Textual unless a renderer or development binary override selects Rust. RC1 did not
+installs use prompt-toolkit fullscreen unless a renderer or development binary override selects Rust. RC1 did not
 bundle Rust. See the [RC2 decision](../architecture/rust-tui-boundary). The repository pins Rust
 1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
 the workspace package settings.

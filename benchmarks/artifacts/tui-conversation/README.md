@@ -45,13 +45,13 @@ From the repository root:
 
 ```sh
 WISP_VISUAL_OUTPUT=/tmp/wisp-tui-captures cargo test -p wisp-tui capture_conversation_screens -- --ignored
-uv run python -m benchmarks.tui_visual_capture /tmp/wisp-tui-captures --textual
 ```
 
 This emits 72 Rust JSON buffers and SVGs: conversation, expanded tool, working,
 approval, new turn, and scrollback at 100 × 30, 80 × 24, 40 × 16, and 30 × 8 in dark,
 light, and monochrome.
-It also emits 16 Textual SVG references at the two larger sizes in dark and light.
+The committed Textual SVG references are historical; their capture script was retired with the
+Textual frontend.
 The working indicator is fixed at its first frame; animation is covered by the
 existing runtime tests. The committed PNGs were rasterized with `rsvg-convert`:
 

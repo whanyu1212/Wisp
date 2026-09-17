@@ -1,4 +1,4 @@
-"""Generate the native palette catalog from Wisp's authoritative Python themes."""
+"""Generate the native palette catalog from Wisp's curated theme colors."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
-from wisp.tui.commands import TEXTUAL_LOCAL_COMMAND_DESCRIPTORS
+from wisp.tui.commands import THEME_COMMAND_DESCRIPTOR
 from wisp.tui.theme import DEFAULT_THEME_NAME, PAPER_THEME_NAME, WISP_THEME_SPECS
 
 OUTPUT = Path(__file__).resolve().parents[1] / "rust/wisp-tui/src/theme_catalog.json"
@@ -16,7 +16,7 @@ def catalog_json() -> str:
     """Serialize ordered theme metadata and native semantic colors.
 
     Returns:
-        str: Deterministic JSON derived from the existing Textual theme definitions.
+        str: Deterministic JSON derived from the curated theme definitions.
     """
     themes = []
     for spec in WISP_THEME_SPECS:
@@ -57,7 +57,7 @@ def catalog_json() -> str:
                 "colors": colors,
             }
         )
-    command = next(item for item in TEXTUAL_LOCAL_COMMAND_DESCRIPTORS if item.name == "theme")
+    command = THEME_COMMAND_DESCRIPTOR
     return (
         json.dumps(
             {

@@ -1,4 +1,4 @@
-"""Measure live typing in matched Rust and Textual source-CLI PTY sessions.
+"""Measure live typing in Rust source-CLI PTY sessions.
 
 The first appearance of an input marker in PTY output is a terminal-paint proxy,
 not a display-photon measurement. Process-tree CPU and RSS are sampled observations:
@@ -57,10 +57,10 @@ _OUTPUT_TAIL_LIMIT = 65_536
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
-    """Paired renderer conditions and controlled fake-provider stream settings."""
+    """Rust renderer conditions and controlled fake-provider stream settings."""
 
     rust_binary: Path | None = None
-    renderers: tuple[Renderer, ...] = ("rust", "textual")
+    renderers: tuple[Renderer, ...] = ("rust",)
     runs: int = 3
     history_messages: tuple[int, ...] = (0, 10_000)
     response_words: int = 400
@@ -585,14 +585,12 @@ def _run_sample(
                             # deltas may otherwise arrive below the scrolled view.
                             os.write(
                                 terminal_fd,
-                                b"\x1b[1;5F" if renderer == "rust" else b"\x1b[F",
+                                b"\x1b[1;5F",
                             )
                             tail_sent = True
                         if final_response_ns is not None and settled_ns is None:
                             settled_plain = _plain_text(settled_output)
-                            if (
-                                "idle" if renderer == "rust" else "Ask Wisp anything"
-                            ) in settled_plain:
+                            if ("idle") in settled_plain:
                                 settled_ns = now_ns
                         if (
                             settled_ns is not None
@@ -740,8 +738,6 @@ def _response_has_final(output: str) -> bool:
 def _history_ready(output: str, renderer: Renderer, history_marker_seen: bool) -> bool:
     if not history_marker_seen:
         return False
-    if renderer == "textual":
-        return _ready(output, renderer)
     compact = "".join(output.split())
     return (
         "AskWispanything" in compact and "~" in output and ("ctx" in output or "context" in output)
@@ -750,8 +746,8 @@ def _history_ready(output: str, renderer: Renderer, history_marker_seen: bool) -
 
 def _parse_renderers(value: str) -> tuple[Renderer, ...]:
     selected = tuple(part.strip() for part in value.split(",") if part.strip())
-    if not selected or any(part not in ("rust", "textual") for part in selected):
-        raise argparse.ArgumentTypeError("renderers must be rust,textual or a nonempty subset")
+    if not selected or any(part != "rust" for part in selected):
+        raise argparse.ArgumentTypeError("renderers must be rust")
     return cast(tuple[Renderer, ...], selected)
 
 
@@ -773,7 +769,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rust-binary", type=Path)
-    parser.add_argument("--renderers", type=_parse_renderers, default=("rust", "textual"))
+    parser.add_argument("--renderers", type=_parse_renderers, default=("rust",))
     parser.add_argument("--runs", type=int, default=BenchmarkConfig.runs)
     parser.add_argument("--history-messages", type=_parse_history, default=(0, 10_000))
     parser.add_argument("--response-words", type=int, default=BenchmarkConfig.response_words)

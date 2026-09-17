@@ -63,7 +63,7 @@ restore the editable prompt only after the authoritative target history loads. T
 200 append-ordered nodes at a time, retains two pages (400 nodes), evicts whole oldest pages, and
 restarts at the first page whenever `/tree` is reopened.
 
-The Rust TUI also supports `/name <display name>` and `/name --clear`. Textual and the direct CLI do
+The Rust TUI also supports `/name <display name>` and `/name --clear`. The direct CLI does
 not currently expose these direct session commands; they remain available through the typed RPC and
 SDK surfaces.
 

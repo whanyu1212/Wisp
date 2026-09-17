@@ -1,4 +1,4 @@
-"""Launch and CLI contracts that do not mount a Textual app."""
+"""Launch and CLI contracts for the Python fallback renderers."""
 
 from __future__ import annotations
 
@@ -387,34 +387,6 @@ def test_run_tui_uses_fullscreen_fallback_when_stdio_is_not_interactive(
     anyio.run(run)
 
 
-def test_run_tui_textual_respects_injected_prompt_reader(
-    tmp_path: Path,
-    monkeypatch: object,
-) -> None:
-    # An injected reader means the caller drives input headlessly; the Textual
-    # app must not be launched (it would seize the terminal and wait for UI
-    # input), and the scripted reader must be consumed instead.
-    def fail_create_textual_tui() -> object:
-        raise AssertionError("textual app should not be constructed with an injected reader")
-
-    async def run() -> None:
-        monkeypatch.setattr(tui_app_module, "create_textual_tui", fail_create_textual_tui)
-        controller = ScriptedController()
-
-        await tui_app_module.run_tui(
-            TuiOptions(
-                config=WispConfig(provider="fake", session_dir=tmp_path),
-                renderer=TuiRendererKind.textual,
-            ),
-            controller=controller,
-            prompt_reader=await _reader_from(["/quit"]),
-        )
-
-        assert controller.shutdown_count == 1
-
-    anyio.run(run)
-
-
 def test_cli_no_args_shows_help_without_tui_env() -> None:
     runner = CliRunner()
 
@@ -514,58 +486,6 @@ def test_cli_tui_command_resolves_trust_before_starting_ui(
 
     assert result.exit_code == 0, result.output
     assert order == ["trust", "tui"]
-
-
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["tui", "--no-synchronized-output"],
-        ["--mode", "tui", "--no-synchronized-output"],
-    ],
-)
-def test_cli_tui_synchronized_output_opt_out_reaches_textual_app(
-    arguments: list[str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    captured: list[TuiOptions] = []
-
-    async def fake_run_tui(options: TuiOptions) -> None:
-        captured.append(options)
-
-    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
-
-    result = CliRunner().invoke(
-        app,
-        arguments,
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured) == 1
-    assert captured[0].synchronized_output is False
-
-
-@pytest.mark.parametrize("arguments", [["tui"], ["--mode", "tui"]])
-def test_cli_tui_synchronized_output_defaults_on(
-    arguments: list[str],
-    monkeypatch: MonkeyPatch,
-) -> None:
-    captured: list[TuiOptions] = []
-
-    async def fake_run_tui(options: TuiOptions) -> None:
-        captured.append(options)
-
-    monkeypatch.setattr(tui_module, "run_tui", fake_run_tui)
-
-    result = CliRunner().invoke(
-        app,
-        arguments,
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert len(captured) == 1
-    assert captured[0].synchronized_output is True
 
 
 def test_cli_tui_command_rejects_invalid_auto_compaction_env(
@@ -710,7 +630,7 @@ def test_cli_tui_mode_validates_continue_before_prompting(tmp_path: Path) -> Non
     assert "Wisp TUI MVP" not in result.output
 
 
-def test_cli_tui_command_defaults_to_textual_renderer(
+def test_cli_tui_command_defaults_to_fullscreen_fallback_renderer(
     tmp_path: Path,
     monkeypatch: object,
 ) -> None:
@@ -732,7 +652,7 @@ def test_cli_tui_command_defaults_to_textual_renderer(
     assert len(captured) == 1
     assert captured[0].config.provider == "fake"
     assert captured[0].config.session_dir == tmp_path
-    assert captured[0].renderer is TuiRendererKind.textual
+    assert captured[0].renderer is TuiRendererKind.fullscreen
     # An explicit --session-dir is carried as a user override so the RPC subprocess
     # honors it (the launcher no longer launders resolved config into flags).
     assert captured[0].user_session_dir == tmp_path

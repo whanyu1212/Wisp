@@ -191,7 +191,7 @@ def _decision_meta(
 
 
 def _decision_notice(content: _DecisionContent) -> str:
-    """Return one bounded, literal notice shared by non-Textual renderers."""
+    """Return one bounded, literal notice shared by Python renderers."""
 
     lines: list[str] = []
     for part in (content.meta, content.title, content.detail):

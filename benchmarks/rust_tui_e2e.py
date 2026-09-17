@@ -1,4 +1,4 @@
-"""Benchmark complete Rust and Textual TUI paths through a real POSIX PTY.
+"""Benchmark the complete Rust TUI path through a real POSIX PTY.
 
 PTY marker visibility is a practical proxy for terminal paint, not a measurement of
 photon-level display latency.  ``wait4`` resource observations describe the directly
@@ -30,12 +30,12 @@ from typing import Literal, cast
 
 from benchmarks.support import environment
 
-type Renderer = Literal["rust", "textual"]
+type Renderer = Literal["rust"]
 
 START_TOKEN = "WISP_E2E_START_7F3A"
 FINAL_TOKEN = "WISP_E2E_FINAL_9C2D"
 _FAKE_RESPONSE_PREFIX = "fake response to: "
-_VALID_RENDERERS = frozenset(("rust", "textual"))
+_VALID_RENDERERS = frozenset(("rust",))
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _SOURCE_ROOT = _REPOSITORY_ROOT / "src"
 
@@ -51,10 +51,10 @@ _READY_MARKERS = (
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
-    """Configuration for paired terminal-backed renderer runs."""
+    """Configuration for terminal-backed Rust renderer runs."""
 
     rust_binary: Path | None = None
-    renderers: tuple[Renderer, ...] = ("rust", "textual")
+    renderers: tuple[Renderer, ...] = ("rust",)
     runs: int = 3
     prompt_words: int = 64
     width: int = 100
@@ -168,8 +168,6 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("the terminal must be at least 60 columns by 12 rows")
     if not math.isfinite(config.timeout_seconds) or config.timeout_seconds <= 0:
         raise ValueError("timeout seconds must be a positive finite number")
-    if "rust" not in config.renderers:
-        return
     binary = config.rust_binary
     if binary is None:
         raise ValueError("--rust-binary is required when benchmarking the Rust renderer")
@@ -609,21 +607,15 @@ def _plain_text(output: bytes | bytearray) -> str:
 
 def _ready(plain: str, renderer: Renderer) -> bool:
     compact = "".join(plain.split())
-    if renderer == "rust":
-        provider_ready = "fake/fake" in plain
-        context_hydrated = re.search(r"ctx\s+~?[0-9]", plain) is not None
-    else:
-        provider_ready = "offline" in plain or "fake" in plain
-        context_hydrated = re.search(r"~?[0-9]+(?:\.[0-9]+)?%", plain) is not None
+    provider_ready = "fake/fake" in plain
+    context_hydrated = re.search(r"ctx\s+~?[0-9]", plain) is not None
     return (
         provider_ready and context_hydrated and any(marker in compact for marker in _READY_MARKERS)
     )
 
 
 def _settled_after_final(tail: str, renderer: Renderer) -> bool:
-    if renderer == "rust":
-        return "idle" in tail
-    return "Ask Wisp anything" in tail
+    return "idle" in tail
 
 
 def _phase_name(
@@ -684,7 +676,7 @@ def _parse_renderers(value: str) -> tuple[Renderer, ...]:
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rust-binary", type=Path)
-    parser.add_argument("--renderers", type=_parse_renderers, default=("rust", "textual"))
+    parser.add_argument("--renderers", type=_parse_renderers, default=("rust",))
     parser.add_argument("--runs", type=int, default=BenchmarkConfig.runs)
     parser.add_argument("--prompt-words", type=int, default=BenchmarkConfig.prompt_words)
     parser.add_argument("--width", type=int, default=BenchmarkConfig.width)

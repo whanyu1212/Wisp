@@ -7,45 +7,31 @@ wisp
 Wisp's fullscreen terminal clients share the same Python RPC controller.
 
 > [!NOTE]
-> **RC2 frontend selection**
+> **Frontend selection**
 >
-> In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
-> on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-> Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
-> other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
-> which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
-> macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
-> failures report an error; they never silently switch frontends.
+> `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
+> installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels
+> cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other
+> platforms use prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
+> `WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust
+> in auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
+> launch/runtime failures report an error; they never silently switch frontends.
 >
-> Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
-> fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
-> Both clients use the same Python runtime, permissions, providers, and saved sessions.
-
-The following footer description applies to Textual; Rust controls are described below.
-
-The footer shows the working directory plus plan/queued state on the left, the active shortcut in the
-center, and the model, billing route, and context percentage on the right. At narrow widths it
-progressively drops the shortcut, model, and working directory while preserving plan/queued state and
-compact billing and context fields.
-
-- `context 53%` is a current provider observation; `context ~53%` is an estimate. Narrow layouts
-  shorten these to `53%` and `~53%`.
-- Billing shows the active route as `ChatGPT plan` for subscription-backed Codex, `offline` for the
-  fake provider, or `API` for a direct provider. Once usage is recorded, its session-wide cumulative
-  estimate is labeled independently as `session $0.042`, `session ≥$0.042` when partially priced, or
-  `session unpriced` when no request can be priced. This keeps earlier usage honest after switching
-  providers. Estimates are not invoices.
+> Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
+> fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions,
+> providers, and saved sessions.
 
 ## Rust TUI
 
-Rust is the RC2 default for native-wheel installs, with Textual retained as a maintained fallback.
-This release does not claim complete feature parity.
+Rust is the default for native-wheel installs. The prompt-toolkit fullscreen renderer remains
+available on pure/source installs and by explicit selection.
 
-The [feature-parity matrix](../architecture/rust-tui-boundary#feature-parity-matrix) records delivered
-model selection, command discovery, context/compaction, skills/MCP, prompt history, overlays, file
-completion, themes, mouse navigation, configurable bindings, keyboard selection, undo/redo, composer
-clipboard actions, and compact paste presentation.
-Rust uses external update instructions instead of Textual's install/restart flow, as described below.
+Rust provides model selection, command discovery, context/compaction, skills/MCP, prompt history,
+overlays, file completion, themes, mouse navigation, configurable bindings, keyboard selection,
+undo/redo, composer clipboard actions, and compact paste presentation. The
+[architecture guide](../architecture/rust-tui-boundary#subsystem-ownership) describes which process
+owns each part of the interface.
+Rust uses external update instructions, as described below.
 Published-artifact validation and terminal/accessibility feedback remain release acceptance work;
 the RC trial does not establish stable promotion.
 
@@ -139,11 +125,6 @@ prompts that exceed the editor limit are rejected explicitly rather than truncat
 RC2 prepares native wheels for the two packaged targets. Transcript search and arbitrary drag
 selection remain follow-ups; composer selection and clipboard actions are keyboard-driven.
 See the mouse controls below; transcript copying still relies on terminal-native selection.
-Textual does not currently expose Rust's direct naming, clone, tree-navigation, or unrevert commands.
-Textual's model picker is hydrated from the backend's authoritative ordered catalog before input is
-enabled. It disables unavailable providers, passes typed `/model` values through unchanged, and only
-persists the selection reported by the backend. If discovery fails, prompts and typed `/model`
-commands remain available while the bare picker reports the catalog as unavailable.
 
 Rust also supports `/model` while idle. The picker groups models by provider, disables unavailable
 providers, and labels preview and legacy models. Use `Up`/`Down`, `PageUp`/`PageDown`, or `Home`/`End`
@@ -191,7 +172,7 @@ Only reference text is inserted: `@"src/example file.py"` for paths requiring JS
 snapshot per opening; typing and tree navigation use that snapshot locally. A policy change clears
 the old choices before refresh, and late responses cannot reopen a dismissed picker. A limited-snapshot
 cue means paths were omitted, not that a folder is empty. Fuzzy results are capped at 30; matching is
-smart-case and deterministic, but ranking need not be identical to Textual. Queries over 4096 bytes
+smart-case and deterministic. Queries over 4096 bytes
 must be shortened. Discovery failures preserve the draft; close and reopen to retry.
 
 The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
@@ -199,8 +180,8 @@ it can cover the header or upper composer rows rather than rearranging the conve
 trust controls take precedence. Below 30×8 no hidden selection can be inserted. Mouse selection is
 opt-in, and modified submission shortcuts retain their existing meanings.
 
-Rust supports `/theme` and `/theme <name>` with the same curated Vapor, Glass, Orchid, Ember, Storm,
-Grove, Wave, Paper, and Dawn palettes as Textual. Glass leaves the main canvas on the terminal's
+Rust supports `/theme` and `/theme <name>` with curated Vapor, Glass, Orchid, Ember, Storm,
+Grove, Wave, Paper, and Dawn palettes. Glass leaves the main canvas on the terminal's
 default background, with smoky graphite surfaces and luminous ice, lilac, and mint accents. Configure
 opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate those effects. The
 picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
@@ -218,8 +199,8 @@ empty welcome screen immediately and applies to later new-session welcome screen
 one named logo once per process, so terminal redraws and resizes do not change it. The Adal variants
 render as pink artwork over the terminal background.
 
-Both frontends share `~/.wisp/tui.json` (`theme` and `last_dark_theme`). Choosing a theme in Rust also
-sets the next Textual launch's preference, and vice versa. Rust preserves unrelated keys and writes
+Rust stores theme preferences in `~/.wisp/tui.json` (`theme` and `last_dark_theme`).
+It preserves unrelated keys and writes
 atomically. Missing, unknown, or unusable preferences fall back to Vapor; unreadable, non-UTF-8,
 non-regular, or over-64-KiB documents are not overwritten. A save failure leaves the live selection
 active and reports a warning; critical approval/cancellation recovery notices retain priority.
@@ -228,7 +209,7 @@ Rust stores the startup-logo choice as `startup_logo` in this file; a missing or
 Random.
 
 Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
-The conversion starts with Textual's Rec.709 grayscale and minimally adjusts native foregrounds when
+The conversion uses Rec.709 grayscale and minimally adjusts native foregrounds when
 needed to retain a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse
 video as well as a marker; status labels, approval action words, and diff `+`/`-` signs remain visible
 without hue. The theme choice can still be changed and remembered while monochrome is active.
@@ -270,11 +251,11 @@ supported. Only button and
 SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
 terminal after exit or failure.
 
-Selecting Rust never falls back to Textual. A missing/non-executable binary,
+Selecting Rust never falls back to Python fullscreen. A missing/non-executable binary,
 unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. See
-[Development setup](../contributing/development#rust-tui-scaffold), or select Textual explicitly with
-`wisp tui --renderer textual`.
+[Development setup](../contributing/development#rust-tui-scaffold), or select Python fullscreen
+explicitly with `wisp tui --renderer fullscreen`.
 
 The daily-use acceptance inventory for [#467](https://github.com/whanyu1212/Wisp/issues/467) is
 recorded in the parity matrix.
@@ -368,7 +349,7 @@ Only user settings supply this preference; project files are ignored even after 
 public environment or CLI keybinding override. The launcher resolves user settings once and passes a
 private snapshot to Rust; the backend child does not inherit it. Bindings change frontend input only,
 not runtime policy. Limits are 64 KiB of configuration, 64 entries, eight chords per action, and 64
-characters per chord. Textual keeps its existing bindings.
+characters per chord. The Python fullscreen renderer keeps its own keybindings.
 
 ### Rust large pastes
 
@@ -392,10 +373,9 @@ Rebuild or select a Rust binary matching the updated Python package before relau
 Automatic notices, binary installation, rollback, and coordinated restart remain distribution work
 under [#469](https://github.com/whanyu1212/Wisp/issues/469).
 
-Unlike print mode, **the Textual TUI exposes the full tool registry by default** — otherwise it would
-be a chatbot that can't read files or run commands. Mutating and command tools still pause for
-approval: approve once, allow that tool for the session, YOLO all mutating/command tools for the
-process, or deny. In the Rust TUI, YOLO is instead an explicit saved project choice.
+Unlike print mode, **fullscreen TUI modes expose the full tool registry by default**. Mutating and
+command tools still pause for approval: approve once, allow that tool for the session, choose a saved
+project YOLO default, or deny.
 
 Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
 `/permissions yolo` in either TUI. Saved defaults apply to subsequent launches in the same canonical
@@ -406,8 +386,7 @@ is not saved. These choices do not change project trust or protected paths.
 
 ## Steering and follow-ups
 
-The composer remains active while a prompt runs. In the Textual, prompt-toolkit fullscreen, and
-Rust TUIs:
+The composer remains active while a prompt runs. In the prompt-toolkit fullscreen and Rust TUIs:
 
 - `Enter` sends a steering message for the active run. It is injected at the next safe request
   boundary, after any current assistant/tool batch.
@@ -463,7 +442,7 @@ workflow to that backend.
 ## Completions and the file picker
 
 Type `/` to filter commands inline. Type `@` to reference a project file. The picker starts in fuzzy
-mode and matches loosely, so `@tuiapp` finds `src/wisp/tui/textual_app.py`; press `Tab` to switch to a
+mode and matches loosely, so `@rust` finds `src/wisp/tui/rust_launcher.py`; press `Tab` to switch to a
 project tree without changing the draft or query, and press `Tab` again to return.
 
 `Up`/`Down` move the selection. In tree mode, `Left`/`Right` collapse or expand a directory, while
@@ -486,36 +465,30 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Enter` | Submit; while a prompt runs, steer it; or activate the selected slash/file-picker item |
 | `Alt+Enter` | While a prompt runs, queue a follow-up; otherwise insert a newline |
 | `Alt+Up` | While a prompt runs, restore the newest queued item to the composer |
-| `Shift+Enter` / `Ctrl+J` | Insert newline (`Ctrl+J` in the live fullscreen renderer) |
+| `Shift+Enter` | Insert newline |
 | `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
 | `Up` / `Down` | Move through an active suggestion menu |
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
-| `Ctrl+G` | Toggle contextual help for the focused Textual surface |
+| `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
-| `Home` / `End` | Traverse to the session beginning / return to the latest output |
+| `Ctrl+Home` / `Ctrl+End` | Traverse to the session beginning / return to the latest output |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
-| `Ctrl+C` | Copy selection; otherwise press twice within 1.5s to quit |
+| `Ctrl+C` | Cancel the active workflow or quit when idle |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |
 
-The Textual transcript has no visible scrollbar, but all persisted conversation and tool activity
-remains reachable through the controls above. Older and newer pages load transparently at the
-mounted window edges. When new output arrives while you are reading earlier content, your viewport
-stays anchored; select the `↓ new` indicator or press `End` to return to the live tail.
+The Rust transcript retains the complete saved conversation. When new output arrives while you are
+reading earlier content, the viewport stays anchored; press `Ctrl+End` to return to the live tail.
 
 ### Resuming long sessions
 
-In Textual, selecting a session from the `/resume` picker, or running `/resume <session-id>`, loads the
-complete active-path transcript before revealing the replacement. The Rust TUI installs
-the latest page first, then loads older history with `PageUp` or `Ctrl+Home`; `PageDown` or `Ctrl+End`
-returns through an evicted tail to the latest page. Plain `Home` remains available to the prompt
-editor. Paging preserves surviving viewport anchors; older-page and exact-detail requests can run
-while a prompt is active. Once backend selection commits, the old transcript is cleared before the
-selected session's page is installed. A
-failed or stale page leaves an explicit error instead of mislabeling old or partially loaded history.
+Selecting a session from `/resume`, or running `/resume <session-id>`, loads the complete saved
+active-path transcript before input resumes. `PageUp` and `PageDown` scroll through the retained
+conversation; no history cap clips older messages. A failed or stale history response reports an
+error rather than presenting a partial replacement as complete.
 
 Historical file-tool cards keep bounded previews. Press `F6` to browse visible cards and `Enter` to
 open detail; when a persisted preview was clipped, the Rust TUI fetches that one exact result on
@@ -523,18 +496,14 @@ demand and releases it when the detail view closes. It does not cache historical
 directly, and cannot recover bytes that the tool truncated before persistence.
 
 Every persisted message row is represented, but representation is logical rather than one widget per
-JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel, and
-completion rows for the same process share one process card; its header reports both the poll count
-and represented row count. Focus and expand that card with `Enter` or `Space`, then use `p`/`n` to
-move through its bounded update timeline and `l` to load the selected row's exact persisted output.
-The timeline keeps transcript layout stable, while exact output is fetched only when requested.
+JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel,
+and completion rows for the same process share one process card; its header reports the poll count.
+Use `F6` to browse visible cards, `Left`/`Right` to collapse or expand one, and `Enter` to open its
+retained detail.
 
-This deliberately trades `/resume` cold-start time and metadata memory for reliable upward scrolling:
-the TUI no longer has to mount older page boundaries while a reader is traversing a long resumed
-session. Output bodies and tool arguments still use bounded previews during the initial load, so the
-same transcript is not held twice in memory. An on-demand detail load returns the exact text stored in
-JSONL; it cannot recover bytes that the tool itself truncated before persistence, and those cards stay
-marked as truncated.
+This deliberately trades `/resume` cold-start time and metadata memory for reliable upward scrolling.
+Output bodies and tool arguments use bounded previews during initial loading. An on-demand detail
+load returns the exact text stored in JSONL; it cannot recover bytes truncated before persistence.
 
 Run `/theme` to preview Vapor, Glass, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one
 of those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
@@ -573,24 +542,11 @@ wisp tui --no-all-tools                  # opt-in tool filter instead of the ful
 wisp tui --yes                           # auto-approve mutating/command tools
 wisp tui --line                          # simple line renderer, for fallback/debugging
 wisp tui --renderer rust                 # explicitly select Rust
-wisp tui --no-synchronized-output        # disable atomic Textual frame presentation
+wisp tui --renderer fullscreen           # explicitly select Python fullscreen
 ```
 
-At process startup, `--continue` or `--resume` hydrates at most 500 active-path persisted messages
-through the same RPC `get_messages` command available to other frontends before accepting input. This
-bounded, silent startup path avoids delaying the first frame. Complete hydration begins only after an
-explicit interactive `/resume` selection in the Textual TUI; line and fallback renderers retain
-bounded paging behavior.
-
-The Textual TUI targets truecolor terminals and degrades gracefully — 256-color and 16-color
-terminals are handled by Textual's own detection. Setting `NO_COLOR` switches to deterministic
-grayscale.
-
-Textual also queries the terminal for synchronized-output support. A positive response lets Textual
-present each display update atomically; unsupported terminals retain ordinary output. If a terminal
-or multiplexer shows rendering artifacts, retry with `--no-synchronized-output`. The flag affects only
-the Textual TUI and has no environment-variable equivalent; line, print, JSONL-RPC, and SDK output do
-not use synchronized frames.
+Rust loads the complete saved active path at startup and on `/resume`. The Python fullscreen and line
+renderers retain their own paging behavior. Set `NO_COLOR` to request grayscale presentation.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
-`--tui-renderer line|fullscreen|textual|rust` plus `WISP_TUI_RENDERER`.
+`--tui-renderer line|fullscreen|rust` plus `WISP_TUI_RENDERER`.

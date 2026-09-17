@@ -5,7 +5,7 @@
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
-| `WISP_TUI_RENDERER` | TUI selection for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default), `line`, `fullscreen`, `textual`, or `rust` |
+| `WISP_TUI_RENDERER` | TUI selection for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default), `line`, `fullscreen`, or `rust` |
 | `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used only when the Rust renderer is selected |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
@@ -49,17 +49,17 @@ project files, and `WISP_TRUST` is never persisted — see
 example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
 `wisp -p "hello" --mode json` for a machine-readable prompt run.
 
-In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
-on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
-other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
-which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
-macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
-failures report an error; they never silently switch frontends.
+`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
+installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
+macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
+prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
+`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
+auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
+launch/runtime failures report an error; they never silently switch frontends.
 
-Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
-fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
-Both clients use the same Python runtime, permissions, providers, and saved sessions.
+Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
+fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
+and saved sessions.
 
 `WISP_RUST_TUI_BINARY` is a source-development override, not a general executable search path. It
 must name an existing, executable absolute path and is removed from the environment passed to the

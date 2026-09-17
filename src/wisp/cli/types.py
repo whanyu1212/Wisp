@@ -23,7 +23,6 @@ class TuiFrontendKind(StrEnum):
     auto = "auto"
     line = "line"
     fullscreen = "fullscreen"
-    textual = "textual"
     rust = "rust"
 
 

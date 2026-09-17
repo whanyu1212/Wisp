@@ -31,6 +31,7 @@ from wisp.events import (
     SessionSaved,
     SessionStats,
     SkillInvoked,
+    TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -39,7 +40,6 @@ from wisp.events import (
 )
 from wisp.tool_presentation import tool_result_status
 from wisp.tui.commands import TuiCommandCatalog
-from wisp.tui.context_widget import format_prompt_cache_usage
 from wisp.tui.decision_content import _approval_content, _decision_notice, _trust_content
 from wisp.tui.history import (
     TUI_HISTORY_MESSAGE_LIMIT,
@@ -64,7 +64,6 @@ class TuiRendererKind(StrEnum):
 
     line = "line"
     fullscreen = "fullscreen"
-    textual = "textual"
 
 
 @dataclass(frozen=True)
@@ -268,7 +267,7 @@ class LineTuiRenderer:
             self.console.print(_unsent_submission_text(submission), markup=False)
 
     def prompt_history_request(self) -> None:
-        self.notice("Searchable prompt history is available in the Textual TUI.")
+        self.notice("Searchable prompt history is available in the Rust TUI.")
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
@@ -397,7 +396,7 @@ class LineTuiRenderer:
         self,
         catalog: RpcModelCatalogSnapshot,
     ) -> None:
-        # No interactive picker outside the Textual renderer -- falls back to
+        # The Python renderers have no interactive picker and fall back to
         # the same grouped listing bare `/model` already printed before the
         # picker existed. Use `/model <id> [effort]` to switch.
         self.console.print(_render_model_listing_text(catalog))
@@ -667,7 +666,7 @@ class FullscreenTuiRenderer:
             self._refresh()
 
     def prompt_history_request(self) -> None:
-        self.notice("Searchable prompt history is available in the Textual TUI.")
+        self.notice("Searchable prompt history is available in the Rust TUI.")
 
     def render_history(self, messages: tuple[HistoricalTranscriptMessage, ...]) -> None:
         for message in messages:
@@ -869,7 +868,7 @@ class FullscreenTuiRenderer:
         self,
         catalog: RpcModelCatalogSnapshot,
     ) -> None:
-        # No interactive picker outside the Textual renderer -- see
+        # The Python renderers have no interactive picker; see
         # LineTuiRenderer.model_picker_request for the same fallback text.
         self._append(
             "system",
@@ -1460,6 +1459,36 @@ def _format_token_count(tokens: int) -> str:
     return str(tokens)
 
 
+def format_prompt_cache_usage(usage: TokenUsage) -> str:
+    """Format reported cache reads and writes without inventing missing data.
+
+    Args:
+        usage (TokenUsage): Provider usage counters.
+
+    Returns:
+        str: Read and write counts, or ``unavailable`` when both are absent.
+    """
+
+    def compact(tokens: int) -> str:
+        sign = "-" if tokens < 0 else ""
+        magnitude = abs(tokens)
+        if magnitude >= 1_000_000:
+            formatted = f"{magnitude / 1_000_000:.1f}".rstrip("0").rstrip(".") + "m"
+        elif magnitude >= 1_000:
+            formatted = f"{magnitude / 1_000:.1f}".rstrip("0").rstrip(".") + "k"
+        else:
+            formatted = str(magnitude)
+        return sign + formatted
+
+    cache_read = usage.cache_read_input_tokens
+    cache_write = usage.cache_write_input_tokens
+    if cache_read is None and cache_write is None:
+        return "unavailable"
+    read = f"{compact(cache_read)} read" if cache_read is not None else "reads unreported"
+    write = f"{compact(cache_write)} written" if cache_write is not None else "writes unreported"
+    return f"{read} · {write}"
+
+
 def _align_footer_line(
     left: str, right: str, width: int | None, *, priority: Literal["left", "right"] = "right"
 ) -> str:
@@ -1542,11 +1571,7 @@ def _unsent_submission_text(submission: TuiSubmission) -> str:
 
 
 def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? [y/N].") -> str:
-    """Shared TUI help text. ``approval_hint`` differs by renderer: the line and
-    fullscreen renderers still read free-text `y`/`n` where blank/Enter denies, but
-    the Textual renderer's decision panel defaults its highlight to "Approve once"
-    (Enter approves) — see ``textual_renderer.help()`` for its override.
-    """
+    """Shared Python TUI help text for free-text approval decisions."""
     return (
         "Commands:\n"
         "  /help                    show this help\n"
@@ -1563,7 +1588,7 @@ def _tui_help_text(*, approval_hint: str = "Tool approvals prompt with approve? 
         "  /resume [session-id]     browse or resume a previous session\n"
         "  /quit, /exit             quit the TUI\n"
         "Fullscreen controls: Esc cancels; press Ctrl+C twice within 1.5s to quit.\n"
-        "Enter submits; Shift+Enter (Textual) or Ctrl+J inserts a newline.\n"
+        "Enter submits; Ctrl+J inserts a newline.\n"
         "The line renderer retains terminal Ctrl+C interrupt and Ctrl+D EOF behavior.\n"
         "In fullscreen interfaces while a prompt runs, Enter steers; Alt+Enter queues a "
         "follow-up; Alt+Up restores.\n"
@@ -1576,7 +1601,7 @@ def _render_session_listing_text(
     *,
     selected_session_id: str | None,
 ) -> str:
-    """Render the RPC-owned newest-first session catalog for non-Textual UIs."""
+    """Render the RPC-owned newest-first session catalog for Python UIs."""
 
     if not sessions:
         return "No persisted sessions found."
@@ -1714,8 +1739,8 @@ def _render_model_listing_text(
 ) -> str:
     """Render every catalog model grouped by provider, current one marked.
 
-    Non-Textual fallback for `model_picker_request` -- no interactive picker
-    outside the Textual renderer, so this is the same grouped-listing text
+    Python fallback for `model_picker_request` -- there is no interactive picker
+    in these renderers, so this is the same grouped-listing text
     `TuiShell._render_model_listing` prints for a bare `/model`, plus the
     active effort tier (which that shell-side listing predates and doesn't
     show). Deliberately does not track "pending configure" state the way the

@@ -1,26 +1,27 @@
 # Upgrading to Wisp 0.2
 
-**0.2.0rc2 is being prepared; this PR does not publish it.** The latest published candidate is
-[0.2.0rc1](https://github.com/whanyu1212/Wisp/releases/tag/v0.2.0rc1), and stable remains 0.1.0.
-This guide describes the RC2 changes and the checks required before stable promotion.
+This guide describes the 0.2 candidate series and the checks required before stable promotion.
+RC2 introduced the Rust-default trial on native wheels; the current development tree also retires
+Textual. Check the [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
+published candidate before installing one.
 
 ## What changes for terminal users
 
-In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
-on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
-other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
-which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
-macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
-failures report an error; they never silently switch frontends.
+`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
+installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
+macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
+prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
+`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
+auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
+launch/runtime failures report an error; they never silently switch frontends.
 
-Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
-fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
-Both clients use the same Python runtime, permissions, providers, and saved sessions.
+Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
+fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
+and saved sessions.
 
 RC2 includes the native-wheel release pipeline, composer selection/undo/clipboard, semantic colors,
 and complete saved-history loading. It is a trial of Rust as the default on the packaged platforms,
-not a claim of complete Textual feature parity or universal terminal performance.
+not a claim of identical Python fullscreen controls or universal terminal performance.
 
 Existing supported JSONL sessions remain readable without manual migration. Python continues to
 own persistence. Back up important sessions before testing a candidate; older releases are not
@@ -62,13 +63,13 @@ The in-process Python SDK has no serialization boundary and does not perform a w
 The Rust TUI requires the exact Python package release. Source builds use the matching
 checkout; native wheels are built and published in lockstep with the Python release.
 
-## Trying the candidate
+## Trying a published candidate
 
-After RC2 is published and its artifacts are verified, use an explicit version pin:
+After a candidate's artifacts are verified, use its exact published version in an explicit pin:
 
 ```bash
-uvx --from "wisp-ai==0.2.0rc2" wisp --version
-uvx --from "wisp-ai==0.2.0rc2" wisp
+uvx --from "wisp-ai==<published-version>" wisp --version
+uvx --from "wisp-ai==<published-version>" wisp
 ```
 
 This avoids replacing an existing persistent `uv tool` installation, but the running application
@@ -84,7 +85,7 @@ for candidate publication, platform installation, long-session measurements, and
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.
 - Verify wheel and source-distribution metadata, installed SDK imports, `wisp --version`, and a
   fake-provider prompt outside the source checkout.
-- Exercise Rust and the Textual fallback in real terminals: long streaming output while typing and scrolling,
+- Exercise Rust and the prompt-toolkit fullscreen fallback in real terminals: long streaming output while typing and scrolling,
   file-picker navigation, cancellation, approvals, and session resume.
 - Dogfood the published candidate and resolve release blockers before updating stable version
   pins or creating the final tag. Passing headless tests is not evidence of native-terminal

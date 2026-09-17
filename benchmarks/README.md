@@ -23,103 +23,33 @@ reconstructed-content validation. It does not include provider latency, operatin
 writes, or terminal rendering. The current decision evidence is recorded in
 `benchmarks/rpc_delta_coalescing_evidence.md`.
 
-Run the complete-history hydration scenario:
-
-```bash
-uv run python -m benchmarks.tui_long_session
-uv run python -m benchmarks.tui_long_session --messages 5000 --page-size 100 --output before.json
-```
-
-The scenario creates a temporary JSONL session, reads every production history page,
-converts and mounts the complete transcript through the Textual hydration path, streams
-an assistant response, and scrolls while a managed CPU-active shell process runs. It
-reports JSON with page-read, conversion, complete-mount, first-wheel response, stream,
-final scroll-state, and process-cleanup measurements. The wheel metric dispatches through Textual's
-screen event path and waits for the resulting viewport and display update without using
-`Pilot.pause()`, whose test-only full-widget drain would inflate long-transcript timings.
-`first_wheel_up_ms` preserves the cold response sample, while `wheel_up_ms` records up to 20
-consecutive production-style responses so periodic compositor-map rebuilds remain visible.
-`wheel_up_complete_arrangement_count` counts whole-tree compositor arrangements across those
-responses. Textual arranges only visible widgets on its scroll fast path, so a non-zero count means
-scrolling re-lays out every mounted widget — latency that grows with session length. Unlike the
-timings it is machine-independent, so it is asserted directly. After
-those measurements it runs a dedicated
-paged-history prepend fixture, reporting whether the probe ran plus suppressed and escaped
-display-update counts. Row-coverage fields compare persisted messages
-with represented row IDs, while `hydrated_entry_count`, `mounted_widget_count`, and
-`persisted_rows_per_widget` expose the reduction from logical process grouping. The fixture includes
-repeated process polls so a regression to one widget per persisted row is visible. With no `--messages` argument it
-runs both the 2,000- and 5,000-message scenarios; repeat `--messages` to choose a
-different suite.
-
-This benchmark measures the chosen `/resume` tradeoff: all structural rows are read and retained up
-front, so conversion and mount time scale with session length, while scrolling should respond without
-requesting or mounting another durable page. Text and arguments remain preview-bounded during that
-initial phase; exact persisted output is an interactive, on-demand path and is intentionally outside
-the cold-mount timing.
-
-The CPU worker runs until it is cancelled immediately after the scroll measurement,
-with a 60-second safety timeout. Streaming metrics therefore run without its load.
-
 ## Rust TUI acceptance (#470)
 
 The renderer decision and the measurements that could not run are recorded in
 `benchmarks/rust_tui_acceptance_evidence.md`. Refresh the in-process transcript snapshot below when
 repeating that gate. Do not treat Textual-only input-latency numbers as a Rust comparison.
 
-## Rust and Textual end-to-end TUI comparison
+## Rust TUI end-to-end and interaction benchmarks
 
-Build the Rust frontend, then run the same source-checkout CLI and deterministic fake-provider
-prompt through each production renderer:
+Build the Rust frontend, then run the source CLI through a real POSIX PTY with a deterministic
+fake-provider prompt:
 
 ```bash
-mkdir -p profiles
 cargo +1.85.0 build --release -p wisp-tui
 uv run python -m benchmarks.rust_tui_e2e \
   --rust-binary "$PWD/target/release/wisp-tui" \
-  --runs 3 --prompt-words 64 \
-  --output profiles/rust-tui-e2e.json
-```
-
-The harness alternates renderer order and records launch-to-ready, prompt echo, first response,
-complete response, settled composer, total runtime, emitted terminal bytes, and direct child
-resource observations. The Rust condition includes the Python launcher, JSONL-RPC backend and
-production event coalescer, pipe transport, Rust event admission, and Ratatui terminal writes. The
-Textual condition includes the same launcher and provider through the maintained Python frontend.
-Every run checks response sentinels, a clean exit, and restoration of terminal settings.
-The initial matched baseline and its interpretation are recorded in
-`benchmarks/rust_tui_e2e_evidence.md`.
-
-Startup timing includes the one-column resize used to request a complete post-hydration frame from
-each differential renderer. "First response" is when the complete fake-provider response-prefix and
-opening sentinel become observable in PTY output; it is not a one-byte time-to-first-token measure.
-
-The visible-response timestamps are PTY-output proxies. They do not include a real terminal
-emulator's parsing, compositing, or display latency. On platforms where a launcher creates child
-processes, `wait4` resource usage for the directly observed process is not a whole-process-tree RSS
-measurement. Compare timings only on the same machine and build, keep individual samples with the
-summary, and do not add machine-specific timing thresholds to CI.
-
-For sustained input responsiveness and process-tree observations, run the paired interaction
-scenario after building the Rust frontend:
-
-```bash
+  --runs 3 --output profiles/rust-tui-e2e.json
 uv run python -m benchmarks.rust_tui_interaction \
   --rust-binary "$PWD/target/release/wisp-tui" \
   --runs 3 --history-messages 0,10000 \
   --output profiles/rust-tui-interaction.json
 ```
 
-This scenario seeds disposable JSONL history before timing, then sends unique composer probes while
-idle and during a paced fake-provider response through each real source-CLI frontend. It samples the
-live launcher, frontend, and backend process tree for CPU and simultaneous RSS. Process sampling can
-miss short-lived children and peaks between observations; report it as observed process-tree usage,
-not exact total resource consumption. Input-to-visible-marker timings also stop at PTY output, not a
-terminal emulator's displayed frame. PageUp/PageDown timing records the next PTY output while the
-response continues; concurrent stream paint can satisfy it, so it does not prove a viewport change
-or isolate navigation work. Keep all raw samples and compare only matched workload and platform
-conditions. The fixture, limits, and local baseline are recorded in
-`benchmarks/rust_tui_interaction_evidence.md`.
+These scripts measure PTY-output timing, terminal restoration, and process-tree resource samples.
+PTY output is a paint proxy rather than a display-photon measurement. Samples are comparable only
+with the same machine, build, and workload. The historical Rust/Textual comparisons remain in
+`benchmarks/rust_tui_e2e_evidence.md` and `benchmarks/rust_tui_interaction_evidence.md`; their
+Textual runners were retired with the frontend.
 
 ## Rust TUI saved-history startup
 
@@ -194,251 +124,12 @@ comparison is available. Use Linux
 `perf record -g -- target/release/examples/transcript_benchmark ...` for equivalent native sampling. Raw JSON and profiles stay under ignored `profiles/`; commit only compact numeric
 evidence and factual profiler conclusions. See `benchmarks/rust_tui_transcript_evidence.md`.
 
-## TUI Streaming Hotpaths
+## Historical Textual benchmark evidence
 
-Measure the real Rich Markdown stream path at the production first-page size, the production
-mounted-history window, and a larger retained-history pressure case:
-
-```bash
-mkdir -p profiles
-uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
-  --output profiles/tui-stream-hotpaths.json
-```
-
-The default matrix retains exactly 60, 75, and 300 converted history entries. The production
-window bounds mounted history while process observations may collapse several persisted rows into
-one card. Larger conditions retain additional entries to isolate retained-history pressure from
-mounted-widget growth. Each sample starts the same command lifecycle that keeps Wisp's 80 ms
-working indicator at the transcript tail, mounts three concurrent pending tool cards, and streams
-100 chunks at 20 ms intervals. Use `--pending-tool-cards 0` to compare with older captures that did
-not include timer pressure. The benchmark rotates condition order between runs and reports
-individual samples plus per-condition medians. `event_loop_delay` comes from a separate 10 ms
-absolute-deadline heartbeat. `layout_passes` wraps Textual's private `_refresh_layout` seam and
-`compositor_renders` wraps `_compositor_refresh` only during the streaming phase. These timings
-may overlap and must not be added together.
-
-Capture a profile for one unambiguous streaming condition without import, fixture-construction,
-or initial-history-render noise:
-
-```bash
-uv run python -m benchmarks.tui_stream_hotpaths --retained-history 300 --runs 1 \
-  --profile-output profiles/tui-stream-300.prof
-uv run python -m pstats profiles/tui-stream-300.prof
-```
-
-`--mounted-history` remains accepted as a compatibility alias for `--retained-history`.
-
-Isolate stable-paragraph wrapping from source preparation and height measurement:
-
-```bash
-uv run python -m benchmarks.tui_markdown_blocks --runs 3 --updates 100 \
-  --output profiles/tui-markdown-blocks.json
-```
-
-This microbenchmark alternates the new paragraph cache with Rich's uncached paragraph element.
-Both conditions keep the same incremental parser, code-fence cache, and one-widget visual.
-It explicitly measures every update instead of relying on stream pacing, reports paragraph-wrap
-counts, and includes an open code fence as a negative control. It is not a terminal or input-latency
-measurement. See [Python TUI responsiveness evidence](./tui_responsiveness_evidence.md) for the
-initial results and remaining limits.
-
-Compare production Rich Markdown streaming with the literal-text floor through the same Textual
-controller, transcript, pacing, and follow behavior:
-
-```bash
-uv run python -m benchmarks.tui_stream_renderers --messages 2000 --runs 3
-```
-
-The harness rotates mode order between runs and restores its temporary plain-render patch after
-each scenario.
-
-The private Textual method patches are installed and restored inside the benchmark process. The
-production TUI accepts an optional synchronous diagnostics sink, but the normal app supplies none,
-retains no samples, and performs no diagnostic I/O. Samples contain counts, durations, sizes, and
-success flags only—never Markdown source, prompts, tool payloads, paths, credentials, or session
-identifiers. Sink failures are isolated from rendering.
-
-In addition to paced wall time, each sample reports `stream_cpu_ms`, which uses
-process CPU time to exclude intentional sleeps without pretending CPU cost is a latency metric.
-`layout_requests` attributes `layout=True` refresh requests by concrete widget class, while
-`layout_passes_per_stream_update` shows whether paced writes trigger additional settlement layouts.
-`content_height_calls` attributes Textual height measurements by concrete widget class.
-`markdown_source_rebuild_count` counts successful source-to-renderable builds separately from Rich
-visual renders. `markdown_source_chars_processed` sums the raw source slices parsed and
-sanitized by those builds. Stable completed Markdown blocks are represented by retained tokens, so
-this total exposes whether the mutable tail remains bounded instead of charging the complete growing
-document on every drain; compare it only with identical streamed content.
-`markdown_renders` splits visual renders between the mutable streaming widget (`active`) and
-`StreamMessage` widgets mounted before streaming (`settled`). `markdown_drains` measures the
-coalesced source-to-renderable preparation already used by production pacing; it excludes the
-subsequent visual measurement, layout, and paint. `display_updates` counts
-attempted `LayoutUpdate`, `ChopsUpdate`, and other display-boundary calls. Chop-span totals separate
-input, terminal-emitted, and exact duplicate spans suppressed by `_DisplayedFrame`.
-`display_frame_fail_open_count` records partial updates safely passed through without exact-cell
-suppression because the cache or update shape was unavailable, cursor movement disabled comparison,
-or control segments could have side effects. History-prepend suppression and escaped-update counts
-distinguish hidden intermediate compositor work from a paint attempted while prepend state was still
-unsettled. A zero
-settled Markdown count is valid when Textual reuses prior measurements during the measured phase.
-
-The same harness now also reports a privacy-safe terminal-write model for each streamed frame.
-`terminal_write_frames`, `terminal_payload_bytes`, `terminal_write_count`, and
-`terminal_writes_per_displayed_frame` describe how many driver writes one logical `_display` call
-would produce after `_DisplayedFrame` filtering. `posix_write_count` is the Unix model (one write
-per payload); `windows_chunk_count` is derived from Textual's 8,192-character Windows split. Headless
-`run_test()` never enables CSI 2026, so `sync_available_frame_count` and
-`observed_driver_frame_count` stay at zero unless a live driver is wrapped. Its terminal payload
-model is rendered only after stream CPU, profiler, wall-clock, and heartbeat timing stops, so this
-measurement-only pass does not inflate the production hotpath distributions. Those fields are
-attribution evidence for #443, not a reason to emit synchronized-output sequences from Wisp.
-Compare them only on the same machine and treat them as before/after evidence for a later
-prototype, not as portable CI limits.
-
-## TUI Live Terminal Frames
-
-Exercise the same Wisp display boundary through a real terminal driver instead of the headless
-write model:
-
-```bash
-uv run python -m benchmarks.tui_terminal_frames --mode paired --runs 3 \
-  --output profiles/tui-terminal-frames-paired.json
-
-uv run python -m benchmarks.tui_terminal_frames --mode paired --runs 3 \
-  --disable-synchronized-output \
-  --output profiles/tui-terminal-frames-paired-disabled.json
-```
-
-Paired mode is POSIX-only. It launches each workload under a fixed-size pseudo-terminal, waits for
-Textual's real `CSI ? 2026 $ p` capability query, and rotates two modes between runs. The unsupported
-mode leaves the query unanswered; the supported mode returns the standard
-`CSI ? 2026 ; 1 $ y` report. It never assigns Textual's private capability flag directly. A control
-pipe starts fixture setup only after negotiation, while child results use a separate file so terminal
-bytes never enter report JSON.
-
-Use native mode in each representative emulator to confirm capability detection and observe visual
-flicker directly:
-
-```bash
-uv run python -m benchmarks.tui_terminal_frames --mode native --runs 3 \
-  --messages 20 --retained-history 10 --stream-chunks 12 \
-  --stream-interval-seconds 0.03 --width 100 --height 24 \
-  --pending-tool-cards 2 \
-  --emulator-label "Apple Terminal 2.15 / macOS 26.5.2 / direct" \
-  --output profiles/tui-terminal-frames-apple-terminal.json
-```
-
-Native mode requires an interactive terminal and lets that emulator answer Textual's query. It waits
-until support is detected or `--negotiation-timeout-seconds` expires before collecting frames. Reports
-contain only environment metadata, display/cache counts, payload sizes, write/flush counts,
-frame-level synchronization balance, coarse out-of-band classes, and process-wide synchronization
-counts from startup through restored shutdown. The observer remains attached until Textual restores
-the terminal. Paired mode independently counts the raw PTY stream and rejects a sample if raw and
-diagnostic begin/end, balance, or maximum-depth results disagree. The PTY reader keeps only a short
-control-sequence tail and discards terminal payload bytes.
-
-Before each native run, resize the usable terminal or multiplexer pane to exactly 100 columns by 24
-rows. Native mode validates the real TTY dimensions against `--width` and `--height` and aborts rather
-than recording a report with a misleading configured viewport. Keep the explicit workload arguments
-above identical in every environment. Include the emulator version, host OS, and `direct` or the
-multiplexer name and version in `--emulator-label`; for tmux, include both tmux and its host emulator.
-
-Retain one row per sample when transcribing evidence. Every sample must complete its source and include
-at least one full layout and one partial update. On a supporting terminal, every observed driver frame
-must have one ordered synchronization pair, no unbalanced frame, and no payload write outside
-synchronization. Process-wide begin/end totals must balance with a maximum depth of one. On an
-unsupported terminal, capability detection and synchronization-pair counts must remain zero. A mixed
-capability result across the three runs is a failure, not an aggregate pass. Repeat native mode with
-`--disable-synchronized-output`; every frame and process synchronization count must then remain zero,
-even when the emulator reports support.
-
-Observe the cold full-layout frame and subsequent streaming updates separately from those automated
-counts. Record whether any intermediate frame or residual whole-screen flicker was visible, then verify
-that the alternate screen, cursor, keyboard input, and shell prompt are restored after the command.
-Raw reports under `profiles/` remain machine-local and ignored; commit only privacy-safe numeric tables
-and factual manual observations.
-
-Counts demonstrate whether intermediate writes are exposed; they do not by themselves prove a
-perceptual flicker improvement. Compare default and disabled native runs on the same machine, record
-the emulator version and multiplexer, and keep manual observations separate from automated framing
-evidence. Windows does not use the POSIX paired harness; if Windows Terminal is unavailable, record
-that limitation and make no Windows compatibility claim.
-
-See `benchmarks/tui_terminal_frames_evidence.md` for the current automated table, manual emulator
-matrix, and the decision gate for #443.
-
-## TUI Interactive Input Latency
-
-Measure the interval from Textual receiving an interactive event through its handler, queued
-framework work, and the first subsequently emitted terminal frame, under both idle and sustained
-assistant-stream conditions:
-
-```bash
-uv run python -m benchmarks.tui_input_latency --runs 5 \
-  --output profiles/tui-input-latency.json
-```
-
-The scenario covers typing, cursor movement, PageUp and wheel navigation, active-run submission,
-approval selection, and cancellation. It reports separate `handler`, `queued`, `display`, and `total`
-distributions for each input category and condition. Every measured gesture waits for its own
-terminal-emitted diagnostic before the next gesture is dispatched, so opposite cursor movements
-cannot cancel before either becomes visible. PageUp and wheel gestures each begin at the transcript
-tail and are independently returned to the tail after measurement. The benchmark alternates
-idle/streaming order between runs to reduce order bias. It uses the production
-`TextualTui.on_event`, Markdown stream controller, transcript, decision panel, and display boundary;
-it does not use a synthetic latency threshold. `stream_chunks` is the minimum workload for each
-streaming run; the producer continues at the configured interval until the input exercise has also
-finished.
-
-`gesture_repetitions` defaults to 5 and is configurable with `--gesture-repetitions`. With the
-default five runs, each idle and streaming condition therefore contains 50 cursor samples and 25
-samples each for PageUp navigation and wheel navigation, keeping nearest-rank p95 values from being
-the single worst observation. The benchmark aborts if any scripted category produces a missing or
-duplicate diagnostic, so invalid event accounting cannot silently enter an evidence report.
-
-Each streaming run also reports total streaming-phase and final-flush time, produced chunks,
-expected and rendered source lengths, Markdown writes, exact source completeness, whether every
-PageUp and wheel gesture remained parked until its explicit return to the tail, and the final
-follow/tail state. These fields keep responsiveness evidence tied to stream progress and correctness
-without turning machine-specific timings into CI limits.
-
-For before/after evidence, run an identical benchmark-only harness in temporary worktrees rooted at
-the two runtime commits. If the harness was added after the baseline, apply the same benchmark-only
-commit to both worktrees before measuring. Capture both the default 20 ms stream interval and a 5 ms
-stress interval, then run the independent fixed-workload hotpath benchmark:
-
-```bash
-uv run python -m benchmarks.tui_input_latency --runs 5 \
-  --stream-interval-seconds 0.02 --output profiles/tui-input-default.json
-uv run python -m benchmarks.tui_input_latency --runs 5 \
-  --stream-interval-seconds 0.005 --output profiles/tui-input-stress.json
-uv run python -m benchmarks.tui_stream_hotpaths --runs 5 \
-  --output profiles/tui-stream-hotpaths.json
-```
-
-Report the exact runtime and harness commits, environment metadata, individual samples, p50/p95
-latency distributions, and correctness flags. Treat a result as evidence only when the known
-active-stream latency gap improves consistently without a systematic completion regression.
-
-Input diagnostics are opt-in and privacy-safe: samples contain only a coarse event category,
-durations, and display-update kind. They never retain key values, pasted text, prompt content,
-coordinates, paths, tool payloads, or session identifiers. Production diagnostics permit multiple
-input events to settle against the same first subsequent frame, which reflects what the terminal can
-actually make visible; this benchmark deliberately serializes its measured gestures so every sample
-has a distinct settlement boundary. Machine-specific values are evidence for same-environment
-before/after comparisons, not portable CI limits.
-
-Treat JSON and profile files as machine-local evidence. Compare timings only on the same machine,
-Python/Textual versions, viewport, and arguments, and report individual samples alongside medians
-rather than promoting one run to a portable threshold. An attempted update is a call into the app's
-display boundary; an emitted update still contains terminal spans after filtering. Counts provide
-attribution evidence, not portable performance thresholds.
-
-Compare absolute timings only on the same machine. `warm_newest_page_read_ms` and
-`older_page_read_ms` measure cache-backed paging after the cold initial read.
-`mounted_widget_counts` remains bounded by the 60-entry history window (plus the
-session marker), while `retained_entry_counts` remains bounded by the 1,200-entry
-history retention limit. This intentionally executes a local shell command through
-`ProcessSupervisor`; it uses a temporary directory and is cancelled before exit.
+The Textual-only benchmark runners were removed when that frontend was retired. Their recorded
+results remain as dated evidence in `tui_responsiveness_evidence.md`,
+`tui_terminal_frames_evidence.md`, and other historical reports; the commands inside those reports
+are not runnable against the current source tree.
 
 ## Managed Process Output
 
@@ -582,22 +273,6 @@ uv run python -m benchmarks.session_loading --entries 2000,10000,50000 --iterati
 ```
 
 Session generation is intentionally outside the reported measurements.
-
-## Diff Generation
-
-Measure production structured-diff generation for localized edits, replacements, repeated lines,
-and long lines:
-
-```bash
-uv run python -m benchmarks.diff_generation
-uv run python -m benchmarks.diff_generation --line-counts 1000,3500,10000 --track-memory
-```
-
-Inputs refused by the production event-loop safety guard are reported with `guarded: true` and no
-retained rows. This keeps the guard cost visible without misrepresenting it as diff computation.
-For ordinary workloads, `configured_size` selects the line count; for `long_line`, it selects the
-line's character length. Every sample separately reports its actual `line_count` and
-`longest_line_chars`.
 
 ## CPU Profiles
 

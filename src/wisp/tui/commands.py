@@ -46,10 +46,7 @@ class TuiSlashCommandName(StrEnum):
 # entirely, which means "leave whatever effort is already configured
 # untouched." No provider's real effort tier is ever this bare dash
 # (confirmed against catalog.toml), so it can't collide with a genuine tier
-# string. Produced by widgets.ModelPicker, consumed by
-# TuiShell._handle_model_command -- lives here (imported by both, no
-# renderer-specific dependency) rather than in the Textual-only widgets
-# module, since TuiShell must stay renderer-agnostic.
+# string. TuiShell consumes it while the Rust model picker emits it.
 MODEL_COMMAND_CLEAR_EFFORT_TOKEN = "-"
 
 
@@ -116,7 +113,7 @@ class TuiCommandCatalog:
         return self._registry.get(identifier)
 
     def with_descriptors(self, *descriptors: CommandDescriptor) -> TuiCommandCatalog:
-        """Return a catalog extended with Textual-local command metadata."""
+        """Return a catalog extended with client-local command metadata."""
 
         return TuiCommandCatalog((*self.descriptors, *descriptors))
 
@@ -163,16 +160,14 @@ DEFAULT_TUI_COMMAND_CATALOG = TuiCommandCatalog(
     )
 )
 
-TEXTUAL_LOCAL_COMMAND_DESCRIPTORS = (
-    CommandDescriptor(
-        name="theme",
-        title="Theme",
-        description="Preview or choose a Wisp color theme",
-        category="configuration",
-        arguments=(CommandArgument("name", "Curated theme name; use /theme to browse"),),
-        accepts_arguments=True,
-        order=58,
-    ),
+THEME_COMMAND_DESCRIPTOR = CommandDescriptor(
+    name="theme",
+    title="Theme",
+    description="Preview or choose a Wisp color theme",
+    category="configuration",
+    arguments=(CommandArgument("name", "Curated theme name; use /theme to browse"),),
+    accepts_arguments=True,
+    order=58,
 )
 
 

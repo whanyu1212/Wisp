@@ -14,7 +14,6 @@ import anyio
 from rich.console import Console
 
 from wisp.rpc import JsonlSubprocessRpcTransport, RpcController
-from wisp.tools.context import ToolContext
 from wisp.update_check import check_for_update
 
 from . import launch as _launch
@@ -26,7 +25,6 @@ from .live import LiveFullscreenTui
 from .rendering import TuiRendererKind, create_tui_renderer
 from .shell import PromptReader, TuiController, TuiShell, _default_prompt_reader
 from .state import TuiExitReason
-from .textual_app import create_textual_tui
 
 # Compatibility aliases for callers/tests that import private helpers from wisp.tui.app.
 _stdin_is_interactive = _launch._stdin_is_interactive
@@ -55,7 +53,6 @@ _view_status_for_status = _state._view_status_for_status
 
 async def _run_tui_cleanup(
     *,
-    textual_tui: object | None,
     live_tui: LiveFullscreenTui | None,
     controller: TuiController | None,
 ) -> None:
@@ -63,11 +60,11 @@ async def _run_tui_cleanup(
 
     first_error: BaseException | None = None
     with anyio.CancelScope(shield=True):
-        for resource in (textual_tui, live_tui, controller):
+        for resource in (live_tui, controller):
             if resource is None:
                 continue
             try:
-                await resource.close()  # type: ignore[attr-defined]
+                await resource.close()
             except BaseException as exc:
                 if first_error is None:
                     first_error = exc
@@ -97,7 +94,6 @@ async def run_tui(
     selected_console = console or Console()
     selected_controller = controller
     owns_controller = selected_controller is None
-    textual_tui = None
     live_tui: LiveFullscreenTui | None = None
     exit_reason = TuiExitReason.exited
     try:
@@ -114,29 +110,7 @@ async def run_tui(
                 raise
 
         selected_prompt_reader = prompt_reader or _default_prompt_reader
-        # An injected prompt_reader means the caller is driving input themselves
-        # (scripted/headless embeds and tests). The Textual app seizes the terminal
-        # on launch, so only stand it up when no reader was supplied; otherwise fall
-        # back to a line renderer and consume the injected reader, mirroring how the
-        # fullscreen path declines to start the live UI when a reader is provided.
-        if options.renderer is TuiRendererKind.textual and prompt_reader is None:
-            # Hand the picker the policy this process already resolved rather than
-            # letting it re-derive one. `options.config` reflects the `--auth-file`
-            # override and the parent's trust decision; a fresh resolution inside the
-            # app would see neither and could leave the real credential file listable.
-            # `from_config` also guarantees `auth_path` is in the returned globs.
-            textual_tui, selected_renderer = create_textual_tui(
-                protected_paths=ToolContext.from_config(options.config).protected_paths,
-                synchronized_output=options.synchronized_output,
-            )
-            selected_prompt_reader = textual_tui.read_prompt
-        else:
-            line_console_renderer = (
-                TuiRendererKind.line
-                if options.renderer is TuiRendererKind.textual
-                else options.renderer
-            )
-            selected_renderer = create_tui_renderer(line_console_renderer, selected_console)
+        selected_renderer = create_tui_renderer(options.renderer, selected_console)
         if (
             options.renderer is TuiRendererKind.fullscreen
             and prompt_reader is None
@@ -161,15 +135,11 @@ async def run_tui(
                 enabled=options.config.update_check_enabled,
             ),
         )
-        if textual_tui is not None:
-            exit_reason = await textual_tui.run_shell(shell.run)
-        else:
-            exit_reason = await shell.run()
+        exit_reason = await shell.run()
     finally:
         active_error = sys.exception()
         cleanup = asyncio.create_task(
             _run_tui_cleanup(
-                textual_tui=textual_tui,
                 live_tui=live_tui,
                 controller=selected_controller if owns_controller else None,
             )

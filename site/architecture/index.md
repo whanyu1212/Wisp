@@ -11,7 +11,7 @@ only the live controls its transport can support. See
 ```mermaid
 flowchart LR
   CLI[CLI] --> Host
-  Textual[Textual TUI] --> Host
+  Fullscreen[Python fullscreen TUI] --> Host
   Rust[Rust TUI] --> Host
   RPC[JSONL RPC] --> Host
   SDK[SDK] --> Host
@@ -37,44 +37,26 @@ request-boundary handshake, and source navigation.
 
 ## Terminal frontend boundary
 
-In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
-on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
-other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
-which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
-macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
-failures report an error; they never silently switch frontends.
+`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
+installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
+macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
+prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
+`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
+auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
+launch/runtime failures report an error; they never silently switch frontends.
 
-Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
-fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
-Both clients use the same Python runtime, permissions, providers, and saved sessions.
+Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
+fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
+and saved sessions.
 
 See the [Rust terminal frontend boundary](./rust-tui-boundary) for the RC2 decision and ownership.
 
 ## Resumed transcript hydration
 
-The Textual TUI completely hydrates the selected session's active path after an explicit interactive
-`/resume`. Rust startup and session selection also load the entire saved active path, projecting it once
-in chronological order; transport and rendering caches remain bounded. This is an intentional UX
-tradeoff: a long session takes longer to select, but upward scrolling no longer crosses asynchronous
-page-mount boundaries that can change scroll geometry underneath the reader.
-
-Complete does not mean one top-level widget per JSONL record. The RPC layer returns every message and
-every nested tool-call identity, with bounded text and argument previews. The TUI verifies that every
-active-path message row survives conversion, then groups request/result pairs into tool cards and all
-observations of one managed process into a single lifecycle card. System and empty assistant rows get
-explicit transcript representations instead of disappearing. Mounting occurs in responsive batches
-behind a progress overlay and the replacement becomes visible only after layout settles.
-
-Process cards retain the IDs and bounded one-line previews of every represented update. Expansion
-renders only a fixed-size timeline window; selecting an update performs an exact, active-path
-`get_messages` lookup for that row. This avoids eagerly duplicating potentially large stdout bodies in
-both the session snapshot and widget tree. The costs are an O(rows) metadata read, conversion, and
-retention during `/resume`, plus detail-fetch latency on the first inspection of an output row. Exact
-lookup bypasses frontend preview limits but preserves the persisted tool-level `truncated` marker,
-because bytes discarded before JSONL persistence cannot be reconstructed.
-
-Session identity and row identity are validated again when an exact-detail response arrives. Pending
-lookups are invalidated on `/new` or another `/resume`, so a late response cannot populate a card from
-the wrong session. Pagination cursor repetition, duplicate rows, omitted row representations, and
-mount failures abort the committed hydration rather than exposing a partial transcript.
+The Rust TUI loads the selected session's entire saved active path at startup and after interactive
+`/resume`, projecting it once in chronological order; transport and rendering caches remain bounded.
+This is an intentional UX tradeoff: long sessions take more time and memory to load, but users can
+scroll through the saved conversation without a history cap. The RPC layer pages through every saved
+message in chronological order. Rust builds its retained transcript after all pages arrive; rendering
+caches and tool previews remain bounded. Exact persisted tool output is fetched on demand when a
+preview was clipped. The prompt-toolkit fullscreen renderer retains its separate paging behavior.

@@ -111,24 +111,25 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 
 | Mode | Command | Output | Best for |
 |------|---------|--------|----------|
-| **TUI** | `wisp` (or `wisp tui`) | Fullscreen terminal UI | RC2 prefers installed Rust; Textual remains available. |
+| **TUI** | `wisp` (or `wisp tui`) | Fullscreen terminal UI | Rust on native installs; prompt-toolkit fullscreen otherwise. |
 | **Print** | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and scripts |
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
-In 0.2.0rc2, `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: prefer the Rust frontend
-on macOS/Linux when the active installation declares its native binary, otherwise use Textual.
-Native wheels cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and
-other platforms keep Textual. Explicit CLI selection takes precedence over `WISP_TUI_RENDERER`,
-which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in auto mode on
-macOS/Linux for source development. Missing or damaged declared binaries and Rust launch/runtime
-failures report an error; they never silently switch frontends.
+`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
+installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
+macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
+prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
+`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
+auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
+launch/runtime failures report an error; they never silently switch frontends.
 
-Use `wisp tui --renderer textual` or `WISP_TUI_RENDERER=textual` for the maintained Python
-fallback. Textual keeps compatibility and critical fixes; new frontend work prioritizes Rust.
-Both clients use the same Python runtime, permissions, providers, and saved sessions.
+Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
+fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
+and saved sessions.
 
-This is the RC2 release policy; stable 0.1.0 and published RC1 retain their existing defaults.
+This describes the current source tree. Published releases retain the frontend behavior with which
+they shipped.
 See the [TUI guide](https://whanyu1212.github.io/Wisp/guide/tui).
 
 The Rust TUI shows context usage in its header. Use `/context` for budget, usage, cost,

@@ -29,4 +29,4 @@ code hot reload, or package management workflow. Project trust gates are necessa
 themselves sufficient for executable extension loading.
 
 Do not describe static factory support as dynamic plugin loading. Do not place extension execution
-or policy in the Textual client.
+or policy in a terminal client.

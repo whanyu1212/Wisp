@@ -57,7 +57,7 @@ def test_default_frontend_follows_installed_distribution(
     monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
     monkeypatch.delenv("WISP_TUI_RENDERER", raising=False)
     # Discovery uses ownership metadata, even if the declared executable is missing.
-    # A damaged native installation must reach Rust launch validation, not Textual.
+    # A damaged native installation must reach Rust launch validation, not Python fullscreen.
     binary = SimpleNamespace(name="wisp-tui", locate=lambda: tmp_path / "missing")
     monkeypatch.setattr(
         rust_binary.metadata,
@@ -66,12 +66,14 @@ def test_default_frontend_follows_installed_distribution(
     )
     result = CliRunner().invoke(app, arguments, env=_cli_env())
     assert result.exit_code == 0, result.output
-    expected = TuiFrontendKind.rust if native and platform != "win32" else TuiFrontendKind.textual
+    expected = (
+        TuiFrontendKind.rust if native and platform != "win32" else TuiFrontendKind.fullscreen
+    )
     assert launched["renderer"] is expected
 
 
 @pytest.mark.parametrize("arguments", [["tui"], ["--mode", "tui"]])
-@pytest.mark.parametrize("selection", ["textual", "rust", "line"])
+@pytest.mark.parametrize("selection", ["fullscreen", "rust", "line"])
 def test_frontend_environment_choice_precedes_automatic_default(
     arguments: list[str],
     selection: str,
@@ -91,6 +93,42 @@ def test_frontend_environment_choice_precedes_automatic_default(
     [
         ["tui", "--renderer", "textual"],
         ["--mode", "tui", "--tui-renderer", "textual"],
+    ],
+)
+def test_removed_textual_renderer_is_rejected(arguments: list[str]) -> None:
+    result = CliRunner().invoke(app, arguments, env=_cli_env())
+
+    assert result.exit_code != 0
+    assert "textual" in result.output
+
+
+def test_removed_textual_environment_selection_is_rejected() -> None:
+    result = CliRunner().invoke(
+        app,
+        ["tui"],
+        env={**_cli_env(), "WISP_TUI_RENDERER": "textual"},
+    )
+
+    assert result.exit_code == 1
+    assert "WISP_TUI_RENDERER must be one of: auto, line, fullscreen, rust" in result.output
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [["tui", "--no-synchronized-output"], ["--mode", "tui", "--no-synchronized-output"]],
+)
+def test_removed_textual_only_option_is_rejected(arguments: list[str]) -> None:
+    result = CliRunner().invoke(app, arguments, env=_cli_env())
+
+    assert result.exit_code != 0
+    assert "No such option: --no-synchronized-output" in result.output
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["tui", "--renderer", "fullscreen"],
+        ["--mode", "tui", "--tui-renderer", "fullscreen"],
         ["tui", "--line"],
     ],
 )
@@ -109,7 +147,7 @@ def test_explicit_frontend_precedes_environment_and_native_override(
     )
     assert result.exit_code == 0, result.output
     assert launched["renderer"] is (
-        TuiFrontendKind.line if "--line" in arguments else TuiFrontendKind.textual
+        TuiFrontendKind.line if "--line" in arguments else TuiFrontendKind.fullscreen
     )
 
 
@@ -134,7 +172,7 @@ def test_automatic_rust_failure_does_not_fall_back(
         monkeypatch.setattr(rust_launcher, "run_rust_tui", lambda _: 23)
     result = CliRunner().invoke(app, ["tui"], env=_cli_env())
     assert result.exit_code == (23 if failure == "exit" else 1)
-    assert "wisp tui --renderer textual" in result.output
+    assert "wisp tui --renderer fullscreen" in result.output
 
 
 def test_bare_interactive_wisp_honors_rust_environment_selection(
@@ -220,12 +258,12 @@ def test_explicit_root_renderer_wins_over_environment(monkeypatch: MonkeyPatch) 
 
     result = CliRunner().invoke(
         app,
-        ["--mode", "tui", "--tui-renderer", "textual"],
+        ["--mode", "tui", "--tui-renderer", "fullscreen"],
         env={**_cli_env(), "WISP_TUI_RENDERER": "rust"},
     )
 
     assert result.exit_code == 0, result.output
-    assert launched["renderer"] is TuiFrontendKind.textual
+    assert launched["renderer"] is TuiFrontendKind.fullscreen
 
 
 def test_tui_line_alias_is_preserved(monkeypatch: MonkeyPatch) -> None:
@@ -381,7 +419,7 @@ def test_missing_environment_binary_is_actionable(
     with pytest.raises(RustTuiLaunchError, match="active Python environment") as raised:
         rust_launcher.resolve_rust_tui_binary()
 
-    assert "--renderer textual" in str(raised.value)
+    assert "--renderer fullscreen" in str(raised.value)
 
 
 def test_windows_error_is_actionable(monkeypatch: MonkeyPatch) -> None:
@@ -390,7 +428,7 @@ def test_windows_error_is_actionable(monkeypatch: MonkeyPatch) -> None:
     with pytest.raises(RustTuiLaunchError, match="macOS and Linux") as raised:
         rust_launcher.resolve_rust_tui_binary()
 
-    assert "wisp tui --renderer textual" in str(raised.value)
+    assert "wisp tui --renderer fullscreen" in str(raised.value)
 
 
 def test_rust_argv_forwards_exact_interpreter_and_opaque_backend_argv(

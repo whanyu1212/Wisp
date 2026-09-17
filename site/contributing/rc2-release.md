@@ -4,6 +4,11 @@ Status: release preparation, September 16, 2026. This PR prepares the candidate;
 tag, publish packages, or remove Textual. Stable remains 0.1.0; the latest published candidate at
 preparation time is 0.2.0rc1.
 
+This is the historical RC2 release checklist. It records the renderer policy and validation work at
+that release; the current frontend policy is documented in the [CLI reference](../reference/cli).
+Textual commands below describe that earlier candidate and are no longer available in current
+development.
+
 ## Renderer decision
 
 The release owner approved an RC trial of Rust as the native-install default, superseding the

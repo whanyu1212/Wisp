@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import anyio
 import pytest
 
 from wisp.tui.theme import PAPER_THEME_NAME, WISP_THEME_NAMES, WISP_THEMES
@@ -194,29 +193,8 @@ def test_invalid_utf8_is_not_overwritten_by_a_save(tmp_path: Path) -> None:
     assert path.read_bytes() == original
 
 
-def test_startup_survives_an_undecodable_preference_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The end-to-end form of the same guarantee, through a real app mount.
-    from wisp.tui.textual_app import TextualTui
-
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    path = theme_preference_path(home_dir=tmp_path)
-    path.parent.mkdir(parents=True)
-    path.write_bytes(b"\xff\xfe\x00garbage")
-
-    async def scenario() -> str:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            return str(app.theme)
-
-    assert anyio.run(scenario) == WISP_THEMES[0].name
-
-
 def test_unknown_theme_is_rejected_when_valid_names_are_supplied(tmp_path: Path) -> None:
-    # Textual registers ~20 built-in themes alongside Wisp's own. Adopting one
-    # would leave transcript role colors and diff variables unresolvable.
+    # Unknown theme names must not be accepted as a Wisp theme preference.
     assert save_theme_preference("dracula", home_dir=tmp_path)
 
     assert load_theme_preference(home_dir=tmp_path) == "dracula"
@@ -225,62 +203,3 @@ def test_unknown_theme_is_rejected_when_valid_names_are_supplied(tmp_path: Path)
 
 def test_wisp_theme_names_covers_every_defined_theme() -> None:
     assert WISP_THEME_NAMES == {theme.name for theme in WISP_THEMES}
-
-
-def test_toggle_uses_paper_and_most_recent_dark_theme(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from wisp.tui.textual_app import TextualTui
-
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-
-    async def scenario() -> tuple[str, str, str, str | None]:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            start = app.theme
-            await pilot.press("ctrl+t")
-            await pilot.pause()
-            switched = app.theme
-            await pilot.press("ctrl+t")
-            await pilot.pause()
-            return start, switched, app.theme, load_theme_preference(home_dir=tmp_path)
-
-    start, switched, returned, persisted = anyio.run(scenario)
-
-    assert start == WISP_THEMES[0].name
-    assert switched == PAPER_THEME_NAME
-    assert returned == start
-    # The last toggle is what persists.
-    assert persisted == start
-
-
-def test_startup_adopts_a_persisted_theme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from wisp.tui.textual_app import TextualTui
-
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    assert save_theme_preference(WISP_THEMES[1].name, home_dir=tmp_path)
-
-    async def scenario() -> str:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            return str(app.theme)
-
-    assert anyio.run(scenario) == WISP_THEMES[1].name
-
-
-def test_startup_ignores_a_persisted_non_wisp_theme(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from wisp.tui.textual_app import TextualTui
-
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    assert save_theme_preference("dracula", home_dir=tmp_path)
-
-    async def scenario() -> str:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            return str(app.theme)
-
-    assert anyio.run(scenario) == WISP_THEMES[0].name

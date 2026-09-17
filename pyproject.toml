@@ -46,7 +46,6 @@ dependencies = [
     "pydantic>=2.13.4",
     "regex>=2026.7.19",
     "rich>=15.0.0",
-    "textual>=8.2.8",
     "typer>=0.26.8",
 ]
 
@@ -90,7 +89,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "tui: headless Textual integration tests",
+    "tui: terminal UI integration tests",
     "process: tests covering process-backed tools or process trees",
     "benchmark: deterministic performance and resource-bound scenarios",
     "slow: intentionally long-running tests outside the other categories",

@@ -1,10 +1,28 @@
-"""Wisp's curated Textual themes and shared presentation variables."""
+"""Curated theme colors shared with the native TUI catalog."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from textual.theme import Theme
+
+@dataclass(frozen=True)
+class ThemePalette:
+    """Named semantic colors serialized into the Rust TUI catalog."""
+
+    name: str
+    primary: str
+    secondary: str
+    accent: str
+    warning: str
+    error: str
+    success: str
+    foreground: str
+    background: str
+    surface: str
+    panel: str
+    dark: bool
+    variables: dict[str, str]
+
 
 # Diff rows are full-width semantic bands with a stronger token-level tint. The
 # foreground must clear WCAG AA against both surfaces; the token band is the
@@ -61,12 +79,12 @@ def _theme_variables(diff_variables: dict[str, str], *, transcript_muted: str) -
 
 @dataclass(frozen=True)
 class WispThemeSpec:
-    """User-facing metadata paired with one registered Textual theme."""
+    """User-facing metadata paired with native semantic colors."""
 
     slug: str
     label: str
     description: str
-    theme: Theme
+    theme: ThemePalette
     terminal_background: bool = False
 
     @property
@@ -78,7 +96,7 @@ class WispThemeSpec:
         return self.theme.dark
 
 
-WISP_THEME_DARK = Theme(
+WISP_THEME_DARK = ThemePalette(
     name="wisp",
     # Pi's restrained blue/teal roles on a more deliberate neutral ladder.
     primary="#81a2be",
@@ -95,7 +113,7 @@ WISP_THEME_DARK = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a0a0a8"),
 )
 
-WISP_THEME_GLASS = Theme(
+WISP_THEME_GLASS = ThemePalette(
     name="wisp-glass",
     # The graphite base is a contrast fallback for semantic calculations and
     # covered surfaces. Glass leaves the main canvas to the terminal so emulator
@@ -118,7 +136,7 @@ WISP_THEME_GLASS = Theme(
     },
 )
 
-WISP_THEME_ORCHID = Theme(
+WISP_THEME_ORCHID = ThemePalette(
     name="wisp-orchid",
     # Catppuccin Macchiato's mauve family, rearranged onto Wisp's elevation order.
     primary="#c6a0f6",
@@ -135,7 +153,7 @@ WISP_THEME_ORCHID = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a5adcb"),
 )
 
-WISP_THEME_EMBER = Theme(
+WISP_THEME_EMBER = ThemePalette(
     name="wisp-ember",
     # OpenCode peach and Flexoki warmth, with brighter semantic text roles.
     primary="#fab283",
@@ -152,7 +170,7 @@ WISP_THEME_EMBER = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a7a29c"),
 )
 
-WISP_THEME_STORM = Theme(
+WISP_THEME_STORM = ThemePalette(
     name="wisp-storm",
     # Tokyo Night's normal-intensity blue (#7aa2f7) clears 4.5:1 against the
     # background but only 4.28:1 against $panel (e.g. JumpToLatest's badge
@@ -171,7 +189,7 @@ WISP_THEME_STORM = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#a9b1d6"),
 )
 
-WISP_THEME_GROVE = Theme(
+WISP_THEME_GROVE = ThemePalette(
     name="wisp-grove",
     # Everforest's green-gray atmosphere with a darker panel for diff readability.
     primary="#8fc9bd",
@@ -187,14 +205,13 @@ WISP_THEME_GROVE = Theme(
     dark=True,
     variables={
         **_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aab3aa"),
-        # Textual's default contrast tints narrowly miss AA on Grove's muted
-        # semantic surfaces, so keep the hues and lift only the text roles.
+        # Grove's muted surfaces need brighter semantic text to clear AA.
         "text-warning": "#ebd4ad",
         "text-error": "#f5bdbe",
     },
 )
 
-WISP_THEME_WAVE = Theme(
+WISP_THEME_WAVE = ThemePalette(
     name="wisp-wave",
     # Kanagawa-inspired ink, crystal blue, violet, and sakura.
     primary="#98b4e6",
@@ -211,7 +228,7 @@ WISP_THEME_WAVE = Theme(
     variables=_theme_variables(_DARK_DIFF_VARIABLES, transcript_muted="#aaa89c"),
 )
 
-WISP_THEME_LIGHT = Theme(
+WISP_THEME_LIGHT = ThemePalette(
     name="wisp-light",
     # Flexoki's warm paper and ink replace the previous cool near-white palette.
     primary="#205ea6",
@@ -228,7 +245,7 @@ WISP_THEME_LIGHT = Theme(
     variables=_theme_variables(_LIGHT_DIFF_VARIABLES, transcript_muted="#575653"),
 )
 
-WISP_THEME_DAWN = Theme(
+WISP_THEME_DAWN = ThemePalette(
     name="wisp-dawn",
     # Rosé Pine Dawn's blush neutrals with strengthened semantic contrast.
     primary="#286983",
@@ -313,6 +330,7 @@ __all__ = [
     "WISP_THEME_STORM",
     "WISP_THEME_WAVE",
     "WISP_THEMES",
+    "ThemePalette",
     "WispThemeSpec",
     "contrast_ratio",
     "relative_luminance",
