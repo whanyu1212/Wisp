@@ -71,7 +71,9 @@ A denial becomes a correlated tool observation through the existing loop. A live
 model could explain the limitation or propose a permitted action, but every later
 invocation must pass the same host checks. Unexpected callback errors propagate
 rather than granting permission. Expected validation and file errors become
-bounded observations.
+bounded observations. The loop reserves `ToolFailure` for recoverable tool errors,
+so a host callback raising that type is wrapped in `RuntimeError` with the original
+exception as its cause. This prevents the outer loop from swallowing a host failure.
 
 This wrapper is synchronous, like the earlier fixture tools. Interactive waiting
 and cancellation during approval belong to chapter 6.

@@ -1,11 +1,19 @@
 """Authorization ordering and changed-request regressions for chapter 5."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from examples.crafting_agents.checkpoint_02 import create_fixture
-from examples.crafting_agents.core import ToolCall, ToolFailure
+from examples.crafting_agents.checkpoint_02 import TOOLS, create_fixture
+from examples.crafting_agents.core import (
+    Message,
+    ScriptedProvider,
+    ScriptStep,
+    ToolCall,
+    ToolFailure,
+    run_agent,
+)
 from examples.crafting_agents.side_effects import ApprovalRequest, ControlledTools, ExecutionPolicy
 
 
@@ -103,9 +111,13 @@ def test_callback_failures_propagate_without_dispatch(
             raise error
 
     tools = ControlledTools(tmp_path, ExecutionPolicy(frozenset({"edit"})), approve, report=report)
-    with pytest.raises(type(error)) as caught:
-        tools.execute(edit())
-    assert caught.value is error
+    provider = ScriptedProvider([ScriptStep(Message("assistant", "", (edit(),)))])
+    with pytest.raises(RuntimeError if isinstance(error, ToolFailure) else type(error)) as caught:
+        asyncio.run(run_agent("fix", provider, TOOLS, tools.execute, report=lambda _: None))
+    if isinstance(error, ToolFailure):
+        assert caught.value.__cause__ is error
+    else:
+        assert caught.value is error
     assert "return a - b" in (tmp_path / "calculator.py").read_text()
 
 

@@ -29,6 +29,25 @@ class ExecutionPolicy:
 # ANCHOR_END: request
 
 
+def _host_callback[T](callback: Callable[[], T]) -> T:
+    """Keep host failures distinct from the loop's recoverable tool-error channel.
+
+    Args:
+        callback (Callable[[], T]): Host-owned approval or reporting operation.
+
+    Returns:
+        T: The callback result.
+
+    Raises:
+        RuntimeError: A callback raises ToolFailure; the original is retained as cause.
+        Exception: Other callback exceptions propagate unchanged.
+    """
+    try:
+        return callback()
+    except ToolFailure as exc:
+        raise RuntimeError("host callback failed") from exc
+
+
 class ControlledTools:
     """Gate the chapter 2 executor; assume a trusted fixture and no concurrent writer."""
 
@@ -71,7 +90,9 @@ class ControlledTools:
                 Denied requests never reach the underlying executor.
 
         Raises:
-            Exception: Approval or reporting callback failures propagate unchanged.
+            RuntimeError: A callback raises ToolFailure, which the loop would otherwise
+                mistake for an ordinary tool observation. The original is the cause.
+            Exception: Other approval or reporting callback failures propagate unchanged.
         """
         try:
             spec = next((tool for tool in TOOLS if tool.name == call.name), None)
@@ -104,16 +125,16 @@ class ControlledTools:
         # External callbacks stay outside conversion of expected boundary failures.
         if name != "read":
             request = ApprovalRequest(call_id, name, arguments, files)
-            self.report(f"approval requested: {call_id} {name}")
-            if not self.approve(request):
+            _host_callback(lambda: self.report(f"approval requested: {call_id} {name}"))
+            if not _host_callback(lambda: self.approve(request)):
                 return self._failure(f"approval_denied: {name}")
-            self.report(f"approval granted: {call_id} {name}")
+            _host_callback(lambda: self.report(f"approval granted: {call_id} {name}"))
             try:
                 if any(self._snapshot(path) != text for path, text in files):
                     raise ToolFailure("stale_input: files changed during approval; request again")
             except ToolFailure as exc:
                 return self._failure(str(exc))
-        self.report(f"dispatch: {call_id} {name}")
+        _host_callback(lambda: self.report(f"dispatch: {call_id} {name}"))
         return self.fixture.execute(ToolCall(call_id, name, dict(arguments)))
 
     # ANCHOR_END: execute
