@@ -2242,8 +2242,17 @@ for line in sys.stdin:
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                     output.clear()
                     phase = "settling"
-            elif phase == "settling" and b"completed prompt did not report" in output:
-                os.write(terminal_fd, b"preserve draft\x1b[1;5H")
+            elif (
+                phase == "settling"
+                and b"completed prompt did not report" in output
+                and b"Ask Wisp anything" in output
+                and b"idle" in output
+            ):
+                os.write(terminal_fd, b"preserve draft")
+                output.clear()
+                phase = "drafting"
+            elif phase == "drafting" and b"preserve draft" in output:
+                os.write(terminal_fd, b"\x1b[1;5H")
                 output.clear()
                 phase = "recovering"
             elif phase == "recovering":
