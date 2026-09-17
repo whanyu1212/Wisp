@@ -599,14 +599,31 @@ impl BackendEvent {
                     "session_path",
                     None,
                 )?;
-                match project_rpc_message_page_with_origins(
-                    array_field(value, &event_type, "messages")?,
+                let source = array_field(value, &event_type, "messages")?;
+                let started = std::time::Instant::now();
+                let projected = project_rpc_message_page_with_origins(
+                    source,
                     bool_field(value, &event_type, "truncated")?,
-                ) {
+                );
+                crate::hydration_profile::record(
+                    "rust.page_projection",
+                    started.elapsed(),
+                    source.len(),
+                );
+                match projected {
                     Ok(page) => Self::MessagesReported {
                         command_id,
                         messages: SessionMessages {
-                            source_messages: array_field(value, &event_type, "messages")?.into(),
+                            source_messages: {
+                                let started = std::time::Instant::now();
+                                let retained = source.into();
+                                crate::hydration_profile::record(
+                                    "rust.page_clone",
+                                    started.elapsed(),
+                                    source.len(),
+                                );
+                                retained
+                            },
                             session,
                             active_leaf_id: optional_exact_string_field(
                                 value,

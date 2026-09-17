@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 
 import anyio
 from anyio.abc import TaskGroup
@@ -45,6 +49,32 @@ type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
 async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
     return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
+
+
+def _record_hydration_profile(stage: str, started: float, count: int) -> None:
+    """Record an opt-in, content-free session read timing for local benchmarks.
+
+    Args:
+        stage (str): Name of the measured handoff stage.
+        started (float): ``perf_counter`` value before the measured work.
+        count (int): Number of messages in the page.
+    """
+    directory = os.environ.get("WISP_HYDRATION_PROFILE_DIR")
+    if directory is None:
+        return
+    record = {
+        "stage": stage,
+        "duration_ms": (time.perf_counter() - started) * 1_000,
+        "count": count,
+        "pid": os.getpid(),
+    }
+    try:
+        with (Path(directory) / f"python-{os.getpid()}.jsonl").open(
+            "a", encoding="utf-8"
+        ) as output:
+            output.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 def start_rpc_messages_command(
@@ -196,6 +226,7 @@ async def run_rpc_messages_command(
     refreshed_entry_count = selected_entry_count
     try:
         with cancel_scope:
+            read_started = time.perf_counter()
             selected_read = session_id is None
             if session_id is None or (
                 selected_session is not None and session_id == selected_session.session_id
@@ -236,6 +267,7 @@ async def run_rpc_messages_command(
                         full_content=full_content,
                     )
                 )
+            _record_hydration_profile("python.page_read", read_started, len(page.messages))
 
             if selected_read and session is not None:
                 refreshed_entry_count, refreshed_history = await _run_abandonable_session_read(
@@ -259,11 +291,15 @@ async def run_rpc_messages_command(
                     next_before_entry_id=page.next_before_entry_id,
                     next_after_entry_id=page.next_after_entry_id,
                 )
+                publish_started = time.perf_counter()
                 _write_messages_page(
                     report,
                     write_event=write_event,
                     forward=after_entry_id is not None,
                     exact=bool(entry_ids),
+                )
+                _record_hydration_profile(
+                    "python.page_publish", publish_started, len(page.messages)
                 )
                 ok = True
         if cancel_scope.cancel_called and error is None:

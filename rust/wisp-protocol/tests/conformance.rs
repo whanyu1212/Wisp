@@ -276,6 +276,23 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         })
     );
 
+    let hydration_older = commands::WispTypedClientRpcCommands::get_messages_hydration_older(
+        "messages-hydration",
+        Some("session-1"),
+        "entry-200",
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        hydration_older,
+        serde_json::json!({
+            "type": "get_messages", "id": "messages-hydration", "session_id": "session-1",
+            "limit": 200, "before_entry_id": "entry-200", "complete_structure": true,
+            "full_content": false, "allow_during_prompt": true
+        })
+    );
+
     let newer =
         commands::WispTypedClientRpcCommands::get_messages_newer("messages-4", None, "entry-75")
             .unwrap()
