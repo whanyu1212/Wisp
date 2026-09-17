@@ -17,7 +17,6 @@ fn connection() -> ConnectionInfo {
     ConnectionInfo {
         backend_version: "test".into(),
         protocol_version: 6,
-        event_schema_version: 37,
     }
 }
 fn active_ui() -> LiveUi {

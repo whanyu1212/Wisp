@@ -8,9 +8,8 @@ use tokio::{
     time::{Duration, timeout},
 };
 use wisp_protocol::{
-    EVENT_SCHEMA_VERSION, HANDSHAKE_FRAME_BYTES, LIVE_RPC_PROTOCOL_VERSION,
-    commands::WispTypedClientRpcCommands, events::WispCurrentLiveEventOutput,
-    handshake_response::RpcHandshakeResponse,
+    HANDSHAKE_FRAME_BYTES, commands::WispTypedClientRpcCommands,
+    events::WispCurrentLiveEventOutput, handshake_response::RpcHandshakeResponse,
 };
 
 use crate::{
@@ -202,7 +201,7 @@ pub(crate) async fn stdout_reader_task<R: AsyncRead + Unpin>(
     };
     let server_limit = response
         .accepted_contract()
-        .map_or(HANDSHAKE_FRAME_BYTES, |contract| contract.3);
+        .map_or(HANDSHAKE_FRAME_BYTES, |contract| contract.2);
     if handshake.send(Ok(response)).is_err() {
         return;
     }
@@ -250,12 +249,6 @@ fn publish_admitted_frame(
 ) -> Result<(), Error> {
     let event = serde_json::from_slice::<WispCurrentLiveEventOutput>(frame)
         .map_err(Error::InvalidProtocolFrame)?;
-    if event.schema_version() != EVENT_SCHEMA_VERSION {
-        return Err(Error::ContractMismatch {
-            protocol: LIVE_RPC_PROTOCOL_VERSION,
-            events: event.schema_version(),
-        });
-    }
     let event = BackendEvent::from_live(&event).map_err(Error::EventProjection)?;
     // The reserved slot remains usable after Receiver::close(). Dropping it here
     // would hide this valid admitted frame from fatal-cleanup diagnostics.
@@ -282,13 +275,13 @@ mod tests {
     };
 
     use super::*;
+    use wisp_protocol::LIVE_RPC_PROTOCOL_VERSION;
 
     fn handshake() -> serde_json::Value {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
             "protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-            "event_schema_version": EVENT_SCHEMA_VERSION,
             "min_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
             "max_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
@@ -302,7 +295,6 @@ mod tests {
     fn event(command_id: &str) -> String {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -384,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn generated_invalid_protocol_cases_release_wire_permits() {
         let mut wrong_schema: serde_json::Value = serde_json::from_str(&event("schema")).unwrap();
-        wrong_schema["schema_version"] = json!(EVENT_SCHEMA_VERSION + 1);
+        wrong_schema["unexpected_field"] = json!(true);
         let cases = [
             ("{".to_string(), 1),
             ("[]".to_string(), 2),

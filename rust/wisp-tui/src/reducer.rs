@@ -5064,7 +5064,6 @@ mod tests {
     fn live_event_projection_uses_validated_wire_fields() {
         let value = serde_json::json!({
             "type": "message.delta",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "turn": 1,
             "role": "assistant",
@@ -5110,7 +5109,6 @@ mod tests {
         ));
         let live = wisp_protocol::events::deserialize(serde_json::json!({
             "type": "rpc.device_code.progress",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-01T00:00:00Z",
             "command_id": "device-1",
             "provider": "openai-codex",
@@ -5672,7 +5670,6 @@ mod tests {
     fn validated_live_tool_result_projects_all_promoted_metadata() {
         let value = serde_json::json!({
             "type": "tool.result", "message_entry_id": null,
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-7",
             "name": "bash",
@@ -6010,7 +6007,6 @@ mod tests {
     fn live_trust_request_projection_preserves_request_identity() {
         let value = serde_json::json!({
             "type": "trust.requested",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "request_id": "trust-7",
             "project_path": "/workspace"

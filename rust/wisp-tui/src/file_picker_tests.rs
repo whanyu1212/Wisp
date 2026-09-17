@@ -49,7 +49,6 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> String {
         &ConnectionInfo {
             backend_version: "test".into(),
             protocol_version: 6,
-            event_schema_version: 37,
         },
     )
     .unwrap();

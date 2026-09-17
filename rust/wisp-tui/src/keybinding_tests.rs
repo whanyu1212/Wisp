@@ -105,7 +105,6 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> String {
         &ConnectionInfo {
             backend_version: "test".into(),
             protocol_version: LIVE_RPC_PROTOCOL_VERSION,
-            event_schema_version: EVENT_SCHEMA_VERSION,
         },
     )
     .unwrap();
