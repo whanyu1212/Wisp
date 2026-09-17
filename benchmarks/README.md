@@ -100,6 +100,27 @@ processes, `wait4` resource usage for the directly observed process is not a who
 measurement. Compare timings only on the same machine and build, keep individual samples with the
 summary, and do not add machine-specific timing thresholds to CI.
 
+For sustained input responsiveness and process-tree observations, run the paired interaction
+scenario after building the Rust frontend:
+
+```bash
+uv run python -m benchmarks.rust_tui_interaction \
+  --rust-binary "$PWD/target/release/wisp-tui" \
+  --runs 3 --history-messages 0,10000 \
+  --output profiles/rust-tui-interaction.json
+```
+
+This scenario seeds disposable JSONL history before timing, then sends unique composer probes while
+idle and during a paced fake-provider response through each real source-CLI frontend. It samples the
+live launcher, frontend, and backend process tree for CPU and simultaneous RSS. Process sampling can
+miss short-lived children and peaks between observations; report it as observed process-tree usage,
+not exact total resource consumption. Input-to-visible-marker timings also stop at PTY output, not a
+terminal emulator's displayed frame. PageUp/PageDown timing records the next PTY output while the
+response continues; concurrent stream paint can satisfy it, so it does not prove a viewport change
+or isolate navigation work. Keep all raw samples and compare only matched workload and platform
+conditions. The fixture, limits, and local baseline are recorded in
+`benchmarks/rust_tui_interaction_evidence.md`.
+
 ## Rust TUI Transcript
 
 Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,
