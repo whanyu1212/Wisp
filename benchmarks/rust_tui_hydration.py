@@ -23,6 +23,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import psutil
+
 from benchmarks.rust_tui_e2e import (
     BenchmarkConfig as E2EConfig,
 )
@@ -70,6 +72,16 @@ class BenchmarkConfig:
     height: int = 24
     timeout_seconds: float = 120.0
     profile: bool = True
+    ready_hold_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class ProcessMemory:
+    """Resident memory of one process at a specific startup checkpoint."""
+
+    role: str
+    pid: int
+    rss_bytes: int
 
 
 @dataclass(frozen=True)
@@ -108,6 +120,8 @@ class SessionSample:
     observed_process_tree_cpu_ms: float
     observed_simultaneous_rss_peak_bytes: int
     resource_observations: int
+    ready_process_memory: tuple[ProcessMemory, ...]
+    settled_process_memory: tuple[ProcessMemory, ...]
     profile_records: tuple[ProfileRecord, ...]
     stage_totals: tuple[StageTotal, ...]
     clean_exit: bool
@@ -185,6 +199,48 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("history messages must be a nonempty set of conditions")
     if any(count < 0 or count % 4 for count in config.history_messages):
         raise ValueError("history messages must be nonnegative multiples of four")
+    if not math.isfinite(config.ready_hold_seconds) or config.ready_hold_seconds < 0:
+        raise ValueError("ready hold seconds must be nonnegative and finite")
+
+
+def snapshot_process_memory(child_pid: int) -> tuple[ProcessMemory, ...]:
+    """Read resident memory for the CLI and its live descendants.
+
+    Args:
+        child_pid: PID of the source CLI launched by this benchmark.
+
+    Returns:
+        Process samples sorted by role and PID. A process that exits during the
+        snapshot is omitted.
+    """
+
+    try:
+        root = psutil.Process(child_pid)
+        processes = (root, *root.children(recursive=True))
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return ()
+    samples = []
+    for process in processes:
+        try:
+            with process.oneshot():
+                arguments = process.cmdline()
+                name = process.name()
+                rss = process.memory_info().rss
+            if process.pid == child_pid:
+                role = "launcher"
+            elif name == "wisp-tui":
+                role = "rust_tui"
+            elif any(
+                arguments[index : index + 2] == ["--mode", "rpc"]
+                for index in range(len(arguments) - 1)
+            ):
+                role = "rpc_backend"
+            else:
+                role = "other"
+            samples.append(ProcessMemory(role, process.pid, rss))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return tuple(sorted(samples, key=lambda sample: (sample.role, sample.pid)))
 
 
 def read_profile_records(directory: Path) -> tuple[ProfileRecord, ...]:
@@ -426,6 +482,9 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         context_redrawn = False
         history_marker_seen = False
         quit_sent = False
+        quit_after: float | None = None
+        ready_process_memory: tuple[ProcessMemory, ...] = ()
+        settled_process_memory: tuple[ProcessMemory, ...] = ()
         wait_result = None
         initial_terminal = None
         start_writer_open = True
@@ -475,6 +534,10 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
                 )
                 if context_redrawn and ready_ns is None and ready_visible:
                     ready_ns = now_ns
+                    ready_process_memory = snapshot_process_memory(child_pid)
+                    quit_after = time.monotonic() + config.ready_hold_seconds
+                if quit_after is not None and not quit_sent and time.monotonic() >= quit_after:
+                    settled_process_memory = snapshot_process_memory(child_pid)
                     os.write(terminal_fd, b"/quit\r")
                     quit_sent = True
                 wait_result = _wait_for_child(child_pid, block=False)
@@ -520,6 +583,15 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             raise RuntimeError("rust process-tree sampling produced no resource evidence")
         if not restored:
             raise RuntimeError("rust did not restore the terminal")
+        for checkpoint, process_memory in (
+            ("ready", ready_process_memory),
+            ("settled", settled_process_memory),
+        ):
+            roles = {process.role for process in process_memory}
+            if roles != {"launcher", "rpc_backend", "rust_tui"}:
+                raise RuntimeError(
+                    f"{checkpoint} process snapshot has unexpected roles: {sorted(roles)}"
+                )
         records = read_profile_records(profile_dir) if config.profile else ()
         if config.profile:
             validate_profile_coverage(records, history_messages)
@@ -533,6 +605,8 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             observed_process_tree_cpu_ms=observer.cpu_ms,
             observed_simultaneous_rss_peak_bytes=observer.rss_peak_bytes,
             resource_observations=observer.observations,
+            ready_process_memory=ready_process_memory,
+            settled_process_memory=settled_process_memory,
             profile_records=records,
             stage_totals=total_stages(records),
             clean_exit=True,
@@ -564,6 +638,9 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parser.add_argument("--height", type=int, default=BenchmarkConfig.height)
     parser.add_argument("--timeout-seconds", type=float, default=BenchmarkConfig.timeout_seconds)
     parser.add_argument(
+        "--ready-hold-seconds", type=float, default=BenchmarkConfig.ready_hold_seconds
+    )
+    parser.add_argument(
         "--no-profile", action="store_true", help="measure startup without profile I/O"
     )
     parser.add_argument("--output", type=Path)
@@ -576,6 +653,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             width=parsed.width,
             height=parsed.height,
             timeout_seconds=parsed.timeout_seconds,
+            ready_hold_seconds=parsed.ready_hold_seconds,
             profile=not parsed.no_profile,
         )
     )

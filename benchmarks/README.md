@@ -140,6 +140,12 @@ without per-page profile file writes. Stage totals omit RPC scheduling, process 
 and drawing, so they do not sum to launch-to-ready. The before/after evidence and limitations are in
 `benchmarks/rust_tui_hydration_evidence.md`.
 
+For per-process transcript memory, add `--no-profile --ready-hold-seconds 1`. The
+report records CLI launcher, Python RPC backend, and Rust TUI RSS when the
+history-ready frame appears and after one idle second. The process-tree peak
+still covers the whole run. Local 0/10k/50k results and a matched Rust/Textual
+interaction comparison are in `benchmarks/rust_tui_memory_evidence.md`.
+
 ## Rust TUI Transcript
 
 Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,

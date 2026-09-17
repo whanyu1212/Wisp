@@ -41,6 +41,8 @@ def _sample(history_messages: int, run: int, duration: float) -> SessionSample:
         observed_process_tree_cpu_ms=duration + 30,
         observed_simultaneous_rss_peak_bytes=1_000,
         resource_observations=2,
+        ready_process_memory=(rust_tui_hydration.ProcessMemory("rust_tui", 456, 512),),
+        settled_process_memory=(rust_tui_hydration.ProcessMemory("rust_tui", 456, 500),),
         profile_records=records,
         stage_totals=total_stages(records),
         clean_exit=True,
@@ -107,6 +109,7 @@ def test_stage_totals_and_condition_distributions_keep_raw_evidence() -> None:
     assert payload["config"]["rust_binary"] is False
     assert payload["samples"][0]["profile_records"][0]["pid"] == 123
     assert payload["samples"][0]["stage_totals"][0]["duration_ms"] == 3
+    assert payload["samples"][0]["ready_process_memory"][0]["rss_bytes"] == 512
 
 
 def test_summary_rejects_missing_stage_in_repeated_condition() -> None:
@@ -156,6 +159,8 @@ def test_config_rejects_invalid_history_and_missing_binary(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="multiples of four"):
         validate_config(BenchmarkConfig(rust_binary=binary, history_messages=(0, 7)))
+    with pytest.raises(ValueError, match="ready hold seconds"):
+        validate_config(BenchmarkConfig(rust_binary=binary, ready_hold_seconds=-1))
     with pytest.raises(ValueError, match="required"):
         validate_config(BenchmarkConfig())
 
