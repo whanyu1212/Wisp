@@ -1,4 +1,4 @@
-"""The teaching loop shared by the first two book checkpoints."""
+"""The teaching loop shared by the book checkpoints."""
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -25,9 +25,9 @@ class ToolCall:
 
 @dataclass(frozen=True)
 class Message:
-    """Retain a user message, assistant decision, or correlated tool observation."""
+    """Retain instructions, a user message, an assistant decision, or a tool observation."""
 
-    role: Literal["user", "assistant", "tool"]
+    role: Literal["system", "user", "assistant", "tool"]
     content: str
     tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
@@ -58,6 +58,7 @@ async def run_agent(
     tools: Sequence[ToolSpec],
     execute: Callable[[ToolCall], str],
     *,
+    instructions: Sequence[str] = (),
     max_turns: int = 10,
     report: Callable[[str], None] = print,
 ) -> RunResult:
@@ -68,6 +69,7 @@ async def run_agent(
         provider (Provider): Complete-response adapter; no token streaming yet.
         tools (Sequence[ToolSpec]): Descriptions supplied on every request.
         execute (Callable[[ToolCall], str]): Executor for one decoded call.
+        instructions (Sequence[str]): Host-assembled blocks prepended once to history.
         max_turns (int): Positive maximum number of model requests.
         report (Callable[[str], None]): Observer for the human-readable trace.
 
@@ -80,7 +82,8 @@ async def run_agent(
     """
     if max_turns < 1:
         raise ValueError("max_turns must be positive")
-    history = [Message("user", prompt)]
+    history = [Message("system", block) for block in instructions]
+    history.append(Message("user", prompt))
     for turn in range(1, max_turns + 1):
         response = await provider.complete(tuple(history), tools)
         if response.role != "assistant":
