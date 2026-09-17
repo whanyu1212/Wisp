@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from benchmarks.support import Measurement, environment, measure
-from wisp.tools.process_manager import (
+from wisp.tools.shell.supervisor import (
     DEFAULT_MAX_RETAINED_BYTES,
     DEFAULT_MAX_RETAINED_LINES,
     _PendingText,

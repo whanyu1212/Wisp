@@ -12,7 +12,7 @@ from tests.test_tools import run_tool
 from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.builtin import FindTool, GrepTool, ReadTool
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import is_protected_path, resolve_tool_path
+from wisp.tools.files.paths import is_protected_path, resolve_tool_path
 from wisp.tools.result import ToolError
 
 pytestmark = pytest.mark.process

@@ -47,7 +47,7 @@ from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.context import ToolContext
-from wisp.tools.file_ops import ReadTool
+from wisp.tools.files.operations import ReadTool
 
 
 def test_in_process_sdk_start_cancel_abandons_startup_trust_lookup(

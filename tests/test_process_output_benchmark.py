@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from benchmarks.process_output import BenchmarkConfig, run_benchmark
-from wisp.tools.process_manager import DEFAULT_MAX_RETAINED_BYTES, DEFAULT_MAX_RETAINED_LINES
+from wisp.tools.shell.supervisor import DEFAULT_MAX_RETAINED_BYTES, DEFAULT_MAX_RETAINED_LINES
 
 pytestmark = pytest.mark.benchmark
 
