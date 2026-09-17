@@ -524,7 +524,6 @@ def _child_environment(
         "WISP_MODEL": "",
         "WISP_TRUST": "1",
         "WISP_TUI_MOUSE": "0",
-        "WISP_UPDATE_CHECK": "0",
     }
     if renderer == "rust":
         if config.rust_binary is None:

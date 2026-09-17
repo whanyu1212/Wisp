@@ -8,13 +8,12 @@ The `wisp` executable selects an interface from its arguments and terminal state
 | Command | Behavior |
 |---|---|
 | `wisp` | Launch the automatically selected TUI when stdin and stdout are interactive |
-| `wisp tui` | Prefer installed Rust on macOS/Linux; otherwise prompt-toolkit fullscreen |
-| `wisp tui --renderer rust` | Explicitly launch Rust (macOS/Linux; native wheel or source override) |
-| `wisp tui --line` | Launch the simple line renderer |
+| `wisp tui` | Launch the Rust TUI from a native wheel or source binary override |
+| `wisp tui --renderer rust` | Explicit Rust selection; `auto` also selects Rust |
 | `wisp -p "PROMPT"` | Run one prompt and print assistant text |
 | `wisp -p "PROMPT" --mode json` | Emit one typed `WispEvent` JSON object per line |
 | `wisp --mode rpc` | Start the long-lived JSONL RPC command host |
-| `wisp --mode tui --tui-renderer RENDERER` | Compatibility TUI entry point (`auto`, `line`, `fullscreen`, or `rust`) |
+| `wisp --mode tui --tui-renderer auto\|rust` | Compatibility TUI entry point |
 
 A prompt is invalid with `--mode rpc` or `--mode tui`. A non-interactive invocation with neither a
 prompt nor an explicit RPC/TUI mode prints help and exits.
@@ -33,7 +32,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
 | `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
-| `--tui-renderer auto\|line\|fullscreen\|rust` | Renderer for `--mode tui` | `WISP_TUI_RENDERER` |
+| `--tui-renderer auto\|rust` | Rust TUI selection for `--mode tui` | `WISP_TUI_RENDERER` |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
 | `--allow-tool NAME` | Expose one named tool; repeat for multiple tools | — |
@@ -56,12 +55,11 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 
 ## `wisp tui`
 
-`wisp tui` defaults to `auto` renderer selection and the full tool registry.
+`wisp tui` launches Rust and enables the full tool registry by default.
 
 | Option | Meaning |
 |---|---|
-| `--line` | Use the simple line renderer instead of fullscreen |
-| `--renderer auto\|rust\|fullscreen\|line` | Select the terminal frontend; defaults to auto |
+| `--renderer auto\|rust` | Select Rust; both values launch the same frontend |
 | `--session-dir PATH` | Override the JSONL session directory |
 | `--auth-file PATH` | Override the provider auth file |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry |
@@ -76,17 +74,14 @@ Provider and model defaults for the dedicated command come from configuration an
 `WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
+Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 include the Rust executable. Pure-wheel
+installs retain print, JSON, RPC, and SDK use, but interactive TUI commands fail with guidance to
+install on a supported native target or build a matching binary from source. For source development,
+set `WISP_RUST_TUI_BINARY` to the absolute path of that binary. Missing, damaged, incompatible, or
+failed Rust launches report an error rather than starting another interface.
 
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions.
+The retained `auto` and `rust` selectors both choose Rust. `WISP_TUI_RENDERER=auto|rust` supplies
+the default for the dedicated and compatibility TUI commands; an explicit option takes precedence.
 
 ## Maintenance and inspection commands
 

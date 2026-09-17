@@ -132,8 +132,8 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
 
     assert "execution=None" in extension_api
     assert "Rust" in architecture
-    assert "fullscreen" in architecture
-    assert "scripts/generate_tui_themes.py" in architecture
+    assert "rust/wisp-tui/src/theme_catalog.json" in architecture
+    assert "scripts/generate_tui_themes.py" not in architecture
     assert "Textual" not in architecture
     assert "Python/Rust\nhandoff tests" in verification
     assert "already-merged feature branch" in delivery

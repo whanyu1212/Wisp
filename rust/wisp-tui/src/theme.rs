@@ -318,7 +318,7 @@ fn catalog() -> &'static Catalog {
     static CATALOG: OnceLock<Catalog> = OnceLock::new();
     CATALOG.get_or_init(|| {
         serde_json::from_str(include_str!("theme_catalog.json"))
-            .expect("checked, generated Wisp theme catalog")
+            .expect("checked-in Wisp theme catalog")
     })
 }
 

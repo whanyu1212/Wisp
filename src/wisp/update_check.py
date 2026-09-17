@@ -1,4 +1,4 @@
-"""Cached release checks and explicit Wisp updates through PyPI."""
+"""Explicit Wisp release checks and updates through PyPI."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import json
 import os
 import platform
 import sys
-import tempfile
-import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
@@ -26,11 +24,9 @@ from wisp import __version__
 PYPI_URL = "https://pypi.org/pypi/wisp-ai/json"
 PYPI_INDEX_URL = "https://pypi.org/simple"
 UPDATE_COMMAND_TEMPLATE = "wisp update"
-CACHE_TTL_SECONDS = 6 * 60 * 60
 HTTP_TIMEOUT_SECONDS = 2.0
 
 _DISTRIBUTION_NAME = "wisp-ai"
-_CACHE_FILENAME = "update-check.json"
 
 type UpdateCommandRunner = Callable[[tuple[str, ...]], Awaitable[None]]
 type UpdateInstallVerifier = Callable[[], Awaitable[None]]
@@ -74,60 +70,14 @@ class UpdateInstallError(RuntimeError):
     """A requested Wisp update could not be installed."""
 
 
-async def check_for_update(
-    *,
-    enabled: bool = True,
-    current_version: str = __version__,
-    home_dir: Path | None = None,
-    now: float | None = None,
-    python_version: str | None = None,
-    local_install_detector: Callable[[], bool] | None = None,
-    transport: httpx.AsyncBaseTransport | None = None,
-) -> UpdateAvailable | None:
-    """Return an available update, or ``None`` when no notification should be shown.
-
-    This function is deliberately best-effort: local metadata, cache, network, and
-    response errors are all suppressed so an update check can never block startup.
-    """
-
-    if not enabled:
-        return None
-
-    try:
-        status = await get_update_status(
-            current_version=current_version,
-            home_dir=home_dir,
-            now=now,
-            python_version=python_version,
-            local_install_detector=local_install_detector,
-            transport=transport,
-            use_cache=True,
-        )
-        update = status.available
-        if update is None:
-            return None
-        skipped_version = await anyio.to_thread.run_sync(
-            _read_skipped_version,
-            _cache_path(home_dir=home_dir),
-        )
-        if skipped_version == update.latest_version:
-            return None
-        return update
-    except Exception:
-        return None
-
-
 async def get_update_status(
     *,
     current_version: str = __version__,
-    home_dir: Path | None = None,
-    now: float | None = None,
     python_version: str | None = None,
     local_install_detector: Callable[[], bool] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-    use_cache: bool = False,
 ) -> UpdateStatus:
-    """Return explicit release status, bypassing the six-hour cache by default."""
+    """Return live release status for an explicit update command."""
 
     try:
         detector = local_install_detector or is_local_install
@@ -138,34 +88,10 @@ async def get_update_status(
 
         installed = Version(current_version)
         interpreter = Version(python_version or platform.python_version())
-        checked_at = time.time() if now is None else now
-        cache_path = _cache_path(home_dir=home_dir)
-        releases: tuple[str, ...] | None = None
-        if use_cache:
-            try:
-                releases = await anyio.to_thread.run_sync(
-                    _read_cache,
-                    cache_path,
-                    checked_at,
-                    interpreter,
-                )
-            except Exception:
-                releases = None
-        if releases is None:
-            releases = await _fetch_releases(
-                transport=transport,
-                python_version=interpreter,
-            )
-            try:
-                await anyio.to_thread.run_sync(
-                    _write_cache,
-                    cache_path,
-                    checked_at,
-                    interpreter,
-                    releases,
-                )
-            except Exception:
-                pass
+        releases = await _fetch_releases(
+            transport=transport,
+            python_version=interpreter,
+        )
 
         latest = _latest_compatible_version(installed, releases)
         if latest is None:
@@ -224,24 +150,6 @@ async def can_install_update() -> bool:
     except UpdateInstallError:
         return False
     return True
-
-
-async def skip_update_version(
-    version: str,
-    *,
-    home_dir: Path | None = None,
-) -> bool:
-    """Best-effort persistence for one explicitly skipped release."""
-
-    try:
-        normalized = str(Version(version))
-        return await anyio.to_thread.run_sync(
-            _write_skipped_version,
-            _cache_path(home_dir=home_dir),
-            normalized,
-        )
-    except Exception:
-        return False
 
 
 async def _require_uv_tool_install() -> None:
@@ -346,55 +254,6 @@ def _read_direct_url() -> str | None:
         return None
 
 
-def _cache_path(*, home_dir: Path | None) -> Path:
-    home = Path.home() if home_dir is None else home_dir
-    return home.expanduser() / ".wisp" / _CACHE_FILENAME
-
-
-def _read_cache(path: Path, now: float, python_version: Version) -> tuple[str, ...] | None:
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-
-    payload = json.loads(raw)
-    if not isinstance(payload, Mapping):
-        raise ValueError("update cache must be a JSON object")
-
-    checked_at = payload.get("checked_at")
-    cached_python_version = payload.get("python_version")
-    releases = payload.get("releases")
-    if isinstance(checked_at, bool) or not isinstance(checked_at, (int, float)):
-        raise ValueError("update cache has an invalid timestamp")
-    if not isinstance(releases, list) or not all(isinstance(item, str) for item in releases):
-        raise ValueError("update cache has invalid releases")
-    _parse_versions(releases)
-    if cached_python_version != str(python_version):
-        return None
-
-    age = now - checked_at
-    if age < 0 or age >= CACHE_TTL_SECONDS:
-        return None
-    return tuple(releases)
-
-
-def _read_skipped_version(path: Path) -> str | None:
-    try:
-        raw = path.read_text(encoding="utf-8")
-        payload = json.loads(raw)
-    except (FileNotFoundError, OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, Mapping):
-        return None
-    value = payload.get("skipped_version")
-    if not isinstance(value, str):
-        return None
-    try:
-        return str(Version(value))
-    except InvalidVersion:
-        return None
-
-
 async def _fetch_releases(
     *,
     transport: httpx.AsyncBaseTransport | None,
@@ -437,69 +296,6 @@ def _file_supports_python(file: object, python_version: Version) -> bool:
         return python_version in SpecifierSet(requires_python)
     except InvalidSpecifier:
         return False
-
-
-def _write_cache(
-    path: Path,
-    checked_at: float,
-    python_version: Version,
-    releases: tuple[str, ...],
-) -> None:
-    document: dict[str, object] = {
-        "checked_at": checked_at,
-        "python_version": str(python_version),
-        "releases": list(releases),
-    }
-    skipped_version = _read_skipped_version(path)
-    if skipped_version is not None:
-        document["skipped_version"] = skipped_version
-    _write_cache_document(path, document)
-
-
-def _write_skipped_version(path: Path, version: str) -> bool:
-    document: dict[str, object] = {}
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        pass
-    except (OSError, UnicodeDecodeError):
-        return False
-    else:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, Mapping):
-            document.update(payload)
-    document["skipped_version"] = version
-    try:
-        _write_cache_document(path, document)
-    except OSError:
-        return False
-    return True
-
-
-def _write_cache_document(path: Path, document: Mapping[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(document, indent=2, sort_keys=True)
-    temporary_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary.write(payload + "\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
-        temporary_path.replace(path)
-    finally:
-        if temporary_path is not None:
-            temporary_path.unlink(missing_ok=True)
 
 
 def _latest_compatible_version(installed: Version, releases: tuple[str, ...]) -> Version | None:

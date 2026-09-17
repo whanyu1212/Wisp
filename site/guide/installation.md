@@ -20,15 +20,16 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
-In the current development tree, native-wheel installs prefer Rust and pure/source installs use
-prompt-toolkit fullscreen. Check the [0.2 upgrade guide](./upgrading) and the
+In the current development tree, native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle
+the Rust TUI and Python backend. One install command selects a compatible wheel. Pure-wheel installs
+retain print, JSON, RPC, and SDK use, but interactive `wisp` / `wisp tui` reports how to obtain or
+build a matching Rust binary. Source checkouts build the binary separately; see
+[Development setup](../contributing/development#rust-tui-scaffold). Check the
+[0.2 upgrade guide](./upgrading) and
 [release page](https://github.com/whanyu1212/Wisp/releases) for the behavior and availability of a
 specific prerelease. The commands above continue to install the published stable release.
 
 ## Updates
-
-The Python line and fullscreen renderers check PyPI at most once every six hours after startup.
-When a newer applicable release is available, they show a passive notice without blocking startup.
 
 ```bash
 wisp update --check   # bypass the cache and check immediately
@@ -36,14 +37,10 @@ wisp update           # check and confirm installation
 wisp update --yes     # check and install without confirmation
 ```
 
-Set `WISP_UPDATE_CHECK=0` to disable background checks; explicit checks still run and ignore a
-skipped-version preference.
-
 Automatic installation is available only when Wisp is running from a persistent `uv tool`
 installation. `uvx`, local-source, and other package-manager installs are never replaced.
 
-Rust users run `wisp update --check` or `wisp update` outside the TUI; `/update` displays
-those instructions.
+Run `wisp update --check` or `wisp update` outside the TUI; `/update` displays those instructions.
 
 ## Next steps
 

@@ -1,27 +1,23 @@
 # Upgrading to Wisp 0.2
 
 This guide describes the 0.2 candidate series and the checks required before stable promotion.
-RC2 introduced the Rust-default trial on native wheels; the current development tree also retires
-Textual. Check the [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
+RC2 introduced the Rust-default trial on native wheels; the current development tree retires all
+Python terminal renderers. Check the
+[release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
 
 ## What changes for terminal users
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
-
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions.
+`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; the retained `auto` and `rust` selectors both
+choose it. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary and Python
+backend. Pure-wheel installs retain print, JSON, RPC, and SDK but interactive commands fail with
+actionable missing-binary guidance. Build a matching Rust binary for a source checkout and set its
+absolute path in `WISP_RUST_TUI_BINARY`; see
+[Development setup](../contributing/development#rust-tui-scaffold).
 
 RC2 includes the native-wheel release pipeline, composer selection/undo/clipboard, semantic colors,
 and complete saved-history loading. It is a trial of Rust as the default on the packaged platforms,
-not a claim of identical Python fullscreen controls or universal terminal performance.
+not a claim of universal terminal performance.
 
 Existing supported JSONL sessions remain readable without manual migration. Python continues to
 own persistence. Back up important sessions before testing a candidate; older releases are not
@@ -85,8 +81,10 @@ for candidate publication, platform installation, long-session measurements, and
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.
 - Verify wheel and source-distribution metadata, installed SDK imports, `wisp --version`, and a
   fake-provider prompt outside the source checkout.
-- Exercise Rust and the prompt-toolkit fullscreen fallback in real terminals: long streaming output while typing and scrolling,
+- Exercise Rust in real terminals: long streaming output while typing and scrolling,
   file-picker navigation, cancellation, approvals, and session resume.
+- Verify pure-wheel print/JSON/RPC/SDK and the actionable Rust-unavailable error for interactive
+  commands.
 - Dogfood the published candidate and resolve release blockers before updating stable version
   pins or creating the final tag. Passing headless tests is not evidence of native-terminal
   visual correctness.

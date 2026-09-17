@@ -43,7 +43,7 @@ _FORBIDDEN_IMPORTS = (
     "wisp.sessions",
     "wisp.settings",
     "wisp.trust",
-    "wisp.tui",
+    "wisp.cli.native_tui",
 )
 _CODING_MODULES = ("compaction.py", "session.py", "tool_execution.py")
 _CODING_FORBIDDEN_IMPORTS = (
@@ -53,7 +53,7 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.rpc",
     "wisp.settings",
     "wisp.trust",
-    "wisp.tui",
+    "wisp.cli.native_tui",
 )
 _FRONTEND_MODULES = (Path("cli/__init__.py"),)
 _FRESH_IMPORT_MODULES = (
@@ -79,7 +79,7 @@ _RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
     "wisp.config",
     "wisp.runtime",
     "wisp.trust",
-    "wisp.tui",
+    "wisp.cli.native_tui",
 )
 _RPC_TRANSPORT_FORBIDDEN_IMPORTS = (
     "wisp.agent",
@@ -88,7 +88,7 @@ _RPC_TRANSPORT_FORBIDDEN_IMPORTS = (
     "wisp.runtime",
     "wisp.sessions",
     "wisp.trust",
-    "wisp.tui",
+    "wisp.cli.native_tui",
 )
 _RPC_EXECUTION_FORBIDDEN_IMPORTS = (
     "os",
@@ -97,7 +97,7 @@ _RPC_EXECUTION_FORBIDDEN_IMPORTS = (
     "threading",
     "wisp.cli.rpc",
     "wisp.trust",
-    "wisp.tui",
+    "wisp.cli.native_tui",
 )
 _CLI_RPC_ADAPTER_FORBIDDEN_IMPORTS = (
     "wisp.coding",

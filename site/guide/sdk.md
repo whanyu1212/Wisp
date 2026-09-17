@@ -58,7 +58,6 @@ async def main() -> None:
             WispConfig(
                 provider="fake",
                 session_dir=root / "sessions",
-                update_check_enabled=False,
             ),
             options=InProcessOptions(
                 # Safe here because this application created the empty workspace.

@@ -20,7 +20,6 @@ async def prompt_once(workspace: Path, session_dir: Path) -> str:
         WispConfig(
             provider="fake",
             session_dir=session_dir,
-            update_check_enabled=False,
         ),
         options=InProcessOptions(
             startup_trusted=True,

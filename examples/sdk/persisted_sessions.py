@@ -25,7 +25,6 @@ async def persisted_session_workflow(workspace: Path, session_dir: Path) -> dict
     config = WispConfig(
         provider="fake",
         session_dir=session_dir,
-        update_check_enabled=False,
     )
     options = InProcessOptions(
         startup_trusted=True,

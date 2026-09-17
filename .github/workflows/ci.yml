@@ -48,9 +48,6 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
-      - name: Check generated TUI themes
-        run: uv run python scripts/generate_tui_themes.py --check
-
       - name: Check live RPC schemas
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}

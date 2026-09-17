@@ -32,7 +32,6 @@ from wisp.validation import redact_validation_error_inputs
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
-DEFAULT_UPDATE_CHECK_ENABLED = True
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -52,7 +51,6 @@ class WispConfig(BaseModel):
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
-    update_check_enabled: bool = DEFAULT_UPDATE_CHECK_ENABLED
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -123,7 +121,6 @@ class WispConfig(BaseModel):
         retry_policy: RetryPolicy | None = None,
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
-        update_check_enabled: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
@@ -222,16 +219,6 @@ class WispConfig(BaseModel):
                     settings.auto_compaction_enabled,
                     default=DEFAULT_AUTO_COMPACTION_ENABLED,
                     name="WISP_AUTO_COMPACTION",
-                )
-            ),
-            update_check_enabled=(
-                update_check_enabled
-                if update_check_enabled is not None
-                else _resolve_bool(
-                    os.environ.get("WISP_UPDATE_CHECK"),
-                    settings.update_check_enabled,
-                    default=DEFAULT_UPDATE_CHECK_ENABLED,
-                    name="WISP_UPDATE_CHECK",
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),

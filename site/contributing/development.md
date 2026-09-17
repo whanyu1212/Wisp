@@ -25,10 +25,10 @@ internal value objects, and Pydantic models for serialized boundaries.
 
 ## Rust TUI {#rust-tui-scaffold}
 
-The Rust frontend is a Cargo workspace member and remains available for source
-development on macOS and Linux. RC2 native-wheel installations prefer Rust automatically; pure/source
-installs use prompt-toolkit fullscreen unless a renderer or development binary override selects Rust. RC1 did not
-bundle Rust. See the [RC2 decision](../architecture/rust-tui-boundary). The repository pins Rust
+The Rust frontend is a Cargo workspace member and is the sole interactive terminal interface.
+Native wheels on macOS arm64 and Linux glibc 2.28+ x86_64 bundle it. Pure/source installs retain the
+Python backend but require a matching source-built binary for interactive use. See the
+[frontend boundary](../architecture/rust-tui-boundary). The repository pins Rust
 1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
 the workspace package settings.
 
@@ -37,12 +37,12 @@ Build and launch it with an absolute binary override:
 ```bash
 cargo build -p wisp-tui
 WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" \
-  uv run wisp tui --renderer rust
+  uv run wisp tui
 ```
 
 The tag-gated release flow now assembles verified platform-wheel candidates under #566. Installed
 native wheels place `wisp-tui` in the active Python environment's scripts directory; the launcher
-never searches `PATH`. Source development still uses the explicit override below. A relative
+never searches `PATH`. Source development uses the explicit override above. A relative
 `WISP_RUST_TUI_BINARY=target/debug/wisp-tui` is rejected rather than searched or resolved against the
 working directory.
 

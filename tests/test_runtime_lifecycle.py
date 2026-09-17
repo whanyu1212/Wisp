@@ -10,16 +10,16 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 import wisp.cli as cli_module
+import wisp.cli.native_tui.launch as tui_launch
 import wisp.cli.rpc as rpc_module
 import wisp.runtime.extensions as runtime_extensions
-import wisp.tui.launch as tui_launch
+from wisp.cli.native_tui.launch import TuiOptions
 from wisp.config import WispConfig
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
 from wisp.tools.process_manager import ProcessSupervisor
 from wisp.tools.result import ToolError
-from wisp.tui.launch import TuiOptions
 
 
 class _ExpectedFailure(Exception):

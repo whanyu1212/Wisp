@@ -57,7 +57,7 @@ def _resolve_installed_binary(python: Path, expected: Path) -> None:
     completed = _run(
         python,
         "-c",
-        "from wisp.tui.rust_launcher import resolve_rust_tui_binary; "
+        "from wisp.cli.native_tui.rust_launcher import resolve_rust_tui_binary; "
         "print(resolve_rust_tui_binary())",
         env={**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"},
     )
@@ -149,7 +149,8 @@ def _expect_resolution_failure(python: Path, message: str) -> None:
         [
             str(python),
             "-c",
-            "from wisp.tui.rust_launcher import resolve_rust_tui_binary; resolve_rust_tui_binary()",
+            "from wisp.cli.native_tui.rust_launcher import resolve_rust_tui_binary; "
+            "resolve_rust_tui_binary()",
         ],
         check=False,
         capture_output=True,
@@ -163,15 +164,14 @@ def _expect_resolution_failure(python: Path, message: str) -> None:
         )
 
 
-def _verify_frontend_selection(python: Path, *, native: bool) -> None:
+def _verify_frontend_selection(python: Path) -> None:
     script = """
-import sys
 from unittest.mock import patch
 from typer.testing import CliRunner
 from wisp import cli as cli_module
 from wisp.cli import app
 
-for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "fullscreen"]]:
+for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "rust"]]:
     selected = {}
     with patch.object(cli_module, "_terminal_is_interactive", return_value=True), patch.object(
         cli_module, "_run_tui_from_cli_options",
@@ -179,11 +179,106 @@ for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "fullscr
     ):
         result = CliRunner().invoke(app, arguments)
     assert result.exit_code == 0, result.output
-    expected = "fullscreen" if "--renderer" in arguments else sys.argv[1]
-    assert selected["renderer"].value == expected, (arguments, selected)
+    assert selected["renderer"].value == "rust", (arguments, selected)
 """
     environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
-    _run(python, "-c", script, "rust" if native else "fullscreen", env=environment)
+    _run(python, "-c", script, env=environment)
+
+
+def _expect_pure_tui_failure(wisp: Path, environment: Path) -> None:
+    consumer = {
+        **_consumer_environment(environment),
+        "WISP_PROVIDER": "fake",
+        "WISP_MODEL": "",
+        "WISP_TRUST": "1",
+    }
+    for arguments in (("tui",), ("--mode", "tui")):
+        completed = subprocess.run(
+            [str(wisp), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=consumer,
+        )
+        output = completed.stdout + completed.stderr
+        if completed.returncode == 0 or "WISP_RUST_TUI_BINARY" not in output:
+            raise RuntimeError(
+                "pure wheel TUI must fail with an actionable Rust binary instruction: "
+                f"arguments={arguments!r}, status={completed.returncode}, output={output!r}"
+            )
+
+
+def _verify_pure_non_tui_interfaces(
+    python: Path, wisp: Path, environment: Path, work_dir: Path
+) -> None:
+    consumer = {
+        **_consumer_environment(environment),
+        "WISP_PROVIDER": "fake",
+        "WISP_MODEL": "",
+        "WISP_TRUST": "1",
+    }
+    print_run = _run(wisp, "-p", "hello", "--session-dir", work_dir / "print", env=consumer)
+    if "fake response to: hello" not in print_run.stdout:
+        raise RuntimeError(
+            f"pure wheel print mode returned unexpected output: {print_run.stdout!r}"
+        )
+
+    json_run = _run(
+        wisp,
+        "-p",
+        "hello",
+        "--mode",
+        "json",
+        "--session-dir",
+        work_dir / "json",
+        env=consumer,
+    )
+    json_records = [json.loads(line) for line in json_run.stdout.splitlines()]
+    if not any(
+        record.get("type") == "message.completed"
+        and record.get("content") == "fake response to: hello"
+        for record in json_records
+    ):
+        raise RuntimeError("pure wheel JSON mode did not complete the fake prompt")
+
+    handshake_script = """
+from wisp import __version__
+from wisp.events import EVENT_SCHEMA_VERSION
+from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+
+print(RpcHandshakeRequest(
+    frontend_name="wheel-lifecycle",
+    frontend_version=__version__,
+    min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+    max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
+    min_event_schema_version=EVENT_SCHEMA_VERSION,
+    max_event_schema_version=EVENT_SCHEMA_VERSION,
+    supported_capabilities=(),
+    required_capabilities=(),
+).model_dump_json())
+"""
+    handshake = _run(python, "-c", handshake_script, env=consumer).stdout
+    rpc_run = subprocess.run(
+        [str(wisp), "--mode", "rpc", "--session-dir", str(work_dir / "rpc")],
+        input=handshake + '{"id":"shutdown-1","type":"shutdown"}\n',
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=consumer,
+    )
+    if rpc_run.returncode != 0:
+        raise RuntimeError(f"pure wheel RPC mode failed: {rpc_run.stderr!r}")
+    rpc_records = [json.loads(line) for line in rpc_run.stdout.splitlines()]
+    rpc_types = [record.get("type") for record in rpc_records]
+    if "rpc.handshake.accepted" not in rpc_types or "rpc.command.finished" not in rpc_types:
+        raise RuntimeError(f"pure wheel RPC mode did not complete shutdown: {rpc_types!r}")
+
+    root = Path(__file__).resolve().parents[1]
+    _run(python, root / "scripts/verify_sdk_install.py", env=consumer)
+    sdk_run = _run(python, root / "examples/sdk/minimal.py", env=consumer)
+    if "fake response to: hello from the SDK" not in sdk_run.stdout:
+        raise RuntimeError(f"pure wheel SDK returned unexpected output: {sdk_run.stdout!r}")
 
 
 def _expect_corrupt_launch_failure(wisp: Path, rust_tui: Path, environment: Path) -> None:
@@ -272,7 +367,7 @@ def verify(
     binary_started = time.monotonic()
     _run(rust_tui, "--version", env=_consumer_environment(environment))
     binary_startup_seconds = time.monotonic() - binary_started
-    _verify_frontend_selection(python, native=True)
+    _verify_frontend_selection(python)
     initial_smoke = _smoke(python, wisp, smoke_script, work_dir / "native-initial")
 
     long_history_smoke = _smoke(
@@ -289,9 +384,11 @@ def verify(
     if extension.exists():
         raise RuntimeError("pure fallback replacement left an orphaned native extension")
     _expect_native_import_failure(python)
-    _expect_resolution_failure(python, "active Python environment")
+    _expect_resolution_failure(python, "no Rust TUI binary")
     _run(wisp, "--help", env=_consumer_environment(environment))
-    _verify_frontend_selection(python, native=False)
+    _verify_frontend_selection(python)
+    _expect_pure_tui_failure(wisp, environment)
+    _verify_pure_non_tui_interfaces(python, wisp, environment, work_dir / "pure")
 
     _install(uv, python, native_wheel)
     _resolve_installed_binary(python, rust_tui)

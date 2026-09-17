@@ -1,4 +1,4 @@
-"""Launch and supervise Wisp's optional Rust terminal frontend."""
+"""Launch and supervise Wisp's Rust terminal frontend."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import os
 import signal
 import subprocess
 import sys
-import termios
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -17,10 +16,16 @@ from types import FrameType
 
 import anyio
 
+try:
+    import termios
+except ImportError:
+    termios = None  # type: ignore[assignment]
+
 from wisp import __version__
 from wisp.settings import resolve_settings
-from wisp.tui.launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
-from wisp.tui.rust_binary import installed_rust_tui_binary
+
+from .launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
+from .rust_binary import installed_rust_tui_binary
 
 _BINARY_ENV = "WISP_RUST_TUI_BINARY"
 _BINDINGS_ENV = "WISP_RUST_TUI_BINDINGS_JSON"
@@ -56,7 +61,7 @@ def resolve_rust_tui_binary() -> Path:
     if sys.platform != "darwin" and not sys.platform.startswith("linux"):
         raise RustTuiLaunchError(
             "the Rust TUI is currently supported only on macOS and Linux; "
-            "use `wisp tui --renderer fullscreen` on Windows"
+            "print, JSON, and RPC modes remain available on this platform"
         )
 
     override = os.environ.get(_BINARY_ENV)
@@ -69,8 +74,10 @@ def resolve_rust_tui_binary() -> Path:
         installed_binary = installed_rust_tui_binary()
         if installed_binary is None:
             raise RustTuiLaunchError(
-                "the active Python environment has no installed Rust TUI binary; "
-                "use `wisp tui --renderer fullscreen`"
+                "this installation has no Rust TUI binary. Native wheels support macOS arm64 "
+                "and Linux glibc x86-64. For a source checkout, run "
+                "`cargo build -p wisp-tui` and set WISP_RUST_TUI_BINARY to the absolute path "
+                "of target/debug/wisp-tui. Print, JSON, and RPC modes remain available."
             )
         path = installed_binary
         source = "the active Python environment"
@@ -80,8 +87,7 @@ def resolve_rust_tui_binary() -> Path:
     except OSError as exc:
         raise RustTuiLaunchError(
             f"Rust TUI binary was not found via {source}; "
-            f"set {_BINARY_ENV} to an absolute development binary path or use "
-            "`wisp tui --renderer fullscreen`"
+            f"set {_BINARY_ENV} to an existing absolute development binary path"
         ) from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise RustTuiLaunchError(f"Rust TUI binary is not executable: {resolved}")
@@ -159,6 +165,8 @@ def run_rust_tui(options: TuiOptions) -> int:
 
 
 def _snapshot_terminal() -> _TerminalSnapshot | None:
+    if termios is None:
+        return None
     try:
         fd = sys.stdin.fileno()
         if not os.isatty(fd):
@@ -173,7 +181,7 @@ def _snapshot_terminal() -> _TerminalSnapshot | None:
 
 
 def _restore_terminal(snapshot: _TerminalSnapshot | None) -> None:
-    if snapshot is None:
+    if snapshot is None or termios is None:
         return
     try:
         _set_foreground_pgrp(snapshot.fd, snapshot.foreground_pgrp)

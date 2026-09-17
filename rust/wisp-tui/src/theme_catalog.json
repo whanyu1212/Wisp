@@ -1,5 +1,4 @@
 {
-  "_generated": "Run uv run python scripts/generate_tui_themes.py; do not edit.",
   "default": "wisp",
   "paper": "wisp-light",
   "command": {

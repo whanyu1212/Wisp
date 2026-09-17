@@ -21,7 +21,6 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
   "session_dir": "~/.wisp/sessions",
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
-  "update_check_enabled": true,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
@@ -33,11 +32,10 @@ Malformed settings files are skipped with a warning, never fatal.
 Some fields are **user-only** and a project file can never set them:
 
 `protected_paths` · `retry` · `effort` · `context_reserve_tokens` · `auto_compaction_enabled` ·
-`update_check_enabled` · `mcp_servers` · `openai_compatible`
+`mcp_servers` · `openai_compatible`
 
-A repository cannot increase your API spending, prolong waits, trigger network update checks,
-launch an MCP command, configure a credential-receiving provider endpoint, or weaken the secret
-guard.
+A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
+credential-receiving provider endpoint, or weaken the secret guard.
 
 Project settings may set `provider`, `model`, `session_dir`, and `auth_path` after you trust the
 project. In particular, `auth_path` can redirect credentials entered through `/connect` to a path

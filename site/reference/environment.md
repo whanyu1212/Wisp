@@ -5,7 +5,7 @@
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
-| `WISP_TUI_RENDERER` | TUI selection for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default), `line`, `fullscreen`, or `rust` |
+| `WISP_TUI_RENDERER` | Rust TUI selector for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default) or `rust` |
 | `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used only when the Rust renderer is selected |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
@@ -18,7 +18,6 @@
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
-| `WISP_UPDATE_CHECK` | Six-hour non-blocking PyPI update notice; defaults to `true` |
 
 ## Provider credentials
 
@@ -49,20 +48,12 @@ project files, and `WISP_TRUST` is never persisted — see
 example, `WISP_MODE=json wisp -p "hello"` still uses text output; write
 `wisp -p "hello" --mode json` for a machine-readable prompt run.
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
-
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions.
+Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the Rust TUI. Pure-wheel installs
+retain print, JSON, RPC, and SDK use; an interactive TUI command instead reports how to obtain a
+native wheel or build a matching Rust binary from source. There is no Python terminal renderer.
 
 `WISP_RUST_TUI_BINARY` is a source-development override, not a general executable search path. It
 must name an existing, executable absolute path and is removed from the environment passed to the
 Python RPC backend. Without an override, native-wheel installations resolve `wisp-tui` only
-from the active Python environment's scripts directory; Wisp never searches `PATH`. RC1 distributions do not include the binary; RC2 prepares native wheels. See
+from the active Python environment's scripts directory; Wisp never searches `PATH`. See
 [Development setup](../contributing/development#rust-tui-scaffold).
