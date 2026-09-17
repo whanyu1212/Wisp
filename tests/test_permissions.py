@@ -14,7 +14,7 @@ from wisp.rpc.host import RpcToolApprovalPolicy
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.builtin import BashTool, WriteTool
 from wisp.tools.context import ToolContext
-from wisp.tools.paths import resolve_tool_path
+from wisp.tools.files.paths import resolve_tool_path
 from wisp.tools.result import ToolError
 
 

@@ -13,13 +13,13 @@ import anyio
 import pytest
 
 import wisp.tools.shell.supervisor as process_manager_module
-from wisp.tools.process_manager import (
+from wisp.tools.result import ToolError
+from wisp.tools.shell.supervisor import (
     ProcessSupervisor,
     ProcessUpdate,
     _bounded_text_tail,
     _pending_text_backends,
 )
-from wisp.tools.result import ToolError
 
 pytestmark = pytest.mark.process
 

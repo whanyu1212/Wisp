@@ -18,8 +18,8 @@ from wisp.project_files import (
     ProjectScanTimedOut,
     collect_project_snapshot,
 )
-from wisp.tools import secure_fs
 from wisp.tools.context import ToolContext
+from wisp.tools.files import secure_fs
 
 
 def config(root: Path) -> FileIndexConfig:

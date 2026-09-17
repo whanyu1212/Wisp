@@ -18,7 +18,7 @@ import anyio
 
 from benchmarks.process_output import DEFAULT_WORKLOADS, _workload_bytes
 from benchmarks.support import Measurement, environment, measure_async
-from wisp.tools.process_manager import (
+from wisp.tools.shell.supervisor import (
     DEFAULT_MAX_RETAINED_BYTES,
     DEFAULT_MAX_RETAINED_LINES,
     ProcessSupervisor,

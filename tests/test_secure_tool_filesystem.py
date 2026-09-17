@@ -12,9 +12,9 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.tools.context import ToolContext
-from wisp.tools.file_ops import EditTool, ReadTool, WriteTool
 from wisp.tools.files import operations as file_ops_module
 from wisp.tools.files import secure_fs as secure_fs_module
+from wisp.tools.files.operations import EditTool, ReadTool, WriteTool
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.search import FindTool, GrepTool, LsTool
 from wisp.tools.search import tools as search_module

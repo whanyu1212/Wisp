@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 import wisp.tools.shell.supervisor as supervisor_module
-from wisp.tools.process_manager import _pending_text_backends
+from wisp.tools.shell.supervisor import _pending_text_backends
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "pending_text_conformance.json"
 

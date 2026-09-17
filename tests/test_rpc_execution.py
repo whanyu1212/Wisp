@@ -105,7 +105,7 @@ from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionTreeNavigation
 from wisp.skills.models import SkillCatalog, SkillDiagnostic, SkillEntry
 from wisp.tools.context import ToolContext
-from wisp.tools.file_ops import CreateOnlyWriteReceipt
+from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 
 class _ApprovalResolver:

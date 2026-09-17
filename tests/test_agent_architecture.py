@@ -155,6 +155,20 @@ def test_obsolete_agent_compatibility_modules_are_removed() -> None:
         assert not (agent_dir / filename).exists()
 
 
+def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> None:
+    wisp_dir = Path(__file__).parents[1] / "src" / "wisp"
+
+    for relative in (
+        "tools/process.py",
+        "tools/file_ops.py",
+        "tools/paths.py",
+        "tools/process_manager.py",
+        "tools/secure_fs.py",
+        "providers/retry.py",
+    ):
+        assert not (wisp_dir / relative).exists()
+
+
 def test_coding_modules_do_not_import_frontends_or_trust_resolution() -> None:
     coding_dir = Path(__file__).parents[1] / "src" / "wisp" / "coding"
 
