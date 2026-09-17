@@ -244,6 +244,10 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("stream interval and input probes must be positive")
     if config.response_words * config.stream_interval_ms < 5_000:
         raise ValueError("the fake response must stream for at least five seconds")
+    # Each streaming probe waits 100 ms before the next one. Leave additional
+    # room for paint, two navigation keys, and renderer scheduling variance.
+    if config.response_words * config.stream_interval_ms < 3_000 + 150 * config.input_probes:
+        raise ValueError("the fake response is too short for the configured input probes")
     if not math.isfinite(config.timeout_seconds):
         raise ValueError("timeout seconds must be finite")
 

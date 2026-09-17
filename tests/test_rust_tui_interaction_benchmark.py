@@ -80,6 +80,15 @@ def test_config_rejects_unusable_stream_and_history() -> None:
         validate_config(
             BenchmarkConfig(renderers=("textual",), response_words=8, stream_interval_ms=20)
         )
+    with pytest.raises(ValueError, match="too short for the configured input probes"):
+        validate_config(
+            BenchmarkConfig(
+                renderers=("textual",),
+                response_words=400,
+                stream_interval_ms=20,
+                input_probes=100,
+            )
+        )
 
 
 def test_probe_markers_do_not_reuse_a_predictable_phase_prefix(
