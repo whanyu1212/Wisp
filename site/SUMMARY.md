@@ -4,9 +4,11 @@
 
 # Crafting Coding Agents
 
-- [Overview & Curriculum](crafting-agents/index.md)
-- [1. The Core Loop](crafting-agents/01-core-loop.md)
-- [2. Giving the Model Hands](crafting-agents/02-tools.md)
+- [Overview & curriculum](crafting-agents/index.md)
+- [1. The smallest coding agent](crafting-agents/01-core-loop.md)
+- [2. Reading, editing, and testing code](crafting-agents/02-tools.md)
+- [Case study: Hardening the tool boundary](crafting-agents/case-studies/tool-boundary.md)
+- [Case study: Earning a Rust boundary](crafting-agents/case-studies/rust-boundary.md)
 
 # Using Wisp
 

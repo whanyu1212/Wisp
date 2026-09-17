@@ -4,6 +4,15 @@ Wisp is a coding agent that stays in sync with you. You can redirect it while it
 
 Its TUI, print mode, JSONL RPC process, and Python SDK share one typed runtime. Sessions, approvals, cancellation, and event ordering behave consistently across those interfaces, within the controls each input model can support.
 
+## Choose a starting point
+
+- **[Build a coding agent](crafting-agents/index.md):** learn the model/tool loop,
+  build runnable checkpoints, and examine Wisp's engineering choices and trade-offs.
+- **[Use Wisp](guide/quickstart.md):** install the application and start working in
+  your repository.
+- **[Understand Wisp's architecture](architecture/index.md):** find the runtime
+  boundaries and implementation entry points.
+
 ## Install Wisp
 
 ```bash

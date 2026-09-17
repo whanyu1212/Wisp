@@ -1,53 +1,106 @@
 # Crafting Coding Agents
 
-> *Building resilient, interactive coding agents from first principles — using Wisp as a production case study.*
+*Learn the engineering decisions involved in building a coding agent, then examine
+Wisp as a concrete, evolving answer to those decisions.*
 
----
+A model can suggest a fix. A coding agent must find the relevant code, make a
+change, check it, and keep the developer informed and in control. Doing that well
+requires more than a model API and a shell command: someone must own the
+conversation, bound tool output, handle interruption, and decide what survives a
+restart.
 
-There is a vast chasm between a 30-line LLM script that calls a function and a production-grade coding agent that developers trust inside their repositories.
+This book builds those mechanisms one at a time. Wisp is our production case
+study. Its choices have benefits and costs; they are examples to reason about,
+not requirements for every agent you build.
 
-A toy demo sends a prompt to an API, parses a single JSON tool call, prints the output, and exits. But real software engineering does not happen in a vacuum. In the real world:
-- The user changes their mind mid-generation and needs to steer or cancel the agent.
-- Commands hang, produce gigabytes of terminal flood, or fail halfway through an edit.
-- Context windows fill up, requiring surgical token estimation and structured compaction.
-- The agent crashes or gets disconnected, requiring lossless session hydration and replay.
-- Different interfaces (TUIs, CLI pipes, background RPC servers, programmatic SDKs) all need consistent session, event, and safety behaviors.
+## Who this is for
 
-This book is a deep, first-principles guide to **crafting coding agents from scratch**.
+You should be comfortable with Python functions, dataclasses, exceptions, and
+basic `async`/`await`. You do not need to know Wisp or any agent framework.
+We introduce model/tool vocabulary before using it.
 
-## The Pedagogical Approach
+If you want to run Wisp rather than build an agent, start with the
+[quickstart](../guide/quickstart.md). The [architecture guide](../architecture/agent-runtime.md)
+is a companion for navigating Wisp's current source.
 
-Every concept in this series follows a four-beat rhythm:
+## One agent, one continuing task
 
-```mermaid
-flowchart LR
-  Concept["1. First Principles"] --> Scratch["2. From Scratch"]
-  Scratch --> Realities["3. Production Realities"]
-  Realities --> CaseStudy["4. Case Study: Wisp"]
+Our running task is small: **fix a broken addition function in a fixture project**.
+The small bug lets us inspect the whole interaction instead of spending a chapter
+understanding the application being edited.
+
+We begin with an in-memory file and a model/tool loop. Next we give that same loop
+a disposable directory, an exact-match editor, and a test runner. Later chapters
+will add useful context, real model streaming, human control, persistence, and
+compaction. Each layer should solve a problem the previous version makes visible.
+
+The first two checkpoints use a **scripted provider**: a fixed sequence of model
+decisions with checks on the observations between them. This makes the examples
+repeatable and runnable without credentials. It demonstrates execution mechanics,
+not a model discovering a solution or evidence of coding ability. A live-provider
+adapter belongs to the planned provider chapter.
+
+### Run the available checkpoints
+
+From a source checkout with Python 3.12 or newer:
+
+```bash
+python3 -m examples.crafting_agents.checkpoint_01
+python3 -m examples.crafting_agents.checkpoint_02
+python3 -m examples.crafting_agents.checkpoint_02 --deny-edits
 ```
 
-1. **First Principles**: What problem are we actually trying to solve? Why does this layer exist in an agent architecture?
-2. **From Scratch**: We implement the minimal, working mechanism in self-contained Python code (~30 to 80 lines) so you understand the raw physics before adding abstractions.
-3. **Production Realities**: We analyze where naive implementations collapse under real developer workflows—race conditions, partial JSON streaming, error loops, and cancellation traps.
-4. **Case Study: How Wisp Does It**: We dive into Wisp's codebase to examine its real-world implementation, exploring the architectural trade-offs it makes, where it shines, and where other architectures make different choices.
+These commands use only the Python standard library. Chapter 1 reads an in-memory
+fixture. Chapter 2 creates and removes a temporary directory; it does not edit
+your checkout. Its test tool executes the supplied fixture with the current
+Python interpreter.
 
-## The Creed: "May or May Not Be the Best Way"
+## How to read a chapter
 
-Building agents is not a solved science; it is an evolving systems engineering discipline. 
+Each chapter follows the same progression:
 
-Throughout this book, Wisp's architecture is presented not as dogmatic gospel, but as a **living case study**. Every design decision—such as decoupling the pure streaming loop from durable persistence, adopting cooperative request boundaries over aggressive task cancellation, or bridging a Python runtime with a native Rust TUI—has concrete benefits and concrete costs. We will examine both with rigorous intellectual honesty.
+1. **Encounter a problem.** What can our agent not yet do reliably?
+2. **Build the mechanism.** Add a small, runnable capability to the teaching agent.
+3. **Inspect the trace.** See the requests, observations, and resulting state.
+4. **Break an assumption.** Try a failure with an observable outcome.
+5. **Study Wisp's choice.** Connect the mechanism to implementation entry points,
+   costs, alternatives, and tests.
+6. **Complete a checkpoint.** Make a focused change and verify its behavior.
 
-## The Curriculum
+Code listings are included from the runnable sources so the book and examples
+share the same implementation. The teaching agent is intentionally smaller than
+Wisp; each chapter names the guarantees it has yet to earn.
 
-| Chapter | Core Concept | What You Will Build |
-| :--- | :--- | :--- |
-| **[1. The Core Loop](./01-core-loop.md)** | The Model-Tool Cycle | A streaming, provider-neutral agent turn loop |
-| **[2. Giving the Model Hands](./02-tools.md)** | Tools, Filesystem & Safety | Safe tool execution, regex edits, and permission gates |
-| **3. Context Windows & Compaction** | Token Budgets & Memory | Budget estimation and structured compaction snapshots |
-| **4. Staying in Sync** | Steering & Interruption | Cooperative turn boundaries and priority queues |
-| **5. Resilient State** | Persistence & Replay | Append-only JSONL event sourcing and transcript hydration |
-| **6. Decoupling the Engine** | Interfaces & Frontends | An RPC command host driving CLI, SDK, and native TUIs |
+## Curriculum
 
----
+Only chapters marked **available** have been written. Planned chapters describe
+the intended progression, not capabilities already present in the checkpoints.
 
-Let's begin at the foundational layer: **[Chapter 1: The Core Loop — The Model-Tool Cycle](./01-core-loop.md)**.
+| Chapter | What you will build or understand | Wisp connection | Status |
+| --- | --- | --- | --- |
+| [1. The smallest coding agent](01-core-loop.md) | The model/action/observation cycle, correlated tool results, explicit stopping | `run_agent_loop` | Available |
+| [2. Reading, editing, and testing code](02-tools.md) | Validated tool dispatch, exact-match edits, test feedback, output limits | Built-in tools and typed results | Available |
+| 3. Giving the model useful context | Instruction assembly, repository discovery, selecting relevant information | Prompt builder, project context, skills | Planned |
+| 4. Talking to models reliably | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation | Planned |
+| 5. Controlling side effects | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor | Planned |
+| 6. Keeping the user in control | Steering, follow-ups, cancellation, request boundaries | `AgentHarness` | Planned |
+| 7. Remembering and resuming work | Transcript versus audit log, durable writes, replay, repair, branching | `CodingSession` and JSONL sessions | Planned |
+| 8. Working within a context window | Budgets, retained history, compaction, overflow recovery | Context estimates and session-owned compaction | Planned |
+| 9. One engine, multiple interfaces | Commands, events, presentation state, transport compatibility | Command host, SDK, CLI, Rust TUI | Planned |
+| 10. Knowing whether it works | Fault injection, task evaluation, latency, cost, profiling | Reliability tests and benchmark evidence | Planned |
+
+Context construction comes before compaction; replay comes before replacing the
+history that gets replayed. Tests accompany each mechanism, while chapter 10 will
+distinguish runtime correctness from live-model task success.
+
+## Wisp case studies
+
+These deeper readings preserve implementation detail without making it a
+prerequisite for the first working agent:
+
+- [Hardening the tool boundary](case-studies/tool-boundary.md): file races,
+  process lifetime, search, scheduling, and current limitations.
+- [Earning a Rust boundary](case-studies/rust-boundary.md): benchmarks, profiling,
+  narrow native kernels, and the cost of maintaining parity.
+
+Begin with [Chapter 1: The smallest coding agent](01-core-loop.md).

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "site/**"
+      - "examples/crafting_agents/**"
       - "book.toml"
       - "mermaid-init.js"
       - "mermaid.min.js"
@@ -16,6 +17,7 @@ on:
       - main
     paths:
       - "site/**"
+      - "examples/crafting_agents/**"
       - "book.toml"
       - "mermaid-init.js"
       - "mermaid.min.js"
@@ -59,6 +61,17 @@ jobs:
           curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" |
             tar -xz -C "$HOME/.cargo/bin" --strip-components=1 \
               lychee-x86_64-unknown-linux-gnu/lychee
+
+      - name: Set up checkpoint Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run book checkpoints offline
+        run: |
+          python -m examples.crafting_agents.checkpoint_01
+          python -m examples.crafting_agents.checkpoint_02
+          python -m examples.crafting_agents.checkpoint_02 --deny-edits
 
       - name: Build book
         run: mdbook build

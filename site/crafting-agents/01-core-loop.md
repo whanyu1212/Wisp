@@ -1,274 +1,211 @@
-# Chapter 1: The Core Loop — The Model-Tool Cycle
+# 1. The smallest coding agent
 
-At the heart of every AI coding agent—beneath all the prompts, token budgets, user interfaces, and terminal integrations—lies a deceptively simple engine: **the core loop**.
+Our task is to fix `add(2, 3)`, which returns `-1` instead of `5`. A model could
+guess the cause from that sentence. A coding agent should be able to inspect the
+implementation and act on what it finds.
 
-If you strip away the hype, an agent is not an autonomous digital mind. It is a state machine executing an iterative loop over an LLM and an execution environment.
+In this chapter we build the loop that makes that possible. By the end, you can
+run an interaction, trace a failed read into the next request, and distinguish
+the model deciding to stop from the code actually being fixed.
 
-In this chapter, we will build this loop from first principles. We will start with the raw mechanics, write a minimal working implementation from scratch in ~50 lines of Python, dissect the subtle ways toy loops fail in production, and then explore how Wisp implements this boundary in `run_agent_loop`.
+## 1. The model decides; the host executes
 
----
+The model receives a conversation and descriptions of available tools. It returns
+an assistant message that may contain tool calls. Each call has an identifier, a
+tool name, and arguments. The host executes it and adds the result to the next
+request.
 
-## 1. The Anatomy of an Agent Turn
-
-Before writing code, let's establish a precise vocabulary.
-
-An agent interaction is made up of discrete **turns**. One turn consists of:
-1. **Sending context** (conversation history + available tool schemas) to the model.
-2. **Receiving a response**, which either:
-   - Contains a textual answer intended for the user (a **terminal turn**), or
-   - Requests one or more actions via **tool calls** (an **action turn**).
-3. **Executing the tools** and packaging their outputs (or error messages) as tool results.
-4. **Feeding the results back** into the conversation history so the model can observe the outcome of its actions.
+The model does not call Python directly. A tool call is data until the host
+validates and dispatches it.
 
 ```mermaid
 flowchart TD
-  Start(["Start Turn"]) --> Context["1. Prepare Context & History"]
-  Context --> Stream["2. Stream Model Response"]
-  Stream --> Decision{"Has Tool Calls?"}
-  Decision -->|No| Final["Turn Completed (End of Run)"]
-  Decision -->|Yes| Exec["3. Execute Requested Tool Batch"]
-  Exec --> Feed["4. Append Tool Results to History"]
-  Feed --> Next(["Next Turn"])
-  Next --> Context
+  Request[Conversation + tool descriptions] --> Model[Model response]
+  Model --> Decision{Tool calls?}
+  Decision -->|Yes| Execute[Host executes calls]
+  Execute --> Observe[Append correlated tool results]
+  Observe --> Request
+  Decision -->|No| Stop[Stop this run]
 ```
 
-This cycle continues until the model determines its task is complete (emitting no tool calls), encounters an unrecoverable error, reaches a configured limit, or is stopped by user intervention.
+A **turn** is one model response plus its requested tool executions. A **run** is
+the sequence of turns started by this invocation. The **conversation** is the
+history we supply to each request. These lifetimes happen to fit inside one
+function here; a resumable agent will separate them.
 
----
+Text and tool calls are not mutually exclusive. An assistant can say “I’ll read
+the function” and request a read in the same response. In this first loop, a
+response with no tool calls ends the run. That is a stopping rule, not proof of
+task completion.
 
-## 2. From Scratch: A Minimal 50-Line Agent Loop
+## 2. Build the loop
 
-Let's build a functional, streaming agent loop using standard async Python. To keep this self-contained, we'll assume an abstract `Provider` interface:
+The full implementation is in
+[`examples/crafting_agents/core.py`](https://github.com/whanyu1212/Wisp/blob/main/examples/crafting_agents/core.py).
+Its small dataclasses represent messages, tool calls, tool descriptions, and the
+run result. The provider contract is:
 
 ```python
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Callable, Coroutine
-
-@dataclass
-class ToolCall:
-    id: str
-    name: str
-    arguments: dict[str, Any]
-
-@dataclass
-class ModelResponse:
-    content: str
-    tool_calls: list[ToolCall] = field(default_factory=list)
-
-# A minimal turn loop
-async def run_toy_agent_loop(
-    prompt: str,
-    stream_model: Callable[[list[dict]], Coroutine[Any, Any, ModelResponse]],
-    execute_tool: Callable[[str, dict], Coroutine[Any, Any, str]],
-    max_turns: int = 10,
-) -> AsyncGenerator[str, None]:
-    """Execute turns until the model finishes or reaches max_turns."""
-    history: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
-    
-    for turn in range(1, max_turns + 1):
-        yield f"--- [Turn {turn}] Consulting model ---"
-        
-        # 1. Get model decision
-        response = await stream_model(history)
-        
-        if response.content:
-            yield f"[Model]: {response.content}"
-        
-        # If no tools were called, the model is done
-        if not response.tool_calls:
-            history.append({"role": "assistant", "content": response.content})
-            yield "--- [Agent Finished] ---"
-            return
-
-        # 2. Record the assistant's intention to call tools
-        history.append({
-            "role": "assistant",
-            "content": response.content,
-            "tool_calls": [
-                {"id": tc.id, "name": tc.name, "args": tc.arguments}
-                for tc in response.tool_calls
-            ],
-        })
-
-        # 3. Execute tools and append observations
-        for tc in response.tool_calls:
-            yield f"[Tool Calling]: {tc.name}({tc.arguments})"
-            try:
-                result = await execute_tool(tc.name, tc.arguments)
-            except Exception as e:
-                result = f"Error executing tool {tc.name}: {e}"
-            
-            yield f"[Tool Result {tc.id}]: {result}"
-            history.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result,
-            })
-            
-    yield "--- [Stopped: Max turns reached] ---"
+async def complete(history: Sequence[Message], tools: Sequence[ToolSpec]) -> Message:
+    ...
 ```
 
-### Why This Works
-Notice the crucial detail on lines 48–52:
+`ToolSpec` describes a tool with named, required string arguments. It is a compact
+teaching contract; a live adapter will need to translate it to the provider's tool
+schema. The executor is a separate callable that accepts a decoded `ToolCall`.
+
 ```python
-try:
-    result = await execute_tool(tc.name, tc.arguments)
-except Exception as e:
-    result = f"Error executing tool {tc.name}: {e}"
+{{#include ../../examples/crafting_agents/core.py:loop}}
 ```
-When a tool fails (e.g., file not found, permission denied, invalid JSON), a naive developer might raise a Python exception and crash the loop. But in an agent loop, **a tool failure is an observation**. Feeding the error string back to the model gives it the opportunity to self-correct (e.g., realize the file path was incorrect and search for the right one).
 
----
+Follow the normal path from top to bottom:
 
-## 3. Production Realities: Where the Toy Loop Breaks
+1. Ask the provider for a complete response using the current history and tools.
+2. Retain the assistant's message, including its requested calls.
+3. Execute calls sequentially, attaching each observation to its call ID.
+4. Send those observations back on the next turn.
 
-The 50-line script above runs well in simple demos. But when placed inside a real terminal IDE or CI bot, it quickly falls apart. Here is why:
+The call ID matters even when two calls have the same tool name. It answers
+“which request produced this result?” Retaining the assistant's calls before
+their results preserves the exchange the next request needs to see.
 
-### 1. The Streaming Chunk Puzzle
-In our toy code, `await stream_model(history)` returns a neat `ModelResponse` with parsed tool arguments. In reality, models stream text and JSON fragments token by token:
+`ToolFailure` means an expected operational failure, such as a missing file.
+Turning it into an observation gives the model a chance to recover. Unexpected
+programming errors propagate instead of being disguised as ordinary tool errors.
+The turn limit is reported distinctly so a caller does not mistake exhaustion
+for a normal finish.
+
+This is an async request loop, **not token streaming**: `complete()` returns one
+whole response. The `report` callback prints a trace for us; it does not drive the
+conversation. Tool execution is synchronous at this checkpoint.
+
+## 3. Supply a repeatable model decision
+
+For now, our “repository” is one in-memory file:
+
+```python
+def add(a, b):
+    return a - b
+```
+
+The read executor exposes only `calculator.py`. Our scripted provider first asks
+for the wrong path, then the right one, then returns a diagnosis:
+
+```python
+{{#include ../../examples/crafting_agents/checkpoint_01.py:script}}
+```
+
+Each `after` condition checks the preceding observation before yielding the next
+response. The script is not learning from the error; we authored that behavior.
+It lets us verify that the host preserves the feedback a real model would need.
+If the observation differs, the checkpoint fails rather than printing a scripted
+success regardless of what happened.
+
+From the checkout root, run:
+
+```bash
+python3 -m examples.crafting_agents.checkpoint_01
+```
+
+The important parts of the trace are:
+
 ```text
-Chunk 1: {"name": "read_f
-Chunk 2: ile", "arguments": "{\"path
-Chunk 3: \": \"src/main.py\"}"}
-```
-A production loop must assemble partial JSON chunks on the fly, validate JSON syntax without crashing on malformed payloads, and stream textual thoughts (`MessageDelta`) immediately to the user's screen while buffering tool parameters until completion.
+turn 1: Locate the function.
+call 1: read {'path': 'sum.py'}
+result 1: error: use read with path='calculator.py'
+turn 2: Try the path from the error.
+call 2: read {'path': 'calculator.py'}
+result 2: def add(a, b):
+    return a - b
 
-### 2. State Mutation vs. Immutable Streams
-Notice that our toy loop directly mutated `history`:
-```python
-history.append({"role": "tool", ...})
-```
-What happens if the user presses `Ctrl+C` midway through tool execution? Or what if the database write fails? Now your in-memory transcript has a dangling tool call with no matching tool result—a state that violates provider API contracts (like Anthropic or OpenAI) and will cause subsequent requests to fail with HTTP 400.
-
-### 3. Provider Protocol Divergence
-Every provider has subtle, incompatible requirements:
-- **Anthropic Claude**: Strict alternation (`user` followed by `assistant`). If you send two `user` messages in a row or an unclosed `tool_use` block without a matching `tool_result`, the API throws an error.
-- **OpenAI / Azure**: Supports explicit tool calls and custom finish reasons like `length` or `stop`.
-- **Google Gemini**: Uses `functionCall` and `functionResponse` parts inside content blocks.
-If your core loop is tightly coupled to one provider's message schema, supporting another requires rewriting the loop.
-
-### 4. Continuation & Token Efficiency
-Sending the entire conversation history over the wire on every single turn burns unnecessary network bandwidth and provider latency. Supporting native provider caching (e.g., Anthropic Prompt Caching or OpenAI Responses/Cursor IDs) requires the loop to track transient continuation state between turns.
-
----
-
-## 4. Case Study: Inside Wisp's `run_agent_loop`
-
-Now let's examine how Wisp solves these problems in `src/wisp/agent/loop/runner.py`.
-
-### Architectural Separation
-In Wisp, `run_agent_loop` is designed around a strict principle:
-> **The core loop owns the turn lifecycle, not the conversation.**
-
-```mermaid
-flowchart LR
-  subgraph Caller["Outer Layers (CodingSession / Harness)"]
-    Durable["Durable Transcript & Persistence"]
-    Queue["User Steering & Follow-up Queues"]
-  end
-
-  subgraph Loop["wisp.agent.loop.run_agent_loop"]
-    Turn["Turn Lifecycle & Counters"]
-    Stream["Provider Stream Adaptation"]
-    Tools["Batch Tool Execution"]
-    Continuation["Transient Continuation State"]
-  end
-
-  Caller -->|Base History + Config| Loop
-  Loop -->|Yields Typed WispEvent stream| Caller
+turn 3: add subtracts b. It needs addition; no file has been changed.
+stopped: model_finished
 ```
 
-Look at the signature of `run_agent_loop`:
+There were three model turns and two tool calls. The final response contains no
+tools, so the run ends. Nothing has been edited or tested. This is why our result
+says `model_finished`, not `task_succeeded`.
 
-```python
-async def run_agent_loop(
-    config: AgentLoopConfig,
-    *,
-    messages: Sequence[Message],
-) -> AsyncGenerator[AgentLoopEvent, None]:
-```
+## 4. Break an assumption
 
-Notice what is **not** here:
-- No database connections.
-- No session files or JSONL writer.
-- No UI components or terminal renderers.
-- No mutable history modification (the input `messages` sequence is never mutated).
+Change the `run_agent` invocation in `checkpoint_01.py` to pass `max_turns=1`.
+The read error is still retained, but the next request never happens. The final
+line becomes `stopped: turn_limit`.
 
-Instead, `run_agent_loop` is a pure async generator. It receives an immutable history snapshot, dependencies packaged in `AgentLoopConfig`, and yields a continuous stream of strongly typed events (`AgentLoopEvent`).
+Now consider a different interruption: the process exits after retaining a tool
+call but before recording its result. The next request could contain an incomplete
+exchange. A working demo loop does not yet solve that problem. Persistence and
+transcript repair will need an explicit owner.
 
-### The Event Lifecycle of a Single Turn
-Every turn in Wisp publishes a predictable sequence of events:
+Other missing guarantees are deliberate next steps:
 
-1. `TurnStarted(turn=1)`
-2. `ContextEstimated(...)` (tokens used vs. window reserve)
-3. `MessageStarted(...)` $\rightarrow$ multiple `MessageDelta(...)` (streamed text tokens) $\rightarrow$ `MessageCompleted(...)`
-4. If tools were called:
-   - `ToolCallRequested(...)`
-   - `ToolExecutionStarted(...)`
-   - `ToolExecutionEnded(...)`
-   - `ToolResultReady(...)`
-5. `TurnCompleted(turn=1, outcome="completed")`
+- Argument validation and real file operations belong to chapter 2.
+- Partial streamed arguments must not execute before completion; the provider
+  chapter will introduce that boundary.
+- Cancellation needs resource cleanup as well as a stopping flag.
+- A real provider may reject history or require provider-native continuation
+  state. The portable message types here do not erase those differences.
 
-### Cooperative Cancellation
-How does Wisp handle cancellation without corrupting state?
+## 5. Wisp's choice: separate the lifetimes
 
-Rather than killing the Python async task (`asyncio.Task.cancel()`), which can leave file handles open or subprocesses running, Wisp uses a cooperative `CancellationToken`:
+Wisp's [runtime architecture](../architecture/agent-runtime.md) separates three
+owners that our example combines:
 
-```python
-def _is_cancelled(config: AgentLoopConfig) -> bool:
-    token = config.cancellation_token
-    return token is not None and token.is_cancelled()
-```
+| Owner | Responsibility |
+| --- | --- |
+| `run_agent_loop` | Turns, model streaming, tool batches, and transient continuation state within one invocation |
+| `AgentHarness` | In-memory conversation and user queues across invocations |
+| `CodingSession` | Durable history, compaction, trust, and session policy |
 
-At well-defined boundaries (before starting a turn, before executing a tool, and after tool completion), the loop checks the token. Cancellation is cooperative and its observable shape depends on timing:
+The loop receives a base history and yields typed events such as `MessageDelta`,
+`MessageCompleted`, `ToolExecutionEnded`, and `TurnCompleted`. It does not append
+to the caller's input message sequence. The harness retains completed messages
+and tool executions; the session adds durability.
 
-- If the token is already cancelled before the first turn starts, the loop emits `ErrorEvent("Agent run cancelled")` and exits — no turn ever begins, so no completion event is produced.
-- If cancellation lands mid-run (during an unfinished turn), the loop cleans up open resources, emits `ErrorEvent("Agent run cancelled")`, and finishes with `TurnCompleted(turn=N, outcome="cancelled")`.
+This is a stateful, effectful execution mechanism with a bounded responsibility—not
+a pure function. It calls providers and tools and tracks state during the run.
+Its separation is useful because frontends can observe progress without owning
+the model/tool cycle, and session storage can evolve without being embedded in
+that cycle.
 
-In both cases the outer harness can then cleanly decide what to save to disk; but consumers of the event stream should not assume a completion event always arrives — only that `ErrorEvent` signals the cancelled terminal state.
+The cost is coordination: events must arrive in a valid order, transcript updates
+must agree with the next provider request, and cancellation must settle owned
+resources. A single object holding conversation and execution state is simpler
+for a small one-shot script. Wisp pays the extra coordination cost to support
+resumable sessions and multiple interfaces.
 
----
+Two distinctions will matter later:
 
-## 5. Architectural Trade-offs ("May or May Not Be the Best Way")
+- **Prompt caching and native continuation are different mechanisms.** Caching
+  can reduce repeated processing or cost while still requiring a full request
+  payload. Native continuation can use provider-held response state. Provider
+  adapters must preserve the semantics of each.
+- **Batching does not establish dependencies by itself.** Our loop runs tools
+  sequentially. Wisp's prepared executor allows concurrency only for batches whose
+  calls are all marked parallel-safe; otherwise it runs sequentially. The scheduling
+  policy, not the existence of a turn, keeps an edit before a dependent test.
 
-Why did Wisp choose this architecture, and what are the alternatives?
+### Follow the implementation
 
-### Trade-off 1: Pure Event Stream vs. Stateful Agent Object
-Many agent frameworks (like LangGraph or AutoGen) represent an agent as a stateful object with internal memory:
-```python
-agent = CodingAgent()
-agent.run("Fix the bug")
-print(agent.history)
-```
+- [`loop/runner.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/loop/runner.py):
+  start at `run_agent_loop` for the normal turn lifecycle.
+- [`harness/runner.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/harness/runner.py):
+  start at `AgentHarness._run` for retaining the conversation across runs.
+- [`test_agent_runtime_invariants.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_agent_runtime_invariants.py):
+  see how observable runtime contracts are tested.
 
-**Why Wisp avoided this:**
-- When an agent object mutates its own history, coordinating multiple interfaces (a Rust TUI, a CLI, and a background RPC daemon) becomes a nightmare of synchronization locks.
-- By making `run_agent_loop` a stateless event generator, the loop becomes trivial to test: pass mock messages, collect yielded events, and assert ordering.
+## 6. Checkpoint
 
-**The Cost:**
-- The caller (`AgentHarness` in `wisp/agent/harness/runner.py`) must do extra work. It must listen to `MessageCompleted` and `ToolExecutionEnded` events and manually project them into its durable transcript. (`ToolResultReady` is a later, provider-facing copy of the same result — it is not the event the harness retains.)
+You should now be able to answer:
 
-### Trade-off 2: Turn-Based Batching vs. Async Reactive Actors
-In Wisp, tools are executed in coordinated batches per turn. If a model requests 3 tool calls, Wisp evaluates and schedules the batch, waits for them to settle, and packages their results for the next turn.
+1. Why must a tool result retain its call ID?
+2. Why is a failed read useful input to the next request?
+3. Why does “the model stopped” not imply “the task succeeded”?
 
-**Alternative Approach:**
-An actor-based model (where each tool runs as an independent concurrent actor emitting results whenever ready).
+**Exercise:** add a second failed read to the script before the successful one.
+Give it a distinct call ID and an `after` condition. The trace should contain
+four turns, three correlated results, and the same final diagnosis. Then lower
+the turn budget and verify that the diagnosis is never emitted.
 
-**Why Wisp stayed turn-based:**
-Coding agents frequently perform dependent operations:
-1. `create_file("foo.py")`
-2. `bash("pytest tests/test_foo.py")`
-
-Running tools in an uncontrolled reactive stream risks running tests before files finish writing. Turn-based batching preserves causality and makes debugging deterministic.
-
----
-
-## Summary
-
-- The core loop is an iterative state machine: **Model Response $\rightarrow$ Tool Calls $\rightarrow$ Tool Execution $\rightarrow$ Tool Results $\rightarrow$ Next Turn**.
-- Tool failures are **observations**, not fatal runtime crashes.
-- Production loops require strict separation of concerns: keep provider-neutral streaming in the loop, while delegating persistence and user steering to outer harnesses.
-- Event-driven streams give frontends complete observability without entangling the agent loop with UI or database code.
-
-A future chapter will explore giving the model hands: tool execution, filesystem operations, and safety gates.
+Next: [Reading, editing, and testing code](02-tools.md). We will keep this loop
+and replace the in-memory read with operations on a disposable project.
