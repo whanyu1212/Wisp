@@ -55,7 +55,7 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.cli.native_tui",
 )
-_FRONTEND_MODULES = (Path("cli/__init__.py"),)
+_FRONTEND_MODULES = (Path("cli/application.py"),)
 _FRESH_IMPORT_MODULES = (
     "wisp.agent.harness",
     "wisp.agent.prompt",
@@ -240,6 +240,22 @@ def test_obsolete_cli_rpc_compatibility_modules_are_removed() -> None:
     assert not (cli_dir / "rpc_configuration.py").exists()
     assert not (cli_dir / "rpc_coordinator.py").exists()
     assert not (cli_dir / "rpc_execution.py").exists()
+
+
+def test_cli_package_init_only_re_exports_the_application() -> None:
+    """Keep the CLI implementation in ``wisp.cli.application``, not the package marker."""
+
+    init_path = Path(__file__).parents[1] / "src" / "wisp" / "cli" / "__init__.py"
+    tree = ast.parse(init_path.read_text(encoding="utf-8"), filename=str(init_path))
+
+    definitions = [
+        type(node).__name__
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+    ]
+
+    assert definitions == []
+    assert "wisp.cli.application" in _module_imports(init_path)
 
 
 def test_legacy_agent_compatibility_exports_are_removed() -> None:

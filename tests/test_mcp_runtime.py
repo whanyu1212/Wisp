@@ -15,7 +15,7 @@ from mcp.types import Tool as McpToolDefinition
 from pytest import MonkeyPatch
 
 import wisp.mcp.runtime as mcp_runtime_module
-from wisp import cli as cli_module
+from wisp.cli import application as cli_module
 from wisp.cli.native_tui.launch import TuiOptions, _preflight_tui_options
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished, RpcMcpStatusReported
