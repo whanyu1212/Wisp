@@ -32,8 +32,9 @@ understanding the application being edited.
 We begin with an in-memory file and a model/tool loop. Next we give that same loop
 a disposable directory, an exact-match editor, and a test runner. Chapter 3 adds
 request context and on-demand file discovery. Chapter 4 introduces streaming,
-failure replays, and an opt-in live provider. Later chapters will add human
-control, persistence, and compaction. Each layer should solve a problem the
+failure replays, and an opt-in live provider. Chapter 5 separates host policy,
+per-operation approval, and resource guarantees. Later chapters will add steering,
+persistence, and compaction. Each layer should solve a problem the
 previous version makes visible.
 
 The first three checkpoints use a **scripted provider**: a fixed sequence of model
@@ -53,6 +54,7 @@ python3 -m examples.crafting_agents.checkpoint_02
 python3 -m examples.crafting_agents.checkpoint_02 --deny-edits
 python3 -m examples.crafting_agents.checkpoint_03
 python3 -m examples.crafting_agents.checkpoint_04
+python3 -m examples.crafting_agents.checkpoint_05
 ```
 
 These commands use only the Python standard library. Chapter 1 reads an in-memory
@@ -89,7 +91,7 @@ the intended progression, not capabilities already present in the checkpoints.
 | [2. Reading, editing, and testing code](02-tools.md) | Validated tool dispatch, exact-match edits, test feedback, output limits | Built-in tools and typed results | Available |
 | [3. Giving the model useful context](03-context.md) | Instruction assembly, repository discovery, selecting relevant information | Prompt builder, project context, skills | Available |
 | [4. Talking to models reliably](04-providers.md) | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation | Available |
-| 5. Controlling side effects | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor | Planned |
+| [5. Controlling side effects](05-side-effects.md) | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor | Available |
 | 6. Keeping the user in control | Steering, follow-ups, cancellation, request boundaries | `AgentHarness` | Planned |
 | 7. Remembering and resuming work | Transcript versus audit log, durable writes, replay, repair, branching | `CodingSession` and JSONL sessions | Planned |
 | 8. Working within a context window | Budgets, retained history, compaction, overflow recovery | Context estimates and session-owned compaction | Planned |

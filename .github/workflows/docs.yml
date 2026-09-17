@@ -81,6 +81,10 @@ jobs:
           python -m examples.crafting_agents.checkpoint_04 --scenario disconnect
           python -m examples.crafting_agents.checkpoint_04 --scenario malformed
           python -m examples.crafting_agents.checkpoint_04 --scenario output-limit
+          python -m examples.crafting_agents.checkpoint_05
+          python -m examples.crafting_agents.checkpoint_05 --scenario policy-denied
+          python -m examples.crafting_agents.checkpoint_05 --scenario approval-denied
+          python -m examples.crafting_agents.checkpoint_05 --scenario stale-input
 
       - name: Build book
         run: mdbook build
