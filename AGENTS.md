@@ -100,9 +100,10 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`
   import shims. Import history helpers directly from `wisp.agent.history` and concrete session-entry
   models from `wisp.sessions`; do not restore the removed `wisp.agent.messages.SessionEntry` factory.
-  The same rule applies outside `wisp.agent`: import tool implementations from `wisp.tools.files`,
-  `wisp.tools.shell`, and `wisp.tools.search`, and retry helpers from `wisp.retry`; do not restore
-  the removed `wisp.tools.{process,file_ops,paths,process_manager,secure_fs}` or
+  The same rule applies outside `wisp.agent`: import tool implementations from their defining
+  modules under `wisp.tools.files`, `wisp.tools.shell`, and `wisp.tools.search` (for example
+  `wisp.tools.files.paths` or `wisp.tools.shell.supervisor`), and retry helpers from `wisp.retry`;
+  do not restore the removed `wisp.tools.{process,file_ops,paths,process_manager,secure_fs}` or
   `wisp.providers.retry` shims.
 
 ## Implementation conventions

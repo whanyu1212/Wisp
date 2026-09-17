@@ -44,10 +44,11 @@ behavior, providers, tools, permissions, and saved sessions.
   startup, fake-provider streaming, visible response progress, clean shutdown, and terminal restore.
 - Extended matched TUI evidence to paced streaming and long saved sessions, with interactive input
   latency and sampled process-tree CPU and memory observations for both renderers.
-- Removed the type-checking-only compatibility modules `wisp.tools.process`, `wisp.tools.file_ops`,
+- Removed the compatibility alias modules `wisp.tools.process`, `wisp.tools.file_ops`,
   `wisp.tools.paths`, `wisp.tools.process_manager`, `wisp.tools.secure_fs`, and
-  `wisp.providers.retry`. Import from `wisp.tools.shell`, `wisp.tools.files`, and `wisp.retry`
-  instead.
+  `wisp.providers.retry`. Import from the defining modules instead: `wisp.tools.shell.process`,
+  `wisp.tools.files.operations`, `wisp.tools.files.paths`, `wisp.tools.shell.supervisor`,
+  `wisp.tools.files.secure_fs`, and `wisp.retry` respectively.
 
 ## 0.2.0rc2 — 2026-09-16
 
