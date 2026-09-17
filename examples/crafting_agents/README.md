@@ -29,7 +29,7 @@ The book includes code through mdBook `ANCHOR` regions. Edit these files rather
 than creating duplicate snippets. From a development environment:
 
 ```bash
-uv run pytest tests/test_crafting_agents.py
+uv run pytest tests/repository/test_crafting_agents.py
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy

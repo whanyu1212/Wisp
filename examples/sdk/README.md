@@ -47,5 +47,5 @@ primitives are tracked in [#406](https://github.com/whanyu1212/Wisp/issues/406).
 Tests import and run these same example functions rather than maintaining separate test-only copies:
 
 ```bash
-uv run pytest tests/test_sdk_examples.py
+uv run pytest tests/sdk/test_sdk_examples.py
 ```
