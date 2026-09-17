@@ -228,7 +228,7 @@ def _run_theme_session(
 
 @pytest.mark.process
 @pytest.mark.parametrize("no_color", [False, True], ids=["color", "monochrome"])
-def test_rust_theme_preferences_interoperate_with_textual_and_survive_restart(
+def test_rust_theme_preferences_interoperate_with_python_and_survive_restart(
     tmp_path: Path, no_color: bool
 ) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")

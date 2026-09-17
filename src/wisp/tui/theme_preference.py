@@ -1,6 +1,6 @@
 """Persisted TUI theme choice.
 
-Theme is a *presentation* concern shared by the Textual and Rust clients: the RPC
+Theme is a *presentation* concern owned by the Rust client: the RPC
 subprocess renders nothing, so this deliberately does not live in ``WispSettings``
 and never crosses the subprocess boundary (see ``tui/launch.py``). It is stored
 beside the other user-local client state in ``~/.wisp/`` rather than in the
@@ -83,8 +83,8 @@ def load_theme_preference(
     """Return the persisted theme name, or ``None`` when unset or unusable.
 
     ``valid_themes`` rejects a name that no longer exists — a theme removed or
-    renamed between releases must not leave the TUI trying to select a theme
-    Textual cannot resolve.
+    renamed between releases must not leave the TUI trying to select an unknown
+    theme.
     """
 
     return load_theme_state(home_dir=home_dir, valid_themes=valid_themes).active_theme

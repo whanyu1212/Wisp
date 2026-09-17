@@ -20,23 +20,15 @@ uvx --from "wisp-ai==0.1.0" wisp
 
 Check the installed version with `wisp --version`.
 
-**0.2.0rc2 is being prepared**, with Rust preferred on native-wheel installs and Textual retained.
-The latest published candidate is still **0.2.0rc1**. Follow release status and opt-in commands in the
-[0.2 upgrade guide](./upgrading). Read its Python API changes and external RPC-client requirements
-before updating. The commands above continue to install the published stable release.
+In the current development tree, native-wheel installs prefer Rust and pure/source installs use
+prompt-toolkit fullscreen. Check the [0.2 upgrade guide](./upgrading) and the
+[release page](https://github.com/whanyu1212/Wisp/releases) for the behavior and availability of a
+specific prerelease. The commands above continue to install the published stable release.
 
 ## Updates
 
-Textual builds check PyPI at most once every six hours after TUI startup. When a newer applicable
-release is available, the check never blocks startup:
-
-- The Textual TUI waits until the session is safely idle and the composer is empty, then offers
-  **Update & restart** (the default), **Later**, or **Skip version**.
-- **Update & restart** is available for persistent `uv tool` installations. After installation,
-  Wisp relaunches the exact original command with its original working directory and environment.
-- Line/fullscreen renderers and installations managed by another package manager receive a passive
-  notice instead of an install prompt.
-- **Skip version** suppresses only that exact release; a newer compatible release is offered again.
+The Python line and fullscreen renderers check PyPI at most once every six hours after startup.
+When a newer applicable release is available, they show a passive notice without blocking startup.
 
 ```bash
 wisp update --check   # bypass the cache and check immediately
@@ -51,7 +43,7 @@ Automatic installation is available only when Wisp is running from a persistent 
 installation. `uvx`, local-source, and other package-manager installs are never replaced.
 
 Rust users run `wisp update --check` or `wisp update` outside the TUI; `/update` displays
-those instructions. Rust does not provide Textual's automatic update/restart dialog.
+those instructions.
 
 ## Next steps
 

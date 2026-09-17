@@ -52,7 +52,9 @@ def test_cli_version_flag() -> None:
     assert result.output == f"wisp {__version__}\n"
 
 
-def test_bare_interactive_cli_launches_textual_tui(monkeypatch: MonkeyPatch) -> None:
+def test_bare_interactive_cli_launches_python_fullscreen_without_native_binary(
+    monkeypatch: MonkeyPatch,
+) -> None:
     launched: dict[str, object] = {}
 
     monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: True)
@@ -61,6 +63,8 @@ def test_bare_interactive_cli_launches_textual_tui(monkeypatch: MonkeyPatch) -> 
         "_run_tui_from_cli_options",
         lambda **kwargs: launched.update(kwargs),
     )
+    monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
+    monkeypatch.setattr("wisp.tui.rust_binary.installed_rust_tui_binary", lambda: None)
 
     result = CliRunner().invoke(
         app,
@@ -69,7 +73,7 @@ def test_bare_interactive_cli_launches_textual_tui(monkeypatch: MonkeyPatch) -> 
     )
 
     assert result.exit_code == 0, result.output
-    assert launched["renderer"] is cli_module.TuiRendererKind.textual
+    assert launched["renderer"] is cli_module.TuiRendererKind.fullscreen
     assert launched["all_tools"] is True
 
 

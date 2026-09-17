@@ -56,7 +56,7 @@ def resolve_rust_tui_binary() -> Path:
     if sys.platform != "darwin" and not sys.platform.startswith("linux"):
         raise RustTuiLaunchError(
             "the Rust TUI is currently supported only on macOS and Linux; "
-            "use `wisp tui --renderer textual` on Windows"
+            "use `wisp tui --renderer fullscreen` on Windows"
         )
 
     override = os.environ.get(_BINARY_ENV)
@@ -70,7 +70,7 @@ def resolve_rust_tui_binary() -> Path:
         if installed_binary is None:
             raise RustTuiLaunchError(
                 "the active Python environment has no installed Rust TUI binary; "
-                "use `wisp tui --renderer textual`"
+                "use `wisp tui --renderer fullscreen`"
             )
         path = installed_binary
         source = "the active Python environment"
@@ -81,7 +81,7 @@ def resolve_rust_tui_binary() -> Path:
         raise RustTuiLaunchError(
             f"Rust TUI binary was not found via {source}; "
             f"set {_BINARY_ENV} to an absolute development binary path or use "
-            "`wisp tui --renderer textual`"
+            "`wisp tui --renderer fullscreen`"
         ) from exc
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise RustTuiLaunchError(f"Rust TUI binary is not executable: {resolved}")

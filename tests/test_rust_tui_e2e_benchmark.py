@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -46,27 +47,25 @@ def _sample(renderer: Renderer, run: int, value: float) -> BenchmarkSample:
 def test_summarize_samples_retains_raw_distribution_extremes() -> None:
     samples = (
         _sample("rust", 1, 10),
-        _sample("textual", 1, 40),
-        _sample("textual", 2, 60),
         _sample("rust", 2, 30),
     )
 
-    rust, textual = summarize_samples(samples)
+    (rust,) = summarize_samples(samples)
 
-    assert (rust.renderer, textual.renderer) == ("rust", "textual")
-    assert rust.samples == textual.samples == 2
+    assert rust.renderer == "rust"
+    assert rust.samples == 2
     assert rust.launch_to_ready_ms.median == 20
     assert rust.launch_to_ready_ms.p95 == 29
     assert rust.launch_to_ready_ms.max == 30
-    assert textual.terminal_output_bytes.median == 5_000
-    assert textual.child_max_rss_bytes is not None
-    assert textual.child_max_rss_bytes.max == 60_000
+    assert rust.terminal_output_bytes.median == 2_000
+    assert rust.child_max_rss_bytes is not None
+    assert rust.child_max_rss_bytes.max == 30_000
 
 
 def test_report_json_includes_samples_and_summaries() -> None:
-    samples = (_sample("textual", 1, 10),)
+    samples = (_sample("rust", 1, 10),)
     report = BenchmarkReport(
-        config=BenchmarkConfig(renderers=("textual",), runs=1),
+        config=BenchmarkConfig(runs=1),
         environment={"platform": "test", "python": "3.12"},
         samples=samples,
         summaries=summarize_samples(samples),
@@ -75,13 +74,15 @@ def test_report_json_includes_samples_and_summaries() -> None:
     payload = json.loads(report.to_json())
 
     assert payload["config"]["rust_binary"] is None
-    assert payload["samples"][0]["renderer"] == "textual"
+    assert payload["samples"][0]["renderer"] == "rust"
     assert payload["summaries"][0]["launch_to_ready_ms"]["median"] == 10
 
 
 def test_validate_config_rejects_invalid_dimensions_and_missing_binary() -> None:
     with pytest.raises(ValueError, match="at least 60 columns"):
-        validate_config(BenchmarkConfig(renderers=("textual",), width=59))
+        validate_config(BenchmarkConfig(width=59))
+    with pytest.raises(ValueError, match="unknown renderers"):
+        validate_config(BenchmarkConfig(renderers=("textual",)))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="rust-binary is required"):
         validate_config(BenchmarkConfig())
     with pytest.raises(ValueError, match="absolute path"):
@@ -141,8 +142,8 @@ def test_post_fork_setup_failure_reaps_the_blocked_child(
 
     with pytest.raises(OSError, match="injected resize failure"):
         rust_tui_e2e._run_sample(
-            BenchmarkConfig(renderers=("textual",), runs=1),
-            renderer="textual",
+            BenchmarkConfig(rust_binary=Path(sys.executable), runs=1),
+            renderer="rust",
             run=1,
             order=1,
         )
@@ -153,7 +154,7 @@ def test_post_fork_setup_failure_reaps_the_blocked_child(
 
 
 @pytest.mark.process
-def test_source_cli_benchmark_completes_both_renderers() -> None:
+def test_source_cli_benchmark_completes_rust_renderer() -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
@@ -168,8 +169,8 @@ def test_source_cli_benchmark_completes_both_renderers() -> None:
         )
     )
 
-    assert [sample.renderer for sample in report.samples] == ["rust", "textual"]
-    assert [summary.renderer for summary in report.summaries] == ["rust", "textual"]
+    assert [sample.renderer for sample in report.samples] == ["rust"]
+    assert [summary.renderer for summary in report.summaries] == ["rust"]
     for sample in report.samples:
         assert sample.launch_to_ready_ms >= 0
         assert sample.submit_to_prompt_echo_ms >= 0

@@ -8,7 +8,7 @@ The shared runtime guarantees consistent semantics, but frontend controls differ
 
 | Interface | Live controls |
 |---|---|
-| Textual/fullscreen TUI | Steer, queue follow-ups, restore the newest queued item, cancel the active command, and answer approvals |
+| Fullscreen TUI | Steer, queue follow-ups, restore the newest queued item, cancel the active command, and answer approvals |
 | Line TUI | Queue follow-up prompts, cancel the active command, and answer approvals |
 | JSONL RPC | Steer, queue follow-ups, inspect/edit queues, cancel by command id, and answer approvals |
 | Python SDK | The same live queue, cancellation, and approval capabilities exposed as typed methods |

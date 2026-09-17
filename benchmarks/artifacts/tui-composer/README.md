@@ -24,7 +24,6 @@ To reproduce the full matrix of nine states, four sizes, and three color variant
 
 ```sh
 WISP_VISUAL_OUTPUT=/tmp/wisp-composer cargo test -p wisp-tui capture_conversation_screens -- --ignored
-uv run python -m benchmarks.tui_visual_capture /tmp/wisp-composer
 rsvg-convert /tmp/wisp-composer/rust-conversation-dark-100x30.svg -o /tmp/wisp-composer/dark.png
 ```
 

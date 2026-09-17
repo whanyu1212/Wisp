@@ -779,68 +779,6 @@ def test_tui_shell_resume_replaces_history_after_selection_and_hydration() -> No
     anyio.run(run)
 
 
-def test_tui_shell_paints_session_operation_before_cold_resume_requests() -> None:
-    class PaintRenderer(LineTuiRenderer):
-        def __init__(self) -> None:
-            super().__init__(_console()[0])
-            self.operation_started = False
-            self.operation_painted = False
-
-        def session_catalog_started(self) -> None:
-            self.operation_started = True
-
-        def session_switch_started(self, session_id: str) -> None:
-            del session_id
-            self.operation_started = True
-
-        async def wait_for_session_operation_paint(self) -> None:
-            assert self.operation_started
-            await anyio.sleep(0)
-            self.operation_painted = True
-
-    class PaintAwareController(ScriptedController):
-        def __init__(self, renderer: PaintRenderer) -> None:
-            super().__init__()
-            self.renderer = renderer
-
-        async def get_sessions(
-            self,
-            *,
-            limit: int = 50,
-            command_id: str | None = None,
-        ) -> str:
-            assert self.renderer.operation_painted
-            return await super().get_sessions(limit=limit, command_id=command_id)
-
-        async def select_session(
-            self,
-            session_id: str,
-            *,
-            command_id: str | None = None,
-        ) -> str:
-            assert self.renderer.operation_painted
-            return await super().select_session(session_id, command_id=command_id)
-
-    async def run() -> None:
-        catalog_renderer = PaintRenderer()
-        catalog_shell = TuiShell(
-            PaintAwareController(catalog_renderer),
-            renderer=catalog_renderer,
-        )
-        await catalog_shell._handle_resume_command(())
-        assert catalog_renderer.operation_painted
-
-        selection_renderer = PaintRenderer()
-        selection_shell = TuiShell(
-            PaintAwareController(selection_renderer),
-            renderer=selection_renderer,
-        )
-        await selection_shell._handle_resume_command(("target",))
-        assert selection_renderer.operation_painted
-
-    anyio.run(run)
-
-
 def test_tui_shell_loads_exact_history_detail_and_rejects_stale_session_results() -> None:
     class RecordingRenderer(LineTuiRenderer):
         def __init__(self) -> None:
@@ -3769,40 +3707,6 @@ def test_tui_shell_adopts_trusted_project_config(tmp_path: Path) -> None:
     anyio.run(run)
 
 
-def test_tui_shell_notifies_the_renderer_of_the_adopted_auth_path(tmp_path: Path) -> None:
-    # The `@`-picker snapshots its protected-path policy at startup. Deferred trust
-    # can move auth_path mid-session, so the shell must tell the renderer or the
-    # picker keeps offering the new credential file that the agent's tools protect.
-    class _RecordingRenderer(LineTuiRenderer):
-        def __init__(self) -> None:
-            super().__init__(_console()[0])
-            self.adopted: list[Path] = []
-
-        def project_auth_path_changed(self, auth_path: Path) -> None:
-            self.adopted.append(auth_path)
-
-    async def run() -> None:
-        renderer = _RecordingRenderer()
-        trusted_auth = tmp_path / "trusted-auth.json"
-        shell = TuiShell(
-            ScriptedController(),
-            renderer=renderer,
-            prompt_reader=await _reader_from([]),
-            provider="startup-provider",
-            model=None,
-            auth_path=tmp_path / "startup-auth.json",
-            settings_home_dir=tmp_path / "home",
-        )
-
-        await shell._handle_rpc_event(
-            ProjectConfigApplied(provider="trusted-provider", auth_path=trusted_auth)
-        )
-
-        assert renderer.adopted == [trusted_auth]
-
-    anyio.run(run)
-
-
 def test_tui_shell_init_drops_effort_invalid_for_the_startup_provider() -> None:
     # Startup adopts the backend-filtered catalog selection, not the shell's
     # independently loaded config value.
@@ -4143,7 +4047,7 @@ def test_tui_shell_disconnect_waits_for_backend_success(tmp_path: Path) -> None:
     anyio.run(run)
 
 
-def test_tui_shell_textual_cancel_requests_backend_device_cancel(tmp_path: Path) -> None:
+def test_tui_shell_cancel_requests_backend_device_cancel(tmp_path: Path) -> None:
     async def run() -> None:
         controller = ScriptedController(hang_device_code=True)
         console, _output = _console()
@@ -4222,7 +4126,7 @@ def test_tui_shell_cancel_during_device_submission_cleans_pending_without_backen
     anyio.run(run)
 
 
-def test_tui_shell_escape_cancels_non_textual_device_authorization(
+def test_tui_shell_escape_cancels_device_authorization(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:

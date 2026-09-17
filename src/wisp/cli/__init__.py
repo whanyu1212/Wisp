@@ -144,16 +144,12 @@ def cli_callback(
         TuiFrontendKind,
         typer.Option(
             "--tui-renderer",
-            help="Terminal frontend for TUI mode: auto prefers installed Rust, otherwise Textual.",
+            help=(
+                "Terminal frontend for TUI mode: auto prefers installed Rust, "
+                "otherwise Python fullscreen."
+            ),
         ),
     ] = TuiFrontendKind.auto,
-    no_synchronized_output: Annotated[
-        bool,
-        typer.Option(
-            "--no-synchronized-output",
-            help="Disable capability-gated synchronized frames in the Textual TUI.",
-        ),
-    ] = False,
     all_tools: Annotated[
         bool,
         typer.Option(
@@ -329,7 +325,6 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 renderer=resolved_tui_renderer,
-                synchronized_output=not no_synchronized_output,
                 project_trusted=trusted,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so the legacy `--mode tui` path keeps honoring
@@ -381,16 +376,9 @@ def tui_command(
         TuiFrontendKind,
         typer.Option(
             "--renderer",
-            help="Terminal frontend: auto prefers installed Rust, otherwise Textual.",
+            help="Terminal frontend: auto prefers installed Rust, otherwise Python fullscreen.",
         ),
     ] = TuiFrontendKind.auto,
-    no_synchronized_output: Annotated[
-        bool,
-        typer.Option(
-            "--no-synchronized-output",
-            help="Disable capability-gated synchronized frames in the Textual TUI.",
-        ),
-    ] = False,
     session_dir: Annotated[
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
@@ -484,7 +472,6 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=selected_renderer,
-            synchronized_output=not no_synchronized_output,
             project_trusted=trusted,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
@@ -545,7 +532,6 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     renderer: TuiFrontendKind,
-    synchronized_output: bool,
     project_trusted: bool,
     user_provider: str | None = None,
     user_model: str | None = None,
@@ -568,7 +554,6 @@ def _run_tui_from_cli_options(
                     continue_latest=continue_latest,
                     approve_unsafe_tools=approve_unsafe_tools,
                     max_tool_iterations=max_tool_iterations,
-                    synchronized_output=synchronized_output,
                     project_trusted=project_trusted,
                     user_provider=user_provider,
                     user_model=user_model,
@@ -578,15 +563,16 @@ def _run_tui_from_cli_options(
             )
         except RustTuiLaunchError as exc:
             typer.echo(f"error: {exc}", err=True)
-            if "--renderer textual" not in str(exc):
+            if "--renderer fullscreen" not in str(exc):
                 typer.echo(
-                    "Select the Python frontend with `wisp tui --renderer textual`.", err=True
+                    "Select the Python fullscreen frontend with `wisp tui --renderer fullscreen`.",
+                    err=True,
                 )
             raise typer.Exit(1) from exc
         if status != 0:
             typer.echo(
                 f"error: Rust TUI exited with status {status}; "
-                "use `wisp tui --renderer textual` to select the Python frontend",
+                "use `wisp tui --renderer fullscreen` to select the Python fullscreen frontend",
                 err=True,
             )
             raise typer.Exit(status if 1 <= status <= 255 else 1)
@@ -610,7 +596,6 @@ def _run_tui_from_cli_options(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             renderer=PythonTuiRendererKind(renderer.value),
-            synchronized_output=synchronized_output,
             project_trusted=project_trusted,
             user_provider=user_provider,
             user_model=user_model,

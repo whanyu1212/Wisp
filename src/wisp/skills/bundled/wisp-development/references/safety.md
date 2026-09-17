@@ -25,4 +25,4 @@ rather than creating a parallel path that skips these checks.
 
 Use the runtime-owned process supervisor for managed subprocesses. Cleanup must be bounded and
 truthful. Never execute project Python in the TUI subprocess, and never send arbitrary Python or
-Textual objects over RPC. Untrusted strings must be rendered as literal escaped text.
+frontend objects over RPC. Untrusted strings must be rendered as literal escaped text.

@@ -6,7 +6,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from textual.theme import Theme
 
 from tests.tui_support import *
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
@@ -33,7 +32,7 @@ from wisp.tui.history import (
 )
 from wisp.tui.input_types import PendingSubmissionView, TuiSubmission, new_submission_id
 from wisp.tui.rendering import _tui_help_text, _unsent_submission_text
-from wisp.tui.theme import WISP_THEMES
+from wisp.tui.theme import WISP_THEMES, ThemePalette
 
 pytestmark = pytest.mark.tui
 
@@ -778,7 +777,7 @@ def test_line_tui_renderer_renders_failed_manual_compaction_as_error(
     # through to the bare unstyled branch -- rendered in default terminal
     # color, less visually distinct than a routine successful compaction (which
     # gets Rich's automatic number highlighting). FullscreenTuiRenderer and
-    # TextualTuiRenderer both already style this red; LineTuiRenderer must too.
+    # The line renderer must distinguish failure from ordinary tool output.
     output = io.StringIO()
     # Verify the renderer's explicit error style independently of an ambient NO_COLOR setting.
     console = Console(file=output, force_terminal=True, no_color=False, width=120)
@@ -1251,53 +1250,6 @@ def test_tui_footer_line_two_still_protects_status_over_model() -> None:
     assert len(long_status_lines[1]) <= 40
 
 
-def test_tui_notice_role_uses_a_distinct_color_from_tool() -> None:
-    # Issue #72: notice and tool previously shared the accent color, making
-    # them visually identical. notice now uses the (previously unused)
-    # warning token instead, in both themes.
-    from wisp.tui.textual_app import TextualTui
-
-    assert "color: $warning" in TextualTui.CSS
-    assert "color: $accent" in TextualTui.CSS
-
-
-@pytest.mark.parametrize("role", ["approved", "denied", "error"])
-def test_semantic_surface_roles_use_contrast_adjusted_text(role: str) -> None:
-    from wisp.tui.textual_app import TextualTui
-
-    semantic_role = {"approved": "success", "denied": "warning", "error": "error"}[role]
-    rule = TextualTui.CSS.split(f".message--{role}", 1)[1].split("}", 1)[0]
-
-    assert f"background: ${semantic_role}-muted;" in rule
-    assert f"color: $text-{semantic_role};" in rule
-
-
-def test_denied_and_error_tool_cards_keep_distinct_semantic_roles() -> None:
-    from wisp.tui.widgets import ToolCard
-
-    denied_role = ToolCard._STATUS_ROLE["denied"]
-    error_role = ToolCard._STATUS_ROLE["error"]
-
-    assert denied_role != error_role
-
-
-def test_tool_card_role_rules_preserve_muted_content_color() -> None:
-    from wisp.tui.textual_app import TextualTui
-
-    role_rule = TextualTui.CSS.split("ToolCard.message--tool,", 1)[1].split("}", 1)[0]
-    assert "color: $text-muted;" in role_rule
-
-
-def test_cancelled_tool_card_uses_explicit_cancelled_action() -> None:
-    from wisp.tui.widgets import ToolCard
-
-    card = ToolCard("write", {"path": "x.py"})
-    card.set_state("cancelled", detail="cancelled")
-
-    assert card.render().plain.startswith("• Cancelled writing  x.py")
-    assert "Denied" not in card.render().plain
-
-
 def test_contrast_ratio_helper_matches_known_wcag_examples() -> None:
     # Sanity-check the helper against textbook values before trusting it for
     # theme assertions below.
@@ -1385,69 +1337,6 @@ def test_dark_theme_semantic_colors_meet_normal_text_contrast_target(color_attr:
     assert contrast_ratio(getattr(WISP_THEME_DARK, color_attr), WISP_THEME_DARK.background) >= 4.5
 
 
-@pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])
-@pytest.mark.parametrize("role", ["success", "warning", "error"])
-def test_derived_semantic_muted_pairs_meet_text_contrast_target(theme_name: str, role: str) -> None:
-    # Textual auto-derives the muted surfaces used by approved, denied, and error
-    # transcript rows. Resolve every registered theme through a live app so these
-    # assertions cover the actual text/background pairs handed to the painter.
-    from wisp.tui.textual_app import TextualTui
-    from wisp.tui.theme import contrast_ratio
-
-    async def scenario() -> tuple[str, str]:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            app.theme = theme_name
-            await pilot.pause()
-            variables = app.get_css_variables()
-            return variables[f"text-{role}"], variables[f"{role}-muted"]
-
-    text, background = anyio.run(scenario)
-
-    assert contrast_ratio(text, background) >= 4.5
-
-
-@pytest.mark.parametrize("theme_name", [theme.name for theme in WISP_THEMES])
-@pytest.mark.parametrize(
-    ("foreground", "background"),
-    [
-        ("diff-add-fg", "diff-add-bg"),
-        ("diff-add-fg", "diff-add-token-bg"),
-        ("diff-line-number-fg", "diff-add-gutter-bg"),
-        ("diff-add-sign-fg", "diff-add-gutter-bg"),
-        ("diff-del-fg", "diff-del-bg"),
-        ("diff-del-fg", "diff-del-token-bg"),
-        ("diff-line-number-fg", "diff-del-gutter-bg"),
-        ("diff-del-sign-fg", "diff-del-gutter-bg"),
-        ("diff-context-fg", "background"),
-        ("diff-hunk-fg", "background"),
-        ("diff-add-count-fg", "panel"),
-        ("diff-del-count-fg", "panel"),
-    ],
-)
-def test_diff_theme_colors_clear_contrast_thresholds(
-    theme_name: str, foreground: str, background: str
-) -> None:
-    # Diff source text must stay legible on BOTH its row band and the stronger
-    # token band layered on top. The token band is the tighter pairing, so it
-    # governs: tuning against the row band alone once shipped a light theme
-    # below AA. Resolved through a live app so the assertion covers the values
-    # Textual actually hands the painter, not just the literals in theme.py.
-    from wisp.tui.textual_app import TextualTui
-    from wisp.tui.theme import contrast_ratio
-
-    async def scenario() -> dict[str, str]:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            app.theme = theme_name
-            await pilot.pause()
-            return dict(app.get_css_variables())
-
-    variables = anyio.run(scenario)
-
-    assert contrast_ratio(variables[foreground], variables[background]) >= 4.5
-
-
 def test_refined_vapor_and_paper_palette_values_are_stable() -> None:
     from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
 
@@ -1483,37 +1372,8 @@ def test_refined_vapor_and_paper_palette_values_are_stable() -> None:
     ) == ("#5e409d", "#100f0f", "#fffcf0", "#f2f0e5", "#e6e4d9")
 
 
-def test_muted_text_role_meets_contrast_target() -> None:
-    # Issue #76: dim/session previously stacked Rich's undefined "dim"
-    # attribute on top of the already-muted secondary color (raw ANSI SGR-2,
-    # not a deterministic blend — see theme.py's MUTED_DARK/MUTED_LIGHT
-    # comment). The baked replacement must clear 4.5:1 against both the main
-    # background and the panel background, in both themes.
-    from wisp.tui.textual_app import TextualTui
-    from wisp.tui.theme import WISP_THEMES, contrast_ratio
-
-    async def scenario() -> dict[str, str]:
-        app = TextualTui()
-        async with app.run_test() as pilot:
-            resolved: dict[str, str] = {}
-            for theme in WISP_THEMES:
-                app.theme = theme.name
-                await pilot.pause()
-                resolved[theme.name] = app.get_css_variables()["transcript-muted"]
-            return resolved
-
-    muted_by_theme = anyio.run(scenario)
-    for theme in WISP_THEMES:
-        muted = muted_by_theme[theme.name]
-        assert contrast_ratio(muted, theme.background) >= 4.5
-        assert contrast_ratio(muted, theme.panel) >= 4.5
-
-
 def test_primary_on_panel_meets_contrast_target_in_every_theme() -> None:
-    # JumpToLatest renders `color: $primary` on `background: $panel` for the
-    # jump-to-latest badge. A theme whose primary only clears 4.5:1 against
-    # its background (not against panel too) still ships with an illegible
-    # badge, so every registered theme must clear the pairing directly.
+    # Rust theme palette uses primary text on the panel surface.
     from wisp.tui.theme import WISP_THEMES, contrast_ratio
 
     for theme in WISP_THEMES:
@@ -1538,7 +1398,7 @@ def test_primary_on_panel_meets_contrast_target_in_every_theme() -> None:
     ],
 )
 def test_every_theme_semantic_text_pair_meets_contrast_target(
-    theme: Theme, color_attr: str, background_attr: str
+    theme: ThemePalette, color_attr: str, background_attr: str
 ) -> None:
     from wisp.tui.theme import contrast_ratio
 
@@ -1550,90 +1410,44 @@ def test_every_theme_semantic_text_pair_meets_contrast_target(
     )
 
 
-def test_line_messages_keep_literal_content_without_baked_rich_styles() -> None:
-    from wisp.tui.widgets import LineMessage
-
-    line = LineMessage("[dim]literal[/dim]", role="dim")
-
-    rendered = line.render()
-    assert rendered.plain == "[dim]literal[/dim]"
-    assert rendered.spans == []
-
-
-def _monochrome_gray(hex_color: str) -> int:
-    """Textual's exact NO_COLOR conversion: Rec. 709 luma, rounded."""
-    from textual.color import Color
-
-    return Color.parse(hex_color).monochrome.r  # r == g == b once converted
-
-
-def _monochrome_hex(hex_color: str) -> str:
-    gray = _monochrome_gray(hex_color)
-    return f"#{gray:02x}{gray:02x}{gray:02x}"
-
-
+@pytest.mark.parametrize("theme", WISP_THEMES, ids=lambda theme: theme.name)
 @pytest.mark.parametrize(
-    ("color_attr", "background_attr"),
+    ("foreground", "background"),
     [
-        ("primary", "background"),
-        ("primary", "panel"),
-        ("success", "background"),
-        ("accent", "background"),
-        ("accent", "surface"),
-        ("warning", "background"),
-        ("warning", "surface"),
-        ("error", "background"),
+        ("diff-add-fg", "diff-add-bg"),
+        ("diff-add-fg", "diff-add-token-bg"),
+        ("diff-line-number-fg", "diff-add-gutter-bg"),
+        ("diff-add-sign-fg", "diff-add-gutter-bg"),
+        ("diff-del-fg", "diff-del-bg"),
+        ("diff-del-fg", "diff-del-token-bg"),
+        ("diff-line-number-fg", "diff-del-gutter-bg"),
+        ("diff-del-sign-fg", "diff-del-gutter-bg"),
+        ("diff-context-fg", "background"),
+        ("diff-hunk-fg", "background"),
+        ("diff-add-count-fg", "panel"),
+        ("diff-del-count-fg", "panel"),
     ],
 )
-def test_light_theme_semantic_text_colors_keep_contrast_under_no_color(
-    color_attr: str, background_attr: str
+def test_every_theme_diff_pair_meets_contrast_target(
+    theme: ThemePalette, foreground: str, background: str
 ) -> None:
-    from wisp.tui.theme import WISP_THEME_LIGHT, contrast_ratio
+    from wisp.tui.theme import contrast_ratio
 
-    color = _monochrome_hex(getattr(WISP_THEME_LIGHT, color_attr))
-    background = _monochrome_hex(getattr(WISP_THEME_LIGHT, background_attr))
+    foreground_color = theme.variables[foreground]
+    background_color = theme.variables.get(background, getattr(theme, background, ""))
 
-    assert contrast_ratio(color, background) >= 4.5
+    assert contrast_ratio(foreground_color, background_color) >= 4.5, (
+        f"{theme.name}: {foreground} on {background}"
+    )
 
 
-def test_monochrome_operational_role_collisions_still_have_distinct_non_color_cues() -> None:
-    # Issue #76: NO_COLOR runs every rendered color through Textual's built-in
-    # Monochrome filter (a fixed Rec. 709 luma conversion). Operational roles
-    # that collide once color is gone must retain distinct border-title labels;
-    # ToolCard also adds a glyph. Conversation roles are deliberately label-free
-    # and are distinguished by their rail color only, so they are excluded along
-    # with quiet, borderless metadata roles.
-    from wisp.tui.theme import WISP_THEME_DARK, WISP_THEME_LIGHT
-    from wisp.tui.widgets import _ROLE_LABELS
+@pytest.mark.parametrize("theme", WISP_THEMES, ids=lambda theme: theme.name)
+def test_every_theme_muted_text_meets_contrast_target(theme: ThemePalette) -> None:
+    from wisp.tui.theme import contrast_ratio
 
-    role_color_attr = {
-        "notice": "warning",
-        "error": "error",
-        "tool": "accent",
-        "approved": "success",
-        "denied": "warning",
-    }
-    comparable_roles = sorted(role_color_attr)
-    collision_threshold = 5  # gray levels; "near-collision" per the issue's audit
-
-    for theme in (WISP_THEME_DARK, WISP_THEME_LIGHT):
-        grays = {
-            role: _monochrome_gray(getattr(theme, role_color_attr[role]))
-            for role in comparable_roles
-        }
-        for i, role_a in enumerate(comparable_roles):
-            for role_b in comparable_roles[i + 1 :]:
-                if abs(grays[role_a] - grays[role_b]) <= collision_threshold:
-                    label_a, label_b = _ROLE_LABELS.get(role_a, ""), _ROLE_LABELS.get(role_b, "")
-                    assert label_a != label_b, (
-                        f"{theme.name}: {role_a!r} (gray={grays[role_a]}) and {role_b!r} "
-                        f"(gray={grays[role_b]}) collide under NO_COLOR and share the same "
-                        f"label {label_a!r} — no non-color cue distinguishes them"
-                    )
-                    assert label_a and label_b, (
-                        f"{theme.name}: {role_a!r}/{role_b!r} collide under NO_COLOR but at "
-                        "least one has no label to fall back on"
-                    )
+    muted = theme.variables["transcript-muted"]
+    assert contrast_ratio(muted, theme.background) >= 4.5
+    assert contrast_ratio(muted, theme.panel) >= 4.5
 
 
 def test_fullscreen_tui_renderer_messages_do_not_infer_footer_state() -> None:

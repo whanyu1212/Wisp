@@ -18,12 +18,12 @@ _ENVIRONMENT = (_REPOSITORY_ROOT / "site" / "reference" / "environment.md").read
 )
 
 
-def test_architecture_records_rc2_trial_and_maintained_textual_fallback() -> None:
+def test_architecture_records_rc2_trial_and_python_fullscreen_fallback() -> None:
     assert "RC2 Rust-default trial" in _ARCHITECTURE
     assert "#470" in _ARCHITECTURE
     assert "supersedes the default hold" in _ARCHITECTURE
     for document in (_ARCHITECTURE, _ARCHITECTURE_INDEX):
-        assert "maintained Python" in document
+        assert "prompt-toolkit fullscreen" in document
         assert "Pure/source installs" in document
         assert "macOS arm64 and Linux glibc 2.28+ x86_64" in document
 
@@ -44,11 +44,11 @@ def test_cli_and_environment_docs_explain_automatic_selection() -> None:
         assert "Explicit CLI selection takes precedence" in document
 
 
-def test_docs_preserve_explicit_textual_recovery_without_silent_fallback() -> None:
+def test_docs_preserve_explicit_fullscreen_recovery_without_silent_fallback() -> None:
     for document in (_ARCHITECTURE, _TUI_GUIDE, _CLI, _ENVIRONMENT, _ARCHITECTURE_INDEX):
         normalized = " ".join(document.split())
         assert "they never silently switch frontends" in normalized
-        assert "wisp tui --renderer textual" in normalized
+        assert "wisp tui --renderer fullscreen" in normalized
 
 
 def test_rc2_decision_keeps_publication_and_stable_promotion_separate() -> None:

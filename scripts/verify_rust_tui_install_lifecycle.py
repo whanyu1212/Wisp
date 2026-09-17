@@ -171,7 +171,7 @@ from typer.testing import CliRunner
 from wisp import cli as cli_module
 from wisp.cli import app
 
-for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "textual"]]:
+for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "fullscreen"]]:
     selected = {}
     with patch.object(cli_module, "_terminal_is_interactive", return_value=True), patch.object(
         cli_module, "_run_tui_from_cli_options",
@@ -179,11 +179,11 @@ for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "textual
     ):
         result = CliRunner().invoke(app, arguments)
     assert result.exit_code == 0, result.output
-    expected = "textual" if "--renderer" in arguments else sys.argv[1]
+    expected = "fullscreen" if "--renderer" in arguments else sys.argv[1]
     assert selected["renderer"].value == expected, (arguments, selected)
 """
     environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
-    _run(python, "-c", script, "rust" if native else "textual", env=environment)
+    _run(python, "-c", script, "rust" if native else "fullscreen", env=environment)
 
 
 def _expect_corrupt_launch_failure(wisp: Path, rust_tui: Path, environment: Path) -> None:

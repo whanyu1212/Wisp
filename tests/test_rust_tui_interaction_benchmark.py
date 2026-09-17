@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -53,19 +54,17 @@ def _sample(renderer: Renderer, history_messages: int, latency: float) -> Sessio
 def test_summary_keeps_conditions_and_raw_probe_phases() -> None:
     samples = (
         _sample("rust", 0, 10),
-        _sample("textual", 0, 40),
         _sample("rust", 0, 30),
         _sample("rust", 8, 50),
     )
 
-    fresh_rust, fresh_textual, long_rust = summarize_samples(samples)
+    fresh_rust, long_rust = summarize_samples(samples)
 
     assert fresh_rust.sessions == 2
     assert fresh_rust.idle_input_visible_ms.median == 20
     assert fresh_rust.streaming_input_visible_ms.median == 30
     assert fresh_rust.page_up_output_activity_ms.median == 40
     assert fresh_rust.page_down_output_activity_ms.median == 50
-    assert fresh_textual.streaming_input_visible_ms.median == 50
     assert long_rust.history_messages == 8
     report = BenchmarkReport(BenchmarkConfig(renderers=("rust",)), {}, samples, (fresh_rust,))
     payload = json.loads(report.to_json())
@@ -75,20 +74,24 @@ def test_summary_keeps_conditions_and_raw_probe_phases() -> None:
 
 def test_config_rejects_unusable_stream_and_history() -> None:
     with pytest.raises(ValueError, match="multiples of four"):
-        validate_config(BenchmarkConfig(renderers=("textual",), history_messages=(0, 7)))
+        validate_config(BenchmarkConfig(rust_binary=Path(sys.executable), history_messages=(0, 7)))
     with pytest.raises(ValueError, match="at least five seconds"):
         validate_config(
-            BenchmarkConfig(renderers=("textual",), response_words=8, stream_interval_ms=20)
+            BenchmarkConfig(
+                rust_binary=Path(sys.executable), response_words=8, stream_interval_ms=20
+            )
         )
     with pytest.raises(ValueError, match="too short for the configured input probes"):
         validate_config(
             BenchmarkConfig(
-                renderers=("textual",),
+                rust_binary=Path(sys.executable),
                 response_words=400,
                 stream_interval_ms=20,
                 input_probes=100,
             )
         )
+    with pytest.raises(ValueError, match="unknown renderers"):
+        validate_config(BenchmarkConfig(renderers=("textual",)))  # type: ignore[arg-type]
 
 
 def test_probe_markers_do_not_reuse_a_predictable_phase_prefix(
@@ -118,7 +121,7 @@ def test_incomplete_repaints_cannot_form_a_visible_marker() -> None:
     assert not rust_tui_interaction._marker_painted(partial_repaints, marker)
 
 
-def test_run_order_alternates_both_histories_and_renderers(
+def test_run_order_alternates_histories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[tuple[int, int, Renderer]] = []
@@ -141,12 +144,8 @@ def test_run_order_alternates_both_histories_and_renderers(
 
     assert observed == [
         (1, 0, "rust"),
-        (1, 0, "textual"),
         (1, 8, "rust"),
-        (1, 8, "textual"),
-        (2, 8, "textual"),
         (2, 8, "rust"),
-        (2, 0, "textual"),
         (2, 0, "rust"),
     ]
 
@@ -170,8 +169,8 @@ def test_post_fork_setup_failure_reaps_the_child(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(OSError, match="injected resize failure"):
         rust_tui_interaction._run_sample(
-            BenchmarkConfig(renderers=("textual",), runs=1),
-            renderer="textual",
+            BenchmarkConfig(rust_binary=Path(sys.executable), runs=1),
+            renderer="rust",
             history_messages=0,
             run=1,
             order=1,
@@ -183,7 +182,7 @@ def test_post_fork_setup_failure_reaps_the_child(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.process
-def test_source_cli_interaction_completes_both_renderers_and_histories() -> None:
+def test_source_cli_interaction_completes_both_histories() -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
@@ -203,9 +202,7 @@ def test_source_cli_interaction_completes_both_renderers_and_histories() -> None
 
     assert {(s.renderer, s.history_messages) for s in report.samples} == {
         ("rust", 0),
-        ("textual", 0),
         ("rust", 8),
-        ("textual", 8),
     }
     for sample in report.samples:
         if sample.history_messages:

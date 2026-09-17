@@ -131,10 +131,10 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
         assert f"`{method}(" in extension_api
 
     assert "execution=None" in extension_api
-    assert "Textual remains the default supported" in architecture
-    assert "Rust failures do not select it automatically" in architecture
+    assert "Rust" in architecture
+    assert "fullscreen" in architecture
     assert "scripts/generate_tui_themes.py" in architecture
-    assert "Textual remains a supported fallback" not in architecture
+    assert "Textual" not in architecture
     assert "Python/Rust\nhandoff tests" in verification
     assert "already-merged feature branch" in delivery
     assert "`wisp-development`" in skills_guide

@@ -184,18 +184,10 @@ jobs:
             target: tests
             marker: not (slow or tui or process or benchmark or production_fault)
             extra_args: ""
-          - suite: tui-integration-0
-            target: tests/test_tui_integration_cli.py
-            marker: tui and not production_fault
-            extra_args: --ci-shard-index=0 --ci-shard-count=2
-          - suite: tui-integration-1
-            target: tests/test_tui_integration_cli.py
-            marker: tui and not production_fault
-            extra_args: --ci-shard-index=1 --ci-shard-count=2
           - suite: tui-components
             target: tests
             marker: tui and not production_fault
-            extra_args: --ignore=tests/test_tui_integration_cli.py
+            extra_args: ""
           - suite: system-and-slow
             target: tests
             marker: (slow or process or benchmark) and not (tui or production_fault)
@@ -252,21 +244,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require successful test shards
+      - name: Require successful TUI tests
         env:
           TEST_RESULT: ${{ needs.test.result }}
         run: test "$TEST_RESULT" = success
-
-      - uses: actions/checkout@v4
-
-      - name: Download integration collections
-        uses: actions/download-artifact@v4
-        with:
-          pattern: test-results-tui-integration-*
-          path: test-results
-
-      - name: Verify complete, disjoint integration collection
-        run: python3 scripts/verify_ci_shards.py test-results/test-results-tui-integration-*/nodes.json
 
   tui-status:
     name: Test (tui)

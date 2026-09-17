@@ -527,7 +527,7 @@ class TraceController:
         return cid
 
     async def get_model_catalog(self, *, command_id: str | None = None) -> str:
-        # Shared traces compare Textual with Rust, whose picker is deferred to #467.
+        # Shared traces compare Python and Rust presentation of the same command.
         return command_id or self._next_id("get_model_catalog")
 
     async def get_connection_catalog(self, *, command_id: str | None = None) -> str:

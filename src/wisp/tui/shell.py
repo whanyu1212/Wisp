@@ -1718,7 +1718,6 @@ class TuiShell:
             return
         if not args:
             self._call_renderer_optional("session_catalog_started")
-            await self._wait_for_session_operation_paint()
             try:
                 command_id = await self.controller.get_sessions(limit=200)
             except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
@@ -1740,7 +1739,6 @@ class TuiShell:
         # renderer implementations intentionally make the repeated start
         # idempotent.
         self._call_renderer_optional("session_switch_started", session_id)
-        await self._wait_for_session_operation_paint()
         try:
             command_id = await self.controller.select_session(session_id)
         except Exception as exc:  # noqa: BLE001 - show send failure in the TUI
@@ -1774,13 +1772,6 @@ class TuiShell:
         if callable(method):
             return cast(object, method(*args, **kwargs))
         return None
-
-    async def _wait_for_session_operation_paint(self) -> None:
-        """Let Textual reveal session-operation chrome before cold RPC work starts."""
-
-        wait_for_paint = getattr(self.renderer, "wait_for_session_operation_paint", None)
-        if callable(wait_for_paint):
-            await cast(Callable[[], Awaitable[None]], wait_for_paint)()
 
     def _end_token_stream(self, completed_content: str | None = None) -> None:
         """Finalize streaming while preserving the original renderer contract."""
@@ -2774,12 +2765,6 @@ class TuiShell:
             self.auth_store = JsonAuthStore(event.auth_path)
             self.connection_catalog = None
             await self._request_connection_catalog()
-            # The credential file just moved, so the `@`-picker's startup policy
-            # snapshot is now stale and would keep offering the new auth file for
-            # mention while the agent's tool context protects it. Hand the renderer
-            # the new path; Textual rebuilds its corpus, other renderers have no
-            # picker and ignore this.
-            self._call_renderer_optional("project_auth_path_changed", event.auth_path)
             self.renderer.notice(
                 f"Applied trusted project config: provider {event.provider}"
                 f"{f', model {event.model}' if event.model else ''}."

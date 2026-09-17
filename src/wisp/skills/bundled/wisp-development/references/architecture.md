@@ -36,8 +36,8 @@ Sessions persist messages and selected raw event types through independent paths
 
 ## Frontend boundary
 
-Interactive terminal frontends are process-isolated RPC clients. Textual is the current supported
-implementation. Wisp has accepted an experiment for an optional Rust frontend, but Python remains
+Interactive terminal frontends are process-isolated RPC clients. Rust is the native fullscreen
+frontend; Python fullscreen and line renderers serve installs without a native binary. Python remains
 the sole authority for providers, MCP, tools and managed processes, trust, approvals, protected
 paths, configuration, authentication, sessions, compaction, cancellation, and durable state.
 
@@ -53,11 +53,10 @@ within a fixed deadline when Rust panics, aborts, or is killed. Backend stdin re
 destructors are not fail-safe cleanup mechanisms.
 
 Python's `wisp.tui.theme` module is authoritative for the curated theme order, metadata, and semantic
-colors shared by Textual and Rust. Regenerate `rust/wisp-tui/src/theme_catalog.json` with
+colors used by Rust. Regenerate `rust/wisp-tui/src/theme_catalog.json` with
 `scripts/generate_tui_themes.py`; do not maintain a second handwritten Rust palette. Theme choices and
 terminal opacity or blur are presentation concerns and must not enter RPC or session persistence.
 
 Keep untrusted output bounded and terminal-safe. A frontend may choose presentation, but it must not
-reconstruct runtime or safety policy from formatted output. Textual remains the default supported
-frontend and can be selected explicitly; Rust failures do not select it automatically. Making Rust
-the default or removing Textual requires a later evidence-backed decision.
+reconstruct runtime or safety policy from formatted output. Rust failures do not silently select
+another frontend; the user can explicitly choose `wisp tui --renderer fullscreen`.

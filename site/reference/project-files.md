@@ -61,11 +61,8 @@ a subsequent invalidation tells clients to discard it.
 
 ## Frontend transition
 
-Textual uses the same scanner and snapshot types through `wisp.project_files`,
-while retaining its existing UI worker, local matching, and stale-request handling.
-External frontends use the RPC capability. Rust's typed protocol client can request
-and decode snapshots; the Rust picker UI is a separate change. Agent grep/find
-behavior and authorization are unchanged.
+The Rust frontend uses the RPC capability to request bounded snapshots for its file picker.
+Agent grep/find behavior and authorization are unchanged.
 
 The contract uses live protocol v8 and event schema v39. Historical v1–v7 protocol
 bundles stay immutable, and supported persisted event schemas remain readable.
