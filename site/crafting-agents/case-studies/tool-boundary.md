@@ -129,7 +129,7 @@ based on the workflows your users actually need.
 ## Evidence and further reading
 
 For observable behavior, begin with
-[`tests/test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_tool_execution.py)
+[`tests/coding/test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/coding/test_tool_execution.py)
 and the interruption matrix described in
 [Testing](../../contributing/testing.md#harness-interruption-and-recovery).
 Tests exercise concrete invariants; their presence is not a claim of complete

@@ -198,7 +198,7 @@ against actual tasks, not just the number of tools offered.
   the read, write, and edit implementations.
 - [`loop/prepared_tools.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/loop/prepared_tools.py):
   approval preparation and execution scheduling.
-- [`test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_tool_execution.py):
+- [`test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/coding/test_tool_execution.py):
   executor behavior and lifecycle coverage.
 
 For performance decisions, continue to [Earning a Rust boundary](case-studies/rust-boundary.md).
@@ -218,8 +218,8 @@ bytes, at most two lines, and marked truncated. Check an input below both limits
 as well: it must be returned unchanged with `truncated=False`.
 
 The regression tests for these teaching contracts live in
-[`tests/test_crafting_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_crafting_agents.py).
-From a development checkout, run `uv run pytest tests/test_crafting_agents.py`.
+[`tests/repository/test_crafting_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/repository/test_crafting_agents.py).
+From a development checkout, run `uv run pytest tests/repository/test_crafting_agents.py`.
 
 Next: [Giving the model useful context](03-context.md). The loop can now execute
 a repair; the next problem is choosing the

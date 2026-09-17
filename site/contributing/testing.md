@@ -40,8 +40,8 @@ rather than live models.
 For changes to conversation orchestration, start with:
 
 ```bash
-uv run pytest tests/test_agent_harness.py tests/test_agent_harness_interruptions.py \
-  tests/test_agent_runtime_invariants.py tests/test_coding_session.py tests/test_compaction.py
+uv run pytest tests/agent/test_agent_harness.py tests/agent/test_agent_harness_interruptions.py \
+  tests/agent/test_agent_runtime_invariants.py tests/coding/test_coding_session.py tests/agent/test_compaction.py
 ```
 
 The interruption matrix records a normal event sequence for streaming, sequential and parallel
@@ -68,7 +68,7 @@ cargo fmt --all --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-uv run pytest tests/test_rust_tui_launcher.py tests/test_rust_tui_supervision.py
+uv run pytest tests/rust_tui/test_rust_tui_launcher.py tests/rust_tui/test_rust_tui_supervision.py
 ```
 
 The cross-language PTY smoke test requires a built binary and runs on macOS and Linux:
@@ -76,7 +76,7 @@ The cross-language PTY smoke test requires a built binary and runs on macOS and 
 ```bash
 cargo build -p wisp-tui
 RUST_TUI_BINARY_UNDER_TEST="$(pwd)/target/debug/wisp-tui" \
-  uv run pytest tests/test_rust_tui_smoke.py
+  uv run pytest tests/rust_tui/test_rust_tui_smoke.py
 ```
 
 `RUST_TUI_BINARY_UNDER_TEST` belongs only to this test harness. It is not launcher configuration and
