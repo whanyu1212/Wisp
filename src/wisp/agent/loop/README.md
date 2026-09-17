@@ -83,11 +83,11 @@ Use the focused suite for the phase being changed:
 
 ```bash
 uv run pytest \
-  tests/test_agent_loop_core.py \
-  tests/test_agent_model_response.py \
-  tests/test_agent_tool_execution.py \
-  tests/test_agent_continuation.py \
-  tests/test_agent_runtime_invariants.py
+  tests/agent/test_agent_loop_core.py \
+  tests/agent/test_agent_model_response.py \
+  tests/agent/test_agent_tool_execution.py \
+  tests/agent/test_agent_continuation.py \
+  tests/agent/test_agent_runtime_invariants.py
 ```
 
 Changes at provider, session, event, or persistence boundaries require the corresponding integration

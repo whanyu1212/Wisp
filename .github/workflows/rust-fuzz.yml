@@ -10,7 +10,7 @@ on:
       - 'schemas/**'
       - 'fuzz/**'
       - 'scripts/prepare_fuzz_corpus.py'
-      - 'tests/test_fuzz_corpus.py'
+      - 'tests/repository/test_fuzz_corpus.py'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'

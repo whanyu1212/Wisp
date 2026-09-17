@@ -65,7 +65,8 @@ The ordering has observable consequences:
 3. Path and exact-match validation prepare a meaningful edit proposal.
 4. Reads run directly; edits and tests require separate decisions.
 5. Changed file contents after approval invalidate the operation.
-6. Only then does `dispatch` appear and the copied request execute.
+6. The `dispatch` observer runs, files are rechecked once more, and only then does
+   the copied request execute. An observer-induced change still blocks execution.
 
 A denial becomes a correlated tool observation through the existing loop. A live
 model could explain the limitation or propose a permitted action, but every later
@@ -193,7 +194,7 @@ Success at one layer does not replace the others.
 ## 8. Checkpoint
 
 ```bash
-uv run pytest tests/test_crafting_side_effects.py
+uv run pytest tests/repository/test_crafting_side_effects.py
 ```
 
 **Exercise 1: catalog versus policy.** Expose `edit` but disallow it in policy.

@@ -135,6 +135,12 @@ class ControlledTools:
             except ToolFailure as exc:
                 return self._failure(str(exc))
         _host_callback(lambda: self.report(f"dispatch: {call_id} {name}"))
+        # The observer is external code too: recheck after its final invocation.
+        try:
+            if any(self._snapshot(path) != text for path, text in files):
+                raise ToolFailure("stale_input: files changed during dispatch reporting")
+        except ToolFailure as exc:
+            return self._failure(str(exc))
         return self.fixture.execute(ToolCall(call_id, name, dict(arguments)))
 
     # ANCHOR_END: execute

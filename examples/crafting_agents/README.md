@@ -76,7 +76,7 @@ The book includes code through mdBook `ANCHOR` regions. Edit these files rather
 than creating duplicate snippets. From a development environment:
 
 ```bash
-uv run pytest tests/test_crafting_agents.py tests/test_crafting_context.py tests/test_crafting_providers.py tests/test_crafting_side_effects.py
+uv run pytest tests/repository/test_crafting_agents.py tests/repository/test_crafting_context.py tests/repository/test_crafting_providers.py tests/repository/test_crafting_side_effects.py
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy

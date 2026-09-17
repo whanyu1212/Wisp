@@ -64,5 +64,8 @@ docs/*
 # Local Claude instructions (shared agent guidance lives in tracked AGENTS.md)
 /CLAUDE.md
 
+# Personal working notes such as WISP_ROADMAP.local.md
+*.local.md
+
 # mdBook output (source lives in site/ and IS tracked)
 /book/
