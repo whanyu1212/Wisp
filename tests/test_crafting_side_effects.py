@@ -83,6 +83,38 @@ def test_invalid_paths_do_not_reach_approval(tmp_path: Path, path: str) -> None:
     assert "only calculator.py" in tools.execute(call)
 
 
+@pytest.mark.parametrize("source", ["approve", "report"])
+@pytest.mark.parametrize("error", [OSError("backend disconnected"), UnicodeError("bad response")])
+def test_callback_failures_propagate_without_dispatch(
+    tmp_path: Path, source: str, error: Exception
+) -> None:
+    create_fixture(tmp_path)
+
+    def approve(request: ApprovalRequest) -> bool:
+        if source == "approve":
+            raise error
+        return True
+
+    def report(message: str) -> None:
+        if source == "report":
+            raise error
+
+    tools = ControlledTools(tmp_path, ExecutionPolicy(frozenset({"edit"})), approve, report=report)
+    with pytest.raises(type(error)) as caught:
+        tools.execute(edit())
+    assert caught.value is error
+    assert "return a - b" in (tmp_path / "calculator.py").read_text()
+
+
+def test_invalid_file_encoding_remains_a_tool_observation(tmp_path: Path) -> None:
+    create_fixture(tmp_path)
+    (tmp_path / "calculator.py").write_bytes(b"\xff")
+    tools = ControlledTools(tmp_path, ExecutionPolicy(), lambda request: True)
+    result = tools.execute(ToolCall("r", "read", {"path": "calculator.py"}))
+    assert "error:" in result
+    assert "decode" in result
+
+
 def test_symlink_replacement_during_approval_is_rejected(tmp_path: Path) -> None:
     create_fixture(tmp_path)
     target = tmp_path / "other.py"

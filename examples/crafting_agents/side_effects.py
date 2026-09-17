@@ -48,10 +48,13 @@ class ControlledTools:
 
     def _snapshot(self, name: str) -> str:
         path = self.root / name
-        if path.is_symlink() or not path.is_file():
-            raise ToolFailure("fixture inputs must be regular files, not symlinks")
-        with path.open("r", encoding="utf-8") as file:
-            text = file.read(16_001)
+        try:
+            if path.is_symlink() or not path.is_file():
+                raise ToolFailure("fixture inputs must be regular files, not symlinks")
+            with path.open("r", encoding="utf-8") as file:
+                text = file.read(16_001)
+        except (OSError, UnicodeError) as exc:
+            raise ToolFailure(str(exc)) from exc
         if len(text) > 16_000:
             raise ToolFailure("fixture input exceeds 16000 characters")
         return text
@@ -66,6 +69,10 @@ class ControlledTools:
         Returns:
             str: Bounded observation, including policy, approval, or stale-input errors.
                 Denied requests never reach the underlying executor.
+
+        Raises:
+            Exception: Unexpected approval or reporting failures propagate. ToolFailure
+                is reserved for expected, model-visible boundary failures.
         """
         try:
             spec = next((tool for tool in TOOLS if tool.name == call.name), None)
@@ -102,7 +109,7 @@ class ControlledTools:
                     raise ToolFailure("stale_input: files changed during approval; request again")
             self.report(f"dispatch: {call_id} {name}")
             return self.fixture.execute(ToolCall(call_id, name, dict(arguments)))
-        except (ToolFailure, OSError, UnicodeError) as exc:
+        except ToolFailure as exc:
             result = bound_output(f"error: {exc}")
             return f"truncated={str(result.truncated).lower()}\n{result.text}"
 
