@@ -221,6 +221,6 @@ The regression tests for these teaching contracts live in
 [`tests/test_crafting_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_crafting_agents.py).
 From a development checkout, run `uv run pytest tests/test_crafting_agents.py`.
 
-Next in the [planned curriculum](index.md#curriculum): **Giving the model useful
-context**. The loop can now execute a repair; the next problem is choosing the
+Next: [Giving the model useful context](03-context.md). The loop can now execute
+a repair; the next problem is choosing the
 instructions and repository information a real model needs to decide what to do.

@@ -75,6 +75,9 @@ programming errors propagate instead of being disguised as ordinary tool errors.
 The turn limit is reported distinctly so a caller does not mistake exhaustion
 for a normal finish.
 
+The optional `instructions` parameter is empty in this checkpoint. Chapter 3
+uses it to prepend host-assembled context before the user message.
+
 This is an async request loop, **not token streaming**: `complete()` returns one
 whole response. The `report` callback prints a trace for us; it does not drive the
 conversation. Tool execution is synchronous at this checkpoint.
