@@ -95,6 +95,10 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
 - `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
   and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
+- For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
+  callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
+  shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,
+  `options.py`, `output.py`, `tools.py`, `rpc.py`).
 - Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.agent.prompt` as their public import surfaces.
   Within each package, import from defining modules. Use the current shared module names above;
   do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`

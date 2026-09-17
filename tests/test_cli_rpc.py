@@ -66,7 +66,7 @@ _RPC_TEST_HANDSHAKE = (
 
 
 def test_rpc_control_stream_buffers_at_most_one_parsed_event() -> None:
-    assert cli_module.rpc._RPC_CONTROL_STREAM_BUFFER_SIZE == 1
+    assert cli_rpc_module._RPC_CONTROL_STREAM_BUFFER_SIZE == 1
 
 
 def test_rpc_mode_requires_handshake_before_ordinary_commands(
@@ -76,7 +76,7 @@ def test_rpc_mode_requires_handshake_before_ordinary_commands(
     async def fail_build_runtime(_config: object) -> object:
         raise AssertionError("runtime must not start before negotiation")
 
-    monkeypatch.setattr(cli_module.rpc, "build_runtime_for_config", fail_build_runtime)
+    monkeypatch.setattr(cli_rpc_module, "build_runtime_for_config", fail_build_runtime)
     result = _BaseCliRunner().invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
@@ -2401,7 +2401,7 @@ def test_rpc_mode_bounds_post_handshake_startup_errors(tmp_path: Path) -> None:
     assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
     message = records[1]["message"]
     assert isinstance(message, str)
-    assert len(message) == cli_module.rpc._MAX_RPC_STARTUP_ERROR_CHARS
+    assert len(message) == cli_rpc_module._MAX_RPC_STARTUP_ERROR_CHARS
     assert message.startswith("Unknown provider: ")
     assert message.endswith("...")
 
@@ -2525,8 +2525,8 @@ def test_rpc_prompt_cancellation_restores_active_leaf_before_completion_boundary
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
-                    cli_module.rpc._write_json_event,
-                    cli_module.rpc._render_json_events,
+                    cli_rpc_module._write_json_event,
+                    cli_rpc_module._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
@@ -2591,8 +2591,8 @@ def test_rpc_cancellation_during_run_snapshot_preserves_existing_context(
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
-                    cli_module.rpc._write_json_event,
-                    cli_module.rpc._render_json_events,
+                    cli_rpc_module._write_json_event,
+                    cli_rpc_module._render_json_events,
                 )
                 await snapshot_started.wait()
                 cancel_scope.cancel()
@@ -2682,8 +2682,8 @@ def test_rpc_prestart_cancellation_preserves_loaded_tool_repair(tmp_path: Path) 
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
-                    cli_module.rpc._write_json_event,
-                    cli_module.rpc._render_json_events,
+                    cli_rpc_module._write_json_event,
+                    cli_rpc_module._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
@@ -2754,8 +2754,8 @@ def test_rpc_prompt_cancellation_retains_entries_after_completion_boundary(
                     cancel_scope,
                     send.clone(),
                     _TrustedGate(),
-                    cli_module.rpc._write_json_event,
-                    cli_module.rpc._render_json_events,
+                    cli_rpc_module._write_json_event,
+                    cli_rpc_module._render_json_events,
                 )
                 await started.wait()
                 cancel_scope.cancel()
@@ -2930,7 +2930,7 @@ def test_rpc_approval_command_resolves_pending_approval(
         ApprovalCommand(id="approval-1", call_id="call-1", approved=False, reason="not safe"),
         running_command=None,
         approval_policy=approval_policy,
-        write_event=cli_module.rpc._write_json_event,
+        write_event=cli_rpc_module._write_json_event,
     )
 
     async def wait_for_decision() -> object:

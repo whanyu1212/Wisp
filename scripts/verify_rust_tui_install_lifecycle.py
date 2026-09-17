@@ -168,8 +168,8 @@ def _verify_frontend_selection(python: Path) -> None:
     script = """
 from unittest.mock import patch
 from typer.testing import CliRunner
-from wisp import cli as cli_module
 from wisp.cli import app
+from wisp.cli import application as cli_module
 
 for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "rust"]]:
     selected = {}
