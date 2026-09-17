@@ -78,9 +78,11 @@ for a normal finish.
 The optional `instructions` parameter is empty in this checkpoint. Chapter 3
 uses it to prepend host-assembled context before the user message.
 
-This is an async request loop, **not token streaming**: `complete()` returns one
-whole response. The `report` callback prints a trace for us; it does not drive the
-conversation. Tool execution is synchronous at this checkpoint.
+This checkpoint is an async request loop, **not token streaming**: its scripted
+`complete()` returns one whole response. Chapter 4 will stream inside that
+provider boundary while keeping the loop's complete-response contract. The
+`report` callback prints a trace for us; it does not drive the conversation. Tool
+execution is synchronous at this checkpoint.
 
 ## 3. Supply a repeatable model decision
 

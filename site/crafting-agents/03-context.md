@@ -341,6 +341,6 @@ Run the teaching regressions with:
 uv run pytest tests/test_crafting_agents.py tests/test_crafting_context.py
 ```
 
-Next in the [curriculum](index.md#curriculum): **Talking to models reliably**. We
+Next: [Talking to models reliably](04-providers.md). We
 will connect a live provider to this prepared context, then distinguish streamed
 progress from a complete response whose tool calls may safely execute.

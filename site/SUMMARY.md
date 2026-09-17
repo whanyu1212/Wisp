@@ -8,6 +8,7 @@
 - [1. The smallest coding agent](crafting-agents/01-core-loop.md)
 - [2. Reading, editing, and testing code](crafting-agents/02-tools.md)
 - [3. Giving the model useful context](crafting-agents/03-context.md)
+- [4. Talking to models reliably](crafting-agents/04-providers.md)
 - [Case study: Hardening the tool boundary](crafting-agents/case-studies/tool-boundary.md)
 - [Case study: Earning a Rust boundary](crafting-agents/case-studies/rust-boundary.md)
 

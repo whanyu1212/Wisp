@@ -31,15 +31,17 @@ understanding the application being edited.
 
 We begin with an in-memory file and a model/tool loop. Next we give that same loop
 a disposable directory, an exact-match editor, and a test runner. Chapter 3 adds
-request context and on-demand file discovery. Later chapters will add real model
-streaming, human control, persistence, and compaction. Each layer should solve a
-problem the previous version makes visible.
+request context and on-demand file discovery. Chapter 4 introduces streaming,
+failure replays, and an opt-in live provider. Later chapters will add human
+control, persistence, and compaction. Each layer should solve a problem the
+previous version makes visible.
 
 The first three checkpoints use a **scripted provider**: a fixed sequence of model
 decisions with checks on the observations between them. This makes the examples
 repeatable and runnable without credentials. It demonstrates execution mechanics,
-not a model discovering a solution or evidence of coding ability. A live-provider
-adapter belongs to the planned provider chapter.
+not a model discovering a solution or evidence of coding ability. Chapter 4 adds
+authored provider-event replays plus an optional live adapter; the offline path
+remains the default.
 
 ### Run the available checkpoints
 
@@ -50,12 +52,15 @@ python3 -m examples.crafting_agents.checkpoint_01
 python3 -m examples.crafting_agents.checkpoint_02
 python3 -m examples.crafting_agents.checkpoint_02 --deny-edits
 python3 -m examples.crafting_agents.checkpoint_03
+python3 -m examples.crafting_agents.checkpoint_04
 ```
 
 These commands use only the Python standard library. Chapter 1 reads an in-memory
 fixture. Chapter 2 creates and removes a temporary directory; it does not edit
-your checkout. Chapter 3 extends that fixture with context and discovery. Their
-test tool executes the supplied fixture with the current Python interpreter.
+your checkout. Chapters 3 and 4 extend that fixture with context, discovery, and
+stream handling. Their test tool executes the supplied fixture with the current
+Python interpreter. The separate live command in chapter 4 requires the OpenAI
+SDK and credentials; live edits and test execution require an explicit opt-in.
 
 ## How to read a chapter
 
@@ -83,7 +88,7 @@ the intended progression, not capabilities already present in the checkpoints.
 | [1. The smallest coding agent](01-core-loop.md) | The model/action/observation cycle, correlated tool results, explicit stopping | `run_agent_loop` | Available |
 | [2. Reading, editing, and testing code](02-tools.md) | Validated tool dispatch, exact-match edits, test feedback, output limits | Built-in tools and typed results | Available |
 | [3. Giving the model useful context](03-context.md) | Instruction assembly, repository discovery, selecting relevant information | Prompt builder, project context, skills | Available |
-| 4. Talking to models reliably | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation | Planned |
+| [4. Talking to models reliably](04-providers.md) | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation | Available |
 | 5. Controlling side effects | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor | Planned |
 | 6. Keeping the user in control | Steering, follow-ups, cancellation, request boundaries | `AgentHarness` | Planned |
 | 7. Remembering and resuming work | Transcript versus audit log, durable writes, replay, repair, branching | `CodingSession` and JSONL sessions | Planned |
