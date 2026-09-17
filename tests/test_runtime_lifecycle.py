@@ -9,7 +9,7 @@ import pytest
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-import wisp.cli as cli_module
+import wisp.cli.application as cli_module
 import wisp.cli.native_tui.launch as tui_launch
 import wisp.cli.rpc as rpc_module
 import wisp.runtime.extensions as runtime_extensions

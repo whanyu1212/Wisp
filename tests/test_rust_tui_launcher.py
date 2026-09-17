@@ -13,8 +13,8 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp import __version__
-from wisp import cli as cli_module
 from wisp.cli import app
+from wisp.cli import application as cli_module
 from wisp.cli.native_tui import rust_binary, rust_launcher
 from wisp.cli.native_tui.launch import TuiOptions
 from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError

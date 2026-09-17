@@ -15,9 +15,11 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner as RawCliRunner
 
 from wisp import __version__
-from wisp import cli as cli_module
 from wisp.agent.messages import Message
-from wisp.cli import _print_mode_tool_approval_policy, _print_mode_tool_registry, app
+from wisp.cli import app
+from wisp.cli import application as cli_module
+from wisp.cli import rpc as cli_rpc_module
+from wisp.cli.tools import _print_mode_tool_approval_policy, _print_mode_tool_registry
 from wisp.coding import CodingSession
 from wisp.events import (
     EVENT_SCHEMA_VERSION,
@@ -428,6 +430,7 @@ __all__ = [
     "build_mixed_tool_runtime",
     "build_tool_runtime",
     "cli_module",
+    "cli_rpc_module",
     "io",
     "json",
     "os",

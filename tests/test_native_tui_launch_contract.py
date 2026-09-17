@@ -10,7 +10,7 @@ import pytest
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
-import wisp.cli as cli_module
+import wisp.cli.application as cli_module
 import wisp.cli.native_tui.launch as native_tui_launch
 from wisp.cli import app
 from wisp.cli.native_tui.launch import TuiOptions, _rpc_command

@@ -671,7 +671,7 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
     monkeypatch.setenv("WISP_TRUST", "1")
     gate = RpcTrustGate(
         Path.cwd(),
-        write_event=cli_module.rpc._write_json_event,
+        write_event=cli_rpc_module._write_json_event,
         on_first_trusted=on_trusted,
     )
     sessions = JsonlSessionStore(tmp_path)
@@ -700,8 +700,8 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
                     anyio.CancelScope(),
                     send.clone(),
                     gate,
-                    cli_module.rpc._write_json_event,
-                    cli_module.rpc._render_json_events,
+                    cli_rpc_module._write_json_event,
+                    cli_rpc_module._render_json_events,
                 )
                 async with receive:
                     async for _ in receive:
