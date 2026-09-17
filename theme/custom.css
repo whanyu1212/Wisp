@@ -3,6 +3,7 @@
    ========================================================================== */
 
 :root {
+  --content-max-width: 100%;
   --wisp-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue",
     sans-serif;
@@ -45,7 +46,8 @@ body {
 }
 
 .content main {
-  max-width: 52rem;
+  max-width: none;
+  margin-inline: 0;
   line-height: 1.75;
   font-size: 1.18rem;
 }

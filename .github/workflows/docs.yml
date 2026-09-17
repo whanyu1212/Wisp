@@ -72,6 +72,10 @@ jobs:
           python -m examples.crafting_agents.checkpoint_01
           python -m examples.crafting_agents.checkpoint_02
           python -m examples.crafting_agents.checkpoint_02 --deny-edits
+          python -m examples.crafting_agents.checkpoint_03
+          python -m examples.crafting_agents.checkpoint_03 --untrusted
+          python -m examples.crafting_agents.checkpoint_03 --long-guidance
+          python -m examples.crafting_agents.checkpoint_03 --deny-edits
 
       - name: Build book
         run: mdbook build
