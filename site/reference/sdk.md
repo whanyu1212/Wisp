@@ -333,7 +333,6 @@ are ordered but do not all have command IDs.
 | `retry_policy` | `RetryPolicy` | Bounded default retry policy |
 | `context_reserve_tokens` | `int` | `16384` |
 | `auto_compaction_enabled` | `bool` | `True` |
-| `update_check_enabled` | `bool` | `True` |
 | `mcp_servers` | `tuple[McpServerConfig, ...]` | `()` |
 | `openai_compatible` | `OpenAICompatibleSettings \| None` | `None` |
 

@@ -17,7 +17,7 @@ Provider-facing tests must use deterministic fake or scripted providers, not liv
 When an event crosses RPC, verify the real JSON round trip. For Rust changes, also run the workspace
 format, Clippy, and test gates from `AGENTS.md`; frontend-boundary changes require the Python/Rust
 handoff tests. Generated theme changes require
-`uv run python scripts/generate_tui_themes.py --check`.
+Rust theme catalog tests in `cargo test -p wisp-tui`.
 
 For package-owned resources, build an artifact and inspect or install the wheel so a source-tree-only
 success cannot hide omitted package data:

@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
+from wisp.cli.native_tui import rust_launcher
+from wisp.cli.native_tui.launch import TuiOptions
+from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError, _TerminalSnapshot
 from wisp.config import WispConfig
-from wisp.tui import rust_launcher
-from wisp.tui.launch import TuiOptions
-from wisp.tui.rust_launcher import RustTuiLaunchError, _TerminalSnapshot
 
 
 class _FakeProcess:

@@ -68,7 +68,6 @@ async def run_with_safe_defaults(workspace: Path, session_dir: Path) -> None:
         WispConfig(
             provider="fake",
             session_dir=session_dir,
-            update_check_enabled=False,
         ),
         options=InProcessOptions(project_context_root=workspace),
     )

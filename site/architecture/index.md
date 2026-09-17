@@ -11,7 +11,6 @@ only the live controls its transport can support. See
 ```mermaid
 flowchart LR
   CLI[CLI] --> Host
-  Fullscreen[Python fullscreen TUI] --> Host
   Rust[Rust TUI] --> Host
   RPC[JSONL RPC] --> Host
   SDK[SDK] --> Host
@@ -37,17 +36,11 @@ request-boundary handshake, and source navigation.
 
 ## Terminal frontend boundary
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
-
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions.
+`wisp`, `wisp tui`, and `wisp --mode tui` launch the Rust frontend. The retained `auto` and `rust`
+selectors both choose Rust. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle its
+binary. A pure-wheel install keeps the Python backend and non-TUI interfaces, but interactive startup
+fails with instructions to obtain a native wheel or build a matching Rust binary. Source checkouts
+use an absolute `WISP_RUST_TUI_BINARY` override.
 
 See the [Rust terminal frontend boundary](./rust-tui-boundary) for the RC2 decision and ownership.
 
@@ -59,4 +52,4 @@ This is an intentional UX tradeoff: long sessions take more time and memory to l
 scroll through the saved conversation without a history cap. The RPC layer pages through every saved
 message in chronological order. Rust builds its retained transcript after all pages arrive; rendering
 caches and tool previews remain bounded. Exact persisted tool output is fetched on demand when a
-preview was clipped. The prompt-toolkit fullscreen renderer retains its separate paging behavior.
+preview was clipped.

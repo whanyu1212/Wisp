@@ -16,6 +16,7 @@ from pytest import MonkeyPatch
 
 import wisp.mcp.runtime as mcp_runtime_module
 from wisp import cli as cli_module
+from wisp.cli.native_tui.launch import TuiOptions, _preflight_tui_options
 from wisp.config import WispConfig
 from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished, RpcMcpStatusReported
 from wisp.mcp.config import McpServerConfig
@@ -27,8 +28,6 @@ from wisp.runtime.event_bus import EventBus
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 from wisp.sdk import InProcessWisp
-from wisp.tui.launch import TuiOptions, _preflight_tui_options
-from wisp.tui.mcp import mcp_status_text
 
 
 def _fixture_server(
@@ -506,7 +505,6 @@ def test_sdk_reports_zero_tool_server_as_disconnected(
     assert report.status.servers[0].status == "disconnected"
     assert report.status.servers[0].tool_names == ()
     assert report.status.servers[0].error is None
-    assert "fixture: disconnected (no tools discovered)" in mcp_status_text(report.status)
     assert EmptyCatalogClient.instances[0].exit_task is not None
 
 
@@ -570,9 +568,7 @@ def test_sdk_downgrades_mcp_status_after_transport_disconnect(
     assert connected.status.servers[0].status == "connected"
     assert disconnected.status.servers[0].status == "disconnected"
     assert disconnected.status.servers[0].tool_names == connected.status.servers[0].tool_names
-    rendered = mcp_status_text(disconnected.status)
-    assert "fixture: disconnected (1 registered tool)" in rendered
-    assert "mcp__fixture__search" in rendered
+    assert disconnected.status.servers[0].tool_names == ("mcp__fixture__search",)
 
 
 def test_print_mode_renders_startup_diagnostic_without_failing(

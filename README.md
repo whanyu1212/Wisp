@@ -111,22 +111,17 @@ to an append-only JSONL session you can read, resume, branch, or audit long afte
 
 | Mode | Command | Output | Best for |
 |------|---------|--------|----------|
-| **TUI** | `wisp` (or `wisp tui`) | Fullscreen terminal UI | Rust on native installs; prompt-toolkit fullscreen otherwise. |
+| **TUI** | `wisp` (or `wisp tui`) | Fullscreen Rust terminal UI | Native-wheel installs on supported platforms |
 | **Print** | `wisp -p "…"` | Assistant text on stdout, events on stderr | One-shot prompts and scripts |
 | **JSON** | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line | Machine-readable automation |
 | **RPC** | `wisp --mode rpc` | Typed JSONL commands and events | Long-lived integrations |
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
-
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions.
+Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 include the Rust TUI and Python backend.
+One installation selects the compatible wheel. Pure-wheel installs on other platforms retain print,
+JSON, RPC, and SDK use, but `wisp` and `wisp tui` report that the Rust TUI is unavailable. A source
+checkout can build a matching binary and set the absolute `WISP_RUST_TUI_BINARY` path; see the
+[development guide](https://whanyu1212.github.io/Wisp/contributing/development#rust-tui-scaffold).
+The Python runtime still owns providers, permissions, tools, and saved sessions.
 
 This describes the current source tree. Published releases retain the frontend behavior with which
 they shipped.

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from functools import partial
 from pathlib import Path
@@ -144,10 +143,7 @@ def cli_callback(
         TuiFrontendKind,
         typer.Option(
             "--tui-renderer",
-            help=(
-                "Terminal frontend for TUI mode: auto prefers installed Rust, "
-                "otherwise Python fullscreen."
-            ),
+            help="Terminal frontend for TUI mode: auto and rust both use the native Rust TUI.",
         ),
     ] = TuiFrontendKind.auto,
     all_tools: Annotated[
@@ -204,7 +200,7 @@ def cli_callback(
 
     console = Console(stderr=True)
     # Explicit CLI/env modes still win; only a bare interactive terminal defaults
-    # to the fullscreen TUI before trust and project config are resolved.
+    # to the Rust TUI before trust and project config are resolved.
     mode_was_provided = _option_was_provided(ctx, "mode")
     bare_interactive_invocation = (
         prompt is None and not _has_callback_cli_args(ctx) and _terminal_is_interactive()
@@ -368,15 +364,11 @@ def cli_callback(
 @app.command("tui")
 def tui_command(
     ctx: typer.Context,
-    line: Annotated[
-        bool,
-        typer.Option("--line", help="Use the simple line renderer instead of the fullscreen TUI."),
-    ] = False,
     renderer: Annotated[
         TuiFrontendKind,
         typer.Option(
             "--renderer",
-            help="Terminal frontend: auto prefers installed Rust, otherwise Python fullscreen.",
+            help="Terminal frontend: auto and rust both use the native Rust TUI.",
         ),
     ] = TuiFrontendKind.auto,
     session_dir: Annotated[
@@ -434,13 +426,9 @@ def tui_command(
     """Start Wisp's terminal interface."""
 
     console = Console(stderr=True)
-    if line and _option_was_provided(ctx, "renderer"):
-        console.print("[red]error:[/red] use either --line or --renderer, not both")
-        raise typer.Exit(1)
-
     # Resolve trust before config, preflight, or terminal UI startup. The persisted
     # decision is then observed by the RPC subprocess, so normal TUI launches never
-    # enter the fullscreen interface with project trust still undecided.
+    # enter the terminal interface with project trust still undecided.
     project_context_root = resolve_project_context_root(Path.cwd())
     trusted = _resolve_cli_trust(project_context_root).trusted
     _validate_session_and_iteration_options(
@@ -451,8 +439,8 @@ def tui_command(
         console=console,
     )
     selected_renderer = _resolve_tui_renderer(
-        TuiFrontendKind.line if line else renderer,
-        renderer_was_provided=line or _option_was_provided(ctx, "renderer"),
+        renderer,
+        renderer_was_provided=_option_was_provided(ctx, "renderer"),
         console=console,
     )
     try:
@@ -538,95 +526,34 @@ def _run_tui_from_cli_options(
     user_session_dir: Path | None = None,
     user_auth_file: Path | None = None,
 ) -> None:
-    from wisp.tui.launch import TuiOptions
+    from wisp.cli.native_tui.launch import TuiOptions
+    from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError, run_rust_tui
 
-    if renderer is TuiFrontendKind.rust:
-        from wisp.tui.rust_launcher import RustTuiLaunchError, run_rust_tui
-
-        try:
-            status = run_rust_tui(
-                TuiOptions(
-                    config=config,
-                    all_tools=all_tools,
-                    allow_read_tools=allow_read_tools,
-                    allowed_tools=allowed_tools,
-                    resume=resume,
-                    continue_latest=continue_latest,
-                    approve_unsafe_tools=approve_unsafe_tools,
-                    max_tool_iterations=max_tool_iterations,
-                    project_trusted=project_trusted,
-                    user_provider=user_provider,
-                    user_model=user_model,
-                    user_session_dir=user_session_dir,
-                    user_auth_file=user_auth_file,
-                )
+    assert renderer is TuiFrontendKind.rust
+    try:
+        status = run_rust_tui(
+            TuiOptions(
+                config=config,
+                all_tools=all_tools,
+                allow_read_tools=allow_read_tools,
+                allowed_tools=allowed_tools,
+                resume=resume,
+                continue_latest=continue_latest,
+                approve_unsafe_tools=approve_unsafe_tools,
+                max_tool_iterations=max_tool_iterations,
+                project_trusted=project_trusted,
+                user_provider=user_provider,
+                user_model=user_model,
+                user_session_dir=user_session_dir,
+                user_auth_file=user_auth_file,
             )
-        except RustTuiLaunchError as exc:
-            typer.echo(f"error: {exc}", err=True)
-            if "--renderer fullscreen" not in str(exc):
-                typer.echo(
-                    "Select the Python fullscreen frontend with `wisp tui --renderer fullscreen`.",
-                    err=True,
-                )
-            raise typer.Exit(1) from exc
-        if status != 0:
-            typer.echo(
-                f"error: Rust TUI exited with status {status}; "
-                "use `wisp tui --renderer fullscreen` to select the Python fullscreen frontend",
-                err=True,
-            )
-            raise typer.Exit(status if 1 <= status <= 255 else 1)
-        return
-
-    from wisp.tui import TuiExitReason, run_tui
-    from wisp.tui.rendering import TuiRendererKind as PythonTuiRendererKind
-
-    restart_argv = tuple(sys.orig_argv)
-    restart_cwd = Path.cwd()
-    restart_environment = dict(os.environ)
-    result = anyio.run(
-        run_tui,
-        TuiOptions(
-            config=config,
-            all_tools=all_tools,
-            allow_read_tools=allow_read_tools,
-            allowed_tools=allowed_tools,
-            resume=resume,
-            continue_latest=continue_latest,
-            approve_unsafe_tools=approve_unsafe_tools,
-            max_tool_iterations=max_tool_iterations,
-            renderer=PythonTuiRendererKind(renderer.value),
-            project_trusted=project_trusted,
-            user_provider=user_provider,
-            user_model=user_model,
-            user_session_dir=user_session_dir,
-            user_auth_file=user_auth_file,
-        ),
-    )
-    if result is TuiExitReason.restart_requested:
-        try:
-            _restart_current_process(
-                restart_argv,
-                cwd=restart_cwd,
-                environment=restart_environment,
-            )
-        except OSError as exc:
-            typer.echo(f"Wisp was updated, but restart failed: {exc}", err=True)
-            raise typer.Exit(1) from exc
-
-
-def _restart_current_process(
-    argv: tuple[str, ...],
-    *,
-    cwd: Path,
-    environment: dict[str, str],
-) -> None:
-    """Replace this process with the exact invocation captured before TUI startup."""
-
-    if not argv:
-        raise OSError("the original process invocation is unavailable")
-    os.chdir(cwd)
-    os.execvpe(argv[0], list(argv), environment)
+        )
+    except RustTuiLaunchError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if status != 0:
+        typer.echo(f"error: Rust TUI exited with status {status}", err=True)
+        raise typer.Exit(status if 1 <= status <= 255 else 1)
 
 
 async def _run_print(

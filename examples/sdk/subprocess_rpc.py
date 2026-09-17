@@ -29,7 +29,6 @@ async def prompt_in_subprocess(workspace: Path, session_dir: Path) -> str:
             "WISP_PROVIDER": "fake",
             "WISP_SESSION_DIR": str(session_dir),
             "WISP_TRUST": "1",
-            "WISP_UPDATE_CHECK": "0",
         }
     )
     transport = await JsonlSubprocessRpcTransport.start(cwd=workspace, env=environment)

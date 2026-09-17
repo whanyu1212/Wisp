@@ -98,8 +98,8 @@ The reusable `Rust TUI wheel candidates` workflow builds `wisp-ai` platform whee
 x86_64 and macOS arm64. It compares Python package files with the current `uv_build` wheel, verifies
 the native extension and executable, and installs without Cargo on the consumer `PATH`. Each target
 exercises an installed fake-provider Rust TUI prompt, the managed-output extension, native/pure
-replacement, explicit Python fullscreen routing, corruption, offline reinstall, and uninstall; it uploads
-checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
+replacement with an actionable missing-binary error, corruption, offline reinstall, and uninstall;
+it uploads checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
 Pull requests and manual workflow runs only upload candidates. The tag-gated release workflow calls
 the same reusable builder, verifies the complete downloaded distribution set, and requires

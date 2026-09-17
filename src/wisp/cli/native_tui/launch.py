@@ -1,4 +1,4 @@
-"""TUI launch and subprocess helpers."""
+"""Native TUI launch options and trust-safe RPC subprocess arguments."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from wisp.config import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
-from wisp.tui.rendering import TuiRendererKind
 
 
 @dataclass(frozen=True)
@@ -20,7 +19,7 @@ class TuiOptions:
     """Options used to start the Wisp TUI shell.
 
     ``config`` is the parent's startup view of configuration, used for preflight
-    validation and the header display. It is deliberately **not** serialized into the
+    validation. It is deliberately **not** serialized into the
     RPC subprocess's arguments: the subprocess owns config resolution and receives
     the trust decision resolved by the parent before TUI startup, so a trusted
     project's ``.wisp/settings.json`` can set provider / model / session dir / auth
@@ -37,17 +36,16 @@ class TuiOptions:
     forwarding a trust-gated field would. Without this, a caller that sets
     ``config.effort`` directly (bypassing ``WISP_EFFORT``/the settings file
     entirely -- e.g. an embedder constructing
-    ``TuiOptions(config=WispConfig(effort=...))``) would seed the parent
-    shell/model picker with that tier while the subprocess never applied it to
-    any prompt.
+    ``TuiOptions(config=WispConfig(effort=...))``) would leave the subprocess
+    without the selected effort for prompts.
 
     ``config.openai_compatible`` is also forwarded through a dedicated structured
     environment value. The endpoint is user-only, so forwarding the resolved value is
     safe and ensures direct embedders configure the RPC subprocess consistently.
 
     ``project_trusted`` carries the parent CLI's already-resolved decision into the
-    child process. It remains optional so direct/embedded ``run_tui`` callers can
-    retain the RPC trust-request fallback.
+    child process. It remains optional for direct launcher callers so the RPC
+    backend can request trust when no parent decision was supplied.
     """
 
     config: WispConfig
@@ -58,7 +56,6 @@ class TuiOptions:
     continue_latest: bool = False
     approve_unsafe_tools: bool = False
     max_tool_iterations: int | None = None
-    renderer: TuiRendererKind = TuiRendererKind.line
     project_trusted: bool | None = None
     user_provider: str | None = None
     user_model: str | None = None

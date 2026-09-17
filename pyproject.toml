@@ -40,7 +40,6 @@ dependencies = [
     "openai>=2.44.0",
     "packaging>=26.0",
     "pathspec>=1.1.1",
-    "prompt-toolkit>=3.0.52",
     "pygments>=2.20.0",
     "pyyaml>=6.0.2",
     "pydantic>=2.13.4",

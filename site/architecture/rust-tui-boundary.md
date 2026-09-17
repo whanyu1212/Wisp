@@ -2,21 +2,15 @@
 
 | Field | Decision |
 |---|---|
-| Current frontend policy | Rust on supported native-wheel installs; prompt-toolkit fullscreen otherwise |
+| Current frontend policy | Rust is the sole interactive terminal frontend; pure installs retain non-TUI interfaces |
 | Runtime boundary | Rust owns terminal presentation; Python owns agent semantics and durability |
 | Historical decision | RC2 Rust-default trial on 2026-09-16; see [RC2 checklist](../contributing/rc2-release.md) |
 
-`wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels cover
-macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other platforms use
-prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-`WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust in
-auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-launch/runtime failures report an error; they never silently switch frontends.
-
-Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions, providers,
-and saved sessions. The line renderer remains a separate Python interface.
+`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; `auto` and `rust` are equivalent selectors.
+Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
+retain print, JSON, RPC, and SDK interfaces but report an actionable missing-binary error for
+interactive startup. Source development uses a matching binary selected by an absolute
+`WISP_RUST_TUI_BINARY` path.
 
 > Rust decides how frontend state is presented. Python decides what is allowed, what is durable,
 > and what commands and events mean.
@@ -28,19 +22,17 @@ flowchart LR
   Launcher[Python launcher] -->|selects and supervises| Rust[Rust TUI]
   Rust -->|spawns| Backend[Python JSONL-RPC backend]
   Rust <-->|typed commands and events| Backend
-  Launcher -->|pure/source fallback| Fullscreen[Python fullscreen TUI]
-  Fullscreen <-->|typed commands and events| Backend
   Backend --> Host[RPC command host]
   Host --> Session[CodingSession]
   Session --> Harness[AgentHarness]
   Harness --> Loop[run_agent_loop]
 ```
 
-For Rust, the Python launcher resolves the exact native executable, passes the Python interpreter
+The Python launcher resolves the exact native executable, passes the Python interpreter
 and backend command, and remains alive as an external supervisor. Rust owns input, rendering,
 backend protocol exchange, and graceful shutdown. The launcher restores terminal state and cleans up
-the shared process group if Rust exits abruptly. An explicit Rust launch error does not select the
-Python fullscreen renderer; the user can select it for a subsequent invocation.
+the shared process group if Rust exits abruptly. Missing or incompatible binaries fail startup with
+guidance; the launcher does not select another terminal renderer.
 
 ## Subsystem ownership
 
@@ -52,7 +44,7 @@ Python fullscreen renderer; the user can select it for a subsequent invocation.
 | Trust, protected paths, approvals, and credentials | Python | Rust collects input and presents decisions, but Python validates and stores them. |
 | Model catalog, configuration, project-file discovery, and updates | Python | Rust renders backend-provided state and sends typed requests. |
 | Terminal input, composer, overlays, layout, scrollback, and themes | Rust TUI | Presentation state is disposable and cannot change backend policy. |
-| CLI print/JSON, SDK, line and fallback fullscreen renderers | Python | These interfaces use the same runtime without depending on Rust presentation. |
+| CLI print/JSON, RPC, and SDK interfaces | Python | These interfaces use the same runtime without depending on Rust presentation. |
 | Binary selection and fail-safe process cleanup | Python launcher | Rust attempts graceful cleanup; the launcher enforces the process boundary. |
 
 ## Wire boundary and compatibility
@@ -71,7 +63,7 @@ schema bundles remain immutable; see [Compatibility and versioning](../reference
 
 | Failure or transition | Owner and outcome |
 |---|---|
-| Missing, corrupt, or incompatible Rust binary | Python launcher reports an actionable non-zero error; users can explicitly choose Python fullscreen on a later run. |
+| Missing, corrupt, or incompatible Rust binary | Python launcher reports an actionable non-zero error with installation or source-build guidance. |
 | Backend spawn or protocol failure | Rust stops accepting commands, restores the terminal, and reports failure; launcher verifies process cleanup. |
 | Rust panic, abort, or abrupt termination | Launcher restores a known terminal baseline and terminates the supervised process group within a deadline. |
 | Normal quit or signal | Rust requests graceful backend shutdown; launcher enforces the cleanup deadline. |
@@ -84,9 +76,9 @@ ownership nor backend EOF alone is treated as a fail-safe cleanup guarantee.
 The RC2 release PR authorized a Rust-default trial on native-wheel installations. It
 supersedes the default hold in [#470](https://github.com/whanyu1212/Wisp/issues/470) for this candidate
 only. Textual was retained as the selectable fallback during that trial. The subsequent retirement
-replaced that fallback with the existing prompt-toolkit fullscreen renderer; it did not move the
-agent runtime to Rust. Textual removal and stable promotion require separate decisions, and the RC2
-trial did not itself publish a stable release.
+replaced that fallback with the existing prompt-toolkit fullscreen renderer. The later Rust-only
+retirement removed the Python terminal renderers; neither change moved the agent runtime to Rust.
+The RC2 trial did not itself publish a stable release.
 
 The dated [RC2 checklist](../contributing/rc2-release.md) and
 [acceptance evidence](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_acceptance_evidence.md)

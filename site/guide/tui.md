@@ -4,27 +4,20 @@
 wisp
 ```
 
-Wisp's fullscreen terminal clients share the same Python RPC controller.
+The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions, and sessions.
 
 > [!NOTE]
-> **Frontend selection**
+> **TUI availability**
 >
-> `wisp`, `wisp tui`, and `wisp --mode tui` use `auto`: they select Rust when a native binary is
-> installed on macOS/Linux, and the prompt-toolkit fullscreen renderer otherwise. Native wheels
-> cover macOS arm64 and Linux glibc 2.28+ x86_64. Pure/source installs, Intel macOS, and other
-> platforms use prompt-toolkit fullscreen by default. Explicit CLI selection takes precedence over
-> `WISP_TUI_RENDERER`, which takes precedence over `auto`. `WISP_RUST_TUI_BINARY` also selects Rust
-> in auto mode on macOS/Linux for source development. Missing or damaged declared binaries and Rust
-> launch/runtime failures report an error; they never silently switch frontends.
->
-> Use `wisp tui --renderer fullscreen` or `WISP_TUI_RENDERER=fullscreen` to select the Python
-> fullscreen renderer explicitly. Both frontends use the same Python runtime, permissions,
-> providers, and saved sessions.
+> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; both `auto` and `rust` selectors choose it.
+> Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
+> retain print, JSON, RPC, and SDK use, but interactive startup reports how to obtain a native wheel
+> or build a matching binary. Source checkouts set the absolute `WISP_RUST_TUI_BINARY` path after
+> building Rust; see [Development setup](../contributing/development#rust-tui-scaffold).
 
 ## Rust TUI
 
-Rust is the default for native-wheel installs. The prompt-toolkit fullscreen renderer remains
-available on pure/source installs and by explicit selection.
+Rust is the only interactive terminal renderer.
 
 Rust provides model selection, command discovery, context/compaction, skills/MCP, prompt history,
 overlays, file completion, themes, mouse navigation, configurable bindings, keyboard selection,
@@ -251,11 +244,10 @@ supported. Only button and
 SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
 terminal after exit or failure.
 
-Selecting Rust never falls back to Python fullscreen. A missing/non-executable binary,
-unsupported platform, package-version mismatch,
-negotiation failure, or non-zero Rust exit is reported as an error. See
-[Development setup](../contributing/development#rust-tui-scaffold), or select Python fullscreen
-explicitly with `wisp tui --renderer fullscreen`.
+A missing or non-executable binary, unsupported platform, package-version mismatch,
+negotiation failure, or non-zero Rust exit is reported as an error. For source checkouts, see
+[Development setup](../contributing/development#rust-tui-scaffold). Print, JSON, RPC, and SDK
+interfaces remain available on pure-wheel installs.
 
 The daily-use acceptance inventory for [#467](https://github.com/whanyu1212/Wisp/issues/467) is
 recorded in the parity matrix.
@@ -349,7 +341,7 @@ Only user settings supply this preference; project files are ignored even after 
 public environment or CLI keybinding override. The launcher resolves user settings once and passes a
 private snapshot to Rust; the backend child does not inherit it. Bindings change frontend input only,
 not runtime policy. Limits are 64 KiB of configuration, 64 entries, eight chords per action, and 64
-characters per chord. The Python fullscreen renderer keeps its own keybindings.
+characters per chord.
 
 ### Rust large pastes
 
@@ -373,12 +365,12 @@ Rebuild or select a Rust binary matching the updated Python package before relau
 Automatic notices, binary installation, rollback, and coordinated restart remain distribution work
 under [#469](https://github.com/whanyu1212/Wisp/issues/469).
 
-Unlike print mode, **fullscreen TUI modes expose the full tool registry by default**. Mutating and
+Unlike print mode, **the TUI exposes the full tool registry by default**. Mutating and
 command tools still pause for approval: approve once, allow that tool for the session, choose a saved
 project YOLO default, or deny.
 
 Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
-`/permissions yolo` in either TUI. Saved defaults apply to subsequent launches in the same canonical
+`/permissions yolo`. Saved defaults apply to subsequent launches in the same canonical
 project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
@@ -386,26 +378,22 @@ is not saved. These choices do not change project trust or protected paths.
 
 ## Steering and follow-ups
 
-The composer remains active while a prompt runs. In the prompt-toolkit fullscreen and Rust TUIs:
+The composer remains active while a prompt runs:
 
 - `Enter` sends a steering message for the active run. It is injected at the next safe request
   boundary, after any current assistant/tool batch.
 - `Alt+Enter` queues follow-up work that starts when the active run would otherwise finish.
 - `Alt+Up` removes the newest queued steering or follow-up message and restores it ahead of the
   current draft, after the shared runtime confirms the queue change.
-- `Escape` cancels the active prompt in the Python fullscreen TUIs. The Rust TUI accepts either
-  `Escape` or `Ctrl+C`. Cancellation does not discard runtime-owned queued messages.
+- `Escape` or `Ctrl+C` cancels the active prompt. Cancellation does not discard runtime-owned
+  queued messages.
 
 A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
-count indicates when more are queued. Python fullscreen TUIs report separate steering and follow-up
-totals in the footer; Rust shows them in its footer and composer. Python returns failed submissions to
-the composer. Rust retains them as recoverable drafts: `Alt+Up` restores one ahead of the current
+count indicates when more are queued. Rust shows steering and follow-up totals in its footer and
+composer. Failed submissions remain recoverable drafts: `Alt+Up` restores one ahead of the current
 draft. The Rust TUI clears a submitted draft only after the JSONL writer flushes it, refreshes queue
 state after startup and session changes, and reports queued or recovering text as unsent if the
 transport closes.
-
-The line renderer accepts text entered during a run as follow-up work, but does not expose the
-fullscreen steering and restoration keybindings.
 
 ## Slash commands
 
@@ -442,8 +430,9 @@ workflow to that backend.
 ## Completions and the file picker
 
 Type `/` to filter commands inline. Type `@` to reference a project file. The picker starts in fuzzy
-mode and matches loosely, so `@rust` finds `src/wisp/tui/rust_launcher.py`; press `Tab` to switch to a
-project tree without changing the draft or query, and press `Tab` again to return.
+mode and matches loosely, so `@rust_launcher` finds
+`src/wisp/cli/native_tui/rust_launcher.py`; press `Tab` to switch to a project tree without changing
+the draft or query, and press `Tab` again to return.
 
 `Up`/`Down` move the selection. In tree mode, `Left`/`Right` collapse or expand a directory, while
 `Enter` (or a click) expands/collapses directories and inserts files. Fuzzy mode retains directory
@@ -465,7 +454,7 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Enter` | Submit; while a prompt runs, steer it; or activate the selected slash/file-picker item |
 | `Alt+Enter` | While a prompt runs, queue a follow-up; otherwise insert a newline |
 | `Alt+Up` | While a prompt runs, restore the newest queued item to the composer |
-| `Ctrl+J` | Insert newline in Rust and Python fullscreen; works when a terminal cannot distinguish `Shift+Enter` from `Enter` |
+| `Ctrl+J` | Insert newline when a terminal cannot distinguish `Shift+Enter` from `Enter` |
 | `Shift+Enter` | Insert newline in Rust when the terminal reports the modified key |
 | `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
 | `Up` / `Down` | Move through an active suggestion menu |
@@ -516,8 +505,7 @@ back to Vapor rather than failing to start.
 `Ctrl+G` and `/help` open the same native contextual guide. It follows focus across the editor, tool
 cards, pickers, context reports, and safety decisions; its key reference is derived from live
 bindings. The panel moves below the conversation on narrow terminals and never runs a tool, changes
-the session, or resolves an approval. Line and fallback fullscreen modes keep their textual `/help`
-summary.
+the session, or resolves an approval.
 
 The searchable prompt-history index holds up to 100 unique prompts and is memory-only; `/history`
 does not create a separate on-disk cache. Submitted user messages still become part of the active
@@ -541,13 +529,12 @@ wisp tui --continue
 wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
-wisp tui --line                          # simple line renderer, for fallback/debugging
 wisp tui --renderer rust                 # explicitly select Rust
-wisp tui --renderer fullscreen           # explicitly select Python fullscreen
+wisp --mode tui --tui-renderer auto       # compatibility entry point; also selects Rust
 ```
 
-Rust loads the complete saved active path at startup and on `/resume`. The Python fullscreen and line
-renderers retain their own paging behavior. Set `NO_COLOR` to request grayscale presentation.
+Rust loads the complete saved active path at startup and on `/resume`. Set `NO_COLOR` to request
+grayscale presentation.
 
 The legacy `--mode tui` entrypoint remains for compatibility and honors
-`--tui-renderer line|fullscreen|rust` plus `WISP_TUI_RENDERER`.
+`--tui-renderer auto|rust` plus `WISP_TUI_RENDERER`.

@@ -55,7 +55,6 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "effort",
         "context_reserve_tokens",
         "auto_compaction_enabled",
-        "update_check_enabled",
         "mcp_servers",
         "openai_compatible",
         "tui_keybindings",
@@ -126,7 +125,6 @@ class WispSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
-    update_check_enabled: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -217,7 +215,6 @@ class ResolvedSettings(BaseModel):
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
-    update_check_enabled: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     openai_compatible: OpenAICompatibleSettings | None = None
     tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
@@ -305,7 +302,6 @@ def resolve_settings(
         effort=user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
-        update_check_enabled=user_settings.update_check_enabled,
         mcp_servers=user_settings.mcp_servers,
         openai_compatible=user_settings.openai_compatible,
         tui_keybindings=user_settings.tui_keybindings or {},

@@ -11,7 +11,6 @@ import re
 import select
 import signal
 import struct
-import subprocess
 import sys
 import termios
 import time
@@ -19,37 +18,42 @@ from pathlib import Path
 
 import pytest
 
-from wisp.tui.theme import WISP_THEME_SPECS, WispThemeSpec, contrast_ratio
-from wisp.tui.theme_preference import load_theme_state
-
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "rust/wisp-tui/src/theme_catalog.json"
+THEMES = json.loads(CATALOG.read_text(encoding="utf-8"))["themes"]
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(color: str) -> float:
+        channels = (int(color[index : index + 2], 16) / 255 for index in (1, 3, 5))
+        linear = tuple(
+            channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+            for channel in channels
+        )
+        return sum(
+            channel * weight
+            for channel, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True)
+        )
+
+    lighter, darker = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
 
 
 @pytest.mark.tui
 def test_native_theme_catalog_is_current() -> None:
-    subprocess.run(
-        [sys.executable, str(ROOT / "scripts/generate_tui_themes.py"), "--check"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
     catalog = json.loads(CATALOG.read_text())
-    assert [entry["name"] for entry in catalog["themes"]] == [
-        spec.name for spec in WISP_THEME_SPECS
-    ]
+    assert catalog["default"] in {entry["name"] for entry in catalog["themes"]}
+    assert catalog["paper"] in {entry["name"] for entry in catalog["themes"]}
+    assert len({entry["slug"] for entry in catalog["themes"]}) == len(catalog["themes"])
     assert catalog["command"]["slash_command"] == "/theme"
-    assert {entry["slug"]: entry["terminal_background"] for entry in catalog["themes"]} == {
-        spec.slug: spec.terminal_background for spec in WISP_THEME_SPECS
-    }
+    assert all(isinstance(entry["terminal_background"], bool) for entry in catalog["themes"])
 
 
 @pytest.mark.tui
-@pytest.mark.parametrize("spec", WISP_THEME_SPECS, ids=lambda spec: spec.slug)
-def test_native_semantic_colors_are_readable(spec: WispThemeSpec) -> None:
-    catalog = json.loads(CATALOG.read_text())
-    colors = next(entry["colors"] for entry in catalog["themes"] if entry["name"] == spec.name)
+@pytest.mark.parametrize("theme", THEMES, ids=lambda theme: theme["slug"])
+def test_native_semantic_colors_are_readable(theme: dict[str, object]) -> None:
+    colors = theme["colors"]
+    assert isinstance(colors, dict)
     for background in ("background", "surface"):
         for foreground in (
             "foreground",
@@ -61,13 +65,13 @@ def test_native_semantic_colors_are_readable(spec: WispThemeSpec) -> None:
             "error",
             "success",
         ):
-            assert contrast_ratio(colors[foreground], colors[background]) >= 4.5, (
-                spec.slug,
+            assert _contrast_ratio(colors[foreground], colors[background]) >= 4.5, (
+                theme["slug"],
                 foreground,
                 background,
             )
     for operation in ("addition", "deletion"):
-        assert contrast_ratio(colors[operation], colors[f"{operation}_background"]) >= 4.5
+        assert _contrast_ratio(colors[operation], colors[f"{operation}_background"]) >= 4.5
 
 
 def _background(name: str, no_color: bool) -> tuple[int, int, int]:
@@ -173,19 +177,23 @@ def _run_theme_session(
                 phase = "preview"
                 output.clear()
             elif phase == "preview" and _background("wisp-light", no_color) in backgrounds:
-                assert load_theme_state().active_theme == "wisp-wave"
+                assert (
+                    json.loads((Path.home() / ".wisp/tui.json").read_text())["theme"] == "wisp-wave"
+                )
                 os.write(terminal_fd, b"\x14\x1b")  # Toggle is ignored while preview owns focus.
                 phase = "cancelled"
                 output.clear()
             elif phase == "cancelled" and _background("wisp-wave", no_color) in backgrounds:
-                assert load_theme_state().active_theme == "wisp-wave"
+                assert (
+                    json.loads((Path.home() / ".wisp/tui.json").read_text())["theme"] == "wisp-wave"
+                )
                 os.write(terminal_fd, b"\x14")
                 phase = "toggled"
                 output.clear()
             elif phase == "toggled" and _background(toggled, no_color) in backgrounds:
-                state = load_theme_state()
-                assert state.active_theme == toggled
-                assert state.last_dark_theme == "wisp-wave"
+                state = json.loads((Path.home() / ".wisp/tui.json").read_text())
+                assert state["theme"] == toggled
+                assert state["last_dark_theme"] == "wisp-wave"
                 os.write(terminal_fd, b"\x03")
                 phase = "quit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
@@ -248,4 +256,4 @@ def test_rust_theme_preferences_interoperate_with_python_and_survive_restart(
             binary, project, tmp_path / "sessions", no_color=no_color, preview=preview
         )
         assert json.loads(path.read_text())["unrelated"] == unrelated
-    assert load_theme_state().active_theme == "wisp-wave"
+    assert json.loads(path.read_text())["theme"] == "wisp-wave"

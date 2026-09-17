@@ -8,8 +8,7 @@ The shared runtime guarantees consistent semantics, but frontend controls differ
 
 | Interface | Live controls |
 |---|---|
-| Fullscreen TUI | Steer, queue follow-ups, restore the newest queued item, cancel the active command, and answer approvals |
-| Line TUI | Queue follow-up prompts, cancel the active command, and answer approvals |
+| Rust TUI | Steer, queue follow-ups, restore the newest queued item, cancel the active command, and answer approvals |
 | JSONL RPC | Steer, queue follow-ups, inspect/edit queues, cancel by command id, and answer approvals |
 | Python SDK | The same live queue, cancellation, and approval capabilities exposed as typed methods |
 | Print / JSON (`wisp -p`) | One prompt per process; no channel for new input while it runs |
@@ -26,10 +25,9 @@ reorders the existing transcript.
   batch and before the next provider request, so completed tool work remains visible and the model
   sees the correction before continuing.
 - **Follow-up** waits until the run would otherwise stop, then continues with the queued message.
-  In a fullscreen TUI, press `Alt+Enter` while a prompt is running to queue one explicitly. The line
-  TUI treats text submitted during a run as follow-up work.
+  In the Rust TUI, press `Alt+Enter` while a prompt is running to queue one explicitly.
 
-While a prompt runs in a fullscreen TUI, ordinary `Enter` submits steering and `Alt+Enter` submits a
+While a prompt runs in the Rust TUI, ordinary `Enter` submits steering and `Alt+Enter` submits a
 follow-up. The queue panel previews both kinds, and the footer keeps separate `steer` and `later`
 counts. Press `Alt+Up` to remove the newest queued item and restore it ahead of any current composer
 draft. Queue changes are confirmed by the shared runtime before the TUI treats them as accepted or
@@ -38,7 +36,7 @@ removed.
 Each queue is FIFO. The default `one_at_a_time` mode injects one message at each eligible boundary;
 live RPC and SDK clients can switch a queue to `all` to inject the current batch together. They can
 also inspect queue counts, remove the newest item, or clear one or both queues before injection. The
-fullscreen TUI intentionally offers only newest-item restoration rather than the complete queue API.
+Rust TUI intentionally offers only newest-item restoration rather than the complete queue API.
 
 The in-process `InProcessWisp` controller exposes these as `steer()`, `follow_up()`,
 `get_queue_state()`, `set_queue_mode()`, `pop_queue()`, and `clear_queue()`. Raw JSONL clients use
@@ -51,8 +49,8 @@ The active provider/tool path unwinds, lifecycle events record the cancelled out
 JSONL entries already committed remain valid. You can resume the session instead of reconstructing
 state from a half-written transcript.
 
-- In the fullscreen TUI, dismiss any open overlay first, then press `Escape` to cancel the active
-  prompt. In `wisp tui --line`, press `Ctrl-C`.
+- In the Rust TUI, dismiss any open overlay first, then press `Escape` or `Ctrl-C` to cancel the
+  active prompt.
 - In RPC, send `{"type":"cancel","target_id":"<running-command-id>"}`.
 - In the SDK, call `InProcessWisp.cancel(target_id)` for the active command.
 
