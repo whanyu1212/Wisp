@@ -1,6 +1,6 @@
 [book]
 title = "Wisp"
-description = "Documentation for Wisp, a coding agent that stays in sync with you."
+description = "Learn to build coding agents, explore Wisp's engineering choices, and use its shared runtime."
 authors = ["Wisp contributors"]
 language = "en"
 src = "site"

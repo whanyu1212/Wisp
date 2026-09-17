@@ -1,247 +1,226 @@
-# Chapter 2: Giving the Model Hands - Tools, Filesystem & Safety
+# 2. Reading, editing, and testing code
 
-A model without tools can only describe work. It cannot do work. Tools are what turn a chatbot into a coding agent: read a file, edit it, run the tests, search the repo.
+Our agent can observe the broken addition function, but it cannot fix it. This
+chapter gives the same loop three operations: read the source, replace a known
+piece of text, and run the project's tests.
 
-But hands are also how an agent causes damage. Every tool is a place where untrusted model output meets your filesystem and your shell. This chapter is about that boundary: how to define it, how to keep it safe, and where the naive version breaks.
+By the end, the trace will show a failing test before the edit and passing tests
+afterward. We will also deny the edit and confirm that a finished run can leave
+the task unresolved.
 
----
+## 1. A tool has two contracts
 
-## 1. First Principles: What a Tool Actually Is
+The **model-facing description** says what operation exists and what arguments it
+accepts. The **host-facing executor** decides how that operation runs. Keeping
+these distinct lets us validate a request before giving it any effect.
 
-Strip away the framework marketing and a tool is three things:
+Our teaching tools are deliberately narrow:
 
-1. **A schema** the model can see (name, description, JSON parameters). This is the only part the model ever touches.
-2. **An executor** the model can never see (your code, running with your privileges). It receives parsed arguments and returns text.
-3. **A policy** that sits between them deciding whether a given call may run, and whether a human must confirm first.
+| Tool | Required string arguments | Meaning |
+| --- | --- | --- |
+| `read` | `path` | Read `calculator.py` |
+| `edit` | `path`, `old`, `new` | Replace exactly one non-empty match in `calculator.py` |
+| `test` | None | Run the fixture's fixed addition tests |
 
-The schema and the executor must stay on opposite sides of a serialization boundary. The model produces JSON; it never gets a file descriptor, a shell handle, or a Python callable. If you blur that line, prompt injection becomes remote code execution.
+The host supplies the working directory and whether edits are approved. Neither
+is a tool argument. A model cannot grant itself permission by placing
+`"approved": true` in a request.
 
-Two distinctions matter more than newcomers expect:
+Three questions are easy to confuse:
 
-- **Policy vs. approval.** Policy is static and silent: "this session may use `read` but not `bash`". Approval is interactive: "this session may use `bash`, but ask me each time". Conflating them gives you either a nagging agent (everything needs a click) or a reckless one (one `--yes` flag disables all judgment).
-- **Failures vs. crashes.** A tool failure (file not found, test failed, bad regex) is information the model can act on. An executor crash (uncaught exception, hung subprocess, corrupted transcript) is not. The contract must convert the first kind into text and prevent the second kind structurally.
+- **Exposure:** was this tool described to the model?
+- **Policy:** will the executor accept this operation and target?
+- **Approval:** has the host authorized this effect?
 
-```mermaid
-flowchart LR
-  Model["Model emits JSON"] --> Gate["Policy: allowed? Approval: confirmed?"]
-  Gate -->|denied| Deny["Error text back to model"]
-  Gate -->|approved| Exec["Executor runs with ambient context"]
-  Exec --> Bounded["Bounded, truncated result"]
-  Bounded --> Model
-```
+Hiding a tool description is not an execution gate. The executor must still
+reject unknown names and invalid arguments.
 
-Ambient context is the quiet fourth piece: working directory, output budgets, secret lists, write scopes. The model never sets these. They ride along with every call so each tool behaves consistently without trusting the caller.
+## 2. Build a fixture executor
 
----
+The executable source is
+[`checkpoint_02.py`](https://github.com/whanyu1212/Wisp/blob/main/examples/crafting_agents/checkpoint_02.py).
+It imports the loop from chapter 1, creates `calculator.py` and two addition tests
+inside a temporary directory, and removes that directory when finished.
 
-## 2. From Scratch: A Minimal Tool Boundary in ~60 Lines
-
-Here is the smallest version that still respects the boundary above. A frozen result type, a protocol with a safety label, a context the model cannot touch, and an executor that turns every failure into text.
+The dispatcher looks up the tool, checks the exact argument names and string
+values, and bounds both successful output and expected errors:
 
 ```python
-import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Protocol
-
-class ToolError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False,
-                 hint: str | None = None):
-        super().__init__(message)
-        self.retryable = retryable
-        self.hint = hint
-
-@dataclass(frozen=True)
-class ToolResult:
-    text: str
-    data: dict[str, Any] = field(default_factory=dict)
-    truncated: bool = False
-
-@dataclass(frozen=True)
-class ToolContext:
-    cwd: str
-    max_output_bytes: int = 50_000
-    max_output_lines: int = 2_000
-    protected_paths: tuple[str, ...] = (".env", "*.key")
-
-class Tool(Protocol):
-    name: str
-    description: str
-    input_schema: dict[str, Any]
-    safety: str  # "read" | "mutating" | "command"
-    async def run(self, args: dict[str, Any], ctx: ToolContext) -> ToolResult: ...
-
-async def execute_tool(tool: Tool, args: dict[str, Any], ctx: ToolContext,
-                       *, approved: bool) -> ToolResult:
-    """Policy gate plus failure-to-text conversion."""
-    if tool.safety in ("mutating", "command") and not approved:
-        return ToolResult(
-            text=f"Tool {tool.name} needs approval before it can run.",
-            data={"approved": False},
-        )
-    try:
-        result = await tool.run(args, ctx)
-    except ToolError as exc:
-        hint = f" Hint: {exc.hint}" if exc.hint else ""
-        return ToolResult(text=f"Error: {exc}{hint}",
-                          data={"retryable": exc.retryable})
-    except Exception as exc:  # executor bug: never let it crash the loop
-        return ToolResult(text=f"Internal tool error in {tool.name}: {exc}",
-                          data={"retryable": False})
-    # Bound the wire: truncate runaway output before it reaches history.
-    # Enforce both budgets, since many short lines can fit in few bytes.
-    lines = result.text.splitlines()
-    if len(lines) > ctx.max_output_lines:
-        kept = "\n".join(lines[:ctx.max_output_lines])
-        return ToolResult(text=kept + "\n[truncated]",
-                          data=result.data, truncated=True)
-    encoded = result.text.encode("utf-8")
-    if len(encoded) > ctx.max_output_bytes:
-        cut = ctx.max_output_bytes
-        return ToolResult(text=encoded[:cut].decode("utf-8", "ignore")
-                          + "\n[truncated]",
-                          data=result.data, truncated=True)
-    return result
+{{#include ../../examples/crafting_agents/checkpoint_02.py:dispatch}}
 ```
 
-Note what this buys you. The model picks a name and JSON args; everything else (cwd, budgets, secrets, approval state) comes from `ToolContext`. `ToolError` carries a machine-readable `retryable` flag and a human hint so the model can self-correct instead of guessing. And the `except Exception` at the bottom is deliberate: a buggy tool must degrade into an error string, never into a dead agent loop.
+An extra argument is rejected rather than silently ignored. That makes failures
+actionable and keeps misspellings from turning into surprising behavior. We catch
+expected file, decoding, and timeout failures here; an unexpected executor bug
+still propagates.
 
-What it does *not* buy you is the subject of the next section.
+After validation, the three operations are straightforward:
 
----
+```python
+{{#include ../../examples/crafting_agents/checkpoint_02.py:operations}}
+```
 
-## 3. Production Realities: Where the Toy Boundary Breaks
+### Why require exactly one match?
 
-**Symlink and TOCTOU races.** The toy checks a path string, then opens it. Between the check and the open, the filesystem can change: a `src/config.py` that was a regular file becomes a symlink to `/etc/passwd`. Any path check done on strings is advisory. The fix is to open directories and files by descriptor (`O_NOFOLLOW`, `dir_fd`), never following links, and to re-validate identity (device + inode + version) after opening.
+An edit is a claim about the file the model observed: “replace this text here.”
+Zero matches means that claim is stale or incorrect. Multiple matches make the
+location ambiguous. Refusing both outcomes makes the model reread or supply a
+more specific edit instead of changing an arbitrary occurrence.
 
-**Non-atomic writes.** `open(path, "w")` truncates first and writes second. A crash, cancellation, or concurrent reader in between leaves a half-written file. Production writes go to a temp file in the same directory, fsync, then atomically rename over the target, preserving permissions and extended attributes.
+This simplicity has a cost: mechanical changes across many occurrences require
+more calls. Later designs might offer patch-oriented or structured editing, but
+they still need a policy for stale and ambiguous input.
 
-**Unbounded output.** `cat huge.log` or `rg pattern monorepo` can return gigabytes. Without byte *and* line caps, one call blows the context window and the RPC wire to the UI. Every tool needs budgets, truncation flags, and ideally a count of dropped bytes so the model knows it saw a prefix, not the whole.
+### Why is a failed test a normal result?
 
-**Hanging processes.** A synchronous `run("pytest")` with no timeout is a denial-of-service against yourself. Real shell tools need start/poll/cancel: launch in the background, stream bounded increments, kill the tree on cancel or lifetime expiry.
+The test process returning a nonzero exit code is expected information. Our tool
+returns the exit code and diagnostics; it does not crash the agent because the
+bug has been reproduced. A process that cannot start or exceeds its deadline
+instead produces an operational error observation.
 
-**Regex denial-of-service.** A pathological pattern (`(a+)+$`) on a large repo can spin a CPU for minutes inside what looks like an innocent read-only call. Mitigations are timeouts per match attempt plus a `literal=true` escape hatch for exact-text search.
+The fixed command uses the current Python interpreter and no shell. That keeps
+this checkpoint easy to inspect. It is not a general-purpose command runner.
 
-**Secret leakage through search.** Ignore-style exclusions (`--glob '!...'`) use glob semantics that differ from your secrets policy, and a caller-supplied glob can re-include an excluded file. The secrets check must be authoritative and applied per emitted record, failing closed: if a record's path cannot be parsed unambiguously, drop it.
+### Bound what the next model request receives
 
-**Approval fatigue and scope.** A binary "approve all mutating tools" switch trains users to click yes. What you want is scoping (which directories, which operations, create-only vs. overwrite) but each knob adds UI and protocol surface.
+Line and byte budgets protect different cases: many short lines versus a single
+very long line. Apply both, even after the first limit has truncated the output:
 
----
+```python
+{{#include ../../examples/crafting_agents/checkpoint_02.py:budget}}
+```
 
-## 4. Case Study: How Wisp Does It
+The result stores truncation separately from the bounded text. Our dispatcher
+renders it as a small `truncated=true/false` header; the byte and line caps apply
+to the body, with the fixed header additional. Cutting encoded bytes and decoding
+with `errors="ignore"` avoids returning half of a UTF-8 character.
 
-Wisp keeps seven built-in tools, deliberately few: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls` (`src/wisp/tools/builtin.py`). Breadth is a liability at this layer; each tool is a maintained attack surface.
+This limits model-visible output **after capture**. It does not bound memory while
+a process runs. The fixture produces small, known output; a general shell tool
+needs bounded capture during execution, which the [tool-boundary case study](case-studies/tool-boundary.md)
+examines.
 
-### The contract
+## 3. Inspect a complete repair
 
-`src/wisp/tools/base.py` defines the `Tool` protocol: `name`, `description`, `input_schema`, `safety`, and `run(arguments, context) -> ToolResult`. Safety is one of `read`, `mutating`, or `command`. `ToolResult` carries `text` (what the model sees), `data` (structured fields for the UI and tests), and `truncated`.
+From the checkout root:
 
-Three small types split responsibilities that toys tend to merge:
+```bash
+python3 -m examples.crafting_agents.checkpoint_02
+```
 
-- `ToolPolicy` (`src/wisp/tools/policy.py`) answers "may this run at all?" with allow-all, allow-read-only, or allow-by-name.
-- `ToolApprovalPolicy` (`src/wisp/tools/approval.py`) answers "must a human confirm?" Anything `mutating` or `command` requires approval unless its name or safety class was pre-approved.
-- `ToolContext` (`src/wisp/tools/context.py`) carries the ambient facts: `cwd`, output budgets (50,000 bytes / 2,000 lines by default), `allow_outside_cwd`, write scopes, and `protected_paths` that default to secrets (`.env`, keys, credential and settings files) unless explicitly emptied.
+The trace includes test diagnostics; its key transitions are:
 
-Errors are typed, not stringly: `ToolError(message, failure_code, retryable, recovery_hint)` with `ToolArgumentError` for schema-valid but value-invalid calls (`src/wisp/tools/result.py`). An edit against stale text, for example, returns `failure_code="stale_input"`, `retryable=True`, and tells the model to reread the range first. That is the failure-as-observation idea from Chapter 1, implemented at the tool layer.
+```text
+turn 1: Reproduce the bug.
+... test returns exit_code=1 and FAILED ...
+turn 2: Read the implementation.
+... read returns return a - b ...
+turn 3: Replace subtraction with addition.
+... edit returns edited calculator.py ...
+turn 4: Check the change.
+... test returns exit_code=0 and OK ...
+turn 5: The two fixture tests pass after the edit.
+stopped: model_finished
+final calculator.py:
+def add(a, b):
+    return a + b
+```
 
-### Files: paranoia with a purpose
+The provider is still scripted. Its `after` checks require the expected failure,
+source, edit acknowledgment, and passing test output before it advances. We have
+verified a repair workflow and two concrete test cases, not measured a model's
+ability to find a fix or proven correctness for every possible input.
 
-`src/wisp/tools/files/secure_fs.py` opens everything component-by-component from the filesystem root with `O_NOFOLLOW` and descriptor-relative calls. No operation follows a symlink, on either POSIX or Windows (which gets its own junction-aware path).
+## 4. Deny the edit
 
-On top of that, `src/wisp/tools/files/operations.py` adds:
+Run the second scenario:
 
-- `read` with 1-indexed offset/limit slicing done inside the secured open, so paging a 10,000-line file never loads it whole.
-- `write` via temp-file plus atomic rename in the common case, preserving mode/ownership/xattrs, snapshotting the prior text (capped at 1M chars so the diff does not flood the TUI event wire), and refusing symlinks and mid-write replacements detected via version checks. One deliberate exception: when the destination has multiple hard links (or a permission fallback forces it), the write goes in place, truncating the existing inode, so readers can observe a partial write and every hard-link alias sees the change.
-- `edit` requiring every `oldText` to match exactly once, with replacements applied only if they do not overlap. Concurrent modification between open and replace aborts instead of silently merging.
+```bash
+python3 -m examples.crafting_agents.checkpoint_02 --deny-edits
+```
 
-The cost is visible in the line count: the file tools are an order of magnitude larger than their schemas suggest. Most of those lines are Windows branches, metadata preservation, and race handling. That ratio is normal for this layer.
+The initial test still fails and the source is still read. The edit returns
+`error: edit denied by the host`, and the last response says `Edit denied; the bug
+remains.` The final source still contains `return a - b`.
 
-### Shell: background by default
+The flag chooses both a host permission and a matching scripted conversation. A
+live model would receive the denial and decide how to respond; this script only
+demonstrates the host's observable behavior.
 
-`BashTool` (`src/wisp/tools/shell/tool.py`) supports `run`, `start`, `poll`, and `cancel` against a shared `ProcessSupervisor`. A bare `run` gets a 30-second default timeout; `start` launches a resumable process with a lifetime cap and yields incremental bounded output on each `poll`. Every response reports `process_state` plus separate stdout/stderr truncation flags and dropped-byte counts so the model can tell a complete log from a prefix; `exit_code` appears only after termination, so `start` and `poll`-while-running carry state without one. Output retention itself lives partly in Rust (see below).
+### What this boundary does not yet solve
 
-### Search: two engines, one policy
+The example assumes a trusted, disposable fixture with no concurrent writers.
+Its path allowlist and symlink check do not provide race-resistant filesystem
+isolation. Writes are not atomic. The test runner executes fixture code with the
+Python process's privileges, captures output in memory, and blocks until it ends
+or times out. It has no process-tree supervision or interactive cancellation.
 
-`GrepTool`/`FindTool` (`src/wisp/tools/search/tools.py`) walk recursively with open directory descriptors, skip hidden names and symlinks, honor `.gitignore`/`.ignore`/`.rgignore` plus `.git/info/exclude`, and cap directories at 100,000 entries and ignore files at 1M bytes / 10,000 patterns. `LsTool` is narrower: it lists a single directory (showing hidden entries only when `all=true`), without ignore-file filtering or the recursive walker's entry guard. Binary detection (NUL bytes), incremental UTF-8 decoding, a 1M-character per-line ceiling, and a 50ms per-pattern regex timeout keep one bad file or pattern from stalling the walk.
+These are reasons to keep the checkpoint scoped to its fixture. Chapter 5 will
+develop the stronger execution boundary. For Wisp's current mechanisms, read
+[Hardening the tool boundary](case-studies/tool-boundary.md).
 
-Literal case-sensitive grep can dispatch per-file scanning to the optional native `wisp-search` Rust extension (`scan_literal_fd` over an already-open descriptor, so the security properties do not change). Anything else (regex, case-insensitive, unrepresentable inputs) stays on the Python engine, and sandbox failures fall back transparently. Protected-path filtering then runs on every emitted record regardless of engine, failing closed on ambiguous parses.
+## 5. Wisp's choice: a small tool surface with richer contracts
 
-### Execution: validated lifecycles, two-phase batches
+Wisp's local built-ins are `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`.
+Skills and MCP can expose additional tools through their own integration paths.
+Each local tool has a schema, executor, and safety category.
 
-Between the model and the tools sits a validated event lifecycle (`src/wisp/agent/loop/tool_execution.py`). Each call must produce its events in order: approval requested before approval resolved, exactly one terminal `ToolExecutionEnded`, never a success after a denial, never anything after the terminal event. Violations raise `ToolExecutionProtocolError` instead of reaching the provider. Argument payloads are deep-copied at each boundary so an executor cannot mutate the record the transcript keeps.
+| Teaching mechanism | Wisp's corresponding choice |
+| --- | --- |
+| Required string arguments | Provider-facing JSON schemas plus runtime argument validation |
+| Host-owned fixture directory | `ToolContext` with working directory, budgets, protected paths, and write scopes |
+| `approve_edits` flag | Separate exposure, `ToolPolicy`, and `ToolApprovalPolicy`, with typed approval events |
+| Error observation | `ToolError` with failure code, retryability, and recovery hint |
+| Output prefix and flag | `ToolResult` with model text, structured data, and truncation state |
+| Sequential execution | Validated tool lifecycles and prepared batches with controlled parallelism |
 
-`PreparedToolExecutor` (`src/wisp/agent/loop/prepared_tools.py`) splits approval from side effects: prepare every call first (surfacing approval requests with zero side effects), then run. Calls marked `parallel_safe` run concurrently up to 8 at a time with results re-ordered into source order; if any call is not parallel-safe the batch goes sequential. This preserves causality for the common `write` then `test` pattern while still parallelizing independent reads. Truncated model responses (finish reason `length`) never execute: each call gets a synthetic retryable error telling the model to re-issue complete arguments.
+Wisp's exact-match edit follows the same basic reasoning as our example, while
+also checking concurrent changes and securing file access. A stale edit can tell
+the model to reread the range rather than offering only “edit failed.”
 
----
+The richer contract costs more implementation and testing. Wisp validates event
+ordering, detaches mutable argument payloads, and separates preparing approvals
+from performing side effects. Those costs buy consistent behavior across the
+TUI, SDK, and RPC clients. A fixed, trusted batch script may not need an
+interactive approval lifecycle; a developer-facing agent does.
 
-## 5. Effectiveness Review: What the Built-ins Get Right, and Where They Fall Short
+Tools also compete for model attention and context. A small surface is easier
+to describe and audit, but Wisp's exact-match edits and unranked search can require
+more interactions than specialized operations. Tool design should be evaluated
+against actual tasks, not just the number of tools offered.
 
-**Done well.**
+### Follow the implementation
 
-- *Small surface, typed contract.* Seven tools behind one protocol with JSON schemas and safety labels is easy to audit. Adding an eighth tool is a conscious decision, not an accident.
-- *Secure by default.* Descriptor-relative opens, no symlink following, secrets protected on every construction path, atomic writes with version checks. The defaults protect a careless integrator.
-- *Everything is bounded.* Bytes, lines, directory entries, ignore files, line lengths, regex time. Truncation flags and dropped-byte counts travel with results instead of being silently cut.
-- *Errors the model can use.* Failure codes plus retryable plus recovery hint turn "it broke" into "reread the file and retry". That single design choice removes a whole class of error loops.
-- *Policy and approval separated.* Non-interactive `--yes` flows, per-name pre-approval, and interactive confirmation compose instead of collapsing into one switch.
-- *Executor bugs become protocol errors.* The lifecycle validator catches ordering and identity mistakes in custom executors before they corrupt provider history.
+- [`tools/base.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/base.py)
+  and [`tools/result.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/result.py):
+  tool and result contracts.
+- [`tools/files/operations.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/files/operations.py):
+  the read, write, and edit implementations.
+- [`loop/prepared_tools.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/loop/prepared_tools.py):
+  approval preparation and execution scheduling.
+- [`test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_tool_execution.py):
+  executor behavior and lifecycle coverage.
 
-**Lacking, or worth doing better.**
+For performance decisions, continue to [Earning a Rust boundary](case-studies/rust-boundary.md).
+It explains why Wisp moved narrow scanning and output-retention kernels into Rust
+while keeping tool policy and orchestration in Python.
 
-- *No undo or multi-file transactions.* `write` returns a before-snapshot for display, but there is no first-class revert, and a batch that edits five files can leave three applied when the fourth fails. Agents work around this with git, but the tool layer itself is not atomic across files.
-- *Exact-match editing only.* `edit` refuses fuzzy or multi-occurrence replacements, which is safe but pushes the model into read-modify-write cycles (and token spend) for mechanical renames a patch-oriented tool could do in one call.
-- *Coarse approval scopes.* Write scoping (`allowed_write_paths`, create-only, non-empty) exists but is operation-level, not path-pattern-level. "Auto-approve writes under `notes/`, always ask under `src/`" is the granularity users actually want.
-- *Search has no ranking.* Results are source-ordered with caps, not relevance-ordered. On a large repo the model sees the first N matches, which rewards lucky file layout over good retrieval.
-- *Fragmented process accounting.* The default `BashTool` supervisor caps at one process while search tools construct their own supervisors; global concurrency and memory budgets are emergent rather than enforced in one place.
-- *No cost or timing telemetry on results.* `ToolResult` reports text and truncation but not duration, bytes scanned, or per-call timing attribution, which makes performance regressions in agent workflows hard to attribute.
+## 6. Checkpoint
 
-None of these are oversights so much as trade-offs of keeping the surface small. Each addition (revert, patch, ranked search, scoped approvals) would expand schemas, UI, and tests. The honest question for your own agent is which of these your users will hit first.
+**Exercise 1: stale edits.** Change the script's `old` text to something absent
+from the fixture. Expect an error, unchanged source, and a failed script
+expectation instead of a false success. Extend the script with a reread and a
+corrected edit before running the tests again.
 
----
+**Exercise 2: both output limits.** Call `bound_output` on `"é" * 100 + "\nx\ny\n"`
+with `max_bytes=9` and `max_lines=2`. The result must be valid UTF-8, at most nine
+bytes, at most two lines, and marked truncated. Check an input below both limits
+as well: it must be returned unchanged with `truncated=False`.
 
-## 6. Why Rust, Where, and What It Costs
+The regression tests for these teaching contracts live in
+[`tests/test_crafting_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_crafting_agents.py).
+From a development checkout, run `uv run pytest tests/test_crafting_agents.py`.
 
-Rust appears in three places around the tools: `wisp-search` (bounded literal grep over open descriptors), `wisp-process-text` (incremental decoding and bounded retention for process output), and the `wisp-tui` frontend that renders tool results. All three crates set `#![forbid(unsafe_code)]`: the goal is speed *with* safety invariants, not speed instead of them.
-
-**What Rust buys here.** Python's GIL makes throughput-bound scanning (walk a 100k-file repo, match every line) effectively single-threaded, and per-character Python loops over process output are slow precisely when output is flooding fastest. The native scanners release the GIL, scan with byte-oriented routines, enforce line/byte/match budgets inside the hot loop, and hand a bounded result back. Cancellation is a shared atomic flag rather than a cooperative `await` that may not arrive while Python is busy decoding.
-
-**What it costs.** First, builds: PyO3/maturin wheels, per-platform CI, and a pure-Python fallback path that must keep working when the extension is absent. Second, parity: every semantic (binary detection, line-boundary rules, truncation accounting, dropped-byte math) now exists twice, and the Python side carries dispatch, validation, and fallback code to keep the accelerator transparent. That is why the native path is deliberately narrow (literal, case-sensitive grep only): the narrower the fast path, the smaller the parity surface. Regex and case-folded search stay in Python where the `regex` crate-equivalent semantics would be hardest to duplicate exactly.
-
-**The rule of thumb.** Reach for Rust when a tool operation is (a) on the hot path of every agent turn (search, process-output retention, terminal rendering), (b) bounded and byte-oriented rather than policy-heavy, and (c) measurable faster in a benchmark, not just plausibly faster. Keep policy (approvals, secrets, path checks), error shaping, and orchestration in Python where iteration speed and readability dominate. Wisp's split follows that line: Rust scans bytes and retains text; Python decides what may run and what the model hears back.
-
----
-
-## 7. Benchmarking and Profiling: How the Boundary Was Earned
-
-Section 6 stated the rule. This section shows the receipts. Both Rust boundaries around the tools were earned through measurement, but the order differed by boundary. The search boundary followed the full sequence: benchmark first, profile second, optimize in Python third, and only then prototype native code behind an adoption threshold. The retention boundary skipped the Python-optimization step — profiling spread the cost across decoding and provenance bookkeeping rather than one fixable hotspot, so the baseline benchmark and the Rust prototype ran back to back. The full numbers live in `benchmarks/tool_boundary_evidence.md` for search and `benchmarks/pending_text_rust_evidence.md` for retention. What follows is how to read them and why each boundary took the order it did.
-
-The work arrived as a chain of small pull requests rather than one rewrite. PR #588 built the harnesses and the baseline. PR #589 prototyped the Rust retention kernel standalone. PR #590 wired it into native wheels. PR #593 optimized Python search paths and added a real-repository benchmark. PR #595 added the narrow native literal scanner. PR #597 removed duplicate protected-path matching. PR #599 reused traversal descriptors during grep. Each one carried its own before and after numbers, which is why the boundary can be explained commit by commit. Note the two orders inside that chain: the retention PRs (#588, #589, #590) went straight from baseline to Rust prototype to integration, while the search PRs (#593, #595, #597, #599) optimized Python first and only then added native code, then kept narrowing the Python overhead around it.
-
-Methodology mattered more than any single result. Fixture construction and one warmup call per path stay outside the measured interval, so cold caches do not pollute the comparison. Every direct result is checked against a fixture oracle (expected counts, truncation flags, output sizes) before it is reported, so a faster but wrong run fails instead of publishing. Reports record wall time and CPU time separately, plus environment metadata, and the docs insist comparisons only hold on the same machine with the same Python build and arguments. Raw JSON and profiler output stay under the ignored `profiles/` directory. Only compact numeric tables are committed as evidence.
-
-Two harnesses cover different questions. `benchmarks/builtin_tools.py` builds synthetic trees (1,000 and 5,000 files of 4 KiB, plus a large file for paging reads) and measures both the public `tool.run` path and the `ConfiguredToolExecutor` path. That pairing answers whether the executor layers (registry lookup, policy, approval handling, normalization, terminal events) add meaningful overhead. They do not: executor and direct timings stayed in the same range, so orchestration stayed in Python. `benchmarks/repository_search.py` runs the same public tools against a real checkout (216 Python files in `src/wisp` at the time). Synthetics isolate scaling behavior. The real tree catches what synthetics miss: ignore rules, protected paths, file shapes, and warm-cache effects on an actual project.
-
-Profiling came before porting. The cProfile attribution on the synthetic workload spread the cost across line splitting (about 1.7 seconds), `Path.relative_to` (about 1.5 seconds), path resolution (about 1.3 seconds), and secure file opens (about 1 second). No single hotspot dominated. That distribution argued against moving search wholesale into Rust. The cheaper move was to remove repeated Python work first.
-
-PR #593 did exactly that: prepare glob matchers once per call, reuse one display path per candidate, keep formatting lazy for no-glob misses. Sorted-prefix `find` on 5,000 synthetic files fell from 1,555.87 ms to 1,037.03 ms. On the real tree it fell from 112.72 ms to 97.53 ms, with capped grep down about 11 percent. The exhaustive grep miss stayed flat and CPU-bound, which pointed at decoding and per-file opens rather than glob handling.
-
-The native wins were deliberately narrow. Managed-process output retention was the cleanest kernel: a bounded byte-to-text state machine with exact source-byte accounting. The Python `_PendingText` path took about 1.32 seconds on 1 MiB of short lines with 12.82 million calls in profile. The standalone Rust `wisp-process-text` kernel ran 15.6 to 42 times faster across six byte shapes against the same 27-case conformance corpus. After integration behind the existing `ProcessSupervisor` API (PR #590), the installed managed-process benchmark improved 1.8 to 3.9 times across Unicode, short lines, mixed newlines, and invalid UTF-8, with ASCII and long-line cases sitting near the polling floor while CPU time still fell more than eightfold. Process spawning, pipes, polling, cancellation, and cleanup never moved. Only retention did.
-
-Literal grep followed the same pattern. Python keeps traversal, ignore and protected-path policy, secure opens, ordering, and result assembly. Rust receives an already-authorized open descriptor and performs only the streaming literal scan with Python-compatible line boundaries. Regex and case-insensitive search stay in Python because matching the `regex` crate and Unicode casefold semantics exactly was not worth the parity risk. Against a 25 percent adoption threshold, the results cleared it: the real-tree literal miss improved 42.3 percent and synthetic 1,000-file misses improved 25.5 to 30.8 percent (PR #595). Later follow-ups kept the same boundary while removing Python overhead around it: skipping the duplicate protected-path match when lexical and resolved paths are equal (PR #597), and opening each grep candidate relative to its already-authorized parent descriptor instead of rewalking from the root (PR #599). The descriptor change alone cut the 1,000-file native miss by 56.5 percent and the real-tree miss by 26.1 percent, with counts and truncation matching on every pair.
-
-The evidence doc is careful about what was not measured. Fixtures are synthetic and warm-cache, so they say nothing about cold filesystem latency. The executor comparison covers sequential pre-approved reads, not approval waits, concurrent scheduling, persistence, or RPC. Two separate retention benchmarks answer two separate questions: the direct kernel comparison isolates `_PendingText` against the standalone Rust kernel with no child process involved, while the installed managed-process benchmark measures the full lifecycle through `ProcessSupervisor.start`, pipe readers, repeated polling, terminal observation, and cleanup. The direct comparison explains where the CPU time goes; the installed comparison is the end-to-end number the boundary decision actually rests on. Each decision states its limit alongside its number, which is what makes the boundary trustworthy: future work knows exactly which claim to retest.
-
-If you take one habit from this chapter, take that sequence. Write the benchmark with an oracle. Profile before choosing a language. Shrink the native surface until the threshold test is unambiguous. Keep a pure-Python fallback so the accelerator stays optional. Your agent will have different hotspots, but the method for finding them transfers directly.
-
----
-
-## Summary
-
-- A tool boundary is a schema the model sees, an executor it never sees, a policy gate between them, and ambient context the model never sets.
-- Tool failures are observations; executor crashes must be structurally impossible, or at least converted to error text.
-- Production file tools need descriptor-relative opens, atomic writes, and version checks. Production shell tools need start/poll/cancel with bounded output. Production search needs ignore handling, binary safety, regex limits, and fail-closed secret filtering.
-- Wisp's seven built-ins pair a small typed contract with heavy runtime guarantees, validated lifecycles, and two-phase parallel-safe batches. Its gaps (no undo, exact-match edits, unranked search, coarse approvals) are the price of that small surface.
-- Rust accelerates bounded byte work (literal grep, output retention, TUI rendering) while Python keeps policy and orchestration. The native path stays narrow so the parity burden stays manageable.
-- Benchmark with oracles, profile before porting, and clear an explicit adoption threshold before accepting native complexity. PRs #588 through #599 show the sequence working in practice.
-
-**Exercise.** Extend the scratch `execute_tool` with a per-tool timeout and a `parallel_safe` flag: run two safe reads concurrently, but force a `write` followed by a `test` command to run sequentially. Then add a `protected_paths` check to the search path that drops records failing closed.
-
-Next: **[Chapter 3: Context Windows & Compaction](./index.md)** (token budgets and structured memory, coming soon).
+Next in the [planned curriculum](index.md#curriculum): **Giving the model useful
+context**. The loop can now execute a repair; the next problem is choosing the
+instructions and repository information a real model needs to decide what to do.
