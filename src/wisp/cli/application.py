@@ -42,7 +42,10 @@ from . import trust as _cli_trust
 from . import update as _cli_update
 from .types import OutputMode, TuiFrontendKind, _JsonOutputModeError, _RenderedPrintError
 
-__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "app", "main"]
+# Compatibility alias for callers that imported the former CLI option enum name.
+TuiRendererKind = TuiFrontendKind
+
+__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "TuiRendererKind", "app", "main"]
 
 # Module-level bindings for sibling helpers. Tests monkeypatch several of these on this module
 # (for example `_terminal_is_interactive` and `_resolve_cli_trust`), so the command bodies below

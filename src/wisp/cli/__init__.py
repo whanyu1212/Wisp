@@ -5,6 +5,6 @@ implementation lives in :mod:`wisp.cli.application`; sibling modules hold subcom
 shared helpers.
 """
 
-from wisp.cli.application import ToolApprovalDecision, TuiFrontendKind, app, main
+from wisp.cli.application import ToolApprovalDecision, TuiFrontendKind, TuiRendererKind, app, main
 
-__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "app", "main"]
+__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "TuiRendererKind", "app", "main"]
