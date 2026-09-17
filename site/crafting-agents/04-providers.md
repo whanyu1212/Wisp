@@ -327,9 +327,9 @@ explicit recovery contracts, rather than a blanket retry around the model/tool
 cycle. Our smaller adapter terminates these cases instead.
 
 Relevant evidence lives in
-[`tests/test_openai_provider.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_openai_provider.py)
+[`tests/providers/test_openai_provider.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/providers/test_openai_provider.py)
 and
-[`tests/test_crafting_providers.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_crafting_providers.py).
+[`tests/repository/test_crafting_providers.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/repository/test_crafting_providers.py).
 The OpenAI [function-calling guide](https://developers.openai.com/api/docs/guides/function-calling#streaming)
 documents the native argument-fragment events used in this chapter.
 
@@ -351,7 +351,7 @@ the acquired-stream failure must close and terminate without a second request.
 Run the checkpoint regressions with:
 
 ```bash
-uv run pytest tests/test_crafting_providers.py
+uv run pytest tests/repository/test_crafting_providers.py
 ```
 
 Next in the [curriculum](index.md#curriculum): **Controlling side effects**. The

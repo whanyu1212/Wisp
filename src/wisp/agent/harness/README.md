@@ -131,9 +131,9 @@ The focused harness checks are:
 
 ```bash
 uv run pytest \
-  tests/test_agent_harness.py \
-  tests/test_agent_harness_interruptions.py \
-  tests/test_agent_runtime_invariants.py
+  tests/agent/test_agent_harness.py \
+  tests/agent/test_agent_harness_interruptions.py \
+  tests/agent/test_agent_runtime_invariants.py
 ```
 
 `test_agent_harness_interruptions.py` records a successful baseline for six small workflows:
@@ -152,4 +152,4 @@ This is a bounded event-boundary matrix, not exhaustive coverage of task schedul
 implementations. Keep targeted in-flight cancellation tests in `test_agent_harness.py` alongside it.
 
 Changes to boundary preparation or transcript persistence should also run
-`tests/test_coding_session.py` and `tests/test_compaction.py`.
+`tests/coding/test_coding_session.py` and `tests/agent/test_compaction.py`.

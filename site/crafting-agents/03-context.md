@@ -310,7 +310,7 @@ current behavior.
   character limits and truncation markers.
 - [`coding/session.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/session.py):
   `_prompt_messages` supplies trust and effective tool policy to the builder.
-- [`tests/test_prompt.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/test_prompt.py):
+- [`tests/agent/test_prompt.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/agent/test_prompt.py):
   ordering, untrusted loading, file precedence, and budget contracts.
 
 Wisp's RPC `get_project_files` capability serves frontend browsing and completion;
@@ -338,7 +338,7 @@ body, but the attempted edit must still be denied and the source unchanged.
 Run the teaching regressions with:
 
 ```bash
-uv run pytest tests/test_crafting_agents.py tests/test_crafting_context.py
+uv run pytest tests/repository/test_crafting_agents.py tests/repository/test_crafting_context.py
 ```
 
 Next: [Talking to models reliably](04-providers.md). We

@@ -26,5 +26,5 @@ execute it.
 Run the focused deterministic tests from a source checkout:
 
 ```bash
-uv run pytest tests/test_static_extension_example.py
+uv run pytest tests/runtime/test_static_extension_example.py
 ```
