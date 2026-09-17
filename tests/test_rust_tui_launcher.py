@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from click.utils import strip_ansi
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
@@ -121,7 +122,7 @@ def test_removed_textual_only_option_is_rejected(arguments: list[str]) -> None:
     result = CliRunner().invoke(app, arguments, env=_cli_env())
 
     assert result.exit_code != 0
-    assert "No such option: --no-synchronized-output" in result.output
+    assert "No such option: --no-synchronized-output" in strip_ansi(result.output)
 
 
 @pytest.mark.parametrize(
