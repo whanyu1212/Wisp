@@ -50,23 +50,11 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
-from wisp.rpc.project_files import ProjectFilesPublisher, RpcProjectFiles
+from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.sessions.jsonl import JsonlSessionStore
 
 from .configuration import _RpcConfigureOverrides
-from .configure import handle_rpc_configure_command
-from .connections import (
-    handle_rpc_disconnect_provider_command,
-    handle_rpc_store_api_key_command,
-    start_rpc_device_code_command,
-)
-from .control import (
-    RpcApprovalResolver,
-    RpcTrustResolver,
-    _RpcControlCommand,
-    handle_rpc_control_command,
-)
 from .coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -75,7 +63,19 @@ from .coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
-from .inspection import (
+from .handlers.configure import handle_rpc_configure_command
+from .handlers.connections import (
+    handle_rpc_disconnect_provider_command,
+    handle_rpc_store_api_key_command,
+    start_rpc_device_code_command,
+)
+from .handlers.control import (
+    RpcApprovalResolver,
+    RpcTrustResolver,
+    _RpcControlCommand,
+    handle_rpc_control_command,
+)
+from .handlers.inspection import (
     handle_rpc_commands_command,
     handle_rpc_connection_catalog_command,
     handle_rpc_mcp_status_command,
@@ -84,7 +84,7 @@ from .inspection import (
     handle_rpc_state_command,
 )
 from .lifecycle import RpcCommandLifecycle, RpcEventWriter
-from .session_mutation import (
+from .session.mutation import (
     start_rpc_clone_session_command,
     start_rpc_fork_session_command,
     start_rpc_navigate_session_tree_command,
@@ -92,13 +92,13 @@ from .session_mutation import (
     start_rpc_set_session_name_command,
     start_rpc_unrevert_session_tree_command,
 )
-from .session_queue import _RpcQueueCommand, handle_rpc_queue_command
-from .session_read import (
+from .session.queue import _RpcQueueCommand, handle_rpc_queue_command
+from .session.read import (
     start_rpc_messages_command,
     start_rpc_session_tree_command,
     start_rpc_sessions_command,
 )
-from .session_run import (
+from .session.run import (
     handle_rpc_new_session_command,
     rpc_has_durable_completion,
     rpc_session_entry_count,
@@ -112,7 +112,7 @@ from .session_run import (
     start_rpc_session_stats_command,
     updated_rpc_history,
 )
-from .session_state import rpc_session_state, updated_rpc_session_state
+from .session.state import rpc_session_state, updated_rpc_session_state
 
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]

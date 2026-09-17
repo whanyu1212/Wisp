@@ -33,7 +33,7 @@ from wisp.rpc.coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
-from wisp.rpc.inspection import _sanitized_auth_error, rpc_connection_catalog_snapshot
+from wisp.rpc.handlers.inspection import _sanitized_auth_error, rpc_connection_catalog_snapshot
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 

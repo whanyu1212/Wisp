@@ -16,7 +16,7 @@ from wisp.providers.base import Provider
 from wisp.providers.catalog import AmbiguousModelError, UnknownModelError, startup_effort
 from wisp.rpc.commands import ConfigureCommand
 from wisp.rpc.configuration import _RpcConfigureOverrides
-from wisp.rpc.inspection import rpc_model_catalog_snapshot
+from wisp.rpc.handlers.inspection import rpc_model_catalog_snapshot
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError

@@ -35,7 +35,7 @@ from wisp.rpc.coordinator import (
     _RpcSessionState,
 )
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
-from wisp.rpc.session_state import rpc_derived_session_state, rpc_selected_session_state
+from wisp.rpc.session.state import rpc_derived_session_state, rpc_selected_session_state
 from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 

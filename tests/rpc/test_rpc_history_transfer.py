@@ -8,7 +8,7 @@ import pytest
 from wisp.agent.messages import Message
 from wisp.events import RpcMessagesReported
 from wisp.rpc.framing import RpcFrameError, encode_rpc_frame
-from wisp.rpc.session_read import _write_messages_page
+from wisp.rpc.session.read import _write_messages_page
 from wisp.sessions.jsonl import JsonlSessionStore
 
 

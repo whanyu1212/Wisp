@@ -99,6 +99,12 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
   shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,
   `options.py`, `output.py`, `tools.py`, `rpc.py`).
+- For the RPC command host, start with `src/wisp/rpc/host.py` (process lifetime and transport
+  bridging), then `coordinator.py` (queuing and session-state synchronization) and `execution.py`
+  (dispatch from `commands.py` models to handlers). Session-scoped handlers and transient session
+  state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`);
+  configuration, connection, control, inspection, and project-file handlers live in
+  `rpc/handlers/`. Both subpackages re-export nothing; import from the defining module.
 - Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.agent.prompt` as their public import surfaces.
   Within each package, import from defining modules. Use the current shared module names above;
   do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`

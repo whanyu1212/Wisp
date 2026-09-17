@@ -101,6 +101,13 @@ _RPC_EXECUTION_FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.cli.native_tui",
 )
+# Handler modules may use stdlib concurrency for physical workers, but must not reach
+# back into frontends or trust resolution; that stays the direction ``execution.py`` sets.
+_RPC_HANDLER_FORBIDDEN_IMPORTS = (
+    "wisp.cli.rpc",
+    "wisp.trust",
+    "wisp.cli.native_tui",
+)
 _CLI_RPC_ADAPTER_FORBIDDEN_IMPORTS = (
     "wisp.coding",
     "wisp.rpc.execution",
@@ -204,12 +211,45 @@ def test_rpc_coordinator_does_not_own_transport_or_runtime_policy() -> None:
     assert violations == []
 
 
+def test_obsolete_flat_rpc_handler_modules_are_removed() -> None:
+    rpc_dir = REPO_ROOT / "src" / "wisp" / "rpc"
+
+    for filename in (
+        "session_run.py",
+        "session_mutation.py",
+        "session_read.py",
+        "session_state.py",
+        "session_queue.py",
+        "configure.py",
+        "connections.py",
+        "control.py",
+        "inspection.py",
+        "project_files.py",
+    ):
+        assert not (rpc_dir / filename).exists()
+
+
+def test_rpc_handler_subpackages_do_not_reexport_modules() -> None:
+    # Keeping these packages empty avoids import cycles with ``wisp.rpc.execution``,
+    # which imports every handler module while the handlers import ``coordinator``.
+    for package in ("session", "handlers"):
+        init = REPO_ROOT / "src" / "wisp" / "rpc" / package / "__init__.py"
+        assert _module_imports(init) == set()
+
+
 @pytest.mark.parametrize(
     ("relative_path", "forbidden"),
     [
         (Path("cli/rpc_transport.py"), _RPC_TRANSPORT_FORBIDDEN_IMPORTS),
         (Path("rpc/execution.py"), _RPC_EXECUTION_FORBIDDEN_IMPORTS),
+        *(
+            (path.relative_to(REPO_ROOT / "src" / "wisp"), _RPC_HANDLER_FORBIDDEN_IMPORTS)
+            for package in ("session", "handlers")
+            for path in sorted((REPO_ROOT / "src" / "wisp" / "rpc" / package).glob("*.py"))
+            if path.name != "__init__.py"
+        ),
     ],
+    ids=str,
 )
 def test_rpc_layers_preserve_dependency_direction(
     relative_path: Path,

@@ -62,14 +62,8 @@ from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.base import ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
-from wisp.rpc import configure as rpc_configure_module
-from wisp.rpc import connections as rpc_connections_module
-from wisp.rpc import control as rpc_control_module
 from wisp.rpc import execution as rpc_execution_module
-from wisp.rpc import inspection as rpc_inspection_module
 from wisp.rpc import lifecycle as rpc_lifecycle_module
-from wisp.rpc import session_mutation as rpc_session_mutation_module
-from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import (
     MAX_RPC_COMMAND_TYPE_CHARS,
     ApprovalCommand,
@@ -82,7 +76,6 @@ from wisp.rpc.commands import (
     TrustCommand,
 )
 from wisp.rpc.configuration import _RpcConfigureOverrides
-from wisp.rpc.connections import handle_rpc_store_api_key_command
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
@@ -93,9 +86,16 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.execution import (
     RpcCommandExecutor,
 )
+from wisp.rpc.handlers import configure as rpc_configure_module
+from wisp.rpc.handlers import connections as rpc_connections_module
+from wisp.rpc.handlers import control as rpc_control_module
+from wisp.rpc.handlers import inspection as rpc_inspection_module
+from wisp.rpc.handlers.connections import handle_rpc_store_api_key_command
 from wisp.rpc.host import RpcHost
 from wisp.rpc.lifecycle import _MAX_RPC_COMMAND_ERROR_CHARS
-from wisp.rpc.session_state import rpc_selected_session_state
+from wisp.rpc.session import mutation as rpc_session_mutation_module
+from wisp.rpc.session import run as rpc_session_run_module
+from wisp.rpc.session.state import rpc_selected_session_state
 from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.commands import CommandArgument, CommandCategory, CommandDescriptor
 from wisp.runtime.event_bus import EventBus

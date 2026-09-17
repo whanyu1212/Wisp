@@ -32,7 +32,6 @@ from wisp.rpc.commands import (
     NewSessionCommand,
     PromptCommand,
 )
-from wisp.rpc.control import RpcTrustResolver
 from wisp.rpc.coordinator import (
     _RpcCommandCompleted,
     _RpcControlEvent,
@@ -41,8 +40,9 @@ from wisp.rpc.coordinator import (
     _RpcSessionState,
 )
 from wisp.rpc.errors import RpcOutputAlreadyReportedError
+from wisp.rpc.handlers.control import RpcTrustResolver
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
-from wisp.rpc.session_state import updated_rpc_session_state
+from wisp.rpc.session.state import updated_rpc_session_state
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import resolve_session_tree
