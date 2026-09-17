@@ -354,6 +354,6 @@ Run the checkpoint regressions with:
 uv run pytest tests/repository/test_crafting_providers.py
 ```
 
-Next in the [curriculum](index.md#curriculum): **Controlling side effects**. The
+Next: [Controlling side effects](05-side-effects.md). The
 model can now make real decisions. We need to strengthen how those decisions meet
 the filesystem, command execution, trust, and user approval.

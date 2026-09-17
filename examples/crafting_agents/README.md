@@ -1,6 +1,6 @@
 # Crafting Coding Agents checkpoints
 
-Runnable sources for the first four chapters of the [mdBook](../../site/crafting-agents/index.md).
+Runnable sources for the first five chapters of the [mdBook](../../site/crafting-agents/index.md).
 Use Python 3.12+ from the checkout root; no package installation, API key, network,
 or third-party dependency is needed:
 
@@ -17,6 +17,10 @@ python3 -m examples.crafting_agents.checkpoint_04 --scenario retry
 python3 -m examples.crafting_agents.checkpoint_04 --scenario disconnect
 python3 -m examples.crafting_agents.checkpoint_04 --scenario malformed
 python3 -m examples.crafting_agents.checkpoint_04 --scenario output-limit
+python3 -m examples.crafting_agents.checkpoint_05
+python3 -m examples.crafting_agents.checkpoint_05 --scenario policy-denied
+python3 -m examples.crafting_agents.checkpoint_05 --scenario approval-denied
+python3 -m examples.crafting_agents.checkpoint_05 --scenario stale-input
 ```
 
 - `core.py`: message/tool types, the shared sequential loop, and a scripted provider.
@@ -33,6 +37,9 @@ python3 -m examples.crafting_agents.checkpoint_04 --scenario output-limit
 - `stream_replay.py`: authored native-shaped event fixtures and observation checks.
 - `openai_transport.py`: optional OpenAI SDK transport, with SDK retries disabled.
 - `checkpoint_04.py`: offline provider scenarios or an explicit live run.
+- `side_effects.py`: host allowlist, immutable approval details, and post-approval
+  content checks under the trusted, single-writer fixture assumption.
+- `checkpoint_05.py`: repair, policy denial, approval denial, and stale-input scenarios.
 
 The default providers replay authored decisions and check observations. They are not
 live models or autonomous solvers. `model_finished` means the last response had no tool
@@ -69,7 +76,7 @@ The book includes code through mdBook `ANCHOR` regions. Edit these files rather
 than creating duplicate snippets. From a development environment:
 
 ```bash
-uv run pytest tests/repository/test_crafting_agents.py tests/repository/test_crafting_context.py tests/repository/test_crafting_providers.py
+uv run pytest tests/repository/test_crafting_agents.py tests/repository/test_crafting_context.py tests/repository/test_crafting_providers.py tests/repository/test_crafting_side_effects.py
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy
@@ -77,5 +84,5 @@ mdbook build
 ```
 
 The focused tests run in normal Python CI; the examples are included in configured
-strict type checking. The docs workflow also runs all twelve offline commands before
+strict type checking. The docs workflow also runs all sixteen offline commands before
 building the book.
