@@ -22,11 +22,11 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.project_files import FileIndexConfig, collect_project_snapshot
-from wisp.rpc import project_files as discovery
 from wisp.rpc.commands import GetProjectFilesCommand, ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
+from wisp.rpc.handlers import project_files as discovery
+from wisp.rpc.handlers.project_files import project_files_report
 from wisp.rpc.host import RpcHost
-from wisp.rpc.project_files import project_files_report
 from wisp.tools.context import ToolContext
 
 
@@ -257,7 +257,7 @@ def test_candidate_credentials_are_reserved_before_interrupted_adoption(
     from wisp.coding import CodingSession
     from wisp.config import WispConfig
     from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
-    from wisp.rpc.project_files import RpcProjectFiles
+    from wisp.rpc.handlers.project_files import RpcProjectFiles
     from wisp.runtime.api import WispRuntime
     from wisp.runtime.extensions import build_runtime
     from wisp.sessions.jsonl import JsonlSessionStore

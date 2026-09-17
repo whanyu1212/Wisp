@@ -31,7 +31,6 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc import host as rpc_host_module
-from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import StoreApiKeyCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
@@ -41,6 +40,7 @@ from wisp.rpc.coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
+from wisp.rpc.session import run as rpc_session_run_module
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sdk import InProcessOptions, InProcessWisp

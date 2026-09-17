@@ -32,7 +32,7 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.framing import RpcFrameError, encode_rpc_frame
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
-from wisp.rpc.session_state import rpc_selected_session_state, updated_rpc_session_state
+from wisp.rpc.session.state import rpc_selected_session_state, updated_rpc_session_state
 from wisp.sessions.jsonl import (
     JsonlSession,
     JsonlSessionStore,

@@ -26,13 +26,13 @@ from wisp.providers.events import (
     ProviderResponseStarted,
     ProviderUsage,
 )
-from wisp.rpc import session_run as rpc_session_run_module
 from wisp.rpc.commands import ApprovalCommand
-from wisp.rpc.control import handle_rpc_control_command
 from wisp.rpc.coordinator import _RpcPromptReady
+from wisp.rpc.handlers.control import handle_rpc_control_command
 from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
 from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
-from wisp.rpc.session_run import (
+from wisp.rpc.session import run as rpc_session_run_module
+from wisp.rpc.session.run import (
     rpc_has_durable_completion,
     run_rpc_prompt_command,
 )
