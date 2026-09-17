@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from tests.cli_support import *
 from tests.cli_support import _test_model_registry
-from tests.test_coding_session import CapturingProvider
+from tests.coding.test_coding_session import CapturingProvider
 from wisp.events import ErrorEvent, RpcCommandFinished, WispEvent
 from wisp.rpc.commands import ConfigureCommand, RpcCommandAdapter
 from wisp.rpc.configuration import _RpcConfigureOverrides
@@ -475,7 +475,7 @@ def test_configure_model_only_auto_switch_resets_stale_effort(tmp_path: Path) ->
     overrides = _RpcConfigureOverrides()
 
     # "gpt-5.5-pro" unambiguously belongs to openai in the built-in catalog
-    # (confirmed in tests/test_rpc_configure.py's auto-switch tests) -- no
+    # (confirmed in tests/rpc/test_rpc_configure.py's auto-switch tests) -- no
     # explicit "provider" field here, only "model".
     _configure_rpc(
         {"model": "gpt-5.5-pro"},

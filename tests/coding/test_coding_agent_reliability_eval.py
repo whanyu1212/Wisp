@@ -31,7 +31,7 @@ _FINAL_SUMMARY = (
     f"Implementation: created `{_BRANCH_NAME}` from refreshed `origin/main` after "
     "confirming local `main` was behind. Verification: the first `uv run pytest` timed "
     "out after 30 seconds and is inconclusive; `uv run pytest "
-    "tests/test_agent_loop_core.py` passed with exit code 0; the longer `uv run pytest` "
+    "tests/agent/test_agent_loop_core.py` passed with exit code 0; the longer `uv run pytest` "
     "retry passed with exit code 0. Remaining uncertainty: none."
 )
 _BASH_TOOL = ToolSpec(
@@ -133,7 +133,7 @@ def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion
     initial_full_test = _bash_call("full-test-timeout", "uv run pytest", timeout=30)
     focused_test = _bash_call(
         "focused-test",
-        "uv run pytest tests/test_agent_loop_core.py",
+        "uv run pytest tests/agent/test_agent_loop_core.py",
         timeout=30,
     )
     full_test_retry = _bash_call("full-test-retry", "uv run pytest", timeout=300)
@@ -179,7 +179,7 @@ def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion
             exit_code=None,
         ),
         focused_test.call_id: _BashOutcome(
-            command="uv run pytest tests/test_agent_loop_core.py",
+            command="uv run pytest tests/agent/test_agent_loop_core.py",
             timeout=30,
             output="Command exited with code 0\n37 passed",
             is_error=False,

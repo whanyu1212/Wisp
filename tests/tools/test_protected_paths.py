@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from tests.test_tools import run_tool
+from tests.tools.test_tools import run_tool
 from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.builtin import FindTool, GrepTool, ReadTool
 from wisp.tools.context import ToolContext
