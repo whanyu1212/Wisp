@@ -465,7 +465,8 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Enter` | Submit; while a prompt runs, steer it; or activate the selected slash/file-picker item |
 | `Alt+Enter` | While a prompt runs, queue a follow-up; otherwise insert a newline |
 | `Alt+Up` | While a prompt runs, restore the newest queued item to the composer |
-| `Shift+Enter` | Insert newline |
+| `Ctrl+J` | Insert newline in Rust and Python fullscreen; works when a terminal cannot distinguish `Shift+Enter` from `Enter` |
+| `Shift+Enter` | Insert newline in Rust when the terminal reports the modified key |
 | `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
 | `Up` / `Down` | Move through an active suggestion menu |
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
