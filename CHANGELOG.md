@@ -26,6 +26,8 @@ versioned event contract was v2; earlier events were unversioned, so there is no
   text, thinking, turn, content-index, and event-order boundaries.
 - Added a matched end-to-end PTY benchmark for the Rust and Textual frontends, covering source-CLI
   startup, fake-provider streaming, visible response progress, clean shutdown, and terminal restore.
+- Extended matched TUI evidence to paced streaming and long saved sessions, with interactive input
+  latency and sampled process-tree CPU and memory observations for both renderers.
 
 ## 0.2.0rc2 — release preparation
 
