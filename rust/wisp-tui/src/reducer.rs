@@ -2976,7 +2976,7 @@ fn handle_session_backend_event(
             };
             if let Some(cursor) = &hydration.report.next_before_entry_id {
                 let id = ids.next_id(CommandKind::GetMessages);
-                let command = WispTypedClientRpcCommands::get_messages_older(
+                let command = WispTypedClientRpcCommands::get_messages_hydration_older(
                     &id,
                     hydration
                         .report
@@ -3097,7 +3097,7 @@ fn handle_session_backend_event(
             };
             if let Some(cursor) = &hydration.report.next_before_entry_id {
                 let id = ids.next_id(CommandKind::GetMessages);
-                let command = WispTypedClientRpcCommands::get_messages_older(
+                let command = WispTypedClientRpcCommands::get_messages_hydration_older(
                     &id,
                     Some(&selected.session_id),
                     cursor,
@@ -3396,10 +3396,13 @@ fn merge_hydration_page(
     // Page projections are only used for validation; keep raw pages until final assembly.
     hydration.report.transcript = SharedTranscript::default();
     if !hydration.report.truncated {
+        let started = std::time::Instant::now();
+        let message_count = hydration.pages.iter().map(|page| page.len()).sum();
         let projected = crate::history::project_chronological_history(
             hydration.pages.iter().rev().flat_map(|page| page.iter()),
         )
         .map_err(|error| error.to_string())?;
+        crate::hydration_profile::record("rust.final_projection", started.elapsed(), message_count);
         hydration.report.transcript = projected.transcript;
         hydration.report.durable_entry_ids = projected.durable_entry_ids;
         hydration.pages.clear();
@@ -3409,6 +3412,8 @@ fn merge_hydration_page(
 }
 
 fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
+    let started = std::time::Instant::now();
+    let message_count = report.durable_entry_ids.len();
     state.transcript = report.transcript;
     let represented_durable_entry_ids = state.transcript.represented_durable_entry_ids();
     let represented_durable_entry_order = report
@@ -3427,6 +3432,7 @@ fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
         tail_evicted: false,
         active_exact_detail: None,
     };
+    crate::hydration_profile::record("rust.history_install", started.elapsed(), message_count);
 }
 
 fn same_optional_session(left: &Option<SessionIdentity>, right: &Option<SessionIdentity>) -> bool {
@@ -7757,7 +7763,7 @@ mod tests {
             let mut end: usize = 15_001;
             let mut request = 1;
             while end > 0 {
-                let start = end.saturating_sub(75);
+                let start = end.saturating_sub(200);
                 let command_id = format!("get_messages-{request}");
                 let report = hydration_page(&command_id, start, end);
                 let finish = finished(&command_id, "get_messages", true);
@@ -7793,6 +7799,7 @@ mod tests {
                     assert_eq!(loaded.seen_entry_ids.len(), 15_001 - start);
                     let command = effects.iter().find_map(command_value).unwrap();
                     assert_eq!(command["before_entry_id"], format!("entry-{start}"));
+                    assert_eq!(command["limit"], 200);
                 } else if selecting {
                     assert!(effects.iter().any(|effect| matches!(effect, UiEffect::RestoreSessionDraft(text) if text == "draft")));
                 }

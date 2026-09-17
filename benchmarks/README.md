@@ -121,6 +121,25 @@ or isolate navigation work. Keep all raw samples and compare only matched worklo
 conditions. The fixture, limits, and local baseline are recorded in
 `benchmarks/rust_tui_interaction_evidence.md`.
 
+## Rust TUI saved-history startup
+
+Profile the source CLI's Rust startup with fresh and fully hydrated saved sessions:
+
+```bash
+uv run python -m benchmarks.rust_tui_hydration \
+  --rust-binary "$PWD/target/release/wisp-tui" \
+  --runs 3 --history-messages 0,10000 \
+  --output profiles/rust-tui-hydration.json
+```
+
+The harness uses an opt-in `WISP_HYDRATION_PROFILE_DIR` directory for content-free Python and Rust
+stage timings. It records each page read, selected-session refresh, report publication, Rust page
+projection and clone, final transcript projection, and history installation alongside
+launch-to-ready and observed process-tree CPU/RSS. Use `--no-profile` for the wall-clock comparison
+without per-page profile file writes. Stage totals omit RPC scheduling, process startup, transport,
+and drawing, so they do not sum to launch-to-ready. The before/after evidence and limitations are in
+`benchmarks/rust_tui_hydration_evidence.md`.
+
 ## Rust TUI Transcript
 
 Measure the production Rust transcript, viewport, Markdown/syntax, tool-card, structured-detail,

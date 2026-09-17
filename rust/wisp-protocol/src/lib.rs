@@ -861,10 +861,28 @@ pub mod commands {
             session_id: Option<&str>,
             before_entry_id: &str,
         ) -> Result<Self, super::ProtocolDecodeError> {
+            Self::get_messages_before(id, session_id, before_entry_id, 75)
+        }
+
+        /// Fetch a larger older page while loading the whole saved transcript.
+        pub fn get_messages_hydration_older(
+            id: &str,
+            session_id: Option<&str>,
+            before_entry_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            Self::get_messages_before(id, session_id, before_entry_id, 200)
+        }
+
+        fn get_messages_before(
+            id: &str,
+            session_id: Option<&str>,
+            before_entry_id: &str,
+            limit: usize,
+        ) -> Result<Self, super::ProtocolDecodeError> {
             let mut value = serde_json::json!({
                 "type": "get_messages",
                 "id": id,
-                "limit": 75,
+                "limit": limit,
                 "before_entry_id": before_entry_id,
                 "complete_structure": true,
                 "full_content": false,

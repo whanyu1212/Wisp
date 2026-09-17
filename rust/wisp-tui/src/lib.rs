@@ -15,6 +15,7 @@ mod event_loop;
 mod file_picker;
 mod framing;
 pub mod history;
+mod hydration_profile;
 mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
