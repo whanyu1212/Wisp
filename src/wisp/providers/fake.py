@@ -62,6 +62,28 @@ class FakeProvider:
             raise ValueError("WISP_FAKE_STREAM_INTERVAL_MS must be a nonnegative integer")
         return interval_ms / 1_000
 
+    @staticmethod
+    def _extra_response_words() -> int:
+        """Read the optional response length used by offline benchmarks.
+
+        Returns:
+            Number of additional deterministic response words.
+
+        Raises:
+            ValueError: If the requested word count is not a nonnegative integer.
+        """
+
+        raw = os.environ.get("WISP_FAKE_RESPONSE_WORDS")
+        if raw is None:
+            return 0
+        try:
+            count = int(raw)
+        except ValueError as exc:
+            raise ValueError("WISP_FAKE_RESPONSE_WORDS must be a nonnegative integer") from exc
+        if count < 0:
+            raise ValueError("WISP_FAKE_RESPONSE_WORDS must be a nonnegative integer")
+        return count
+
     async def stream(
         self,
         messages: Sequence[Message],
@@ -74,6 +96,12 @@ class FakeProvider:
     ) -> AsyncIterator[ProviderEvent]:
         prompt = _last_user_prompt(messages)
         response = f"fake response to: {prompt}"
+        extra_words = self._extra_response_words()
+        if extra_words:
+            response = f"{response} {' '.join('payload' for _ in range(extra_words))}"
+        response_prefix = os.environ.get("WISP_FAKE_RESPONSE_PREFIX")
+        if response_prefix:
+            response = f"{response_prefix} {response}"
         response_suffix = os.environ.get("WISP_FAKE_RESPONSE_SUFFIX")
         if response_suffix:
             response = f"{response} {response_suffix}"

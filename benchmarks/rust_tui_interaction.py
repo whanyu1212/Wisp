@@ -13,7 +13,6 @@ import json
 import math
 import os
 import pty
-import re
 import secrets
 import select
 import struct
@@ -50,6 +49,7 @@ from scripts.smoke_installed_rust_tui import _seed_history
 type ProbePhase = Literal["idle", "streaming"]
 type NavigationDirection = Literal["page_up", "page_down"]
 _RESPONSE_SUFFIX = "WISP_INTERACTION_RESPONSE_DONE_6E2C"
+_RESPONSE_PREFIX = "WISP_INTERACTION_RESPONSE_BEGIN_A7C8D9E01234"
 _HISTORY_READY = "RC2 saved history ready"
 _SAMPLE_INTERVAL_SECONDS = 0.02
 _OUTPUT_TAIL_LIMIT = 65_536
@@ -63,7 +63,7 @@ class BenchmarkConfig:
     renderers: tuple[Renderer, ...] = ("rust", "textual")
     runs: int = 3
     history_messages: tuple[int, ...] = (0, 10_000)
-    prompt_words: int = 400
+    response_words: int = 400
     stream_interval_ms: int = 20
     input_probes: int = 5
     width: int = 100
@@ -228,7 +228,7 @@ def validate_config(config: BenchmarkConfig) -> None:
             rust_binary=config.rust_binary,
             renderers=config.renderers,
             runs=config.runs,
-            prompt_words=config.prompt_words,
+            prompt_words=config.response_words,
             width=config.width,
             height=config.height,
             timeout_seconds=config.timeout_seconds,
@@ -242,7 +242,7 @@ def validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("history messages must be nonnegative multiples of four")
     if config.stream_interval_ms < 1 or config.input_probes < 1:
         raise ValueError("stream interval and input probes must be positive")
-    if config.prompt_words * config.stream_interval_ms < 5_000:
+    if config.response_words * config.stream_interval_ms < 5_000:
         raise ValueError("the fake response must stream for at least five seconds")
     if not math.isfinite(config.timeout_seconds):
         raise ValueError("timeout seconds must be finite")
@@ -361,7 +361,7 @@ def _run_sample(
     run: int,
     order: int,
 ) -> SessionSample:
-    prompt = " ".join((START_TOKEN, *("payload" for _ in range(config.prompt_words))))
+    prompt = START_TOKEN
     with tempfile.TemporaryDirectory(prefix="wisp-tui-interaction-") as temporary:
         root = Path(temporary)
         home, project_dir, session_dir = root / "home", root / "project", root / "sessions"
@@ -377,6 +377,8 @@ def _run_sample(
         history_bytes = _seed_history(session_dir, history_messages) if history_messages else 0
         child_environment = _child_environment(config, renderer=renderer, home=home)
         child_environment["WISP_FAKE_STREAM_INTERVAL_MS"] = str(config.stream_interval_ms)
+        child_environment["WISP_FAKE_RESPONSE_WORDS"] = str(config.response_words)
+        child_environment["WISP_FAKE_RESPONSE_PREFIX"] = _RESPONSE_PREFIX
         child_environment["WISP_FAKE_RESPONSE_SUFFIX"] = _RESPONSE_SUFFIX
         child_environment["WISP_AUTO_COMPACTION"] = "0"
         command = [
@@ -724,8 +726,7 @@ def _marker_painted(output: str, marker: str) -> bool:
 
 
 def _response_prefix_visible(output: str) -> bool:
-    pattern = rf"response.{{0,64}}to:.{{0,128}}{re.escape(START_TOKEN)}"
-    return re.search(pattern, output) is not None
+    return _RESPONSE_PREFIX[-12:] in output
 
 
 def _response_has_final(output: str) -> bool:
@@ -771,7 +772,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parser.add_argument("--renderers", type=_parse_renderers, default=("rust", "textual"))
     parser.add_argument("--runs", type=int, default=BenchmarkConfig.runs)
     parser.add_argument("--history-messages", type=_parse_history, default=(0, 10_000))
-    parser.add_argument("--prompt-words", type=int, default=BenchmarkConfig.prompt_words)
+    parser.add_argument("--response-words", type=int, default=BenchmarkConfig.response_words)
     parser.add_argument(
         "--stream-interval-ms", type=int, default=BenchmarkConfig.stream_interval_ms
     )
@@ -787,7 +788,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             renderers=parsed.renderers,
             runs=parsed.runs,
             history_messages=parsed.history_messages,
-            prompt_words=parsed.prompt_words,
+            response_words=parsed.response_words,
             stream_interval_ms=parsed.stream_interval_ms,
             input_probes=parsed.input_probes,
             width=parsed.width,

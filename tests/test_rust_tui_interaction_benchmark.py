@@ -78,7 +78,7 @@ def test_config_rejects_unusable_stream_and_history() -> None:
         validate_config(BenchmarkConfig(renderers=("textual",), history_messages=(0, 7)))
     with pytest.raises(ValueError, match="at least five seconds"):
         validate_config(
-            BenchmarkConfig(renderers=("textual",), prompt_words=8, stream_interval_ms=20)
+            BenchmarkConfig(renderers=("textual",), response_words=8, stream_interval_ms=20)
         )
 
 
@@ -185,7 +185,7 @@ def test_source_cli_interaction_completes_both_renderers_and_histories() -> None
             rust_binary=binary,
             runs=1,
             history_messages=(0, 8),
-            prompt_words=300,
+            response_words=300,
             stream_interval_ms=20,
             input_probes=2,
             timeout_seconds=45,
