@@ -76,6 +76,11 @@ jobs:
           python -m examples.crafting_agents.checkpoint_03 --untrusted
           python -m examples.crafting_agents.checkpoint_03 --long-guidance
           python -m examples.crafting_agents.checkpoint_03 --deny-edits
+          python -m examples.crafting_agents.checkpoint_04
+          python -m examples.crafting_agents.checkpoint_04 --scenario retry
+          python -m examples.crafting_agents.checkpoint_04 --scenario disconnect
+          python -m examples.crafting_agents.checkpoint_04 --scenario malformed
+          python -m examples.crafting_agents.checkpoint_04 --scenario output-limit
 
       - name: Build book
         run: mdbook build
