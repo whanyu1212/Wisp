@@ -14,7 +14,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import ValidationError
 
-from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent, WispEvent
+from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.framing import RpcFrameError, decode_rpc_object, pop_rpc_frame
 from wisp.rpc.protocol import (
@@ -85,7 +85,6 @@ async def read_rpc_stdin_handshake(
             backend_package_version=backend_package_version,
             min_protocol_version=MIN_LIVE_RPC_PROTOCOL_VERSION,
             max_protocol_version=MAX_LIVE_RPC_PROTOCOL_VERSION,
-            event_schema_version=EVENT_SCHEMA_VERSION,
         )
     else:
         response = negotiate_rpc_handshake(

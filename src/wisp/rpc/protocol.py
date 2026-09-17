@@ -16,9 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.events import EVENT_SCHEMA_VERSION
-
-LIVE_RPC_PROTOCOL_VERSION = 8
+LIVE_RPC_PROTOCOL_VERSION = 9
 MIN_LIVE_RPC_PROTOCOL_VERSION = LIVE_RPC_PROTOCOL_VERSION
 MAX_LIVE_RPC_PROTOCOL_VERSION = LIVE_RPC_PROTOCOL_VERSION
 MAX_WIRE_VERSION = 2**32 - 1
@@ -46,7 +44,6 @@ type RpcCapability = Annotated[
     ),
 ]
 type RpcHandshakeRejectionCode = Literal[
-    "event_schema_version_mismatch",
     "invalid_handshake",
     "protocol_version_mismatch",
     "unsupported_capability",
@@ -85,8 +82,6 @@ class RpcHandshakeRequest(_ProtocolModel):
     )
     min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    min_event_schema_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    max_event_schema_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     supported_capabilities: tuple[RpcCapability, ...] = Field(
         max_length=MAX_HANDSHAKE_CAPABILITIES,
         json_schema_extra={"uniqueItems": True},
@@ -115,10 +110,6 @@ class RpcHandshakeRequest(_ProtocolModel):
     def _validate_ranges_and_capabilities(self) -> Self:
         if self.min_protocol_version > self.max_protocol_version:
             raise ValueError("minimum protocol version cannot exceed maximum protocol version")
-        if self.min_event_schema_version > self.max_event_schema_version:
-            raise ValueError(
-                "minimum event schema version cannot exceed maximum event schema version"
-            )
         if not set(self.required_capabilities).issubset(self.supported_capabilities):
             raise ValueError("required RPC capabilities must also be supported")
         return self
@@ -134,7 +125,6 @@ class RpcHandshakeAccepted(_ProtocolModel):
         json_schema_extra={"pattern": _VERSION_PATTERN},
     )
     protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    event_schema_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     capabilities: tuple[RpcCapability, ...] = Field(
@@ -181,7 +171,6 @@ class RpcHandshakeRejected(_ProtocolModel):
     )
     min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    event_schema_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
 
     @field_validator("backend_package_version")
     @classmethod
@@ -222,7 +211,6 @@ def negotiate_rpc_handshake(
     limits: RpcTransportLimits,
     min_protocol_version: int = MIN_LIVE_RPC_PROTOCOL_VERSION,
     max_protocol_version: int = MAX_LIVE_RPC_PROTOCOL_VERSION,
-    event_schema_version: int = EVENT_SCHEMA_VERSION,
 ) -> RpcHandshakeResponse:
     """Select a deterministic common contract or return a bounded rejection."""
 
@@ -237,20 +225,12 @@ def negotiate_rpc_handshake(
             backend_package_version=backend_package_version,
             min_protocol_version=min_protocol_version,
             max_protocol_version=max_protocol_version,
-            event_schema_version=event_schema_version,
         )
 
     if common_minimum > common_maximum:
         return reject(
             "protocol_version_mismatch",
             "No compatible live RPC protocol version.",
-        )
-    if not (
-        request.min_event_schema_version <= event_schema_version <= request.max_event_schema_version
-    ):
-        return reject(
-            "event_schema_version_mismatch",
-            "No compatible live event schema version.",
         )
     if not set(request.required_capabilities).issubset(backend_capabilities):
         return reject(
@@ -265,7 +245,6 @@ def negotiate_rpc_handshake(
     return RpcHandshakeAccepted(
         backend_package_version=backend_package_version,
         protocol_version=common_maximum,
-        event_schema_version=event_schema_version,
         min_protocol_version=min_protocol_version,
         max_protocol_version=max_protocol_version,
         capabilities=selected_capabilities,
@@ -285,12 +264,6 @@ def validate_rpc_handshake_response(
         <= request.max_protocol_version
     ):
         raise ValueError("backend selected a protocol version outside the requested range")
-    if not (
-        request.min_event_schema_version
-        <= response.event_schema_version
-        <= request.max_event_schema_version
-    ):
-        raise ValueError("backend selected an event schema version outside the requested range")
     if not set(response.capabilities).issubset(request.supported_capabilities):
         raise ValueError("backend selected a capability the frontend did not offer")
     if not set(request.required_capabilities).issubset(response.capabilities):

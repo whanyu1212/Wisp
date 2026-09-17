@@ -8,7 +8,6 @@ from pathlib import Path
 import wisp
 from wisp.config import WispConfig
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     KnownWispEvent,
     RpcCommandFinished,
     ToolApprovalRequested,
@@ -51,7 +50,6 @@ def main() -> None:
 
     required_symbols = (
         WispConfig,
-        EVENT_SCHEMA_VERSION,
         KnownWispEvent,
         RpcCommandFinished,
         ToolApprovalRequested,

@@ -5,16 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Literal, Self, cast
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     TypeAdapter,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
@@ -34,36 +32,6 @@ from wisp.skills.models import (
 )
 from wisp.tool_types import ToolFailureCode
 
-EVENT_SCHEMA_VERSION: Literal[39] = 39
-MESSAGE_ORIGIN_SCHEMA_VERSION = 39
-THRESHOLD_COMPACTION_SCHEMA_VERSION = 10
-OVERFLOW_COMPACTION_SCHEMA_VERSION = 11
-COST_ACCOUNTING_SCHEMA_VERSION = 12
-QUEUE_UPDATE_SCHEMA_VERSION = 13
-QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION = 14
-QUEUE_ITEMS_REMOVED_SCHEMA_VERSION = 15
-RPC_STATE_SCHEMA_VERSION = 16
-RPC_MESSAGES_SCHEMA_VERSION = 17
-RPC_SESSIONS_SCHEMA_VERSION = 18
-RPC_SESSION_DERIVATION_SCHEMA_VERSION = 19
-RPC_SESSION_TREE_SCHEMA_VERSION = 20
-RPC_SESSION_NAME_SCHEMA_VERSION = 21
-RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION = 22
-RPC_COMMANDS_SCHEMA_VERSION = 23
-RPC_SESSION_UNREVERT_SCHEMA_VERSION = 24
-PROCESS_METADATA_SCHEMA_VERSION = 25
-COMPACTION_POLICY_SCHEMA_VERSION = 26
-AGENT_MODE_SCHEMA_VERSION = 27
-SKILL_INVOCATION_SCHEMA_VERSION = 28
-SKILL_CATALOG_SCHEMA_VERSION = 29
-MCP_STATUS_SCHEMA_VERSION = 30
-PACKAGE_SKILLS_SCHEMA_VERSION = 31
-CONTEXT_ACCOUNTING_SCHEMA_VERSION = 32
-TOOL_FAILURE_METADATA_SCHEMA_VERSION = 33
-RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION = 34
-RPC_MODEL_CATALOG_SCHEMA_VERSION = 35
-RPC_CONNECTION_CATALOG_SCHEMA_VERSION = 36
-RPC_PROJECT_FILES_SCHEMA_VERSION = 37
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32
 MAX_RPC_CONNECTION_METHODS = 64
@@ -89,30 +57,6 @@ QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
-_PROCESS_METADATA_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
-_TOOL_RESULT_EVENT_TYPES = frozenset({"tool.result", "tool.execution.ended"})
-_TOOL_FAILURE_METADATA_FIELDS = frozenset({"failure_code", "retryable", "recovery_hint"})
-_PROCESS_METADATA_FIELDS = frozenset(
-    {
-        "process_id",
-        "process_state",
-        "process_error",
-        "stdout",
-        "stderr",
-        "stdout_truncated",
-        "stderr_truncated",
-        "stdout_dropped_bytes",
-        "stderr_dropped_bytes",
-    }
-)
-
-
-def _strip_context_accounting_fields(value: object) -> None:
-    if not isinstance(value, dict):
-        return
-    value.pop("trailing_estimated_tokens", None)
-    value.pop("effective_tokens", None)
-    value.pop("accounting_method", None)
 
 
 def utc_now() -> datetime:
@@ -120,56 +64,17 @@ def utc_now() -> datetime:
 
 
 class WispEvent(BaseModel):
-    """Base class for versioned events consumed by every Wisp frontend."""
+    """Base class for the typed events consumed by every Wisp frontend.
+
+    Events carry no per-event version. The live RPC protocol bundle under
+    ``schemas/live-rpc/`` is the single compatibility contract: additive changes
+    regenerate the current bundle and breaking changes bump the protocol version.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: str
-    schema_version: Literal[
-        5,
-        6,
-        7,
-        8,
-        9,
-        10,
-        11,
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-        25,
-        26,
-        27,
-        28,
-        29,
-        30,
-        31,
-        32,
-        33,
-        34,
-        35,
-        36,
-        37,
-        38,
-        39,
-    ] = EVENT_SCHEMA_VERSION
     timestamp: datetime = Field(default_factory=utc_now)
-
-    @field_validator("schema_version", mode="before")
-    @classmethod
-    def _require_integer_schema_version(cls, value: object) -> object:
-        if type(value) is not int:
-            raise ValueError("Wisp event schema_version must be an integer")
-        return value
 
 
 class ToolCallSnapshot(BaseModel):
@@ -195,22 +100,6 @@ class _MessageOriginEvent(WispEvent):
     """
 
     message_entry_id: str | None = Field(default=None, min_length=1, max_length=4096)
-
-    @model_validator(mode="after")
-    def _validate_message_origin(self) -> Self:
-        if (
-            self.message_entry_id is not None
-            and self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION
-        ):
-            raise ValueError("Message origins require schema_version 39 or newer")
-        return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_origin(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
-            data.pop("message_entry_id", None)
-        return data
 
 
 class AgentStarted(_MessageOriginEvent):
@@ -811,25 +700,6 @@ class MessageCompleted(_MessageOriginEvent):
     cost: UsageCost | None = None
     context_observation: ContextObservation | None = None
 
-    @model_validator(mode="after")
-    def _validate_cost_schema(self) -> Self:
-        if self.cost is not None and self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
-            raise ValueError(
-                f"usage cost requires schema_version {COST_ACCOUNTING_SCHEMA_VERSION} or newer"
-            )
-        return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
-            data.pop("message_entry_id", None)
-        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
-            data.pop("cost", None)
-        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
-            data.pop("context_observation", None)
-        return data
-
 
 class ContextPressure(WispEvent):
     """Provider-reported total usage crossed the configured warning threshold."""
@@ -852,13 +722,6 @@ class ContextEstimated(WispEvent):
     provider: str
     model: str | None = None
     budget: ContextBudget
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
-            _strip_context_accounting_fields(data.get("budget"))
-        return data
 
 
 class ContextOverflow(WispEvent):
@@ -942,13 +805,6 @@ class ProjectConfigApplied(WispEvent):
     auto_compaction_enabled: bool | None = None
     auth_path: Path
 
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < COMPACTION_POLICY_SCHEMA_VERSION:
-            data.pop("auto_compaction_enabled", None)
-        return data
-
 
 class _ToolResultEvent(_MessageOriginEvent):
     """Shared bounded result contract for distinct tool lifecycle events."""
@@ -1012,18 +868,6 @@ class _ToolResultEvent(_MessageOriginEvent):
             if name not in envelope_fields
         }
 
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < MESSAGE_ORIGIN_SCHEMA_VERSION:
-            data.pop("message_entry_id", None)
-        if self.schema_version < PROCESS_METADATA_SCHEMA_VERSION:
-            _strip_process_metadata_fields(data)
-        if self.schema_version < TOOL_FAILURE_METADATA_SCHEMA_VERSION:
-            for field in _TOOL_FAILURE_METADATA_FIELDS:
-                data.pop(field, None)
-        return data
-
 
 class ToolExecutionEnded(_ToolResultEvent):
     """Durable boundary reached after one tool execution finishes."""
@@ -1066,33 +910,14 @@ class CompactionStarted(WispEvent):
     @model_validator(mode="after")
     def _validate_trigger(self) -> CompactionStarted:
         if self.reason == "threshold":
-            if self.schema_version < THRESHOLD_COMPACTION_SCHEMA_VERSION:
-                raise ValueError(
-                    "threshold compaction requires schema_version "
-                    f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
-                )
             if self.trigger_budget is None:
                 raise ValueError("threshold compaction requires a trigger budget")
         elif self.reason == "overflow":
-            if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
-                raise ValueError(
-                    "overflow compaction requires schema_version "
-                    f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
-                )
             if self.trigger_budget is None:
                 raise ValueError("overflow compaction requires a trigger budget")
         elif self.trigger_budget is not None:
             raise ValueError("manual compaction must not include a trigger budget")
         return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version in {8, 9}:
-            data.pop("trigger_budget", None)
-        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
-            _strip_context_accounting_fields(data.get("trigger_budget"))
-        return data
 
 
 class CompactionCompleted(WispEvent):
@@ -1112,17 +937,7 @@ class CompactionCompleted(WispEvent):
 
     @model_validator(mode="after")
     def _validate_reason(self) -> CompactionCompleted:
-        if self.reason == "threshold" and self.schema_version < THRESHOLD_COMPACTION_SCHEMA_VERSION:
-            raise ValueError(
-                "threshold compaction requires schema_version "
-                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
-            )
         if self.reason == "overflow":
-            if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
-                raise ValueError(
-                    "overflow compaction requires schema_version "
-                    f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
-                )
             if self.outcome != "completed" and self.will_retry:
                 raise ValueError("failed overflow compaction must not retry")
             if (
@@ -1133,20 +948,7 @@ class CompactionCompleted(WispEvent):
                 raise ValueError("completed overflow compaction without retry must explain why")
         elif self.will_retry:
             raise ValueError("only overflow compaction may retry")
-        if self.cost is not None and self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
-            raise ValueError(
-                f"usage cost requires schema_version {COST_ACCOUNTING_SCHEMA_VERSION} or newer"
-            )
         return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < OVERFLOW_COMPACTION_SCHEMA_VERSION:
-            data.pop("will_retry", None)
-        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
-            data.pop("cost", None)
-        return data
 
 
 class AgentCompleted(WispEvent):
@@ -1177,20 +979,6 @@ class SessionStatsReported(WispEvent):
     command_id: str
     stats: SessionStats
 
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < COST_ACCOUNTING_SCHEMA_VERSION:
-            stats = cast(dict[str, object], data["stats"])
-            stats.pop("cost", None)
-        if self.schema_version < COMPACTION_POLICY_SCHEMA_VERSION:
-            stats = cast(dict[str, object], data["stats"])
-            stats.pop("compaction", None)
-        if self.schema_version < CONTEXT_ACCOUNTING_SCHEMA_VERSION:
-            stats = cast(dict[str, object], data["stats"])
-            _strip_context_accounting_fields(stats.get("context"))
-        return data
-
 
 class PermissionState(BaseModel):
     """Effective approval mode and user-owned default for the active project."""
@@ -1209,12 +997,6 @@ class RpcPermissionsReported(WispEvent):
     command_id: str
     permissions: PermissionState
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < 38:
-            raise ValueError("Permission reports require schema_version 38 or newer")
-        return self
-
 
 class RpcStateReported(WispEvent):
     """Immediate, non-persisted in-memory state returned over RPC."""
@@ -1222,24 +1004,6 @@ class RpcStateReported(WispEvent):
     type: Literal["rpc.state"] = "rpc.state"
     command_id: str
     state: RpcStateSnapshot
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_STATE_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC state reports require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
-            )
-        return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        state = cast(dict[str, object], data["state"])
-        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            state.pop("session_name", None)
-        if self.schema_version < AGENT_MODE_SCHEMA_VERSION:
-            state.pop("mode", None)
-        return data
 
 
 class RpcCommandsReported(WispEvent):
@@ -1249,14 +1013,6 @@ class RpcCommandsReported(WispEvent):
     command_id: str
     commands: tuple[RpcCommandDescriptor, ...] = ()
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_COMMANDS_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC command reports require schema_version {RPC_COMMANDS_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class RpcModelCatalogReported(WispEvent):
     """Immediate, non-persisted effective model catalog returned over RPC."""
@@ -1265,15 +1021,6 @@ class RpcModelCatalogReported(WispEvent):
     command_id: str
     catalog: RpcModelCatalogSnapshot
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_MODEL_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC model catalog reports require schema_version "
-                f"{RPC_MODEL_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class RpcConnectionCatalogReported(WispEvent):
     """Immediate, non-persisted provider connection catalog returned over RPC."""
@@ -1281,15 +1028,6 @@ class RpcConnectionCatalogReported(WispEvent):
     type: Literal["rpc.connection_catalog"] = "rpc.connection_catalog"
     command_id: str
     catalog: RpcConnectionCatalogSnapshot
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC connection catalog reports require schema_version "
-                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        return self
 
 
 class RpcDeviceCodeReported(WispEvent):
@@ -1304,15 +1042,6 @@ class RpcDeviceCodeReported(WispEvent):
     ]
     user_code: Annotated[str, Field(min_length=1, max_length=MAX_RPC_DEVICE_CODE_CHARS)]
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC device-code reports require schema_version "
-                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class RpcDeviceCodeProgressReported(WispEvent):
     """Sanitized progress from one backend-owned device-code poll loop."""
@@ -1321,30 +1050,6 @@ class RpcDeviceCodeProgressReported(WispEvent):
     command_id: str
     provider: RpcProviderId
     attempt: int = Field(ge=1, le=MAX_RPC_DEVICE_CODE_ATTEMPTS)
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC device-code progress reports require schema_version "
-                f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        return self
-
-
-def _validate_package_skill_schema(
-    catalog: RpcSkillCatalogSnapshot,
-    *,
-    schema_version: int,
-) -> None:
-    if schema_version >= PACKAGE_SKILLS_SCHEMA_VERSION:
-        return
-    if any(entry.source == "package:wisp" for entry in catalog.entries) or any(
-        diagnostic.source == "package:wisp" for diagnostic in catalog.diagnostics
-    ):
-        raise ValueError(
-            f"Package skill sources require schema_version {PACKAGE_SKILLS_SCHEMA_VERSION} or newer"
-        )
 
 
 class RpcProjectFile(BaseModel):
@@ -1372,24 +1077,12 @@ class RpcProjectFilesReported(WispEvent):
     entries: tuple[RpcProjectFile, ...] = Field(max_length=MAX_PROJECT_FILES)
     truncated: bool
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_PROJECT_FILES_SCHEMA_VERSION:
-            raise ValueError("Project file reports require schema_version 37 or newer")
-        return self
-
 
 class ProjectFilesInvalidated(WispEvent):
     """Previously returned file metadata is obsolete after a policy transition."""
 
     type: Literal["project_files.invalidated"] = "project_files.invalidated"
     generation: int = Field(ge=1, le=2**53 - 1, strict=True)
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_PROJECT_FILES_SCHEMA_VERSION:
-            raise ValueError("Project file invalidation requires schema_version 37 or newer")
-        return self
 
 
 class RpcSkillsReported(WispEvent):
@@ -1399,15 +1092,6 @@ class RpcSkillsReported(WispEvent):
     command_id: str
     catalog: RpcSkillCatalogSnapshot
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < SKILL_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC skill reports require schema_version {SKILL_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
-        return self
-
 
 class RpcMcpStatusReported(WispEvent):
     """Immediate, non-persisted MCP runtime status returned over RPC."""
@@ -1416,31 +1100,12 @@ class RpcMcpStatusReported(WispEvent):
     command_id: str
     status: RpcMcpStatusSnapshot
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < MCP_STATUS_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC MCP status reports require schema_version "
-                f"{MCP_STATUS_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class SkillCatalogUpdated(WispEvent):
     """A trust transition replaced the catalog available to future operations."""
 
     type: Literal["skill.catalog.updated"] = "skill.catalog.updated"
     catalog: RpcSkillCatalogSnapshot
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < SKILL_CATALOG_SCHEMA_VERSION:
-            raise ValueError(
-                "skill catalog updates require schema_version "
-                f"{SKILL_CATALOG_SCHEMA_VERSION} or newer"
-            )
-        _validate_package_skill_schema(self.catalog, schema_version=self.schema_version)
-        return self
 
 
 class RpcMessagesReported(WispEvent):
@@ -1457,33 +1122,7 @@ class RpcMessagesReported(WispEvent):
     next_after_entry_id: str | None = None
 
     @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_MESSAGES_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC message reports require schema_version {RPC_MESSAGES_SCHEMA_VERSION} or newer"
-            )
-        if self.schema_version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION and any(
-            message.tool_result is not None for message in self.messages
-        ):
-            raise ValueError(
-                "RPC message tool-result metadata requires schema_version "
-                f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
-            )
-        if self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION and any(
-            message.skill_invocation is not None for message in self.messages
-        ):
-            raise ValueError(
-                "RPC message skill-invocation metadata requires schema_version "
-                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
-            )
-        if (
-            self.schema_version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION
-            and self.next_after_entry_id is not None
-        ):
-            raise ValueError(
-                "RPC message forward cursors require schema_version "
-                f"{RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION} or newer"
-            )
+    def _validate_cursors(self) -> Self:
         if (
             self.next_before_entry_id is not None or self.next_after_entry_id is not None
         ) and not self.truncated:
@@ -1491,19 +1130,6 @@ class RpcMessagesReported(WispEvent):
         if self.next_before_entry_id is not None and self.next_after_entry_id is not None:
             raise ValueError("RPC message report cursors are mutually exclusive")
         return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION:
-            messages = data.get("messages")
-            if isinstance(messages, list):
-                for message in messages:
-                    if isinstance(message, dict):
-                        message.pop("tool_result", None)
-        if self.schema_version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION:
-            data.pop("next_after_entry_id", None)
-        return data
 
 
 class RpcSessionsReported(WispEvent):
@@ -1517,29 +1143,13 @@ class RpcSessionsReported(WispEvent):
     selected_session_name: str | None = None
 
     @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_SESSIONS_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC session reports require schema_version {RPC_SESSIONS_SCHEMA_VERSION} or newer"
-            )
+    def _validate_selection(self) -> Self:
         if (self.selected_session_id is None) != (self.selected_session_path is None):
             raise ValueError(
                 "RPC session reports must include selected_session_id and "
                 "selected_session_path together"
             )
         return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            data.pop("selected_session_name", None)
-            sessions = data.get("sessions")
-            if isinstance(sessions, list):
-                for summary in sessions:
-                    if isinstance(summary, dict):
-                        summary.pop("name", None)
-        return data
 
 
 class RpcSessionSelected(WispEvent):
@@ -1552,22 +1162,6 @@ class RpcSessionSelected(WispEvent):
     active_leaf_id: str | None = Field(default=None, min_length=1)
     entry_count: int = Field(ge=0)
     session_name: str | None = None
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_SESSIONS_SCHEMA_VERSION:
-            raise ValueError(
-                f"RPC session selection events require schema_version "
-                f"{RPC_SESSIONS_SCHEMA_VERSION} or newer"
-            )
-        return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            data.pop("session_name", None)
-        return data
 
 
 class _RpcSessionDerived(WispEvent):
@@ -1586,22 +1180,9 @@ class _RpcSessionDerived(WispEvent):
 
     @model_validator(mode="after")
     def _validate_derivation(self) -> Self:
-        if self.schema_version < RPC_SESSION_DERIVATION_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC session derivation events require schema_version "
-                f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
-            )
         if self.source_session_id == self.session_id:
             raise ValueError("RPC session derivation must create a new session id")
         return self
-
-    @model_serializer(mode="wrap")
-    def _serialize_versioned(self, handler: SerializerFunctionWrapHandler) -> dict[str, object]:
-        data = cast(dict[str, object], handler(self))
-        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            data.pop("source_session_name", None)
-            data.pop("session_name", None)
-        return data
 
 
 class RpcSessionCloned(_RpcSessionDerived):
@@ -1637,15 +1218,6 @@ class RpcSessionNameChanged(WispEvent):
     name: str | None = None
     entry_count: int = Field(ge=0)
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_SESSION_NAME_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC session name events require schema_version "
-                f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class RpcSessionTreeReported(WispEvent):
     """Bounded append-order page of the selected persisted session tree."""
@@ -1662,11 +1234,6 @@ class RpcSessionTreeReported(WispEvent):
 
     @model_validator(mode="after")
     def _validate_tree_report(self) -> Self:
-        if self.schema_version < RPC_SESSION_TREE_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC session tree events require schema_version "
-                f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
-            )
         if (self.session_id is None) != (self.session_path is None):
             raise ValueError(
                 "RPC session tree reports must include session_id and session_path together"
@@ -1707,12 +1274,7 @@ class RpcSessionTreeNavigated(WispEvent):
     entry_count: int = Field(ge=0)
 
     @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < RPC_SESSION_TREE_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC session tree navigation events require schema_version "
-                f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
-            )
+    def _validate_transition(self) -> Self:
         if self.changed == (self.previous_active_leaf_id == self.active_leaf_id):
             raise ValueError(
                 "RPC session tree navigation changed must match the active-leaf transition"
@@ -1734,11 +1296,6 @@ class RpcSessionTreeUnreverted(WispEvent):
 
     @model_validator(mode="after")
     def _validate_unrevert(self) -> Self:
-        if self.schema_version < RPC_SESSION_UNREVERT_SCHEMA_VERSION:
-            raise ValueError(
-                "RPC session tree unrevert events require schema_version "
-                f"{RPC_SESSION_UNREVERT_SCHEMA_VERSION} or newer"
-            )
         if self.previous_active_leaf_id == self.active_leaf_id:
             raise ValueError("RPC session tree unrevert must change the active leaf")
         return self
@@ -1753,14 +1310,6 @@ class QueueUpdated(WispEvent):
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < QUEUE_UPDATE_SCHEMA_VERSION:
-            raise ValueError(
-                f"queue updates require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class QueueItemsRemoved(WispEvent):
     """Queued text removed by an RPC pop or clear operation."""
@@ -1773,12 +1322,7 @@ class QueueItemsRemoved(WispEvent):
     follow_up: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
-            raise ValueError(
-                "queue removal results require schema_version "
-                f"{QUEUE_ITEMS_REMOVED_SCHEMA_VERSION} or newer"
-            )
+    def _validate_removal(self) -> Self:
         if self.operation == "pop" and self.kind is None:
             raise ValueError("queue pop results require a queue kind")
         if self.kind == "steering" and self.follow_up:
@@ -1798,23 +1342,6 @@ class QueueMessageInjected(_MessageOriginEvent):
     content: str
     skill_invocation: SkillInvocationEvidence | None = None
 
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION:
-            raise ValueError(
-                "queue message injection requires schema_version "
-                f"{QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION} or newer"
-            )
-        if (
-            self.skill_invocation is not None
-            and self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                "queue skill-invocation metadata requires schema_version "
-                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
-            )
-        return self
-
 
 class SkillInvoked(WispEvent):
     """An explicit skill directive became one provider-visible user message."""
@@ -1825,15 +1352,6 @@ class SkillInvoked(WispEvent):
     invocation: SkillInvocationEvidence
     provider_content: str
     queue_kind: QueueKind | None = None
-
-    @model_validator(mode="after")
-    def _validate_schema_version(self) -> Self:
-        if self.schema_version < SKILL_INVOCATION_SCHEMA_VERSION:
-            raise ValueError(
-                "skill invocations require schema_version "
-                f"{SKILL_INVOCATION_SCHEMA_VERSION} or newer"
-            )
-        return self
 
 
 class ModelProviderAutoSwitched(WispEvent):
@@ -1917,281 +1435,13 @@ KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
 JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 
 
-def _require_current_schema(data: JsonObject) -> None:
-    version = data.get("schema_version")
-    if type(version) is not int or not 5 <= version <= EVENT_SCHEMA_VERSION:
-        raise ValueError(
-            "Unsupported Wisp event schema_version: "
-            f"{version!r}; expected 5 through {EVENT_SCHEMA_VERSION}"
-        )
-    _reject_legacy_session_name_fields(data, version=version)
-    _reject_legacy_process_metadata(data, version=version)
-    _reject_legacy_tool_failure_metadata(data, version=version)
-    if data.get("type") in {"compaction.started", "compaction.completed"}:
-        if not 8 <= version <= EVENT_SCHEMA_VERSION:
-            raise ValueError(
-                f"Compaction events require schema_version 8 through {EVENT_SCHEMA_VERSION}, "
-                f"got {version!r}"
-            )
-        if data.get("reason", "manual") == "threshold" and (
-            not isinstance(version, int) or version < THRESHOLD_COMPACTION_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                "Threshold compaction events require schema_version "
-                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer, "
-                f"got {version!r}"
-            )
-        if data.get("reason", "manual") == "overflow" and (
-            not isinstance(version, int) or version < OVERFLOW_COMPACTION_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                "Overflow compaction events require schema_version "
-                f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer, got {version!r}"
-            )
-        if version in {8, 9} and data.get("trigger_budget") is not None:
-            raise ValueError(
-                "Compaction trigger budgets require schema_version "
-                f"{THRESHOLD_COMPACTION_SCHEMA_VERSION} or newer"
-            )
-        if "will_retry" in data and (
-            not isinstance(version, int) or version < OVERFLOW_COMPACTION_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                "Compaction retry metadata requires schema_version "
-                f"{OVERFLOW_COMPACTION_SCHEMA_VERSION} or newer"
-            )
-        if "cost" in data and version < COST_ACCOUNTING_SCHEMA_VERSION:
-            raise ValueError(
-                "Compaction cost metadata requires schema_version "
-                f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
-            )
-    if (
-        data.get("type") == "message.completed"
-        and "cost" in data
-        and (version < COST_ACCOUNTING_SCHEMA_VERSION)
-    ):
-        raise ValueError(
-            "Message cost metadata requires schema_version "
-            f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "session.stats":
-        stats = data.get("stats")
-        if isinstance(stats, dict) and "cost" in stats and version < COST_ACCOUNTING_SCHEMA_VERSION:
-            raise ValueError(
-                "Session cost metadata requires schema_version "
-                f"{COST_ACCOUNTING_SCHEMA_VERSION} or newer"
-            )
-        if (
-            isinstance(stats, dict)
-            and "compaction" in stats
-            and version < COMPACTION_POLICY_SCHEMA_VERSION
-        ):
-            raise ValueError(
-                "Session compaction policy requires schema_version "
-                f"{COMPACTION_POLICY_SCHEMA_VERSION} or newer"
-            )
-    if (
-        data.get("type") == "project.config.applied"
-        and "auto_compaction_enabled" in data
-        and version < COMPACTION_POLICY_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "Project compaction policy requires schema_version "
-            f"{COMPACTION_POLICY_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "queue.updated" and version < QUEUE_UPDATE_SCHEMA_VERSION:
-        raise ValueError(
-            f"Queue update events require schema_version {QUEUE_UPDATE_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "rpc.state" and version < RPC_STATE_SCHEMA_VERSION:
-        raise ValueError(
-            f"RPC state events require schema_version {RPC_STATE_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "rpc.commands" and version < RPC_COMMANDS_SCHEMA_VERSION:
-        raise ValueError(
-            "RPC command report events require schema_version "
-            f"{RPC_COMMANDS_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "rpc.model_catalog" and version < RPC_MODEL_CATALOG_SCHEMA_VERSION:
-        raise ValueError(
-            "RPC model catalog events require schema_version "
-            f"{RPC_MODEL_CATALOG_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {
-        "rpc.connection_catalog",
-        "rpc.device_code",
-        "rpc.device_code.progress",
-    } and (version < RPC_CONNECTION_CATALOG_SCHEMA_VERSION):
-        raise ValueError(
-            "RPC connection events require schema_version "
-            f"{RPC_CONNECTION_CATALOG_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"rpc.project_files", "project_files.invalidated"} and (
-        version < RPC_PROJECT_FILES_SCHEMA_VERSION
-    ):
-        raise ValueError("Project file events require schema_version 37 or newer")
-    if data.get("type") == "rpc.mcp" and version < MCP_STATUS_SCHEMA_VERSION:
-        raise ValueError(
-            f"RPC MCP status events require schema_version {MCP_STATUS_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"rpc.skills", "skill.catalog.updated"} and (
-        version < PACKAGE_SKILLS_SCHEMA_VERSION
-    ):
-        catalog = data.get("catalog")
-        if isinstance(catalog, dict):
-            entries = catalog.get("entries")
-            diagnostics = catalog.get("diagnostics")
-            descriptors = (
-                *(entries if isinstance(entries, list) else ()),
-                *(diagnostics if isinstance(diagnostics, list) else ()),
-            )
-            if any(
-                isinstance(descriptor, dict) and descriptor.get("source") == "package:wisp"
-                for descriptor in descriptors
-            ):
-                raise ValueError(
-                    "Package skill sources require schema_version "
-                    f"{PACKAGE_SKILLS_SCHEMA_VERSION} or newer"
-                )
-    if data.get("type") == "rpc.messages" and version < RPC_MESSAGES_SCHEMA_VERSION:
-        raise ValueError(
-            "RPC message report events require schema_version "
-            f"{RPC_MESSAGES_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "rpc.messages" and version < RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION:
-        messages = data.get("messages")
-        if isinstance(messages, list) and any(
-            isinstance(message, dict) and message.get("tool_result") is not None
-            for message in messages
-        ):
-            raise ValueError(
-                "RPC message tool-result metadata requires schema_version "
-                f"{RPC_MESSAGE_TOOL_RESULT_SCHEMA_VERSION} or newer"
-            )
-    if (
-        data.get("type") == "rpc.messages"
-        and version < RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION
-        and "next_after_entry_id" in data
-    ):
-        raise ValueError(
-            "RPC message forward cursors require schema_version "
-            f"{RPC_MESSAGE_FORWARD_CURSOR_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"rpc.sessions", "rpc.session.selected"} and (
-        version < RPC_SESSIONS_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            f"RPC session events require schema_version {RPC_SESSIONS_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"rpc.session.cloned", "rpc.session.forked"} and (
-        version < RPC_SESSION_DERIVATION_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "RPC session derivation events require schema_version "
-            f"{RPC_SESSION_DERIVATION_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "rpc.session.name_changed" and (
-        version < RPC_SESSION_NAME_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "RPC session name events require schema_version "
-            f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"rpc.session.tree", "rpc.session.tree.navigated"} and (
-        version < RPC_SESSION_TREE_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "RPC session tree events require schema_version "
-            f"{RPC_SESSION_TREE_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") == "queue.items.removed" and version < QUEUE_ITEMS_REMOVED_SCHEMA_VERSION:
-        raise ValueError(
-            "Queue removal result events require schema_version "
-            f"{QUEUE_ITEMS_REMOVED_SCHEMA_VERSION} or newer"
-        )
-    if (
-        data.get("type") == "queue.message.injected"
-        and version < QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            "Queue message injection events require schema_version "
-            f"{QUEUE_MESSAGE_INJECTED_SCHEMA_VERSION} or newer"
-        )
-    if data.get("type") in {"context.estimated", "session.stats"} and not (
-        9 <= version <= EVENT_SCHEMA_VERSION
-    ):
-        raise ValueError(
-            f"Context statistics events require schema_version 9 through {EVENT_SCHEMA_VERSION}, "
-            f"got {version!r}"
-        )
-
-
-def _reject_legacy_session_name_fields(data: JsonObject, *, version: int) -> None:
-    if version >= RPC_SESSION_NAME_SCHEMA_VERSION:
-        return
-    event_type = data.get("type")
-    has_name_field = False
-    if event_type == "rpc.state":
-        state = data.get("state")
-        has_name_field = isinstance(state, dict) and "session_name" in state
-    elif event_type == "rpc.sessions":
-        has_name_field = "selected_session_name" in data
-        sessions = data.get("sessions")
-        if isinstance(sessions, list):
-            has_name_field = has_name_field or any(
-                isinstance(summary, dict) and "name" in summary for summary in sessions
-            )
-    elif event_type == "rpc.session.selected":
-        has_name_field = "session_name" in data
-    elif event_type in {"rpc.session.cloned", "rpc.session.forked"}:
-        has_name_field = "source_session_name" in data or "session_name" in data
-    if has_name_field:
-        raise ValueError(
-            "RPC session name fields require schema_version "
-            f"{RPC_SESSION_NAME_SCHEMA_VERSION} or newer"
-        )
-
-
-def _reject_legacy_tool_failure_metadata(data: JsonObject, *, version: int) -> None:
-    if version >= TOOL_FAILURE_METADATA_SCHEMA_VERSION:
-        return
-    if data.get("type") not in _TOOL_RESULT_EVENT_TYPES:
-        return
-    if not any(field in data for field in _TOOL_FAILURE_METADATA_FIELDS):
-        return
-    raise ValueError(
-        "Tool failure metadata requires schema_version "
-        f"{TOOL_FAILURE_METADATA_SCHEMA_VERSION} or newer"
-    )
-
-
-def _reject_legacy_process_metadata(data: JsonObject, *, version: int) -> None:
-    if version >= PROCESS_METADATA_SCHEMA_VERSION:
-        return
-    if data.get("type") not in _PROCESS_METADATA_EVENT_TYPES:
-        return
-    if not any(field in data for field in _PROCESS_METADATA_FIELDS):
-        return
-    raise ValueError(
-        f"Bash process metadata requires schema_version {PROCESS_METADATA_SCHEMA_VERSION} or newer"
-    )
-
-
-def _strip_process_metadata_fields(data: dict[str, object]) -> None:
-    for field in _PROCESS_METADATA_FIELDS:
-        data.pop(field, None)
-
-
 def wisp_event_from_json(line: str) -> KnownWispEvent:
-    """Parse one supported-schema JSONL event line into a typed Wisp event."""
+    """Parse one JSONL event line into a typed Wisp event."""
 
-    data = JsonObjectAdapter.validate_json(line)
-    _require_current_schema(data)
-    return KnownWispEventAdapter.validate_python(data)
+    return KnownWispEventAdapter.validate_json(line)
 
 
 def wisp_event_from_dict(data: JsonObject) -> KnownWispEvent:
-    """Parse one supported-schema event dictionary into a typed Wisp event."""
+    """Parse one event dictionary into a typed Wisp event."""
 
-    _require_current_schema(data)
     return KnownWispEventAdapter.validate_python(data)

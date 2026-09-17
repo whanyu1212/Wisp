@@ -22,7 +22,7 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, TypeAdapter
 
-from wisp.events import EVENT_SCHEMA_VERSION, KnownWispEventAdapter
+from wisp.events import KnownWispEventAdapter
 from wisp.rpc.commands import RpcCommandAdapter
 from wisp.rpc.protocol import (
     LIVE_RPC_PROTOCOL_VERSION,
@@ -45,6 +45,7 @@ HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
     (5, "37dc90b7fe06005444def1710af98be7b6b8fddb4231ff161dc119365fdcafc2"),
     (6, "98be3f2fac077427b65884fb9be56057909888f5938d39f227c8894fd3ebe562"),
     (7, "30705ba4f61caaa932b833bb7572d89ab86d1b845e16543fe76f301a5d85e445"),
+    (8, "391bee41378e3702abfe3ec399a642e0a2e15685a01308691be144e8f6faabf4"),
 )
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -88,11 +89,6 @@ def generate_protocol_artifacts() -> dict[str, str]:
             "kind": "ordered-range",
             "maximum_property": "max_protocol_version",
             "minimum_property": "min_protocol_version",
-        },
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_event_schema_version",
-            "minimum_property": "min_event_schema_version",
         },
         {
             "kind": "array-subset",
@@ -140,7 +136,6 @@ def generate_protocol_artifacts() -> dict[str, str]:
         filename: _sha256(content) for filename, content in schemas.items()
     }
     manifest: JsonObject = {
-        "event_schema_version": EVENT_SCHEMA_VERSION,
         "fixed_handshake_frame_bytes": MAX_HANDSHAKE_FRAME_BYTES,
         "live_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
         "maximum_application_frame_bytes": MAX_LIVE_RPC_FRAME_BYTES,
@@ -761,23 +756,6 @@ def _shape_current_event_output_schema(schema: JsonObject) -> None:
                 _remove_number(raw_property)
         definition["required"] = [cast(JsonValue, name) for name in properties]
         definition["additionalProperties"] = False
-
-    mapping = _discriminator_mapping(schema)
-    if not mapping:
-        raise RuntimeError("generated event union has no discriminator mapping")
-    for reference in mapping.values():
-        definition = _local_definition(schema, reference)
-        properties = _object_member(definition, "properties")
-        existing = properties.get("schema_version")
-        if not isinstance(existing, dict):
-            raise RuntimeError(f"event definition {reference!r} has no schema_version property")
-        title = existing.get("title", "Schema Version")
-        properties["schema_version"] = {
-            "const": EVENT_SCHEMA_VERSION,
-            "default": EVENT_SCHEMA_VERSION,
-            "title": title,
-            "type": "integer",
-        }
 
 
 def _add_command_semantic_constraints(schema: JsonObject) -> None:

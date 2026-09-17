@@ -143,8 +143,7 @@ def _compatible_message_delta(left: MessageDelta, right: MessageDelta) -> bool:
     """Return whether two adjacent deltas describe the same content stream."""
 
     return (
-        left.schema_version == right.schema_version
-        and left.turn == right.turn
+        left.turn == right.turn
         and left.role == right.role
         and left.content_index == right.content_index
         and left.content_kind == right.content_kind
