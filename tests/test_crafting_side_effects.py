@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from examples.crafting_agents.checkpoint_02 import create_fixture
-from examples.crafting_agents.core import ToolCall
+from examples.crafting_agents.core import ToolCall, ToolFailure
 from examples.crafting_agents.side_effects import ApprovalRequest, ControlledTools, ExecutionPolicy
 
 
@@ -84,7 +84,10 @@ def test_invalid_paths_do_not_reach_approval(tmp_path: Path, path: str) -> None:
 
 
 @pytest.mark.parametrize("source", ["approve", "report"])
-@pytest.mark.parametrize("error", [OSError("backend disconnected"), UnicodeError("bad response")])
+@pytest.mark.parametrize(
+    "error",
+    [OSError("backend disconnected"), UnicodeError("bad response"), ToolFailure("callback failed")],
+)
 def test_callback_failures_propagate_without_dispatch(
     tmp_path: Path, source: str, error: Exception
 ) -> None:

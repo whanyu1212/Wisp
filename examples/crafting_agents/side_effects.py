@@ -71,8 +71,7 @@ class ControlledTools:
                 Denied requests never reach the underlying executor.
 
         Raises:
-            Exception: Unexpected approval or reporting failures propagate. ToolFailure
-                is reserved for expected, model-visible boundary failures.
+            Exception: Approval or reporting callback failures propagate unchanged.
         """
         try:
             spec = next((tool for tool in TOOLS if tool.name == call.name), None)
@@ -99,18 +98,27 @@ class ControlledTools:
                 old = dict(arguments)["old"]
                 if not old or files[0][1].count(old) != 1:
                     raise ToolFailure("old text must match exactly once")
-            if name != "read":
-                request = ApprovalRequest(call_id, name, arguments, files)
-                self.report(f"approval requested: {call_id} {name}")
-                if not self.approve(request):
-                    raise ToolFailure(f"approval_denied: {name}")
-                self.report(f"approval granted: {call_id} {name}")
+        except ToolFailure as exc:
+            return self._failure(str(exc))
+
+        # External callbacks stay outside conversion of expected boundary failures.
+        if name != "read":
+            request = ApprovalRequest(call_id, name, arguments, files)
+            self.report(f"approval requested: {call_id} {name}")
+            if not self.approve(request):
+                return self._failure(f"approval_denied: {name}")
+            self.report(f"approval granted: {call_id} {name}")
+            try:
                 if any(self._snapshot(path) != text for path, text in files):
                     raise ToolFailure("stale_input: files changed during approval; request again")
-            self.report(f"dispatch: {call_id} {name}")
-            return self.fixture.execute(ToolCall(call_id, name, dict(arguments)))
-        except ToolFailure as exc:
-            result = bound_output(f"error: {exc}")
-            return f"truncated={str(result.truncated).lower()}\n{result.text}"
+            except ToolFailure as exc:
+                return self._failure(str(exc))
+        self.report(f"dispatch: {call_id} {name}")
+        return self.fixture.execute(ToolCall(call_id, name, dict(arguments)))
 
     # ANCHOR_END: execute
+
+    @staticmethod
+    def _failure(message: str) -> str:
+        result = bound_output(f"error: {message}")
+        return f"truncated={str(result.truncated).lower()}\n{result.text}"
