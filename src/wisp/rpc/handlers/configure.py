@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import cast
 
 from wisp.coding.session import CodingSession
+from wisp.config.settings import try_persist_user_model_selection
 from wisp.events import (
     ErrorEvent,
     ModelProviderAutoSwitched,
@@ -20,7 +21,6 @@ from wisp.rpc.handlers.inspection import rpc_model_catalog_snapshot
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError
-from wisp.settings import try_persist_user_model_selection
 
 
 def handle_rpc_configure_command(

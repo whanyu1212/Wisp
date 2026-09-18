@@ -7,8 +7,8 @@ from pathlib import Path
 
 from wisp.agent.messages import Message
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
+from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.providers.base import ToolSpec
-from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.base import ToolPromptMetadata
 
 from .instructions import DEFAULT_SYSTEM_PROMPT, INSTRUCTION_BOUNDARY_SYSTEM_PROMPT

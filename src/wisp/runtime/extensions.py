@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 import anyio
 
 from wisp.auth.storage import JsonAuthStore
-from wisp.config import default_auth_path
+from wisp.config.runtime import default_auth_path
 from wisp.events import ErrorEvent
 from wisp.extensions import builtin
 from wisp.mcp.config import McpServerConfig

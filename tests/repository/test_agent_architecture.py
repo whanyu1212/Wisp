@@ -362,6 +362,36 @@ def test_events_package_exports_every_lifecycle_module_name() -> None:
     assert union_members <= exported, sorted(union_members - exported)
 
 
+def test_config_package_keeps_sdk_import_path_and_defining_modules() -> None:
+    """``wisp.config`` stays the documented SDK path while internals live in submodules.
+
+    The package root re-exports only the runtime configuration surface. Settings
+    resolution and validation helpers are imported from their defining modules so
+    the root never grows into a second copy of the package.
+    """
+
+    import wisp.config as config
+    from wisp.config.runtime import WispConfig, default_auth_path, default_session_dir
+
+    assert config.WispConfig is WispConfig
+    assert config.default_auth_path is default_auth_path
+    assert config.default_session_dir is default_session_dir
+    assert WispConfig.__module__ == "wisp.config.runtime"
+    for removed in ("config.py", "settings.py", "validation.py"):
+        assert not (REPO_ROOT / "src" / "wisp" / removed).exists()
+
+    root_imports = _module_imports(REPO_ROOT / "src" / "wisp" / "config" / "__init__.py")
+    assert root_imports == {"wisp.config.runtime"}, sorted(root_imports)
+
+    internal_root_importers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if path != REPO_ROOT / "src" / "wisp" / "config" / "__init__.py"
+        and "wisp.config" in _module_imports(path)
+    )
+    assert internal_root_importers == [], internal_root_importers
+
+
 def test_agent_loop_package_exports_public_contracts() -> None:
     from wisp.agent import loop
     from wisp.agent.loop.config import AgentLoopConfig, CancellationToken, UsageCostEstimator

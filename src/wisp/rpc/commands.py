@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from wisp.agent.mode import AgentMode
+from wisp.config.validation import redact_validation_error_inputs
 from wisp.events import (
     MAX_RPC_MODEL_EFFORT_CHARS,
     MAX_RPC_MODEL_ID_CHARS,
@@ -28,7 +29,6 @@ from wisp.events import (
     QueueMode,
 )
 from wisp.permissions import PermissionMode
-from wisp.validation import redact_validation_error_inputs
 
 type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project"]
 

@@ -19,7 +19,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import (
     PermissionState,
     RpcCommandFinished,

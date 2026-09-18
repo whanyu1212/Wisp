@@ -8,7 +8,7 @@ import anyio
 import pytest
 
 from wisp.coding import CodingSession
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.mcp.config import McpServerConfig
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
 from wisp.runtime.api import WispRuntime

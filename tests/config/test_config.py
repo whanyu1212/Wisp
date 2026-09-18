@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from wisp import config as config_module
-from wisp.config import WispConfig, default_auth_path, default_session_dir
+from wisp.config import runtime as config_module
+from wisp.config.runtime import WispConfig, default_auth_path, default_session_dir
+from wisp.config.settings import persist_user_model_selection
 from wisp.mcp.config import McpServerConfig
-from wisp.settings import persist_user_model_selection
 
 
 def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

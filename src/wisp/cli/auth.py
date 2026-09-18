@@ -10,7 +10,7 @@ import typer
 
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 
 from . import trust as _cli_trust
 

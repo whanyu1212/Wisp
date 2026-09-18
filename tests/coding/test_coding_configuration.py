@@ -11,7 +11,7 @@ from wisp.coding import (
     CodingSessionConfiguration,
     resolve_coding_session_configuration,
 )
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted, ProviderUsage
 from wisp.providers.fake import FakeProvider, ScriptedProvider

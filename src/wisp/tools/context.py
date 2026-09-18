@@ -6,11 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 from wisp.permissions import permissions_directory
-from wisp.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 
 if TYPE_CHECKING:
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
     from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 

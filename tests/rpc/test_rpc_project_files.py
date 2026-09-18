@@ -255,7 +255,7 @@ def test_candidate_credentials_are_reserved_before_interrupted_adoption(
 ) -> None:
     from wisp.auth.storage import JsonAuthStore
     from wisp.coding import CodingSession
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
     from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides
     from wisp.rpc.handlers.project_files import RpcProjectFiles
     from wisp.runtime.api import WispRuntime
@@ -334,7 +334,7 @@ def test_candidate_credentials_are_reserved_before_interrupted_adoption(
 
 def test_host_trust_transition_invalidates_even_when_configuration_is_equal(tmp_path: Path) -> None:
     from tests.rpc_support import RecordingEventWriter
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
     from wisp.rpc.host import InProcessOptions
     from wisp.runtime.extensions import build_runtime
 

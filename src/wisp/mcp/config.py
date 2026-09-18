@@ -20,8 +20,8 @@ from pydantic import (
     model_validator,
 )
 
+from wisp.config.validation import redact_validation_error_inputs
 from wisp.tool_types import ToolSafety
-from wisp.validation import redact_validation_error_inputs
 
 MAX_MCP_SERVERS = 16
 MAX_MCP_ARGS = 64

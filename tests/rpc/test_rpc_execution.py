@@ -26,7 +26,7 @@ from wisp.auth.openai_codex import DeviceCodeInfo
 from wisp.auth.storage import ApiKeyCredential, OAuthCredential
 from wisp.coding import CodingSession
 from wisp.coding.session import _RetainedQueueState
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import (
     ErrorEvent,
     MessageCompleted,

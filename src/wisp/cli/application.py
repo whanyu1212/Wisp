@@ -15,7 +15,7 @@ from wisp import __version__
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
 from wisp.coding import CodingSession, resolve_coding_session_configuration
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,

@@ -10,7 +10,7 @@ from pathlib import Path
 import anyio
 
 from wisp.coding import CodingSession, resolve_coding_session_configuration
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import ProviderRegistry

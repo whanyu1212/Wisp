@@ -14,7 +14,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp import __version__
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand

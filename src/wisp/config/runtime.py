@@ -17,17 +17,17 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
-from wisp.openai_compatible import OpenAICompatibleSettings
-from wisp.permissions import permissions_directory
-from wisp.retry import RetryPolicy
-from wisp.settings import (
+from wisp.config.settings import (
     DEFAULT_PROTECTED_PATHS,
     ResolvedSettings,
     resolve_settings,
     user_settings_path,
 )
-from wisp.validation import redact_validation_error_inputs
+from wisp.config.validation import redact_validation_error_inputs
+from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.openai_compatible import OpenAICompatibleSettings
+from wisp.permissions import permissions_directory
+from wisp.retry import RetryPolicy
 
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
@@ -146,7 +146,7 @@ class WispConfig(BaseModel):
 
         ``effort`` never consults the project settings layer, trusted or not —
         it is resolved from the USER settings file only (see
-        :func:`wisp.settings.resolve_settings`), the same way ``retry_policy`` is,
+        :func:`wisp.config.settings.resolve_settings`), the same way ``retry_policy`` is,
         since it directly controls per-request cost/latency. Persisted user
         provider/model defaults are coupled: a higher-precedence provider override
         without a model drops the saved user model and effort rather than sending

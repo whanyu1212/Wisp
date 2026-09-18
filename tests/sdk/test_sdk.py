@@ -15,7 +15,7 @@ import wisp.sdk as sdk_module
 from tests.rpc_support import guard_rpc_command_serialization
 from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,

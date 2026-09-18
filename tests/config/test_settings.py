@@ -11,9 +11,8 @@ import pytest
 from pydantic import ValidationError
 from pytest import CaptureFixture, MonkeyPatch
 
-from wisp.config import WispConfig
-from wisp.permissions import permissions_directory
-from wisp.settings import (
+from wisp.config.runtime import WispConfig
+from wisp.config.settings import (
     DEFAULT_PROTECTED_PATHS,
     WispSettings,
     persist_user_effort,
@@ -21,6 +20,7 @@ from wisp.settings import (
     resolve_settings,
     user_settings_path,
 )
+from wisp.permissions import permissions_directory
 
 
 def _write_settings(directory: Path, **values: object) -> None:

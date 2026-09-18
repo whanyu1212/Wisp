@@ -78,7 +78,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
     # The config is otherwise identical before/after approval, so this guards the
     # no-settings transition path from returning before CodingSession.trusted flips.
     from wisp.cli import rpc
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     project = tmp_path / "project"
     project.mkdir()
@@ -146,7 +146,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     from wisp.cli import rpc
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     project = tmp_path / "project"
     skill_root = project / ".wisp" / "skills" / "project-demo"
@@ -263,7 +263,7 @@ def test_rpc_trusted_rebuild_preserves_configure_overrides(
     # RPC gate approve trust before the first prompt. A configure command that arrives
     # before that prompt must outrank the trusted project's provider/model defaults.
     from wisp.cli import rpc
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     project = tmp_path / "project"
     nested = project / "src"
@@ -332,7 +332,7 @@ def test_rpc_trusted_rebuild_preserves_explicit_effort_for_unknown_model(
     # the rebuild must not silently drop it via startup_effort's validation,
     # which stays permissive for catalog-unknown models.
     from wisp.cli import rpc
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     project = tmp_path / "project"
     nested = project / "src"

@@ -14,7 +14,7 @@ import wisp.cli.native_tui.launch as tui_launch
 import wisp.cli.rpc as rpc_module
 import wisp.runtime.extensions as runtime_extensions
 from wisp.cli.native_tui.launch import TuiOptions
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError

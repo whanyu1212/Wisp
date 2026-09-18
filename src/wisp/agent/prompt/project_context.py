@@ -8,8 +8,8 @@ from collections.abc import Sequence
 from contextvars import ContextVar
 from pathlib import Path
 
+from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.providers.base import ToolSpec
-from wisp.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
 

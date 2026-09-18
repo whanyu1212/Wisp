@@ -9,7 +9,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from pytest import MonkeyPatch
 
 from wisp.coding import CodingSession
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import WispEvent
 from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.configuration import _RpcConfigureOverrides
