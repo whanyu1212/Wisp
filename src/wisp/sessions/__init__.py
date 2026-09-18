@@ -29,14 +29,16 @@ from .jsonl import (
     JsonlSession,
     JsonlSessionStore,
     SessionForkResult,
-    SessionMessagePage,
     SessionNameChange,
     SessionRunSnapshot,
     SessionSummary,
     SessionTreeNavigation,
+    SessionTreeUnrevert,
+)
+from .pagination import (
+    SessionMessagePage,
     SessionTreeNodeSummary,
     SessionTreePage,
-    SessionTreeUnrevert,
 )
 from .replay import (
     SessionContextRow,

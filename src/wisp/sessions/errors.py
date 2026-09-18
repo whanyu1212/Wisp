@@ -41,3 +41,11 @@ class SessionNavigationCancelledError(SessionError):
 
 class SessionUnrevertUnavailableError(SessionError):
     """Raised when no eligible explicit tree navigation can be unreverted."""
+
+
+class SessionNotFoundError(SessionError):
+    """Raised when a requested session cannot be found."""
+
+
+class AmbiguousSessionError(SessionError):
+    """Raised when a session reference matches more than one session."""
