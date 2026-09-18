@@ -6,8 +6,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Protocol, assert_never
 
-from wisp.events import PermissionState
-from wisp.permissions import PermissionMode
+from wisp.events import PermissionMode, PermissionState
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,

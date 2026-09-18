@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
-from wisp.permissions import permissions_directory
+from wisp.trust.permissions import permissions_directory
 
 if TYPE_CHECKING:
     from wisp.config.runtime import WispConfig

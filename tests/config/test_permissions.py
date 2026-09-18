@@ -7,15 +7,15 @@ from pathlib import Path
 import anyio
 import pytest
 
-import wisp.permissions as permissions
+import wisp.trust.permissions as permissions
 from wisp.config.runtime import WispConfig
-from wisp.permissions import load_permission_mode, permissions_directory, save_permission_mode
 from wisp.rpc.host import RpcToolApprovalPolicy
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.builtin import BashTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import resolve_tool_path
 from wisp.tools.result import ToolError
+from wisp.trust.permissions import load_permission_mode, permissions_directory, save_permission_mode
 
 
 def test_rpc_permission_command_round_trips_across_new_processes(

@@ -7,14 +7,14 @@ from pathlib import Path
 
 from pytest import CaptureFixture, MonkeyPatch
 
-from wisp.trust import (
+from wisp.trust.flow import resolve_trust
+from wisp.trust.records import (
     GLOBAL_TRUST_PATH,
     _default_trust_path,
     forget_trust,
     is_trusted,
     record_trust,
 )
-from wisp.trust_flow import resolve_trust
 
 
 def _trust_file(tmp_path: Path) -> Path:

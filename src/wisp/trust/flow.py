@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from wisp.trust import is_trusted, record_trust
+from wisp.trust.records import is_trusted, record_trust
 
 # A prompter shows the trust question and returns the user's yes/no answer. Returns
 # None when no answer can be obtained (e.g. a non-interactive stream), which is

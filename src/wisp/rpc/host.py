@@ -21,6 +21,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config.runtime import WispConfig
 from wisp.events import (
+    PermissionMode,
     PermissionState,
     RpcCommandFinished,
     RpcProjectFilesReported,
@@ -29,7 +30,6 @@ from wisp.events import (
     TrustResolved,
     WispEvent,
 )
-from wisp.permissions import PermissionMode, load_permission_mode, save_permission_mode
 from wisp.rpc.commands import ApprovalScope, ParsedRpcCommand
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
@@ -56,7 +56,8 @@ from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
-from wisp.trust import is_trusted, record_trust, trust_override_from_env
+from wisp.trust.permissions import load_permission_mode, save_permission_mode
+from wisp.trust.records import is_trusted, record_trust, trust_override_from_env
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]

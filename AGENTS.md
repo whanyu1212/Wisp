@@ -123,6 +123,12 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `from wisp.config import WispConfig` stays stable for SDK users; internal code imports from the
   defining submodule, and modules below it in the import graph (`wisp.mcp`, `wisp.retry`,
   `wisp.validation`) must not import from `wisp.config`.
+- For trust and permissions, start with `src/wisp/trust/records.py` (durable per-project trust
+  decisions and the non-interactive env override), then `trust/flow.py` (the interactive prompt
+  the CLI runs) and `trust/permissions.py` (per-project `PermissionMode` persistence). The package
+  root re-exports nothing. `PermissionMode` itself is RPC vocabulary defined in `wisp.events`;
+  `trust/permissions.py` may reference it only under `TYPE_CHECKING` because `wisp.config` loads
+  that module while `wisp.events` may still be initializing.
 - For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
   callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
   shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,

@@ -14,7 +14,7 @@ from wisp.cli.trust import (
     trust_override_from_env,
     trusted_noninteractive,
 )
-from wisp.trust import is_trusted, record_trust
+from wisp.trust.records import is_trusted, record_trust
 
 
 def test_env_override_trusted(monkeypatch: MonkeyPatch) -> None:

@@ -400,7 +400,7 @@ def test_rpc_trust_stored_decision_skips_prompt(tmp_path: Path, monkeypatch: Mon
     # Pre-record a trust decision for the cwd; the prompt must not re-prompt.
     trust_file = tmp_path / "trust.json"
     monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
-    from wisp.trust import record_trust
+    from wisp.trust.records import record_trust
 
     record_trust(Path.cwd(), True)
 
@@ -440,13 +440,13 @@ def test_rpc_trust_input_closed_yields_untrusted_no_hang(tmp_path: Path) -> None
     assert resolved and resolved[0]["trusted"] is False
     # The forced-untrusted decision from input close is not persisted, so a later
     # interactive run still prompts.
-    from wisp.trust import is_trusted
+    from wisp.trust.records import is_trusted
 
     assert is_trusted(Path.cwd(), trust_path=trust_file) is None
 
 
 def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    from wisp.trust import is_trusted
+    from wisp.trust.records import is_trusted
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -488,7 +488,7 @@ def test_rpc_trust_denial_with_reason_persists(tmp_path: Path, monkeypatch: Monk
 def test_rpc_trust_transient_denial_with_reason_does_not_persist(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    from wisp.trust import is_trusted
+    from wisp.trust.records import is_trusted
 
     project = tmp_path / "proj"
     project.mkdir()

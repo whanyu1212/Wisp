@@ -17,11 +17,11 @@ from wisp import __version__
 from wisp.agent.mode import AgentMode
 from wisp.events import (
     KnownWispEvent,
+    PermissionMode,
     QueueKind,
     QueueMode,
     wisp_event_from_json,
 )
-from wisp.permissions import PermissionMode
 from wisp.rpc.commands import (
     ApprovalCommand,
     ApprovalScope,

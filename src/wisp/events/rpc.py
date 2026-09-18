@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from wisp.agent.mode import AgentMode
 from wisp.events._base import QueueMode, WispEvent
-from wisp.permissions import PermissionMode
 from wisp.project_files import (
     MAX_PROJECT_FILES,
     MAX_PROJECT_PATH_CHARS,
@@ -17,6 +16,10 @@ from wisp.project_files import (
     is_display_safe_path,
 )
 from wisp.skills.models import SkillDiagnosticCode, SkillDiagnosticSeverity, SkillSource
+
+# The tool-approval posture a frontend selects; persisted per project by ``wisp.trust``.
+# A ``type`` alias so the schema bundle keeps its named ``PermissionMode`` definition.
+type PermissionMode = Literal["ask", "yolo"]
 
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32

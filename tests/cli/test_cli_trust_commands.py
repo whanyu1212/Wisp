@@ -8,7 +8,7 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
 from wisp.cli import app
-from wisp.trust import is_trusted
+from wisp.trust.records import is_trusted
 
 
 def _env(trust_file: Path) -> dict[str, str]:
