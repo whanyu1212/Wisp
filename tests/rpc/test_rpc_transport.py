@@ -9,8 +9,14 @@ from queue import Queue
 
 import anyio
 import pytest
+from jsonschema import Draft202012Validator
 
-from wisp.cli.rpc_transport import RpcStdinTransport, read_rpc_stdin_handshake
+from tests.paths import REPO_ROOT
+from wisp.cli.rpc_transport import (
+    PreV9RpcHandshakeRejected,
+    RpcStdinTransport,
+    read_rpc_stdin_handshake,
+)
 from wisp.events import ErrorEvent
 from wisp.rpc import framing as rpc_framing
 from wisp.rpc.commands import (
@@ -113,7 +119,11 @@ def test_stdin_handshake_rejects_invalid_first_frames(frame: bytes) -> None:
 
 
 def test_stdin_handshake_tells_pre_v9_frontends_the_protocol_mismatched() -> None:
-    """A conforming v8 client sent an event schema range; it must learn the protocol moved."""
+    """A conforming v8 client sent an event schema range; it must learn the protocol moved.
+
+    The rejection must also satisfy the immutable v8 server-handshake contract, or a
+    strict v8 client discards the frame before it can read the rejection code.
+    """
 
     legacy = json.loads(_handshake_line())
     legacy.update(
@@ -135,8 +145,31 @@ def test_stdin_handshake_tells_pre_v9_frontends_the_protocol_mismatched() -> Non
 
         assert accepted is None
         assert len(responses) == 1
-        assert isinstance(responses[0], RpcHandshakeRejected)
-        assert responses[0].code == "protocol_version_mismatch"
+        response = responses[0]
+        assert isinstance(response, PreV9RpcHandshakeRejected)
+        assert response.code == "protocol_version_mismatch"
+        v8_schema = json.loads(
+            (REPO_ROOT / "schemas" / "live-rpc" / "v8" / "server-handshake.schema.json").read_text()
+        )
+        Draft202012Validator(v8_schema).validate(json.loads(response.model_dump_json()))
+
+    anyio.run(scenario)
+
+
+def test_stdin_handshake_keeps_v9_shape_for_invalid_legacy_looking_frames() -> None:
+    """Only a structurally pre-v9 request earns the legacy rejection shape."""
+
+    async def scenario() -> None:
+        responses: list[object] = []
+        await read_rpc_stdin_handshake(
+            io.BytesIO(b'{"id":"command-1","type":"shutdown"}\n'),
+            backend_package_version="0.1.0",
+            supported_capabilities=(),
+            limits=_limits(),
+            write_response=responses.append,
+        )
+
+        assert type(responses[0]) is RpcHandshakeRejected
 
     anyio.run(scenario)
 

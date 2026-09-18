@@ -13,7 +13,7 @@ from typing import Protocol, TextIO, cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
-from pydantic import ValidationError
+from pydantic import Field, ValidationError
 
 from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
@@ -22,6 +22,7 @@ from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
     MAX_LIVE_RPC_PROTOCOL_VERSION,
+    MAX_WIRE_VERSION,
     MIN_LIVE_RPC_PROTOCOL_VERSION,
     RpcHandshakeAccepted,
     RpcHandshakeRejected,
@@ -45,6 +46,25 @@ _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
 # claims v9 or newer must already conform to the v9 schema.
 _LEGACY_HANDSHAKE_FIELDS = frozenset({"min_event_schema_version", "max_event_schema_version"})
 _FIRST_UNVERSIONED_EVENT_PROTOCOL = 9
+# The final per-event schema stamp published in `schemas/live-rpc/v8/`. A v8
+# rejection frame must carry it or a strict v8 client discards the frame.
+_LAST_EVENT_SCHEMA_VERSION = 39
+
+
+class PreV9RpcHandshakeRejected(RpcHandshakeRejected):
+    """Rejection shaped for the immutable v8 server-handshake contract.
+
+    Only sent to a frontend that offered a pre-v9 protocol range, so it can
+    parse the frame and surface `protocol_version_mismatch` instead of failing
+    on an unknown response shape. Not part of the v9 bundle.
+    """
+
+    event_schema_version: int = Field(
+        default=_LAST_EVENT_SCHEMA_VERSION, ge=1, le=MAX_WIRE_VERSION, strict=True
+    )
+
+
+type RpcHandshakeReply = RpcHandshakeResponse | PreV9RpcHandshakeRejected
 
 
 def _is_pre_v9_handshake(payload: dict[str, object]) -> bool:
@@ -73,9 +93,13 @@ async def read_rpc_stdin_handshake(
     backend_package_version: str,
     supported_capabilities: tuple[str, ...],
     limits: RpcTransportLimits,
-    write_response: Callable[[RpcHandshakeResponse], None],
+    write_response: Callable[[RpcHandshakeReply], None],
 ) -> RpcHandshakeAccepted | None:
-    """Read and answer the mandatory first external RPC frame."""
+    """Read and answer the mandatory first external RPC frame.
+
+    A structurally pre-v9 request receives a `PreV9RpcHandshakeRejected` so the
+    legacy frontend can decode the frame; every other outcome is a v9 response.
+    """
 
     raw_line = await anyio.to_thread.run_sync(
         partial(stdin.readline, MAX_HANDSHAKE_FRAME_BYTES + 2)
@@ -83,7 +107,8 @@ async def read_rpc_stdin_handshake(
     if raw_line in {"", b""}:
         return None
     encoded_line = raw_line.encode("utf-8") if isinstance(raw_line, str) else raw_line
-    response: RpcHandshakeResponse
+    response: RpcHandshakeReply
+    legacy_frontend = False
     try:
         if not encoded_line.endswith(b"\n"):
             raise RpcFrameError("RPC handshake frame is incomplete")
@@ -94,6 +119,7 @@ async def read_rpc_stdin_handshake(
         if "type" not in payload:
             raise RpcFrameError("RPC handshake frame is missing its type discriminator")
         if _is_pre_v9_handshake(payload):
+            legacy_frontend = True
             payload = {
                 key: value for key, value in payload.items() if key not in _LEGACY_HANDSHAKE_FIELDS
             }
@@ -114,6 +140,9 @@ async def read_rpc_stdin_handshake(
             supported_capabilities=supported_capabilities,
             limits=limits,
         )
+    if legacy_frontend and isinstance(response, RpcHandshakeRejected):
+        # Re-shape the rejection so the pre-v9 frontend can decode it.
+        response = PreV9RpcHandshakeRejected(**response.model_dump())
     write_response(response)
     return response if isinstance(response, RpcHandshakeAccepted) else None
 
