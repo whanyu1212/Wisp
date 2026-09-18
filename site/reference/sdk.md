@@ -13,7 +13,7 @@ For lifecycle guidance and complete examples, start with the [Python SDK guide](
 |---|---|
 | `wisp.sdk` | In-process controller and startup options |
 | `wisp.rpc` | High-level controller, transport protocol, subprocess transport, and typed command models |
-| `wisp.events` | Typed event models, event schema constant, and JSON/dict parsers |
+| `wisp.events` | Typed event models and JSON/dict parsers |
 | `wisp.config` | Immutable runtime configuration |
 | `wisp.sessions` | JSONL session store, entries, replay models, and typed session errors |
 | `wisp.runtime` | Static extension/runtime contracts and registries |

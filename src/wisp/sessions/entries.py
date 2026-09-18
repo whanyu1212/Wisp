@@ -37,9 +37,12 @@ from wisp.sessions.errors import (
 SESSION_ENTRY_SCHEMA_VERSION: Literal[6] = 6
 SKILL_INVOCATION_SESSION_SCHEMA_VERSION = 6
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
-# Events written before live RPC v9 carried a per-event ``schema_version``. The
-# field no longer exists on ``WispEvent``; drop it so retained history still loads.
+# Events written before live RPC v9 carried a per-event ``schema_version`` in the
+# closed range below. The field no longer exists on ``WispEvent``; a stamp inside
+# that range is dropped so retained history still loads, while anything else is
+# a malformed or unsupported persisted event and fails closed.
 _LEGACY_EVENT_VERSION_FIELD = "schema_version"
+_LEGACY_EVENT_VERSION_RANGE = range(5, 40)
 MAX_SESSION_NAME_BYTES = 256
 _SESSION_NAME_NEWLINES_RE = re.compile(r"[\r\n]+")
 
@@ -389,6 +392,17 @@ def typed_event_from_envelope(
     location = f" at {source}" if source is not None else ""
     payload = envelope.payload
     if _LEGACY_EVENT_VERSION_FIELD in payload:
+        version = payload[_LEGACY_EVENT_VERSION_FIELD]
+        if type(version) is not int:
+            raise MalformedPersistedEventError(
+                f"Persisted event schema_version must be an integer{location}"
+            )
+        if version not in _LEGACY_EVENT_VERSION_RANGE:
+            raise UnsupportedPersistedEventVersionError(
+                f"Unsupported persisted event schema_version {version}{location}; "
+                f"only pre-v9 events in {_LEGACY_EVENT_VERSION_RANGE.start} through "
+                f"{_LEGACY_EVENT_VERSION_RANGE.stop - 1} carry one"
+            )
         payload = {
             key: value for key, value in payload.items() if key != _LEGACY_EVENT_VERSION_FIELD
         }

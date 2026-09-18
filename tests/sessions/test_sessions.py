@@ -1939,6 +1939,40 @@ def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path
         session.read_typed_events()
 
 
+@pytest.mark.parametrize(
+    ("stamp", "error_type", "match"),
+    [
+        (4, UnsupportedPersistedEventVersionError, "schema_version 4"),
+        (40, UnsupportedPersistedEventVersionError, "schema_version 40"),
+        ("39", MalformedPersistedEventError, "must be an integer"),
+        (39.0, MalformedPersistedEventError, "must be an integer"),
+    ],
+)
+def test_session_fails_closed_on_non_legacy_event_version_stamps(
+    tmp_path: Path,
+    stamp: object,
+    error_type: type[SessionError],
+    match: str,
+) -> None:
+    """Only genuine pre-v9 stamps (v5–v39) are stripped; anything else is not history."""
+
+    path = tmp_path / "stamped-event.jsonl"
+    raw_event = {"type": "error", "message": "x", "schema_version": stamp}
+    legacy = {
+        "id": "stamped-event",
+        "session_id": "event-session",
+        "kind": "event",
+        "event": raw_event,
+        "created_at": "2026-07-11T00:00:00Z",
+    }
+    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
+    session = JsonlSessionStore(tmp_path).load(path)
+
+    assert session.read_events() == (raw_event,)
+    with pytest.raises(error_type, match=match):
+        session.read_typed_events()
+
+
 def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "malformed-event.jsonl"
     raw_event = {"type": "error"}

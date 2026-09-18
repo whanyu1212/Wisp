@@ -55,8 +55,9 @@ files, provider SDK objects, tool executors, or approval policy. Python reads hi
 formats and projects current-version data for Rust.
 
 The Rust frontend and Python package are exact-version peers. Generated Rust transfer types follow
-the committed live schema; the launcher and handshake reject package, RPC, or event-schema mismatch
-before ordinary interaction. Current live contracts are RPC v8 and event schema v39. Historical
+the committed live schema; the launcher and handshake reject package or RPC protocol mismatch
+before ordinary interaction. The current live contract is RPC v9; events carry no separate schema
+version. Historical
 schema bundles remain immutable; see [Compatibility and versioning](../reference/compatibility.md).
 
 ## Lifecycle and failure ownership
