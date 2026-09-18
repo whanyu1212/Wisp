@@ -5,6 +5,7 @@ import importlib
 import os
 import subprocess
 import sys
+import typing
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
@@ -325,6 +326,39 @@ def test_events_carry_no_per_event_schema_version() -> None:
     assert not any(name.endswith("_SCHEMA_VERSION") for name in dir(events)), (
         "per-event schema version constants were removed with live RPC v9"
     )
+
+
+def test_events_package_exports_every_lifecycle_module_name() -> None:
+    """``wisp.events`` is the only public import surface for event models.
+
+    Every class, constant, and alias defined in a lifecycle submodule must be
+    re-exported from the package root so callers never depend on submodule layout,
+    and every union member must be exported so the schema bundle and importers agree.
+    """
+
+    import wisp.events as events
+
+    package_dir = REPO_ROOT / "src" / "wisp" / "events"
+    defined: set[str] = set()
+    for module_path in sorted(package_dir.glob("*.py")):
+        if module_path.name == "__init__.py":
+            continue
+        for node in ast.parse(module_path.read_text()).body:
+            if isinstance(node, ast.ClassDef | ast.FunctionDef):
+                defined.add(node.name)
+            elif isinstance(node, ast.Assign):
+                defined.update(target.id for target in node.targets if isinstance(target, ast.Name))
+
+    exported = set(events.__all__)
+    assert defined <= exported, sorted(defined - exported)
+    assert all(hasattr(events, name) for name in exported)
+    assert not (REPO_ROOT / "src" / "wisp" / "events.py").exists()
+
+    union_members = {
+        member.__name__
+        for member in typing.get_args(typing.get_args(events.KnownWispEvent.__value__)[0])
+    }
+    assert union_members <= exported, sorted(union_members - exported)
 
 
 def test_agent_loop_package_exports_public_contracts() -> None:

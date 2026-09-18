@@ -98,6 +98,10 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - `prompt/builder.py` assembles instructions in order; `prompt/instructions.py` holds core instruction
   text; `prompt/project_context.py` discovers trusted files and bounded Git/project context.
   `prompt/text_budget.py` applies shared character limits to context and tool guidance.
+- `src/wisp/events/` is the typed event vocabulary shared by every interface. Import from
+  `wisp.events` (the package root re-exports everything); the lifecycle submodules `run.py`,
+  `usage.py`, `tools.py`, `sessions.py`, `rpc.py`, and `errors.py` only group the models, and
+  `__init__.py` owns the `KnownWispEvent` union whose member order the schema bundle depends on.
 - `messages.py` defines message and compaction records and projects completion events. `history.py`
   normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
 - `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
