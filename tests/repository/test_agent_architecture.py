@@ -68,6 +68,12 @@ _FRESH_IMPORT_MODULES = (
     "wisp.coding.persistence",
     "wisp.coding.session",
     "wisp.coding.tool_execution",
+    # The config root re-exports eagerly; importing an MCP module first must not
+    # re-enter wisp.config while wisp.mcp.config is still initializing.
+    "wisp.config",
+    "wisp.config.settings",
+    "wisp.mcp.config",
+    "wisp.mcp.transport",
     "wisp.providers.base",
     "wisp.runtime.api",
 )
@@ -375,7 +381,7 @@ def test_config_package_keeps_sdk_import_path_and_defining_modules() -> None:
     assert config.default_auth_path is default_auth_path
     assert config.default_session_dir is default_session_dir
     assert WispConfig.__module__ == "wisp.config.runtime"
-    for removed in ("config.py", "settings.py", "validation.py"):
+    for removed in ("config.py", "settings.py"):
         assert not (REPO_ROOT / "src" / "wisp" / removed).exists()
 
     root_imports = _module_imports(REPO_ROOT / "src" / "wisp" / "config" / "__init__.py")

@@ -40,10 +40,10 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.config.validation import redact_validation_error_inputs
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
+from wisp.validation import redact_validation_error_inputs
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
