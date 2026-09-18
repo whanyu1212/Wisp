@@ -39,9 +39,20 @@ _STDIN_THREAD_POLL_INTERVAL = 0.01
 _STDIN_THREAD_QUEUE_SIZE = 1
 _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
 # Frontends on live RPC v8 or earlier advertised an event schema range in the
-# handshake. Those fields no longer exist; drop them before validation so such a
-# client is told `protocol_version_mismatch` rather than `invalid_handshake`.
+# handshake. Those fields no longer exist; a structurally pre-v9 request that
+# carries both is normalised before validation so the client is told
+# `protocol_version_mismatch` rather than `invalid_handshake`. A request that
+# claims v9 or newer must already conform to the v9 schema.
 _LEGACY_HANDSHAKE_FIELDS = frozenset({"min_event_schema_version", "max_event_schema_version"})
+_FIRST_UNVERSIONED_EVENT_PROTOCOL = 9
+
+
+def _is_pre_v9_handshake(payload: dict[str, object]) -> bool:
+    maximum = payload.get("max_protocol_version")
+    return _LEGACY_HANDSHAKE_FIELDS <= payload.keys() and (
+        type(maximum) is int and maximum < _FIRST_UNVERSIONED_EVENT_PROTOCOL
+    )
+
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type QueueFactory = Callable[[int], Queue[str | bytes | Exception]]
@@ -82,7 +93,7 @@ async def read_rpc_stdin_handshake(
         payload = decode_rpc_object(frame, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
         if "type" not in payload:
             raise RpcFrameError("RPC handshake frame is missing its type discriminator")
-        if _LEGACY_HANDSHAKE_FIELDS & payload.keys():
+        if _is_pre_v9_handshake(payload):
             payload = {
                 key: value for key, value in payload.items() if key not in _LEGACY_HANDSHAKE_FIELDS
             }

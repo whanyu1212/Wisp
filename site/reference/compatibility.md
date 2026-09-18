@@ -53,11 +53,11 @@ handshake artifacts therefore record ordered ranges, selected-version containmen
 required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce
 those rules during decoding.
 
-The live event artifact includes only the version emitted by the current package even though Python
-retains historical event parsing for persisted sessions. The handshake negotiates protocol and event
-compatibility independently, advertises a fixed pre-negotiation frame ceiling, and reports directional
-application-frame limits. The manifest records both version domains, transport ceilings, and SHA-256
-hashes for every schema.
+The live event artifact describes only the shapes emitted by the current package even though Python
+still loads persisted events written before protocol v9. The handshake negotiates the protocol
+version, advertises a fixed pre-negotiation frame ceiling, and reports directional application-frame
+limits; there is no separate event-version negotiation. The manifest records the protocol version,
+transport ceilings, and SHA-256 hashes for every schema.
 
 Regenerate or verify the artifacts from the repository root with:
 
