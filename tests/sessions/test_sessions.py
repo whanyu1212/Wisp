@@ -30,6 +30,8 @@ from wisp.sessions import (
     SessionTreeNavigation,
     SessionTreeNodeSummary,
     SessionTreePage,
+    file_io,
+    pagination,
 )
 from wisp.sessions import (
     jsonl as jsonl_module,
@@ -90,8 +92,8 @@ def _message_page_text_bytes(page: SessionMessagePage) -> int:
 
 
 def test_session_tree_facades_are_publicly_exported() -> None:
-    assert SessionTreePage.__module__ == "wisp.sessions.jsonl"
-    assert SessionTreeNodeSummary.__module__ == "wisp.sessions.jsonl"
+    assert SessionTreePage.__module__ == "wisp.sessions.pagination"
+    assert SessionTreeNodeSummary.__module__ == "wisp.sessions.pagination"
     assert SessionTreeNavigation.__module__ == "wisp.sessions.jsonl"
     assert SessionNameChange.__module__ == "wisp.sessions.jsonl"
 
@@ -501,7 +503,9 @@ def test_session_message_pages_reuse_active_path_index(
         resolve_count += 1
         return original_resolve(entries)
 
+    # The JSONL reader validates the file; the pagination projection builds the index.
     monkeypatch.setattr(jsonl_module, "resolve_session_tree", count_resolves)
+    monkeypatch.setattr(pagination, "resolve_session_tree", count_resolves)
 
     newest = reader.read_message_page(limit=2)
     older = reader.read_message_page(limit=2, before_entry_id=newest.next_before_entry_id)
@@ -664,7 +668,7 @@ def test_session_tree_compaction_preview_is_utf8_bounded() -> None:
         ),
     )
 
-    node = jsonl_module._session_tree_node_summary(entry)  # noqa: SLF001
+    node = pagination.session_tree_node_summary(entry)  # noqa: SLF001
 
     assert node.kind == "compaction"
     assert node.role is None
@@ -1026,7 +1030,7 @@ def test_session_message_page_complete_structure_preserves_process_arguments(
             await session.append_message(
                 Message(
                     role="assistant",
-                    content="x" * jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT,
+                    content="x" * pagination.MESSAGE_CONTENT_BYTE_LIMIT,
                 )
             )
 
@@ -1042,7 +1046,7 @@ def test_session_message_page_complete_structure_preserves_process_arguments(
     }
     assert process_call.arguments_truncated is False
     assert all(not message.content_truncated for message in page.messages)
-    assert _message_page_text_bytes(page) > jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert _message_page_text_bytes(page) > pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_exact_full_content_bypasses_preview_limits(
@@ -1124,11 +1128,11 @@ def test_session_message_page_applies_aggregate_budget_only_to_previews(
     if complete_structure:
         assert page.messages[0].content == oversized
         assert all(not message.content_truncated for message in page.messages)
-        assert _message_page_text_bytes(page) > jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+        assert _message_page_text_bytes(page) > pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
     else:
         assert page.messages[0].content == ""
         assert page.messages[0].content_truncated is True
-        assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+        assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
@@ -1166,8 +1170,8 @@ def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
 
     assert tool_call.arguments_truncated is True
     assert set(tool_call.arguments) == {"truncated_json_preview"}
-    assert len(rendered_arguments.encode("utf-8")) <= jsonl_module.TOOL_ARGUMENTS_BYTE_LIMIT
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert len(rendered_arguments.encode("utf-8")) <= pagination.TOOL_ARGUMENTS_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_projects_tool_result_presentation_metadata(
@@ -1225,7 +1229,7 @@ def test_session_message_entry_rejects_tool_result_metadata_on_non_tool_message(
 
 def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
-    oversized_before_text = "x" * (jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT + 1)
+    oversized_before_text = "x" * (pagination.MESSAGE_CONTENT_BYTE_LIMIT + 1)
 
     async def write() -> None:
         await session.append_entry(
@@ -1252,7 +1256,7 @@ def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path)
     assert page.messages[0].tool_result is not None
     assert page.messages[0].tool_result.before_text is None
     assert page.messages[0].tool_result.truncated is True
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
     exact = session.read_message_page(
         entry_ids=(page.messages[0].entry_id,),
@@ -1266,7 +1270,7 @@ def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path)
 
 def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
-    oversized_summary = "🙂" * (jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT + 1)
+    oversized_summary = "🙂" * (pagination.MESSAGE_CONTENT_BYTE_LIMIT + 1)
 
     async def write() -> None:
         await session.append_entry(
@@ -1290,11 +1294,11 @@ def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path
     assert page.messages[0].tool_result.summary is not None
     assert (
         len(page.messages[0].tool_result.summary.encode("utf-8"))
-        <= jsonl_module.MESSAGE_CONTENT_BYTE_LIMIT
+        <= pagination.MESSAGE_CONTENT_BYTE_LIMIT
     )
     assert page.messages[0].tool_result.truncated is True
     assert page.messages[0].content_truncated is True
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> None:
@@ -1330,7 +1334,7 @@ def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> 
         for message in page.messages
         for tool_call in message.tool_calls
     )
-    assert _message_page_text_bytes(page) <= jsonl_module.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+    assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
 def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
@@ -2750,7 +2754,7 @@ def test_write_all_retries_short_writes(monkeypatch: MonkeyPatch) -> None:
 
     monkeypatch.setattr(os, "write", short_write)
 
-    jsonl_module._write_all(123, b"abcdef")  # noqa: SLF001
+    file_io.write_all(123, b"abcdef")  # noqa: SLF001
 
     assert written == b"abcdef"
 
@@ -2759,7 +2763,7 @@ def test_write_all_rejects_zero_progress(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(os, "write", lambda _fd, _data: 0)
 
     with pytest.raises(OSError, match="made no progress"):
-        jsonl_module._write_all(123, b"record")  # noqa: SLF001
+        file_io.write_all(123, b"record")  # noqa: SLF001
 
 
 def test_failed_first_append_removes_empty_crash_artifact(
@@ -2820,7 +2824,7 @@ def test_append_sync_failure_rolls_back_complete_record(
     )
     session.path.write_bytes(f"{session_entry_to_json(committed)}\n".encode())
     original = session.path.read_bytes()
-    real_sync = jsonl_module._sync_file  # noqa: SLF001
+    real_sync = jsonl_module.sync_file  # noqa: SLF001
     sync_calls = 0
 
     def fail_first_sync(fd: int) -> None:
@@ -2830,7 +2834,7 @@ def test_append_sync_failure_rolls_back_complete_record(
             raise OSError(errno.EIO, "sync failed")
         real_sync(fd)
 
-    monkeypatch.setattr(jsonl_module, "_sync_file", fail_first_sync)
+    monkeypatch.setattr(jsonl_module, "sync_file", fail_first_sync)
 
     with pytest.raises(OSError, match="sync failed"):
         session._append_line('{"complete":true}')  # noqa: SLF001
@@ -2884,8 +2888,8 @@ def test_successful_append_syncs_file_and_new_parent_entry(
     session = JsonlSessionStore(tmp_path).create()
     file_syncs: list[int] = []
     directory_syncs: list[Path] = []
-    real_file_sync = jsonl_module._sync_file  # noqa: SLF001
-    real_directory_sync = jsonl_module._sync_directory  # noqa: SLF001
+    real_file_sync = jsonl_module.sync_file  # noqa: SLF001
+    real_directory_sync = jsonl_module.sync_directory  # noqa: SLF001
 
     def track_file_sync(fd: int) -> None:
         file_syncs.append(fd)
@@ -2895,8 +2899,8 @@ def test_successful_append_syncs_file_and_new_parent_entry(
         directory_syncs.append(path)
         real_directory_sync(path)
 
-    monkeypatch.setattr(jsonl_module, "_sync_file", track_file_sync)
-    monkeypatch.setattr(jsonl_module, "_sync_directory", track_directory_sync)
+    monkeypatch.setattr(jsonl_module, "sync_file", track_file_sync)
+    monkeypatch.setattr(jsonl_module, "sync_directory", track_directory_sync)
 
     session._append_line('{"first":true}')  # noqa: SLF001
     session._append_line('{"second":true}')  # noqa: SLF001
@@ -3067,13 +3071,13 @@ def test_truncate_to_zero_syncs_parent_directory(
 
     anyio.run(seed)
     synced: list[Path] = []
-    real_sync = jsonl_module._sync_directory  # noqa: SLF001
+    real_sync = jsonl_module.sync_directory  # noqa: SLF001
 
     def track_sync(path: Path) -> None:
         synced.append(path)
         real_sync(path)
 
-    monkeypatch.setattr(jsonl_module, "_sync_directory", track_sync)
+    monkeypatch.setattr(jsonl_module, "sync_directory", track_sync)
 
     async def truncate() -> None:
         await session.truncate_entries(0)
@@ -3122,8 +3126,8 @@ def test_session_recovery_uses_process_local_and_sidecar_locks(
         message=Message(role="user", content="safe"),
     )
     session.path.write_bytes(f"{session_entry_to_json(committed)}\n{{".encode())
-    real_interprocess_lock = jsonl_module._interprocess_lock  # noqa: SLF001
-    real_recover = jsonl_module._recover_incomplete_tail  # noqa: SLF001
+    real_interprocess_lock = jsonl_module.interprocess_lock  # noqa: SLF001
+    real_recover = jsonl_module.recover_incomplete_tail  # noqa: SLF001
     sidecar_lock_held = False
 
     @contextmanager
@@ -3145,8 +3149,8 @@ def test_session_recovery_uses_process_local_and_sidecar_locks(
         assert sidecar_lock_held
         return real_recover(path)
 
-    monkeypatch.setattr(jsonl_module, "_interprocess_lock", tracked_interprocess_lock)
-    monkeypatch.setattr(jsonl_module, "_recover_incomplete_tail", checked_recover)
+    monkeypatch.setattr(jsonl_module, "interprocess_lock", tracked_interprocess_lock)
+    monkeypatch.setattr(jsonl_module, "recover_incomplete_tail", checked_recover)
 
     assert session.read_entries() == (committed,)
 

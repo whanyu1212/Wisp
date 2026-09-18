@@ -106,6 +106,12 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
 - `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
   and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
+- For session persistence, start with `src/wisp/sessions/jsonl.py`: `JsonlSessionStore` and
+  `JsonlSession` own the append/read lifecycle and the public result models. `file_io.py` holds the
+  durable-file boundary (fsync ordering, cross-process locking, private modes, tail recovery);
+  `pagination.py` projects bounded message and tree pages; `summaries.py` scans listing metadata
+  without replaying transcripts. `entries.py`, `replay.py`, and `branching.py` define the records
+  and tree semantics they all share. Tests that patch a helper must target its defining module.
 - For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
   callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
   shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,
