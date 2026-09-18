@@ -5,7 +5,7 @@ consumers integrate against.
 
 Since live RPC protocol v9, `WispEvent` payloads carry no per-event version. The protocol bundle
 under `schemas/live-rpc/` is the single event compatibility contract, negotiated once in the
-handshake; the current typed models live in `src/wisp/events.py`. Additive event changes regenerate
+handshake; the current typed models live in the `src/wisp/events/` package. Additive event changes regenerate
 the current bundle in place and are recorded under the current protocol heading; breaking changes
 bump the protocol version and open a new `## Live RPC protocol vN` heading.
 

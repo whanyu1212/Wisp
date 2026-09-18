@@ -21,8 +21,9 @@ For lifecycle guidance and complete examples, start with the [Python SDK guide](
 | `wisp.tools` | Tool, context, result, safety, approval, and policy contracts |
 
 Import supported names from these namespaces, not private implementation modules. Package-level
-`__all__` lists are verified from the built wheel. `wisp.events` is a model namespace rather than a
-curated re-export package; the stable entry points used by SDK consumers are described below.
+`__all__` lists are verified from the built wheel. `wisp.events` re-exports every event model from
+its package root; import from `wisp.events`, not its lifecycle submodules. The stable entry points
+used by SDK consumers are described below.
 
 See [Project file discovery](./project-files) for snapshot bounds, cancellation,
 and handling `ProjectFilesInvalidated` notifications.
