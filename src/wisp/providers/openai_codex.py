@@ -17,7 +17,7 @@ import httpx
 from wisp.agent.messages import Message, Role
 from wisp.auth.openai_codex import account_id_from_access_token, refresh_openai_codex_token
 from wisp.auth.storage import JsonAuthStore
-from wisp.config import default_auth_path
+from wisp.config.runtime import default_auth_path
 from wisp.providers.auth import ProviderAuthResolver, StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

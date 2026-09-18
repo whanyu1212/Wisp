@@ -22,7 +22,7 @@ except ImportError:
     termios = None  # type: ignore[assignment]
 
 from wisp import __version__
-from wisp.settings import resolve_settings
+from wisp.config.settings import resolve_settings
 
 from .launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
 from .rust_binary import installed_rust_tui_binary

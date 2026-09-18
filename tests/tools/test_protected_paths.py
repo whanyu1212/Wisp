@@ -9,7 +9,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from tests.tools.test_tools import run_tool
-from wisp.settings import DEFAULT_PROTECTED_PATHS
+from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.builtin import FindTool, GrepTool, ReadTool
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path, resolve_tool_path
@@ -469,7 +469,7 @@ def test_grep_skips_protected_symlink(tmp_path: Path) -> None:
 def test_configured_auth_file_is_protected(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     # P2: a custom credential file (via WISP_AUTH_FILE) is Wisp's active secret and
     # must be protected even though it isn't named like the default auth.json.
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_text('{"token": "sk-super-secret"}\n', encoding="utf-8")
@@ -487,7 +487,7 @@ def test_auth_file_protected_even_when_guard_disabled(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # Disabling the general guard must not expose Wisp's own credential file.
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
@@ -506,7 +506,7 @@ def test_auth_file_protected_even_when_guard_disabled(
 def test_directly_constructed_config_protects_auth_file(tmp_path: Path) -> None:
     # Re-review: building WispConfig directly (embedding/SDK), bypassing from_env,
     # must still protect the credential file. Enforced as a model invariant.
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_text('{"token": "sk-super-secret"}\n', encoding="utf-8")
@@ -522,7 +522,7 @@ def test_directly_constructed_config_protects_auth_file(tmp_path: Path) -> None:
 def test_directly_constructed_config_protects_auth_even_with_empty_guard(
     tmp_path: Path,
 ) -> None:
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
@@ -537,7 +537,7 @@ def test_directly_constructed_config_protects_auth_even_with_empty_guard(
 def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) -> None:
     # model_copy skips validators; ToolContext.from_config must still protect the
     # (new) auth file so a validation-skipping copy can't expose the credential.
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     auth_file = tmp_path / "codex-auth.json"
     auth_file.write_text('{"token": "sk-secret"}\n', encoding="utf-8")
@@ -550,7 +550,7 @@ def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) 
 
 
 def test_from_config_backstops_ca_bundle_protection_after_model_copy(tmp_path: Path) -> None:
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
     from wisp.openai_compatible import OpenAICompatibleSettings
 
     ca_bundle = tmp_path / "private-ca.pem"
@@ -573,7 +573,7 @@ def test_from_config_backstops_settings_protection_after_model_copy(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     settings_dir = tmp_path / ".wisp"
@@ -598,7 +598,7 @@ def test_project_settings_cannot_disable_secret_guard(
     # stays blocked because project protected_paths are ignored.
     import json
 
-    from wisp.config import WispConfig
+    from wisp.config.runtime import WispConfig
 
     wisp_dir = tmp_path / ".wisp"
     wisp_dir.mkdir()

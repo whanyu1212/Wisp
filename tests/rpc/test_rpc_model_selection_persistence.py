@@ -8,7 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from tests.rpc_support import RpcExecutorFixture, build_rpc_executor_fixture
-from wisp import settings
+from wisp.config import settings
 from wisp.events import ErrorEvent, RpcCommandFinished
 from wisp.rpc.commands import ConfigureCommand
 from wisp.rpc.handlers import configure as configure_module

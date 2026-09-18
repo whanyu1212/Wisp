@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import wisp.rpc as rpc_package
 import wisp.sdk as sdk_package
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import (
     KnownWispEvent,
     RpcCommandFinished,

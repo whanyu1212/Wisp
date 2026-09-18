@@ -19,8 +19,8 @@ from wisp.cli.native_tui import rust_binary, rust_launcher
 from wisp.cli.native_tui.launch import TuiOptions
 from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError
 from wisp.cli.types import TuiFrontendKind
-from wisp.config import WispConfig
-from wisp.settings import ResolvedSettings
+from wisp.config.runtime import WispConfig
+from wisp.config.settings import ResolvedSettings
 
 
 def _cli_env() -> dict[str, str]:

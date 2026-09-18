@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from wisp.config import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
+from wisp.config.runtime import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore

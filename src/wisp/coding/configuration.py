@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry, startup_effort
 from wisp.runtime.registry import ProviderRegistry

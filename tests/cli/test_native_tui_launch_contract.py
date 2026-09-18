@@ -15,7 +15,7 @@ import wisp.cli.native_tui.launch as native_tui_launch
 from wisp.cli import app
 from wisp.cli.native_tui.launch import TuiOptions, _rpc_command
 from wisp.cli.types import TuiFrontendKind
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.trust_flow import TrustDecision
 
 

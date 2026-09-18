@@ -117,6 +117,12 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `pagination.py` projects bounded message and tree pages; `summaries.py` scans listing metadata
   without replaying transcripts. `entries.py`, `replay.py`, and `branching.py` define the records
   and tree semantics they all share. Tests that patch a helper must target its defining module.
+- For runtime configuration, start with `src/wisp/config/runtime.py`: `WispConfig` and its
+  defaults. `config/settings.py` resolves layered user and project settings. `wisp.config` (the
+  package root) eagerly re-exports only the SDK-facing runtime surface so
+  `from wisp.config import WispConfig` stays stable for SDK users; internal code imports from the
+  defining submodule, and modules below it in the import graph (`wisp.mcp`, `wisp.retry`,
+  `wisp.validation`) must not import from `wisp.config`.
 - For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
   callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
   shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,

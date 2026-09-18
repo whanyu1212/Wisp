@@ -20,7 +20,7 @@ import sniffio
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 
 from wisp.agent.prompt import resolve_project_context_root
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import KnownWispEvent, WispEvent
 from wisp.rpc.client import RpcController, RpcTransport
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommand

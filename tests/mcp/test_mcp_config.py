@@ -7,7 +7,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.mcp import config as mcp_config_module
 from wisp.mcp.config import McpServerConfig
 

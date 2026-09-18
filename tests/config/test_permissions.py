@@ -8,7 +8,7 @@ import anyio
 import pytest
 
 import wisp.permissions as permissions
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.permissions import load_permission_mode, permissions_directory, save_permission_mode
 from wisp.rpc.host import RpcToolApprovalPolicy
 from wisp.tools.approval import ToolApprovalPolicy

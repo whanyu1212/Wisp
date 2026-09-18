@@ -44,7 +44,6 @@ _FORBIDDEN_IMPORTS = (
     "wisp.rpc",
     "wisp.runtime",
     "wisp.sessions",
-    "wisp.settings",
     "wisp.trust",
     "wisp.cli.native_tui",
 )
@@ -54,7 +53,6 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.cli",
     "wisp.config",
     "wisp.rpc",
-    "wisp.settings",
     "wisp.trust",
     "wisp.cli.native_tui",
 )
@@ -70,6 +68,12 @@ _FRESH_IMPORT_MODULES = (
     "wisp.coding.persistence",
     "wisp.coding.session",
     "wisp.coding.tool_execution",
+    # The config root re-exports eagerly; importing an MCP module first must not
+    # re-enter wisp.config while wisp.mcp.config is still initializing.
+    "wisp.config",
+    "wisp.config.settings",
+    "wisp.mcp.config",
+    "wisp.mcp.transport",
     "wisp.providers.base",
     "wisp.runtime.api",
 )
@@ -360,6 +364,36 @@ def test_events_package_exports_every_lifecycle_module_name() -> None:
         for member in typing.get_args(typing.get_args(events.KnownWispEvent.__value__)[0])
     }
     assert union_members <= exported, sorted(union_members - exported)
+
+
+def test_config_package_keeps_sdk_import_path_and_defining_modules() -> None:
+    """``wisp.config`` stays the documented SDK path while internals live in submodules.
+
+    The package root re-exports only the runtime configuration surface. Settings
+    resolution and validation helpers are imported from their defining modules so
+    the root never grows into a second copy of the package.
+    """
+
+    import wisp.config as config
+    from wisp.config.runtime import WispConfig, default_auth_path, default_session_dir
+
+    assert config.WispConfig is WispConfig
+    assert config.default_auth_path is default_auth_path
+    assert config.default_session_dir is default_session_dir
+    assert WispConfig.__module__ == "wisp.config.runtime"
+    for removed in ("config.py", "settings.py"):
+        assert not (REPO_ROOT / "src" / "wisp" / removed).exists()
+
+    root_imports = _module_imports(REPO_ROOT / "src" / "wisp" / "config" / "__init__.py")
+    assert root_imports == {"wisp.config.runtime"}, sorted(root_imports)
+
+    internal_root_importers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src").rglob("*.py")
+        if path != REPO_ROOT / "src" / "wisp" / "config" / "__init__.py"
+        and "wisp.config" in _module_imports(path)
+    )
+    assert internal_root_importers == [], internal_root_importers
 
 
 def test_agent_loop_package_exports_public_contracts() -> None:

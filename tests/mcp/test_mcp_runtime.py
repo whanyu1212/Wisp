@@ -18,7 +18,7 @@ import wisp.mcp.runtime as mcp_runtime_module
 from tests.paths import FIXTURES_DIR
 from wisp.cli import application as cli_module
 from wisp.cli.native_tui.launch import TuiOptions, _preflight_tui_options
-from wisp.config import WispConfig
+from wisp.config.runtime import WispConfig
 from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished, RpcMcpStatusReported
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.runtime import McpRuntime, _discover_tools
