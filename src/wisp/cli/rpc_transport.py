@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from collections.abc import Awaitable, Callable
@@ -37,6 +38,10 @@ _STDIN_THREAD_POLL_INTERVAL = 0.01
 # an unsafe aggregate allocation while the coordinator is backpressured.
 _STDIN_THREAD_QUEUE_SIZE = 1
 _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
+# Frontends on live RPC v8 or earlier advertised an event schema range in the
+# handshake. Those fields no longer exist; drop them before validation so such a
+# client is told `protocol_version_mismatch` rather than `invalid_handshake`.
+_LEGACY_HANDSHAKE_FIELDS = frozenset({"min_event_schema_version", "max_event_schema_version"})
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type QueueFactory = Callable[[int], Queue[str | bytes | Exception]]
@@ -77,6 +82,11 @@ async def read_rpc_stdin_handshake(
         payload = decode_rpc_object(frame, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
         if "type" not in payload:
             raise RpcFrameError("RPC handshake frame is missing its type discriminator")
+        if _LEGACY_HANDSHAKE_FIELDS & payload.keys():
+            payload = {
+                key: value for key, value in payload.items() if key not in _LEGACY_HANDSHAKE_FIELDS
+            }
+            frame = json.dumps(payload).encode("utf-8")
         request = RpcHandshakeRequestAdapter.validate_json(frame)
     except (RpcFrameError, ValidationError, ValueError):
         response = RpcHandshakeRejected(

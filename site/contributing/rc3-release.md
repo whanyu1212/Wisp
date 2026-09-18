@@ -26,8 +26,9 @@ RC3 also includes the mdBook documentation migration, selectable startup logos, 
 integration, faster full-history hydration, RPC delta coalescing, and measured search-path and
 literal-`grep` optimizations. The
 [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) gives the full candidate scope.
-These changes do not alter the supported live RPC v8 / event schema v39 contract or require a saved
-session migration. Large saved histories remain fully available; startup time and memory can still
+These changes did not alter the live RPC v8 / event schema v39 contract that RC3 shipped, and did
+not require a saved session migration. (Later releases replaced the per-event schema version with
+protocol v9; see [Compatibility and versioning](../reference/compatibility.md).) Large saved histories remain fully available; startup time and memory can still
 grow with the amount of retained content.
 
 Transcript search, built-in arbitrary transcript copying, clickable Markdown links, and an

@@ -112,6 +112,35 @@ def test_stdin_handshake_rejects_invalid_first_frames(frame: bytes) -> None:
     anyio.run(scenario)
 
 
+def test_stdin_handshake_tells_pre_v9_frontends_the_protocol_mismatched() -> None:
+    """A conforming v8 client sent an event schema range; it must learn the protocol moved."""
+
+    legacy = json.loads(_handshake_line())
+    legacy.update(
+        min_protocol_version=8,
+        max_protocol_version=8,
+        min_event_schema_version=39,
+        max_event_schema_version=39,
+    )
+
+    async def scenario() -> None:
+        responses: list[object] = []
+        accepted = await read_rpc_stdin_handshake(
+            io.BytesIO(json.dumps(legacy).encode() + b"\n"),
+            backend_package_version="0.1.0",
+            supported_capabilities=(),
+            limits=_limits(),
+            write_response=responses.append,
+        )
+
+        assert accepted is None
+        assert len(responses) == 1
+        assert isinstance(responses[0], RpcHandshakeRejected)
+        assert responses[0].code == "protocol_version_mismatch"
+
+    anyio.run(scenario)
+
+
 def test_stdin_handshake_clean_eof_emits_no_response() -> None:
     async def scenario() -> None:
         responses: list[object] = []
