@@ -15,7 +15,6 @@ from pytest import MonkeyPatch
 
 from tests.paths import REPO_ROOT
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     ProjectConfigApplied,
     ProviderRetrying,
     QueueItemsRemoved,
@@ -59,7 +58,6 @@ from wisp.events import (
     RpcStateReported,
     RpcStateSnapshot,
     SkillCatalogUpdated,
-    ToolExecutionEnded,
     ToolResultReady,
     TrustRequested,
     TrustResolved,
@@ -138,11 +136,11 @@ class RecordingTransport:
             yield event
 
 
-def test_changelog_documents_current_event_schema() -> None:
+def test_changelog_documents_protocol_as_the_single_event_contract() -> None:
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert f"## Schema v{EVENT_SCHEMA_VERSION} — current" in changelog
-    assert f"Events at schema v5 through v{EVENT_SCHEMA_VERSION} remain readable." in changelog
+    assert f"## Live RPC protocol v{LIVE_RPC_PROTOCOL_VERSION} — current" in changelog
+    assert "Events no longer carry a per-event `schema_version`." in changelog
 
 
 def test_rpc_commands_serialize_as_jsonl_and_parse() -> None:
@@ -299,12 +297,6 @@ def test_connection_catalog_event_round_trips_and_enforces_bounds() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValidationError, match="schema_version 36"):
-        RpcConnectionCatalogReported(
-            command_id="connections-1",
-            catalog=event.catalog,
-            schema_version=35,
-        )
     with pytest.raises(ValidationError):
         RpcConnectionCatalogSnapshot(providers=(provider,) * 33)
 
@@ -350,12 +342,6 @@ def test_model_catalog_event_round_trips_and_enforces_bounds() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValidationError, match="schema_version 35"):
-        RpcModelCatalogReported(
-            command_id="models-1",
-            catalog=event.catalog,
-            schema_version=34,
-        )
     with pytest.raises(ValidationError):
         RpcModelProviderSnapshot(
             name="provider",
@@ -421,8 +407,6 @@ def test_mcp_status_event_round_trips_over_json_transport() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 30"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 29}).model_dump_json())
 
 
 def test_skill_catalog_events_round_trip_over_json_transport() -> None:
@@ -456,20 +440,6 @@ def test_skill_catalog_events_round_trip_over_json_transport() -> None:
     )
 
     assert tuple(wisp_event_from_json(event.model_dump_json()) for event in events) == events
-    for event_type in (RpcSkillsReported, SkillCatalogUpdated):
-        kwargs: dict[str, object] = {"catalog": catalog, "schema_version": 30}
-        if event_type is RpcSkillsReported:
-            kwargs["command_id"] = "skills-1"
-        with pytest.raises(
-            ValidationError, match="Package skill sources require schema_version 31"
-        ):
-            event_type(**kwargs)
-
-    for event in events:
-        legacy_payload = json.loads(event.model_dump_json())
-        legacy_payload["schema_version"] = 30
-        with pytest.raises(ValueError, match="Package skill sources require schema_version 31"):
-            wisp_event_from_json(json.dumps(legacy_payload))
 
 
 def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
@@ -687,7 +657,7 @@ def test_set_session_name_command_serializes_as_jsonl_and_parses() -> None:
         SetSessionNameCommand(name="ok", session_id="")
 
 
-def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
+def test_rpc_state_report_round_trips() -> None:
     event = RpcStateReported(
         command_id="state-1",
         state=RpcStateSnapshot(
@@ -703,11 +673,9 @@ def test_rpc_state_report_round_trips_only_at_schema_v16() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 16"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 15}).model_dump_json())
 
 
-def test_rpc_state_agent_mode_is_backward_compatible_before_schema_v27() -> None:
+def test_rpc_state_agent_mode_defaults_to_build_when_absent() -> None:
     event = RpcStateReported(
         command_id="state-1",
         state=RpcStateSnapshot(
@@ -720,16 +688,15 @@ def test_rpc_state_agent_mode_is_backward_compatible_before_schema_v27() -> None
             pending_follow_up_count=0,
         ),
     )
-    legacy = event.model_copy(update={"schema_version": 26})
-    payload = json.loads(legacy.model_dump_json())
+    payload = json.loads(event.model_dump_json())
+    del payload["state"]["mode"]
 
-    assert "mode" not in payload["state"]
     restored = wisp_event_from_json(json.dumps(payload))
     assert isinstance(restored, RpcStateReported)
     assert restored.state.mode == "build"
 
 
-def test_rpc_commands_report_round_trips_only_at_schema_v23() -> None:
+def test_rpc_commands_report_round_trips() -> None:
     event = RpcCommandsReported(
         command_id="commands-1",
         commands=(
@@ -754,11 +721,9 @@ def test_rpc_commands_report_round_trips_only_at_schema_v23() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 23"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 22}).model_dump_json())
 
 
-def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
+def test_rpc_messages_report_round_trips() -> None:
     event = RpcMessagesReported(
         command_id="messages-1",
         session_id="session-1",
@@ -784,11 +749,9 @@ def test_rpc_messages_report_round_trips_only_at_schema_v17() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 17"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 16}).model_dump_json())
 
 
-def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
+def test_rpc_messages_tool_result_metadata_is_tool_role_only() -> None:
     event = RpcMessagesReported(
         command_id="messages-1",
         messages=(
@@ -812,10 +775,6 @@ def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    payload = json.loads(event.model_dump_json())
-    payload["schema_version"] = 21
-    with pytest.raises(ValueError, match="tool-result metadata requires schema_version 22"):
-        wisp_event_from_json(json.dumps(payload))
     with pytest.raises(ValueError, match="valid only on tool messages"):
         RpcMessageSnapshot(
             entry_id="entry-2",
@@ -827,32 +786,7 @@ def test_rpc_messages_tool_result_metadata_requires_schema_v22() -> None:
         )
 
 
-def test_rpc_messages_tool_result_metadata_strips_from_legacy_serialization() -> None:
-    event = RpcMessagesReported(
-        command_id="messages-1",
-        messages=(
-            RpcMessageSnapshot(
-                entry_id="entry-1",
-                created_at=datetime(2026, 7, 28, tzinfo=UTC),
-                role="tool",
-                content="denied",
-                content_original_bytes=6,
-                tool_call_id="call-1",
-                tool_name="write",
-                is_error=True,
-                tool_result=RpcMessageToolResultSnapshot(status="denied"),
-            ),
-        ),
-    )
-    legacy = event.model_copy(update={"schema_version": 21})
-
-    payload = json.loads(legacy.model_dump_json())
-
-    assert "tool_result" not in payload["messages"][0]
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == 21
-
-
-def test_rpc_sessions_report_round_trips_only_at_schema_v18() -> None:
+def test_rpc_sessions_report_round_trips() -> None:
     event = RpcSessionsReported(
         command_id="sessions-1",
         sessions=(
@@ -869,11 +803,9 @@ def test_rpc_sessions_report_round_trips_only_at_schema_v18() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 18"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 17}).model_dump_json())
 
 
-def test_rpc_session_selected_round_trips_only_at_schema_v18() -> None:
+def test_rpc_session_selected_round_trips() -> None:
     event = RpcSessionSelected(
         command_id="select-1",
         session_id="session-1",
@@ -883,11 +815,9 @@ def test_rpc_session_selected_round_trips_only_at_schema_v18() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 18"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 17}).model_dump_json())
 
 
-def test_rpc_session_derivation_events_round_trip_only_at_schema_v19() -> None:
+def test_rpc_session_derivation_events_round_trip() -> None:
     clone = RpcSessionCloned(
         command_id="clone-1",
         source_session_id="source",
@@ -913,9 +843,6 @@ def test_rpc_session_derivation_events_round_trip_only_at_schema_v19() -> None:
 
     assert wisp_event_from_json(clone.model_dump_json()) == clone
     assert wisp_event_from_json(fork.model_dump_json()) == fork
-    for event in (clone, fork):
-        with pytest.raises(ValueError, match="require schema_version 19"):
-            wisp_event_from_json(event.model_copy(update={"schema_version": 18}).model_dump_json())
 
 
 def test_rpc_session_derivation_events_reject_invalid_targets() -> None:
@@ -935,7 +862,7 @@ def test_rpc_session_derivation_events_reject_invalid_targets() -> None:
         RpcSessionCloned(**{**fields, "session_id": "clone", "active_leaf_id": None})
 
 
-def test_rpc_session_tree_events_round_trip_only_at_schema_v20() -> None:
+def test_rpc_session_tree_events_round_trip() -> None:
     node = RpcSessionTreeNode(
         entry_id="entry-1",
         parent_id=None,
@@ -969,12 +896,9 @@ def test_rpc_session_tree_events_round_trip_only_at_schema_v20() -> None:
 
     assert wisp_event_from_json(report.model_dump_json()) == report
     assert wisp_event_from_json(navigated.model_dump_json()) == navigated
-    for event in (report, navigated):
-        with pytest.raises(ValueError, match="require schema_version 20"):
-            wisp_event_from_json(event.model_copy(update={"schema_version": 19}).model_dump_json())
 
 
-def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
+def test_rpc_session_tree_unrevert_round_trips() -> None:
     event = RpcSessionTreeUnreverted(
         command_id="unrevert-1",
         session_id="session-1",
@@ -986,43 +910,24 @@ def test_rpc_session_tree_unrevert_round_trips_only_at_schema_v24() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 24"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 23}).model_dump_json())
 
 
-def test_rpc_message_forward_cursor_round_trips_only_at_schema_v34() -> None:
+def test_rpc_message_forward_cursor_round_trips() -> None:
     report = RpcMessagesReported(
         command_id="messages-1",
         truncated=True,
         next_after_entry_id="entry-1",
     )
 
-    assert report.schema_version == EVENT_SCHEMA_VERSION
     assert wisp_event_from_json(report.model_dump_json()) == report
 
-    legacy_without_cursor = RpcMessagesReported(
-        command_id="messages-legacy",
-        schema_version=33,
-    )
-    legacy_payload = json.loads(legacy_without_cursor.model_dump_json())
-    assert "next_after_entry_id" not in legacy_payload
-    assert wisp_event_from_json(json.dumps(legacy_payload)) == legacy_without_cursor
-
-    legacy_payload["next_after_entry_id"] = "entry-1"
-    legacy_payload["truncated"] = True
-    with pytest.raises(ValueError, match="forward cursors require schema_version 34"):
-        wisp_event_from_json(json.dumps(legacy_payload))
-
-    with pytest.raises(ValidationError, match="forward cursors require schema_version 34"):
-        RpcMessagesReported(
-            command_id="messages-invalid",
-            schema_version=33,
-            truncated=True,
-            next_after_entry_id="entry-1",
-        )
+    without_cursor = RpcMessagesReported(command_id="messages-plain")
+    payload = json.loads(without_cursor.model_dump_json())
+    assert payload["next_after_entry_id"] is None
+    assert wisp_event_from_json(json.dumps(payload)) == without_cursor
 
 
-def test_tool_failure_metadata_round_trips_only_at_schema_v33() -> None:
+def test_tool_failure_metadata_round_trips() -> None:
     event = ToolResultReady(
         call_id="call-1",
         name="grep",
@@ -1034,15 +939,6 @@ def test_tool_failure_metadata_round_trips_only_at_schema_v33() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    legacy = event.model_copy(update={"schema_version": 32})
-    payload = json.loads(legacy.model_dump_json())
-    assert "failure_code" not in payload
-    assert "retryable" not in payload
-    assert "recovery_hint" not in payload
-
-    payload["failure_code"] = "invalid_pattern"
-    with pytest.raises(ValueError, match="Tool failure metadata requires schema_version 33"):
-        wisp_event_from_json(json.dumps(payload))
 
 
 def test_tool_failure_metadata_requires_an_error_and_failure_code() -> None:
@@ -1064,99 +960,7 @@ def test_tool_failure_metadata_requires_an_error_and_failure_code() -> None:
         )
 
 
-@pytest.mark.parametrize("event_type", ["tool.result", "tool.execution.ended"])
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("process_id", "p123"),
-        ("process_state", "running"),
-        ("process_error", "failed"),
-        ("stdout", "out"),
-        ("stderr", "err"),
-        ("stdout_truncated", True),
-        ("stderr_truncated", True),
-        ("stdout_dropped_bytes", 1),
-        ("stderr_dropped_bytes", 1),
-    ],
-)
-def test_bash_process_metadata_requires_schema_v25(
-    event_type: str,
-    field: str,
-    value: object,
-) -> None:
-    payload = {
-        "schema_version": 24,
-        "type": event_type,
-        "call_id": "call-1",
-        "name": "bash",
-        "output": "Process p123 is still running",
-        "is_error": False,
-        field: value,
-    }
-
-    with pytest.raises(ValueError, match="Bash process metadata requires schema_version 25"):
-        wisp_event_from_json(json.dumps(payload))
-
-    payload["schema_version"] = 25
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == 25
-
-
-@pytest.mark.parametrize(
-    "event",
-    [
-        ToolResultReady(
-            schema_version=24,
-            call_id="call-1",
-            name="bash",
-            output="Process p123 is still running",
-            is_error=False,
-            process_id="p123",
-            process_state="running",
-            stdout="out",
-            stderr="err",
-            stdout_truncated=True,
-            stderr_truncated=True,
-            stdout_dropped_bytes=1,
-            stderr_dropped_bytes=2,
-        ),
-        ToolExecutionEnded(
-            schema_version=24,
-            call_id="call-1",
-            name="bash",
-            output="Process p123 is still running",
-            is_error=False,
-            process_id="p123",
-            process_state="running",
-            stdout="out",
-            stderr="err",
-            stdout_truncated=True,
-            stderr_truncated=True,
-            stdout_dropped_bytes=1,
-            stderr_dropped_bytes=2,
-        ),
-    ],
-)
-def test_bash_process_metadata_is_stripped_for_legacy_serialized_events(
-    event: ToolResultReady | ToolExecutionEnded,
-) -> None:
-    payload = json.loads(event.model_dump_json())
-
-    for field in (
-        "process_id",
-        "process_state",
-        "process_error",
-        "stdout",
-        "stderr",
-        "stdout_truncated",
-        "stderr_truncated",
-        "stdout_dropped_bytes",
-        "stderr_dropped_bytes",
-    ):
-        assert field not in payload
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == 24
-
-
-def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
+def test_rpc_session_name_changed_round_trips() -> None:
     event = RpcSessionNameChanged(
         command_id="name-1",
         session_id="session-1",
@@ -1167,15 +971,12 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 21"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 20}).model_dump_json())
 
 
 @pytest.mark.parametrize(
     "payload",
     [
         {
-            "schema_version": 20,
             "type": "rpc.state",
             "command_id": "state-1",
             "state": {
@@ -1194,7 +995,6 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
             },
         },
         {
-            "schema_version": 20,
             "type": "rpc.sessions",
             "command_id": "sessions-1",
             "sessions": [],
@@ -1203,7 +1003,6 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
             "selected_session_name": "Named",
         },
         {
-            "schema_version": 20,
             "type": "rpc.sessions",
             "command_id": "sessions-1",
             "sessions": [
@@ -1218,7 +1017,6 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
             ],
         },
         {
-            "schema_version": 20,
             "type": "rpc.session.selected",
             "command_id": "select-1",
             "session_id": "session-1",
@@ -1228,7 +1026,6 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
             "session_name": "Named",
         },
         {
-            "schema_version": 20,
             "type": "rpc.session.cloned",
             "command_id": "clone-1",
             "source_session_id": "source",
@@ -1242,7 +1039,6 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
             "entry_count": 1,
         },
         {
-            "schema_version": 20,
             "type": "rpc.session.forked",
             "command_id": "fork-1",
             "source_session_id": "source",
@@ -1259,35 +1055,26 @@ def test_rpc_session_name_changed_round_trips_only_at_schema_v21() -> None:
         },
     ],
 )
-def test_rpc_session_name_fields_require_schema_v21(payload: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="session name fields require schema_version 21"):
-        wisp_event_from_json(json.dumps(payload))
+def test_rpc_session_name_fields_round_trip(payload: dict[str, object]) -> None:
+    event = wisp_event_from_json(json.dumps(payload))
+    dumped = json.loads(event.model_dump_json())
+    _assert_subset(payload, dumped)
 
 
-def test_rpc_session_name_fields_are_stripped_for_legacy_serialized_events() -> None:
-    event = RpcSessionsReported(
-        schema_version=20,
-        command_id="sessions-1",
-        sessions=(
-            RpcSessionSummary(
-                session_id="session-1",
-                session_path=Path("/tmp/session-1.jsonl"),
-                updated_at=datetime(2026, 7, 24, tzinfo=UTC),
-                entry_count=1,
-                active_leaf_id="entry-1",
-                name="Named",
-            ),
-        ),
-        selected_session_id="session-1",
-        selected_session_path=Path("/tmp/session-1.jsonl"),
-        selected_session_name="Named",
-    )
+def _assert_subset(expected: object, actual: object) -> None:
+    """Assert every key in ``expected`` appears in ``actual``; defaults may add more."""
 
-    payload = json.loads(event.model_dump_json())
-
-    assert "selected_session_name" not in payload
-    assert "name" not in payload["sessions"][0]
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == 20
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict)
+        for key, value in expected.items():
+            assert key in actual, key
+            _assert_subset(value, actual[key])
+    elif isinstance(expected, list):
+        assert isinstance(actual, list) and len(actual) == len(expected)
+        for left, right in zip(expected, actual, strict=True):
+            _assert_subset(left, right)
+    else:
+        assert expected == actual
 
 
 def test_rpc_session_tree_events_reject_inconsistent_payloads() -> None:
@@ -1459,8 +1246,6 @@ def test_queue_items_removed_round_trips_through_json() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValueError, match="require schema_version 15"):
-        wisp_event_from_json(event.model_copy(update={"schema_version": 14}).model_dump_json())
 
 
 @pytest.mark.parametrize(
@@ -1566,27 +1351,12 @@ def test_project_config_applied_round_trips_through_json() -> None:
     minimal = ProjectConfigApplied(provider="fake", auth_path=Path("/tmp/auth.json"))
     assert wisp_event_from_json(minimal.model_dump_json()) == minimal
 
-    legacy = applied.model_copy(update={"schema_version": 25})
-    legacy_payload = json.loads(legacy.model_dump_json())
-    assert "auto_compaction_enabled" not in legacy_payload
-    legacy_event = wisp_event_from_json(json.dumps(legacy_payload))
-    assert legacy_event.schema_version == 25
-    assert isinstance(legacy_event, ProjectConfigApplied)
-    assert legacy_event.auto_compaction_enabled is None
-
-
-def test_compaction_policy_fields_require_schema_v26() -> None:
-    project_payload = json.loads(
-        ProjectConfigApplied(
-            provider="openai",
-            auto_compaction_enabled=False,
-            auth_path=Path("/home/u/.wisp/auth.json"),
-        ).model_dump_json()
-    )
-    project_payload["schema_version"] = 25
-
-    with pytest.raises(ValueError, match="Project compaction policy requires schema_version 26"):
-        wisp_event_from_json(json.dumps(project_payload))
+    # Older writers omitted the compaction policy; absence reads as "unknown".
+    payload = json.loads(applied.model_dump_json())
+    del payload["auto_compaction_enabled"]
+    restored = wisp_event_from_json(json.dumps(payload))
+    assert isinstance(restored, ProjectConfigApplied)
+    assert restored.auto_compaction_enabled is None
 
 
 def test_rpc_commands_allow_protocol_optional_id() -> None:
@@ -1609,8 +1379,7 @@ def test_rpc_init_command_round_trips_without_arguments() -> None:
 
 def test_wisp_event_from_json_returns_typed_event() -> None:
     event = wisp_event_from_json(
-        '{"schema_version":6,"type":"rpc.command.finished","command_id":"cmd-1",'
-        '"command_type":"prompt","ok":true}'
+        '{"type":"rpc.command.finished","command_id":"cmd-1","command_type":"prompt","ok":true}'
     )
 
     assert isinstance(event, RpcCommandFinished)
@@ -1632,8 +1401,10 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [5, 17, 18, 19, 20])
-def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int) -> None:
+@pytest.mark.parametrize("schema_version", [5, 20, 39])
+def test_wisp_event_from_json_rejects_per_event_schema_version(schema_version: int) -> None:
+    """Live events carry no version; pre-v9 payloads are only accepted via session replay."""
+
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
         "schema_version": schema_version,
@@ -1642,23 +1413,7 @@ def test_wisp_event_from_json_accepts_legacy_schema_versions(schema_version: int
         "ok": True,
     }
 
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == schema_version
-
-
-@pytest.mark.parametrize("schema_version", [None, 1, 2, 3, 4])
-def test_wisp_event_from_json_rejects_unsupported_schema_version(
-    schema_version: int | None,
-) -> None:
-    payload: dict[str, object] = {
-        "type": "rpc.command.finished",
-        "command_id": "cmd-1",
-        "command_type": "prompt",
-        "ok": True,
-    }
-    if schema_version is not None:
-        payload["schema_version"] = schema_version
-
-    with pytest.raises(ValueError, match="Unsupported Wisp event schema_version"):
+    with pytest.raises(ValidationError, match="schema_version"):
         wisp_event_from_json(json.dumps(payload))
 
 
@@ -1959,8 +1714,6 @@ def test_jsonl_subprocess_rpc_transport_times_out_while_writing_handshake(
             frontend_version="0.1.0",
             min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            min_event_schema_version=EVENT_SCHEMA_VERSION,
-            max_event_schema_version=EVENT_SCHEMA_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         )
@@ -1987,22 +1740,19 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 started = {
-    "schema_version": 39,
     "type": "rpc.command.started",
     "command_id": command["id"],
     "command_type": command["type"],
 }
 finished = {
-    "schema_version": 39,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],
@@ -2034,9 +1784,11 @@ print(json.dumps(finished), flush=True)
 
 
 @pytest.mark.process
-def test_jsonl_subprocess_rpc_transport_rejects_wrong_event_schema_version(
+def test_jsonl_subprocess_rpc_transport_rejects_versioned_event_frame(
     tmp_path: Path,
 ) -> None:
+    """A per-event schema_version is a pre-v9 wire shape and must fail closed."""
+
     async def run() -> None:
         script = """
 import json
@@ -2045,10 +1797,9 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2063,7 +1814,7 @@ print(json.dumps({
             [sys.executable, "-c", script],
             cwd=tmp_path,
         )
-        with pytest.raises(RpcProtocolError, match="negotiated version"):
+        with pytest.raises(RpcProtocolError, match="invalid RPC event"):
             await anext(transport.events())
         await transport.close()
 
@@ -2080,10 +1831,9 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2114,7 +1864,6 @@ print(json.dumps({
     "backend_package_version": "0.1.0",
     "min_protocol_version": 7,
     "max_protocol_version": 7,
-    "event_schema_version": 38,
 }), flush=True)
 """
         with pytest.raises(RpcHandshakeError, match="No compatible") as error:
@@ -2144,10 +1893,9 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2179,16 +1927,14 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": "0.1.0",
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
 command = json.loads(sys.stdin.readline())
 print(json.dumps({
-    "schema_version": 39,
     "type": "rpc.command.finished",
     "command_id": command["id"],
     "command_type": command["type"],

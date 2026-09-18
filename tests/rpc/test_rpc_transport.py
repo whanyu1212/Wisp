@@ -11,7 +11,7 @@ import anyio
 import pytest
 
 from wisp.cli.rpc_transport import RpcStdinTransport, read_rpc_stdin_handshake
-from wisp.events import EVENT_SCHEMA_VERSION, ErrorEvent
+from wisp.events import ErrorEvent
 from wisp.rpc import framing as rpc_framing
 from wisp.rpc.commands import (
     ConfigureCommand,
@@ -53,8 +53,6 @@ def _handshake_line() -> bytes:
             frontend_version="0.1.0",
             min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            min_event_schema_version=EVENT_SCHEMA_VERSION,
-            max_event_schema_version=EVENT_SCHEMA_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         ).model_dump_json()

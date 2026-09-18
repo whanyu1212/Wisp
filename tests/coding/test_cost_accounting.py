@@ -526,11 +526,3 @@ def test_cost_events_require_schema_v12_and_round_trip() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    with pytest.raises(ValidationError, match="usage cost requires schema_version 12"):
-        MessageCompleted(
-            schema_version=11,
-            turn=1,
-            content="answer",
-            finish_reason="stop",
-            cost=cost,
-        )

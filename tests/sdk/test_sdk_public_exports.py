@@ -6,7 +6,6 @@ import wisp.rpc as rpc_package
 import wisp.sdk as sdk_package
 from wisp.config import WispConfig
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     KnownWispEvent,
     RpcCommandFinished,
     ToolApprovalRequested,
@@ -135,7 +134,6 @@ def test_documented_sdk_namespaces_import_supported_contracts() -> None:
 
     public_symbols = (
         WispConfig,
-        EVENT_SCHEMA_VERSION,
         KnownWispEvent,
         RpcCommandFinished,
         ToolApprovalRequested,

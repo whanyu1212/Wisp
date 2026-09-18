@@ -12,7 +12,7 @@ from tests.rpc_support import guard_rpc_command_serialization
 from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.events import EVENT_SCHEMA_VERSION, ContextBudget, ContextEstimate, ToolCallSnapshot
+from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
 from wisp.providers.base import Provider
 from wisp.providers.catalog import (
     ModelCatalog,
@@ -56,8 +56,6 @@ _RPC_TEST_HANDSHAKE = (
         frontend_version=__version__,
         min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        min_event_schema_version=EVENT_SCHEMA_VERSION,
-        max_event_schema_version=EVENT_SCHEMA_VERSION,
         supported_capabilities=(),
         required_capabilities=(),
     ).model_dump_json()
@@ -1274,7 +1272,7 @@ def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
         "agent.completed",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == EVENT_SCHEMA_VERSION for record in records)
+    assert all("schema_version" not in record for record in records)
     assert records[0]["type"] == "rpc.command.started"
     assert records[0]["command_id"] == "cmd-1"
     assert records[0]["command_type"] == "prompt"
@@ -1331,7 +1329,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "rpc.commands",
         "rpc.command.finished",
     ]
-    assert all(record["schema_version"] == EVENT_SCHEMA_VERSION for record in records)
+    assert all("schema_version" not in record for record in records)
     report = records[1]
     assert report["command_id"] == "commands-1"
     assert [command["name"] for command in report["commands"]] == [
@@ -1389,7 +1387,7 @@ def test_rpc_mode_reports_active_skill_catalog(tmp_path: Path) -> None:
         "rpc.command.finished",
     ]
     report = records[1]
-    assert report["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in report
     assert report["command_id"] == "skills-1"
     assert report["catalog"] == {
         "entries": [
@@ -1433,7 +1431,7 @@ def test_rpc_mode_reports_mcp_status(tmp_path: Path) -> None:
         "rpc.command.finished",
     ]
     report = records[1]
-    assert report["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in report
     assert report["command_id"] == "mcp-1"
     assert report["status"] == {"servers": []}
     assert records[-1]["command_type"] == "get_mcp_status"
@@ -1469,7 +1467,6 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": EVENT_SCHEMA_VERSION,
             "timestamp": finished[0]["timestamp"],
             "command_id": "stats-1",
             "command_type": "get_session_stats",
@@ -1496,7 +1493,7 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.messages")
     assert report["command_id"] == "messages-1"
-    assert report["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in report
     assert report["session_id"]
     assert report["session_path"]
     assert report["active_leaf_id"]
@@ -1519,7 +1516,6 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
     assert finished == [
         {
             "type": "rpc.command.finished",
-            "schema_version": EVENT_SCHEMA_VERSION,
             "timestamp": finished[0]["timestamp"],
             "command_id": "messages-1",
             "command_type": "get_messages",
@@ -1542,7 +1538,7 @@ def test_rpc_mode_reports_sessions_catalog(tmp_path: Path) -> None:
     records = _jsonl_records(result.stdout)
     report = next(record for record in records if record["type"] == "rpc.sessions")
     assert report["command_id"] == "sessions-1"
-    assert report["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in report
     assert report["selected_session_id"] is None
     assert report["selected_session_path"] is None
     assert len(report["sessions"]) == 1
@@ -1575,14 +1571,14 @@ def test_rpc_mode_select_session_then_reads_messages(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     selected = next(record for record in records if record["type"] == "rpc.session.selected")
-    assert selected["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in selected
     assert selected["command_id"] == "select-1"
     assert selected["session_id"] == session.session_id
     assert selected["session_path"] == str(session.path)
     assert selected["entry_count"] == 4
 
     report = next(record for record in records if record["type"] == "rpc.messages")
-    assert report["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in report
     assert report["session_id"] == session.session_id
     assert [message["content"] for message in report["messages"]] == [
         "first",
@@ -1635,10 +1631,8 @@ def test_rpc_mode_sets_selected_and_explicit_session_names(tmp_path: Path) -> No
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
     name_events = [record for record in records if record["type"] == "rpc.session.name_changed"]
-    assert [event["schema_version"] for event in name_events] == [
-        EVENT_SCHEMA_VERSION,
-        EVENT_SCHEMA_VERSION,
-    ]
+    assert len(name_events) == 2
+    assert all("schema_version" not in event for event in name_events)
     assert name_events[0]["session_id"] == selected_session.session_id
     assert name_events[0]["previous_name"] is None
     assert name_events[0]["name"] == "Roadmap Cleanup"
@@ -1678,7 +1672,7 @@ def test_rpc_mode_clones_selected_session_then_reads_clone(tmp_path: Path) -> No
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert all(record["schema_version"] == EVENT_SCHEMA_VERSION for record in records)
+    assert all("schema_version" not in record for record in records)
     cloned = next(record for record in records if record["type"] == "rpc.session.cloned")
     assert cloned["command_id"] == "clone-1"
     assert cloned["source_session_id"] == source.session_id
@@ -1732,7 +1726,7 @@ def test_rpc_mode_first_message_fork_persists_after_edited_prompt(tmp_path: Path
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert all(record["schema_version"] == EVENT_SCHEMA_VERSION for record in records)
+    assert all("schema_version" not in record for record in records)
     forked = next(record for record in records if record["type"] == "rpc.session.forked")
     assert forked["command_id"] == "fork-1"
     assert forked["source_session_id"] == source.session_id
@@ -1796,7 +1790,7 @@ def test_rpc_mode_pages_navigates_and_resubmits_session_tree_prompt(
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assert all(record["schema_version"] == EVENT_SCHEMA_VERSION for record in records)
+    assert all("schema_version" not in record for record in records)
     tree_reports = [record for record in records if record["type"] == "rpc.session.tree"]
     assert tree_reports[0]["session_id"] is None
     assert tree_reports[0]["session_path"] is None
@@ -1920,7 +1914,7 @@ def test_rpc_mode_unreverts_navigation_after_process_restart(tmp_path: Path) -> 
     unreverted = next(
         record for record in records if record["type"] == "rpc.session.tree.unreverted"
     )
-    assert unreverted["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in unreverted
     assert unreverted["active_leaf_id"] == leaf.id
     report = next(record for record in records if record["type"] == "rpc.messages")
     assert [message["content"] for message in report["messages"]] == [

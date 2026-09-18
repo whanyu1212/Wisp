@@ -980,7 +980,7 @@ def test_provider_summary_rejects_heading_tokens_without_real_sections() -> None
     anyio.run(run)
 
 
-def test_compaction_events_round_trip_on_current_schema_without_summary() -> None:
+def test_compaction_events_round_trip_without_summary() -> None:
     started = CompactionStarted(session_id="session", source_entry_count=4)
     completed = CompactionCompleted(
         session_id="session",
@@ -993,8 +993,6 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         usage=TokenUsage(input_tokens=3, output_tokens=2, total_tokens=5),
     )
 
-    assert started.schema_version == 39
-    assert completed.schema_version == 39
     assert "summary" not in completed.model_dump(mode="json")
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
@@ -1007,61 +1005,28 @@ def test_compaction_events_round_trip_on_current_schema_without_summary() -> Non
         )
 
 
-@pytest.mark.parametrize("version", [5, 6, 7, 8, 9, 10])
-def test_event_parser_accepts_legacy_schemas(version: int) -> None:
+def test_event_parser_rejects_legacy_per_event_schema_version() -> None:
+    """Live parsing fails closed on the pre-v9 ``schema_version`` key."""
+
     payload = {
-        "schema_version": version,
-        "type": "session.saved",
-        "session_id": "session",
-        "path": str(Path("/tmp/session.jsonl")),
-    }
-
-    assert wisp_event_from_json(json.dumps(payload)).schema_version == version
-
-
-def test_event_parser_rejects_non_integer_schema_versions() -> None:
-    with pytest.raises(ValueError, match="Unsupported Wisp event schema_version"):
-        wisp_event_from_dict(
-            {
-                "schema_version": 11.0,
-                "type": "session.saved",
-                "session_id": "session",
-                "path": "/tmp/session.jsonl",
-            }
-        )
-
-
-def test_typed_events_reject_non_integer_schema_versions() -> None:
-    payload = {
-        "schema_version": 11.0,
+        "schema_version": 11,
         "type": "session.saved",
         "session_id": "session",
         "path": "/tmp/session.jsonl",
     }
 
-    with pytest.raises(ValidationError, match="schema_version must be an integer"):
+    with pytest.raises(ValidationError, match="schema_version"):
+        wisp_event_from_dict(payload)
+    with pytest.raises(ValidationError, match="schema_version"):
         SessionSaved(**payload)
-    with pytest.raises(ValidationError, match="schema_version must be an integer"):
+    with pytest.raises(ValidationError, match="schema_version"):
         KnownWispEventAdapter.validate_python(payload)
 
 
-@pytest.mark.parametrize("version", [5, 6, 7])
-def test_compaction_events_require_schema_v8(version: int) -> None:
-    payload = CompactionStarted(
-        schema_version=version,
-        session_id="session",
-        source_entry_count=1,
-    ).model_dump_json()
-
-    with pytest.raises(ValueError, match="require schema_version 8 through 39"):
-        wisp_event_from_json(payload)
-
-
-def test_threshold_compaction_events_require_schema_v10() -> None:
+def test_threshold_compaction_events_round_trip() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
     event = CompactionStarted(
-        schema_version=10,
         session_id="session",
         reason="threshold",
         source_entry_count=4,
@@ -1069,25 +1034,9 @@ def test_threshold_compaction_events_require_schema_v10() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
-    for version in (8, 9):
-        with pytest.raises(
-            ValueError, match="Threshold compaction events require schema_version 10"
-        ):
-            payload = event.model_copy(update={"schema_version": version}).model_dump_json()
-            wisp_event_from_json(payload)
-
-    with pytest.raises(ValidationError, match="requires schema_version 10"):
-        CompactionCompleted(
-            schema_version=9,
-            session_id="session",
-            reason="threshold",
-            outcome="completed",
-            replaced_entry_count=2,
-            retained_entry_count=2,
-        )
 
 
-def test_overflow_compaction_events_require_schema_v11() -> None:
+def test_overflow_compaction_events_validate_retry_metadata() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
     started = CompactionStarted(
@@ -1107,14 +1056,6 @@ def test_overflow_compaction_events_require_schema_v11() -> None:
 
     assert wisp_event_from_json(started.model_dump_json()) == started
     assert wisp_event_from_json(completed.model_dump_json()) == completed
-    with pytest.raises(ValidationError, match="requires schema_version 11"):
-        CompactionStarted(
-            schema_version=10,
-            session_id="session",
-            reason="overflow",
-            source_entry_count=4,
-            trigger_budget=budget,
-        )
     with pytest.raises(ValidationError, match="without retry must explain"):
         CompactionCompleted(
             session_id="session",
@@ -1143,26 +1084,20 @@ def test_overflow_compaction_events_require_schema_v11() -> None:
             retained_entry_count=2,
             error="",
         )
-
-    legacy = CompactionCompleted(
-        schema_version=10,
-        session_id="session",
-        outcome="completed",
-        replaced_entry_count=2,
-        retained_entry_count=2,
-    )
-    assert "will_retry" not in legacy.model_dump(mode="json")
-    payload = legacy.model_dump(mode="json") | {"will_retry": False}
-    with pytest.raises(ValueError, match="retry metadata requires schema_version 11"):
-        wisp_event_from_dict(payload)
+    with pytest.raises(ValidationError, match="only overflow compaction may retry"):
+        CompactionCompleted(
+            session_id="session",
+            outcome="completed",
+            replaced_entry_count=2,
+            retained_entry_count=2,
+            will_retry=True,
+        )
 
 
-@pytest.mark.parametrize("version", [8, 9])
-def test_legacy_compaction_started_events_round_trip(version: int) -> None:
+def test_compaction_started_without_trigger_budget_round_trips() -> None:
     payload = json.dumps(
         {
             "type": "compaction.started",
-            "schema_version": version,
             "timestamp": "2026-07-19T00:00:00Z",
             "session_id": "session",
             "source_entry_count": 4,
@@ -1171,7 +1106,7 @@ def test_legacy_compaction_started_events_round_trip(version: int) -> None:
 
     event = wisp_event_from_json(payload)
 
-    assert "trigger_budget" not in event.model_dump(mode="json")
+    assert event.model_dump(mode="json")["trigger_budget"] is None
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
@@ -1188,14 +1123,6 @@ def test_compaction_started_validates_reason_metadata() -> None:
     with pytest.raises(ValidationError, match="manual compaction must not include"):
         CompactionStarted(
             session_id="session",
-            source_entry_count=4,
-            trigger_budget=budget,
-        )
-    with pytest.raises(ValidationError, match="requires schema_version 10"):
-        CompactionStarted(
-            schema_version=9,
-            session_id="session",
-            reason="threshold",
             source_entry_count=4,
             trigger_budget=budget,
         )

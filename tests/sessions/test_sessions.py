@@ -17,7 +17,6 @@ from pytest import MonkeyPatch
 
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     ContextBudget,
     ContextEstimate,
     ErrorEvent,
@@ -1470,7 +1469,7 @@ def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
         records[3]["id"],
     ]
     assert records[3]["event"]["schema_version"] == 1
-    assert records[3]["event"]["payload"]["schema_version"] == EVENT_SCHEMA_VERSION
+    assert "schema_version" not in records[3]["event"]["payload"]
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
@@ -1894,13 +1893,16 @@ def test_session_reads_public_exclude_none_serialization_as_linear_chain(
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("version", [5, 6])
-def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
+@pytest.mark.parametrize("version", [5, 6, 39])
+def test_session_reads_legacy_versioned_events_only_on_typed_access(
     tmp_path: Path,
     version: int,
 ) -> None:
+    """Events written before live RPC v9 carried a per-event version; it is ignored on read."""
+
     path = tmp_path / f"event-v{version}.jsonl"
-    raw_event = ErrorEvent(schema_version=version, message="historical").model_dump(mode="json")
+    raw_event = ErrorEvent(message="historical").model_dump(mode="json")
+    raw_event["schema_version"] = version
     legacy = {
         "id": f"event-{version}",
         "session_id": "event-session",
@@ -1915,18 +1917,13 @@ def test_session_upgrades_legacy_v5_v6_events_only_on_typed_access(
     typed = session.read_typed_events()
     assert len(typed) == 1
     assert isinstance(typed[0], ErrorEvent)
-    assert typed[0].schema_version == version
     assert typed[0].message == "historical"
+    assert "schema_version" not in typed[0].model_dump()
 
 
-def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path) -> None:
+def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
-    future_schema_version = EVENT_SCHEMA_VERSION + 1
-    raw_event = {
-        "type": "future.event",
-        "schema_version": future_schema_version,
-        "future": True,
-    }
+    raw_event = {"type": "future.event", "future": True}
     legacy = {
         "id": "future-event",
         "session_id": "event-session",
@@ -1938,16 +1935,13 @@ def test_session_retains_future_event_payload_until_typed_access(tmp_path: Path)
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(
-        UnsupportedPersistedEventVersionError,
-        match=f"schema_version {future_schema_version}",
-    ):
+    with pytest.raises(MalformedPersistedEventError, match="Malformed persisted event"):
         session.read_typed_events()
 
 
 def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "malformed-event.jsonl"
-    raw_event = {"type": "error", "message": "missing version"}
+    raw_event = {"type": "error"}
     legacy = {
         "id": "malformed-event",
         "session_id": "event-session",
@@ -1959,7 +1953,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
-    with pytest.raises(MalformedPersistedEventError, match="must be an integer"):
+    with pytest.raises(MalformedPersistedEventError, match="Malformed persisted event"):
         session.read_typed_events()
 
 
