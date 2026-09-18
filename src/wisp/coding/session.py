@@ -44,14 +44,18 @@ from wisp.coding.compaction import (
     CompactionSummaryError,
     ManualCompactionPlan,
     NothingToCompactError,
+    exceeds_provider_auto_compaction_limit,
+    matches_provider_suffix,
     plan_manual_compaction,
     plan_preflight_compaction,
+    provider_auto_compaction_excess_tokens,
     should_auto_compact,
     summarize_manual_compaction,
     truncate_active_turn_tool_results,
 )
 from wisp.coding.configuration import CodingSessionConfiguration
 from wisp.coding.costs import CostEstimator
+from wisp.coding.persistence import PendingSessionEntry, RunPersistence
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
@@ -88,12 +92,9 @@ from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.entries import (
     CompactionSessionEntry,
-    EventSessionEntry,
     MessageSessionEntry,
-    PersistedEventEnvelope,
     SessionEntry,
     ToolResultPresentationSnapshot,
-    is_session_tree_entry,
 )
 from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -119,63 +120,6 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "error",
     }
 )
-
-
-@dataclass(slots=True)
-class _RunPersistence:
-    """Advance one run only along the session branch it has observed."""
-
-    session: JsonlSession
-    expected_active_leaf_id: str | None
-    operation_id: str | None
-
-    async def append_entry(self, entry: SessionEntry) -> SessionEntry:
-        persisted = await self.session.append_entry_if_current(
-            entry,
-            expected_active_leaf_id=self.expected_active_leaf_id,
-        )
-        if is_session_tree_entry(persisted):
-            self.expected_active_leaf_id = persisted.id
-        return persisted
-
-    async def append_message(self, message: Message) -> SessionEntry:
-        persisted = await self.session.append_message_if_current(
-            message,
-            expected_active_leaf_id=self.expected_active_leaf_id,
-            operation_id=self.operation_id,
-        )
-        self.expected_active_leaf_id = persisted.id
-        return persisted
-
-    async def append_event(self, event: WispEvent) -> SessionEntry:
-        persisted = await self.append_entry(
-            EventSessionEntry(
-                session_id=self.session.session_id,
-                event=PersistedEventEnvelope(payload=event.model_dump(mode="json")),
-                operation_id=self.operation_id,
-            )
-        )
-        return persisted
-
-    async def append_compaction(
-        self,
-        entry: CompactionSessionEntry,
-        *,
-        expected_context_entry_ids: Sequence[str],
-    ) -> SessionEntry:
-        persisted = await self.session.append_compaction_entry_if_current(
-            entry,
-            expected_context_entry_ids=expected_context_entry_ids,
-            expected_active_leaf_id=self.expected_active_leaf_id,
-        )
-        self.expected_active_leaf_id = persisted.id
-        return persisted
-
-
-@dataclass(frozen=True, slots=True)
-class _PendingSessionEntry:
-    persistence: _RunPersistence
-    entry: SessionEntry
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +194,7 @@ class CodingSession:
         validate_optional_non_negative_integer(max_tool_iterations, field="max_tool_iterations")
         self.max_tool_iterations = max_tool_iterations
         self.mode = mode
-        self._pending_entries: deque[_PendingSessionEntry] = deque()
+        self._pending_entries: deque[PendingSessionEntry] = deque()
         self._pending_flush_lock = anyio.Lock()
         self._operation_lock = anyio.Semaphore(1)
         self._history_refresh_session_ids: set[str] = set()
@@ -258,7 +202,7 @@ class CodingSession:
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
-        self._active_persistence: _RunPersistence | None = None
+        self._active_persistence: RunPersistence | None = None
         self._last_session_id: str | None = None
         self._accepting_queued_messages = False
         self._retained_queues: dict[str, _RetainedQueueState] = {}
@@ -552,7 +496,7 @@ class CodingSession:
         if snapshot.entry_count or recover_history:
             history = snapshot.replay.messages
             self._history_refresh_session_ids.discard(session.session_id)
-        persistence = _RunPersistence(
+        persistence = RunPersistence(
             session=session,
             expected_active_leaf_id=snapshot.active_leaf_id,
             operation_id=operation_id,
@@ -717,7 +661,7 @@ class CodingSession:
                         (*prompt_messages, *self._conversation_history(active_history))
                     )
             remaining_budget = self._harness_context_budget(harness)
-            if self._exceeds_provider_auto_compaction_limit(
+            if exceeds_provider_auto_compaction_limit(
                 remaining_budget
             ) and self._recover_via_tool_result_truncation(harness, remaining_budget):
                 # Recovers a session resumed after a crash mid-turn: the crashed
@@ -727,7 +671,7 @@ class CodingSession:
                 # compacted away, so it would otherwise re-trigger this same
                 # overflow on every future prompt in the session, forever.
                 remaining_budget = self._harness_context_budget(harness)
-            if self._exceeds_provider_auto_compaction_limit(remaining_budget):
+            if exceeds_provider_auto_compaction_limit(remaining_budget):
                 error_message = (
                     "Active prompt exceeds the provider auto-compaction limit "
                     "after compacting all eligible history"
@@ -799,7 +743,7 @@ class CodingSession:
                             (*prompt_messages, *self._conversation_history(active_history))
                         )
                     remaining_budget = self._harness_context_budget(harness)
-                    if self._exceeds_provider_auto_compaction_limit(remaining_budget):
+                    if exceeds_provider_auto_compaction_limit(remaining_budget):
                         error_message = (
                             "Active prompt and steering exceed the provider "
                             "auto-compaction limit after compacting all eligible history"
@@ -830,56 +774,6 @@ class CodingSession:
         completed_turn_had_tool_calls = False
         queue_batch_started_new_turn = False
         active_loop_turn = False
-
-        def matches_provider_suffix(messages: Sequence[Message], suffix: Sequence[Message]) -> bool:
-            """Compare provider-visible fields without persistence-only metadata."""
-
-            if len(messages) < len(suffix):
-                return False
-            for persisted, live in zip(messages[-len(suffix) :], suffix, strict=True):
-                persisted_calls = (
-                    tuple(
-                        (
-                            tool_call.call_id,
-                            tool_call.name,
-                            dict(tool_call.arguments),
-                            tool_call.parse_error,
-                        )
-                        for tool_call in persisted.tool_calls
-                    )
-                    if persisted.tool_calls is not None
-                    else None
-                )
-                live_calls = (
-                    tuple(
-                        (
-                            tool_call.call_id,
-                            tool_call.name,
-                            dict(tool_call.arguments),
-                            tool_call.parse_error,
-                        )
-                        for tool_call in live.tool_calls
-                    )
-                    if live.tool_calls is not None
-                    else None
-                )
-                if (
-                    persisted.role,
-                    persisted.content,
-                    persisted.tool_call_id,
-                    persisted.tool_name,
-                    persisted_calls,
-                    persisted.is_error,
-                ) != (
-                    live.role,
-                    live.content,
-                    live.tool_call_id,
-                    live.tool_name,
-                    live_calls,
-                    live.is_error,
-                ):
-                    return False
-            return True
 
         async def replacement_after_compaction(
             continuation_messages: Sequence[Message],
@@ -959,8 +853,8 @@ class CodingSession:
                     harness,
                     active_from=context.active_from,
                 )
-                if self._exceeds_provider_auto_compaction_limit(remaining_budget):
-                    excess_tokens = self._provider_auto_compaction_excess_tokens(remaining_budget)
+                if exceeds_provider_auto_compaction_limit(remaining_budget):
+                    excess_tokens = provider_auto_compaction_excess_tokens(remaining_budget)
                     truncated = (
                         truncate_active_turn_tool_results(
                             harness.messages,
@@ -1268,14 +1162,14 @@ class CodingSession:
 
         async with self._operation_lock:
             self._operation_active = True
-            self._active_persistence = _RunPersistence(
+            self._active_persistence = RunPersistence(
                 session=session,
                 expected_active_leaf_id=session.read_active_leaf_id(),
                 operation_id=None,
             )
             try:
                 replay = await self._prepare_compaction_replay(session)
-                self._active_persistence = _RunPersistence(
+                self._active_persistence = RunPersistence(
                     session=session,
                     expected_active_leaf_id=replay.active_leaf_id,
                     operation_id=None,
@@ -1294,27 +1188,6 @@ class CodingSession:
                 self._active_persistence = None
                 self._operation_active = False
 
-    @staticmethod
-    def _exceeds_provider_auto_compaction_limit(budget: ContextBudget) -> bool:
-        return (
-            budget.context_window is not None and budget.reserve_tokens >= budget.context_window
-        ) or should_auto_compact(budget, enabled=True)
-
-    @staticmethod
-    def _provider_auto_compaction_excess_tokens(budget: ContextBudget) -> int | None:
-        """Return how far over the provider's auto-compaction limit ``budget`` is.
-
-        Returns ``None`` when the overage cannot be a truncatable token excess — a
-        ``reserve_tokens >= context_window`` configuration is unfixable by shrinking
-        message content, so the caller must not attempt truncation recovery for it.
-        """
-
-        if budget.context_window is None or budget.reserve_tokens >= budget.context_window:
-            return None
-        tokens = budget.effective_tokens or 0
-        excess = tokens - (budget.context_window - budget.reserve_tokens)
-        return excess if excess > 0 else None
-
     def _recover_via_tool_result_truncation(
         self, harness: AgentHarness, budget: ContextBudget
     ) -> bool:
@@ -1329,7 +1202,7 @@ class CodingSession:
         transcript; the caller re-checks the budget afterward regardless.
         """
 
-        excess_tokens = self._provider_auto_compaction_excess_tokens(budget)
+        excess_tokens = provider_auto_compaction_excess_tokens(budget)
         if excess_tokens is None:
             return False
         # Reclaim a margin beyond the bare excess so one truncation pass is enough
@@ -1977,12 +1850,12 @@ class CodingSession:
         )
         persistence = self._active_persistence
         if persistence is None or persistence.session.session_id != session.session_id:
-            persistence = _RunPersistence(
+            persistence = RunPersistence(
                 session=session,
                 expected_active_leaf_id=session.read_active_leaf_id(),
                 operation_id=operation_id,
             )
-        self._pending_entries.append(_PendingSessionEntry(persistence=persistence, entry=entry))
+        self._pending_entries.append(PendingSessionEntry(persistence=persistence, entry=entry))
         return entry.id
 
     async def _repair_and_flush(
