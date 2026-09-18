@@ -279,9 +279,8 @@ transport.
 
 | Name | Contract |
 |---|---|
-| `WispEvent` | Frozen Pydantic base model with `type` and `schema_version`. Unknown fields are rejected. |
+| `WispEvent` | Frozen Pydantic base model with `type` and `timestamp`. Unknown fields are rejected. |
 | `KnownWispEvent` | Discriminated union of every event model understood by this version. |
-| `EVENT_SCHEMA_VERSION` | Schema version emitted by the installed package. |
 | `wisp_event_from_json(line)` | Validate one JSON event string and return `KnownWispEvent`. |
 | `wisp_event_from_dict(data)` | Validate one event dictionary and return `KnownWispEvent`. |
 

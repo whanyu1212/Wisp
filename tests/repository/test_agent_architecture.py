@@ -310,6 +310,23 @@ def test_legacy_agent_compatibility_exports_are_removed() -> None:
     assert "Agent" not in agent_loop.__all__
 
 
+def test_events_carry_no_per_event_schema_version() -> None:
+    """The live RPC protocol bundle is the single event contract; do not reintroduce a counter."""
+
+    import wisp.events as events
+    from wisp.events import WispEvent
+
+    assert "schema_version" not in WispEvent.model_fields
+    for name in dir(events):
+        member = getattr(events, name)
+        if isinstance(member, type) and issubclass(member, WispEvent):
+            assert "schema_version" not in member.model_fields, name
+    assert not hasattr(events, "EVENT_SCHEMA_VERSION")
+    assert not any(name.endswith("_SCHEMA_VERSION") for name in dir(events)), (
+        "per-event schema version constants were removed with live RPC v9"
+    )
+
+
 def test_agent_loop_package_exports_public_contracts() -> None:
     from wisp.agent import loop
     from wisp.agent.loop.config import AgentLoopConfig, CancellationToken, UsageCostEstimator

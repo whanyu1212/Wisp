@@ -331,7 +331,18 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v39 — current
+## Live RPC protocol v9 — current
+
+- Events no longer carry a per-event `schema_version`. The live RPC protocol bundle under
+  `schemas/live-rpc/` is the single compatibility contract: additive event changes regenerate the
+  current bundle in place, and breaking changes bump the protocol version. The handshake no longer
+  exchanges `event_schema_version`, and the `event_schema_version_mismatch` rejection code is gone.
+- Live JSONL-RPC now negotiates protocol v9. Published v1–v8 bundles remain immutable. Persisted
+  sessions written by earlier releases still load: the session reader drops a legacy
+  `schema_version` key from event payloads before typed validation.
+- Frontends speaking protocol v8 or earlier are rejected with `protocol_version_mismatch`.
+
+## Schema v39
 
 - Added nullable `message_entry_id` to `agent.started`, `message.completed`,
   `queue.message.injected`, `tool.execution.ended`, and `tool.result`. The coding session
