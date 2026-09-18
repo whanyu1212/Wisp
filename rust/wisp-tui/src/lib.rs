@@ -125,8 +125,8 @@ use wisp_protocol::events::WispCurrentLiveEventOutput;
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 
 use wisp_protocol::{
-    EVENT_SCHEMA_VERSION, HANDSHAKE_FRAME_BYTES, LIVE_RPC_PROTOCOL_VERSION,
-    MAX_APPLICATION_FRAME_BYTES, ProtocolDecodeError,
+    HANDSHAKE_FRAME_BYTES, LIVE_RPC_PROTOCOL_VERSION, MAX_APPLICATION_FRAME_BYTES,
+    ProtocolDecodeError,
 };
 
 const WRITER_CHANNEL_CAPACITY: usize = 1;
@@ -191,8 +191,8 @@ pub enum Error {
     FrontendVersionMismatch { expected: String, frontend: String },
     #[error("backend package version {actual:?} does not match required version {expected:?}")]
     BackendVersionMismatch { expected: String, actual: String },
-    #[error("backend selected unsupported RPC v{protocol}/event v{events}")]
-    ContractMismatch { protocol: u32, events: u32 },
+    #[error("backend selected unsupported RPC protocol v{protocol}")]
+    ContractMismatch { protocol: u32 },
     #[error("RPC writer stopped unexpectedly")]
     WriterStopped,
     #[error("RPC writer admission stalled for 5 seconds")]
@@ -3918,11 +3918,11 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     actual: actual_version,
                 });
             }
-            let (protocol, events, max_client_frame, _max_server_frame) = response
+            let (protocol, max_client_frame, _max_server_frame) = response
                 .accepted_contract()
                 .expect("non-rejected validated handshake must be accepted");
-            if protocol != LIVE_RPC_PROTOCOL_VERSION || events != EVENT_SCHEMA_VERSION {
-                return Err(Error::ContractMismatch { protocol, events });
+            if protocol != LIVE_RPC_PROTOCOL_VERSION {
+                return Err(Error::ContractMismatch { protocol });
             }
 
             let theme_preferences = ThemePreferences::from_environment();
@@ -3947,7 +3947,6 @@ async fn run(cli: Cli) -> Result<(), Error> {
             let connection = ConnectionInfo {
                 backend_version: actual_version,
                 protocol_version: protocol,
-                event_schema_version: events,
             };
             let mut live_ui = LiveUi {
                 bindings,
@@ -4503,7 +4502,6 @@ mod tests {
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
             "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "event_schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
@@ -4544,7 +4542,6 @@ mod tests {
             &ConnectionInfo {
                 backend_version: "test".into(),
                 protocol_version: 6,
-                event_schema_version: 37,
             },
         )
         .unwrap();
@@ -4804,7 +4801,6 @@ mod tests {
     fn shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -4816,7 +4812,6 @@ mod tests {
     fn shutdown_started_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.started",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown"
@@ -4826,7 +4821,6 @@ mod tests {
     fn failed_shutdown_event(command_id: &str) -> serde_json::Value {
         json!({
             "type": "rpc.command.finished",
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "command_id": command_id,
             "command_type": "shutdown",
@@ -4904,7 +4898,6 @@ mod tests {
         ));
         let event = json!({
             "type": "tool.result", "message_entry_id": null,
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
             "timestamp": "2026-01-02T03:04:05Z",
             "call_id": "call-large",
             "name": "bash",
@@ -6106,7 +6099,6 @@ mod tests {
             .send(QueuedEvent {
                 event: BackendEvent::from_live(&parsed_event(json!({
                     "type": "message.delta",
-                    "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",
@@ -6137,7 +6129,6 @@ mod tests {
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
                     protocol_version: 3,
-                    event_schema_version: 35,
                 },
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -7085,7 +7076,6 @@ mod tests {
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
                     protocol_version: 3,
-                    event_schema_version: 35,
                 },
             )
             .unwrap();
@@ -7120,7 +7110,6 @@ mod tests {
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
                     protocol_version: 3,
-                    event_schema_version: 35,
                 },
             )
             .unwrap();
@@ -7173,7 +7162,6 @@ mod tests {
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
             protocol_version: 3,
-            event_schema_version: 35,
         };
         live_ui.draw(&mut terminal, &connection).unwrap();
         live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-2".into();
@@ -8151,7 +8139,6 @@ mod tests {
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
             protocol_version: LIVE_RPC_PROTOCOL_VERSION,
-            event_schema_version: EVENT_SCHEMA_VERSION,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         live_ui.draw(&mut terminal, &connection).unwrap();
@@ -8211,7 +8198,6 @@ mod tests {
             .dispatch(
                 UiAction::BackendEvent(projected_event(json!({
                     "type": "message.delta",
-                    "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION,
                     "timestamp": "2026-01-02T03:04:05Z",
                     "turn": 1,
                     "role": "assistant",

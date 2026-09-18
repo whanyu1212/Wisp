@@ -16,7 +16,6 @@ from pydantic import ValidationError
 from wisp import __version__
 from wisp.agent.mode import AgentMode
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     KnownWispEvent,
     QueueKind,
     QueueMode,
@@ -572,7 +571,6 @@ class JsonlSubprocessRpcTransport:
             max_client_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
             max_server_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
         )
-        self._event_schema_version = request.max_event_schema_version
         self._stdout_buffer = bytearray()
         self._close_lock = anyio.Lock()
         self._closed = False
@@ -607,8 +605,6 @@ class JsonlSubprocessRpcTransport:
             frontend_version=__version__,
             min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            min_event_schema_version=EVENT_SCHEMA_VERSION,
-            max_event_schema_version=EVENT_SCHEMA_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         )
@@ -700,14 +696,10 @@ class JsonlSubprocessRpcTransport:
                 if not frame:
                     raise RpcProtocolError("Backend emitted an empty RPC event frame")
                 try:
-                    payload = decode_rpc_object(
+                    decode_rpc_object(
                         frame,
                         max_frame_bytes=self._limits.max_server_frame_bytes,
                     )
-                    if payload.get("schema_version") != self._event_schema_version:
-                        raise RpcProtocolError(
-                            "Backend event schema version does not match the negotiated version"
-                        )
                     yield wisp_event_from_json(frame.decode("utf-8"))
                 except RpcProtocolError:
                     raise
@@ -765,7 +757,6 @@ class JsonlSubprocessRpcTransport:
         except ValueError as exc:
             raise RpcHandshakeError(str(exc)) from exc
         self._limits = response.limits
-        self._event_schema_version = response.event_schema_version
 
 
 def _default_command_id(prefix: str) -> str:

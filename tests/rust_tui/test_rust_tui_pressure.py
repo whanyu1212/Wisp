@@ -26,7 +26,6 @@ import time
 from pathlib import Path
 
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     AgentCompleted,
     AgentStarted,
     MessageCompleted,
@@ -68,7 +67,6 @@ print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
     "protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-    "event_schema_version": EVENT_SCHEMA_VERSION,
     "min_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
     "max_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
     "capabilities": [],

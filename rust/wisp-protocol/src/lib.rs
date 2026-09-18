@@ -15,12 +15,13 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v8 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v8/manifest.json");
+/// The canonical manifest embedded alongside the generated live RPC v9 models.
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v9/manifest.json");
 /// The only live RPC protocol version implemented by these models.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 8;
-/// The current Wisp event schema version.
-pub const EVENT_SCHEMA_VERSION: u32 = 39;
+///
+/// Events carry no separate schema version; the protocol version is the single
+/// compatibility contract negotiated during the handshake.
+pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 9;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -154,22 +155,22 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v8/client-handshake.schema.json"
+        "../../../schemas/live-rpc/v9/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v8/server-handshake.schema.json"
+        "../../../schemas/live-rpc/v9/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v8/commands.schema.json"
+        "../../../schemas/live-rpc/v9/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v8/events.schema.json"
+        "../../../schemas/live-rpc/v9/events.schema.json"
     ))
 });
 
@@ -431,7 +432,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v8/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v9/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -448,8 +449,6 @@ pub mod handshake_request {
                 "frontend_version": frontend_version,
                 "min_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
                 "max_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
-                "min_event_schema_version": super::EVENT_SCHEMA_VERSION,
-                "max_event_schema_version": super::EVENT_SCHEMA_VERSION,
                 "supported_capabilities": [],
                 "required_capabilities": []
             }))
@@ -466,7 +465,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v8/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v9/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -502,13 +501,12 @@ pub mod handshake_response {
             })
         }
 
-        /// Return selected protocol, event schema, and directional limits on acceptance.
-        pub fn accepted_contract(&self) -> Option<(u32, u32, usize, usize)> {
+        /// Return the selected protocol version and directional limits on acceptance.
+        pub fn accepted_contract(&self) -> Option<(u32, usize, usize)> {
             let value = self.wire_value();
             (value["type"] == "rpc.handshake.accepted").then(|| {
                 (
                     value["protocol_version"].as_u64().unwrap() as u32,
-                    value["event_schema_version"].as_u64().unwrap() as u32,
                     value["limits"]["max_client_frame_bytes"].as_u64().unwrap() as usize,
                     value["limits"]["max_server_frame_bytes"].as_u64().unwrap() as usize,
                 )
@@ -526,7 +524,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v8/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v9/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -1095,7 +1093,7 @@ pub mod events {
         SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v8/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/v9/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -1315,13 +1313,6 @@ pub mod events {
                 .as_str()
                 .expect("validated event has a discriminator")
                 .to_owned()
-        }
-
-        /// Return the validated event schema version carried by this event.
-        pub fn schema_version(&self) -> u32 {
-            self.wire_value()["schema_version"]
-                .as_u64()
-                .expect("validated event has a schema version") as u32
         }
 
         /// Project command discovery for one exact request.

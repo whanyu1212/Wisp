@@ -411,10 +411,9 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -721,10 +720,9 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1086,10 +1084,9 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 8,
-    "event_schema_version": 39,
-    "min_protocol_version": 8,
-    "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1481,8 +1478,8 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 8, "event_schema_version": 39,
-    "min_protocol_version": 8, "max_protocol_version": 8,
+    "protocol_version": 9,
+    "min_protocol_version": 9, "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -2126,7 +2123,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from wisp.events import (
-    EVENT_SCHEMA_VERSION, MessageStarted, MessageCompleted, RpcCommandFinished,
+    MessageStarted, MessageCompleted, RpcCommandFinished,
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
     RpcMessagesReported, RpcMessageSnapshot,
 )
@@ -2140,7 +2137,7 @@ def finish(command):
 request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type":"rpc.handshake.accepted", "backend_package_version":request["frontend_version"],
-    "protocol_version":PROTOCOL_VERSION, "event_schema_version":EVENT_SCHEMA_VERSION,
+    "protocol_version":PROTOCOL_VERSION,
     "min_protocol_version":PROTOCOL_VERSION, "max_protocol_version":PROTOCOL_VERSION,
     "capabilities":[],
     "limits":{"max_client_frame_bytes":67108864,"max_server_frame_bytes":67108864},

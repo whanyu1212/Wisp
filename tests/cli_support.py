@@ -22,7 +22,6 @@ from wisp.cli import rpc as cli_rpc_module
 from wisp.cli.tools import _print_mode_tool_approval_policy, _print_mode_tool_registry
 from wisp.coding import CodingSession
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolResultReady,
@@ -61,8 +60,6 @@ _RPC_TEST_HANDSHAKE = (
         frontend_version=__version__,
         min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        min_event_schema_version=EVENT_SCHEMA_VERSION,
-        max_event_schema_version=EVENT_SCHEMA_VERSION,
         supported_capabilities=(),
         required_capabilities=(),
     ).model_dump_json()

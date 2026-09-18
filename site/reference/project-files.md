@@ -7,7 +7,7 @@ protection policy. It does not accept client paths, queries, or policy overrides
 
 The report contains `command_id`, a process-local policy `generation`, `entries`
 with relative POSIX `path` and `kind` (`file` or `directory`), and `truncated`.
-Standard event version and timestamp fields also apply. No absolute root,
+The standard event `timestamp` field also applies. No absolute root,
 credential paths, denied-entry counts, file contents, or raw filesystem errors
 are returned. Paths are advisory names; later tool operations still perform their
 own access checks. Names that cannot be represented safely in UTF-8 or contain
@@ -64,5 +64,5 @@ a subsequent invalidation tells clients to discard it.
 The Rust frontend uses the RPC capability to request bounded snapshots for its file picker.
 Agent grep/find behavior and authorization are unchanged.
 
-The contract uses live protocol v8 and event schema v39. Historical v1–v7 protocol
-bundles stay immutable, and supported persisted event schemas remain readable.
+The contract uses live protocol v9. Historical v1–v8 protocol bundles stay immutable, and
+persisted sessions written by earlier releases remain readable.

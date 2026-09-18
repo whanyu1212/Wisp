@@ -79,6 +79,13 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   avoid interface-specific copies of runtime policy.
 - Preserve append-only JSONL session semantics and backward-compatible event parsing when changing
   persisted schemas.
+- `WispEvent` payloads carry no per-event version. The live RPC protocol bundle under
+  `schemas/live-rpc/` is the single event compatibility contract: an additive event change (new
+  type, new optional field, new enum value) regenerates the current `vN/` bundle in place; a breaking
+  change (remove/rename/retype a field or type, change requiredness or lifecycle ordering) bumps
+  `LIVE_RPC_PROTOCOL_VERSION`, pins the previous manifest hash in `rpc/protocol_schema.py`, and
+  generates the next bundle. Persisted events written before v9 still carry `schema_version`; the
+  session reader drops it on typed access. Do not reintroduce a per-event counter.
 
 ### Finding agent code
 

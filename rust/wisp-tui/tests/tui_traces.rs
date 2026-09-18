@@ -243,18 +243,15 @@ fn trace_schema_enforces_queue_events_but_allows_unknown_events() {
     for event in [
         serde_json::json!({
             "type": "queue.updated",
-            "schema_version": 34,
             "steering_mode": "invalid",
         }),
         serde_json::json!({
             "type": "queue.items.removed",
-            "schema_version": 34,
             "command_id": "pop-1",
             "operation": "pop",
         }),
         serde_json::json!({
             "type": "queue.message.injected", "message_entry_id": null,
-            "schema_version": 34,
             "kind": "steering",
             "content": "expanded",
             "skill_invocation": {"original_content": "/skill request"},

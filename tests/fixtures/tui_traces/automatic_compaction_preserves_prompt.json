@@ -22,7 +22,6 @@
       "type": "rpc.event",
       "event": {
         "type": "compaction.started",
-        "schema_version": 39,
         "timestamp": "2026-09-11T00:00:00Z",
         "session_id": "session-1",
         "reason": "threshold",
@@ -53,7 +52,6 @@
       "type": "rpc.event",
       "event": {
         "type": "compaction.completed",
-        "schema_version": 39,
         "timestamp": "2026-09-11T00:00:00Z",
         "session_id": "session-1",
         "reason": "threshold",
@@ -79,7 +77,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.updated",
-        "schema_version": 34,
         "steering": [
           "steer now"
         ],
@@ -91,7 +88,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.message.injected",
-        "schema_version": 34,
         "kind": "steering",
         "content": "steer now"
       },

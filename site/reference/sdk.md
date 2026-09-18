@@ -13,7 +13,7 @@ For lifecycle guidance and complete examples, start with the [Python SDK guide](
 |---|---|
 | `wisp.sdk` | In-process controller and startup options |
 | `wisp.rpc` | High-level controller, transport protocol, subprocess transport, and typed command models |
-| `wisp.events` | Typed event models, event schema constant, and JSON/dict parsers |
+| `wisp.events` | Typed event models and JSON/dict parsers |
 | `wisp.config` | Immutable runtime configuration |
 | `wisp.sessions` | JSONL session store, entries, replay models, and typed session errors |
 | `wisp.runtime` | Static extension/runtime contracts and registries |
@@ -279,9 +279,8 @@ transport.
 
 | Name | Contract |
 |---|---|
-| `WispEvent` | Frozen Pydantic base model with `type` and `schema_version`. Unknown fields are rejected. |
+| `WispEvent` | Frozen Pydantic base model with `type` and `timestamp`. Unknown fields are rejected. |
 | `KnownWispEvent` | Discriminated union of every event model understood by this version. |
-| `EVENT_SCHEMA_VERSION` | Schema version emitted by the installed package. |
 | `wisp_event_from_json(line)` | Validate one JSON event string and return `KnownWispEvent`. |
 | `wisp_event_from_dict(data)` | Validate one event dictionary and return `KnownWispEvent`. |
 

@@ -178,8 +178,8 @@ impl KeyHelp {
         if !self.update_guidance && matches!(self.owner, Owner::Composer) {
             if let Some(info) = connection {
                 lines.push(Line::raw(format!(
-                    "Backend {} · rpc v{} / events v{}",
-                    info.backend_version, info.protocol_version, info.event_schema_version
+                    "Backend {} · rpc v{}",
+                    info.backend_version, info.protocol_version
                 )));
             }
         }

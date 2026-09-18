@@ -45,7 +45,6 @@ const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 pub struct ConnectionInfo {
     pub backend_version: String,
     pub protocol_version: u32,
-    pub event_schema_version: u32,
 }
 
 pub fn decision_context_visible(area: Rect) -> bool {
@@ -2517,7 +2516,6 @@ mod tests {
         ConnectionInfo {
             backend_version: "0.9.0".into(),
             protocol_version: 3,
-            event_schema_version: 35,
         }
     }
 
@@ -4243,7 +4241,7 @@ mod tests {
         for chunk in chunks {
             let event = wisp_protocol::events::deserialize(json!({
                 "type": "message.delta", "turn": 1, "delta": chunk,
-                "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "timestamp": "2026-09-13T00:00:00Z",
+                "timestamp": "2026-09-13T00:00:00Z",
                 "role": "assistant", "content_index": 0,
                 "content_kind": "text"
             }))
@@ -4281,7 +4279,7 @@ mod tests {
 
         let completed = wisp_protocol::events::deserialize(json!({
             "type": "message.completed", "message_entry_id": null, "turn": 1, "content": source,
-            "schema_version": wisp_protocol::EVENT_SCHEMA_VERSION, "timestamp": "2026-09-13T00:00:00Z",
+            "timestamp": "2026-09-13T00:00:00Z",
             "role": "assistant", "tool_calls": [], "usage": null,
             "finish_reason": "stop", "response_id": null, "cost": null,
             "context_observation": null

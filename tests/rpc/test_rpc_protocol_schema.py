@@ -16,7 +16,6 @@ from pydantic import ValidationError
 import wisp.rpc.protocol_schema as protocol_schema
 from tests.paths import FIXTURES_DIR, REPO_ROOT
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     BillableTokenUsage,
     CompactionCompleted,
     CompactionStarted,
@@ -102,7 +101,7 @@ def test_protocol_artifact_generation_is_deterministic_and_hashed() -> None:
 
     manifest = json.loads(first["manifest.json"])
     assert manifest["live_protocol_version"] == LIVE_RPC_PROTOCOL_VERSION
-    assert manifest["event_schema_version"] == EVENT_SCHEMA_VERSION
+    assert "event_schema_version" not in manifest
     assert manifest["fixed_handshake_frame_bytes"] == MAX_HANDSHAKE_FRAME_BYTES
     assert manifest["maximum_application_frame_bytes"] == MAX_LIVE_RPC_FRAME_BYTES
     for filename in _SCHEMA_FILES:
@@ -129,13 +128,14 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
         "missing protocol schema directory: v5",
         "missing protocol schema directory: v6",
         "missing protocol schema directory: v7",
+        "missing protocol schema directory: v8",
     )
 
     (directory / "commands.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("commands.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "protocol schema hash mismatch: v8/commands.schema.json",
-        "protocol schema dialect mismatch: v8/commands.schema.json",
+        "protocol schema hash mismatch: v9/commands.schema.json",
+        "protocol schema dialect mismatch: v9/commands.schema.json",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
@@ -143,13 +143,14 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
         "missing protocol schema directory: v5",
         "missing protocol schema directory: v6",
         "missing protocol schema directory: v7",
+        "missing protocol schema directory: v8",
     )
 
     write_protocol_artifacts(directory)
     (directory / "obsolete.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("obsolete.schema.json",)
     assert invalid_protocol_history(tmp_path) == (
-        "unexpected protocol artifact set: v8",
+        "unexpected protocol artifact set: v9",
         "missing protocol schema directory: v1",
         "missing protocol schema directory: v2",
         "missing protocol schema directory: v3",
@@ -157,6 +158,7 @@ def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_pat
         "missing protocol schema directory: v5",
         "missing protocol schema directory: v6",
         "missing protocol schema directory: v7",
+        "missing protocol schema directory: v8",
     )
 
 
@@ -176,7 +178,7 @@ def test_historical_protocol_manifest_is_pinned_outside_its_version_directory(
     ) == ("missing protocol schema directory: v2",)
 
     manifest = json.loads(manifest_content)
-    manifest["event_schema_version"] = EVENT_SCHEMA_VERSION + 1
+    manifest["maximum_application_frame_bytes"] += 1
     manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
     assert invalid_protocol_history(
         tmp_path,
@@ -206,6 +208,7 @@ def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
         "missing protocol schema directory: v6",
         "missing protocol schema directory: v7",
         "missing protocol schema directory: v8",
+        "missing protocol schema directory: v9",
     )
 
     monkeypatch.setattr(
@@ -244,7 +247,7 @@ def test_git_history_check_reports_modified_committed_version_artifacts(
 def test_protocol_version_directories_cannot_be_cross_written(tmp_path: Path) -> None:
     assert protocol_schema_directory(tmp_path, protocol_version=3) == tmp_path / "v3"
 
-    with pytest.raises(RuntimeError, match="refusing to write protocol v8 into v2"):
+    with pytest.raises(RuntimeError, match="refusing to write protocol v9 into v2"):
         write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=2))
 
 
@@ -282,16 +285,15 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
         "frontend_version": "0.1.0",
         "min_protocol_version": 1,
         "max_protocol_version": 1,
-        "min_event_schema_version": EVENT_SCHEMA_VERSION,
-        "max_event_schema_version": EVENT_SCHEMA_VERSION,
         "supported_capabilities": ["streaming.text"],
         "required_capabilities": ["streaming.text"],
     }
 
     assert client.is_valid(client_payload)
     assert not client.is_valid(
-        {key: value for key, value in client_payload.items() if key != "max_event_schema_version"}
+        {key: value for key, value in client_payload.items() if key != "max_protocol_version"}
     )
+    assert not client.is_valid({**client_payload, "max_event_schema_version": 39})
     assert not client.is_valid({**client_payload, "frontend_name": "wisp-rust-tui\n"})
     assert not client.is_valid({**client_payload, "supported_capabilities": [1]})
     assert not client.is_valid({**client_payload, "supported_capabilities": ["streaming.text\n"]})
@@ -303,11 +305,6 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
             "minimum_property": "min_protocol_version",
         },
         {
-            "kind": "ordered-range",
-            "maximum_property": "max_event_schema_version",
-            "minimum_property": "min_event_schema_version",
-        },
-        {
             "kind": "array-subset",
             "subset_property": "required_capabilities",
             "superset_property": "supported_capabilities",
@@ -317,7 +314,6 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
     hello = RpcHandshakeAccepted(
         backend_package_version="0.1.0",
         protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        event_schema_version=EVENT_SCHEMA_VERSION,
         min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         capabilities=(),
@@ -393,7 +389,7 @@ def test_conformance_fixtures_cover_and_round_trip_every_wire_discriminator() ->
     event_validator = Draft202012Validator(event_schema)
     for discriminator, payload in event_fixtures.items():
         assert payload["type"] == discriminator
-        assert payload["schema_version"] == EVENT_SCHEMA_VERSION
+        assert "schema_version" not in payload
         assert event_validator.is_valid(payload)
         event = wisp_event_from_dict(payload)
         assert json.loads(event.model_dump_json()) == payload
@@ -880,14 +876,15 @@ def test_event_schema_enforces_queue_removal_invariants() -> None:
         assert not validator.is_valid(malformed)
 
 
-def test_event_schema_rejects_historical_future_and_incomplete_live_events() -> None:
+def test_event_schema_rejects_versioned_and_incomplete_live_events() -> None:
+    """Live events carry no per-event version; a stray one is a wire error."""
+
     validator = Draft202012Validator(_artifact("events.schema.json"))
     event = RpcCommandFinished(command_id="command-1", command_type="prompt", ok=True)
     payload = json.loads(event.model_dump_json())
 
     assert validator.is_valid(payload)
-    assert not validator.is_valid({**payload, "schema_version": EVENT_SCHEMA_VERSION - 1})
-    assert not validator.is_valid({**payload, "schema_version": EVENT_SCHEMA_VERSION + 1})
+    assert not validator.is_valid({**payload, "schema_version": 39})
     assert not validator.is_valid({key: value for key, value in payload.items() if key != "error"})
 
 
@@ -968,14 +965,8 @@ def test_all_live_event_float_fields_reject_non_finite_values() -> None:
         {"type": "queue.message.injected", "kind": "follow_up", "content": "same"},
     ],
 )
-def test_message_origins_are_versioned_and_legacy_events_remain_readable(
-    payload: dict[str, object],
-) -> None:
-    current = wisp_event_from_dict(
-        {**payload, "schema_version": 39, "message_entry_id": "persisted-id"}
-    )
-    assert current.model_dump()["message_entry_id"] == "persisted-id"
-    legacy = wisp_event_from_dict({**payload, "schema_version": 38})
-    assert "message_entry_id" not in legacy.model_dump()
-    with pytest.raises(ValueError, match="Message origins require"):
-        wisp_event_from_dict({**payload, "schema_version": 38, "message_entry_id": "persisted-id"})
+def test_message_origins_are_optional(payload: dict[str, object]) -> None:
+    with_origin = wisp_event_from_dict({**payload, "message_entry_id": "persisted-id"})
+    assert with_origin.model_dump()["message_entry_id"] == "persisted-id"
+    without_origin = wisp_event_from_dict(payload)
+    assert without_origin.model_dump()["message_entry_id"] is None

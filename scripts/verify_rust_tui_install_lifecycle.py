@@ -243,7 +243,6 @@ def _verify_pure_non_tui_interfaces(
 
     handshake_script = """
 from wisp import __version__
-from wisp.events import EVENT_SCHEMA_VERSION
 from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
 
 print(RpcHandshakeRequest(
@@ -251,8 +250,6 @@ print(RpcHandshakeRequest(
     frontend_version=__version__,
     min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
     max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-    min_event_schema_version=EVENT_SCHEMA_VERSION,
-    max_event_schema_version=EVENT_SCHEMA_VERSION,
     supported_capabilities=(),
     required_capabilities=(),
 ).model_dump_json())

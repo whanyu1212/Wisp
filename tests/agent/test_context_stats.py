@@ -456,7 +456,7 @@ def test_session_stats_explains_unavailable_threshold_policy(
     assert stats.compaction.overflow_recovery_enabled is overflow_enabled
 
 
-def test_context_statistics_events_accept_schema_v9_and_current() -> None:
+def test_context_statistics_events_round_trip_and_tolerate_missing_policy() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=1_000, reserve_tokens=100)
     estimated = ContextEstimated(turn=1, provider="test", model="model", budget=budget)
@@ -473,25 +473,12 @@ def test_context_statistics_events_accept_schema_v9_and_current() -> None:
 
     assert wisp_event_from_json(estimated.model_dump_json()) == estimated
     assert wisp_event_from_json(reported.model_dump_json()) == reported
-    legacy_stats = reported.model_copy(update={"schema_version": 25})
-    legacy_stats_payload = json.loads(legacy_stats.model_dump_json())
-    assert "compaction" not in legacy_stats_payload["stats"]
-    legacy_event = wisp_event_from_json(json.dumps(legacy_stats_payload))
-    assert legacy_event.schema_version == 25
-    assert isinstance(legacy_event, SessionStatsReported)
-    assert legacy_event.stats.compaction is None
-    stats_policy_payload = json.loads(reported.model_dump_json())
-    stats_policy_payload["schema_version"] = 25
-    with pytest.raises(ValueError, match="Session compaction policy requires schema_version 26"):
-        wisp_event_from_json(json.dumps(stats_policy_payload))
-    assert (
-        wisp_event_from_json(
-            estimated.model_copy(update={"schema_version": 9}).model_dump_json()
-        ).schema_version
-        == 9
-    )
-    with pytest.raises(ValueError, match="require schema_version 9 through 39"):
-        wisp_event_from_json(estimated.model_copy(update={"schema_version": 8}).model_dump_json())
+    # Older writers omitted the compaction policy block; absence reads as "unknown".
+    without_policy = json.loads(reported.model_dump_json())
+    del without_policy["stats"]["compaction"]
+    restored = wisp_event_from_json(json.dumps(without_policy))
+    assert isinstance(restored, SessionStatsReported)
+    assert restored.stats.compaction is None
 
 
 def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_observation() -> None:

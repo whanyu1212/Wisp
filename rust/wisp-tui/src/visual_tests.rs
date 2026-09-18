@@ -181,7 +181,6 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> ratatui::buffer::Buffer {
         &ConnectionInfo {
             backend_version: "visual".into(),
             protocol_version: wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            event_schema_version: wisp_protocol::EVENT_SCHEMA_VERSION,
         },
     )
     .unwrap();
@@ -504,7 +503,6 @@ fn capture_conversation_screens() {
                         &ConnectionInfo {
                             backend_version: "visual".into(),
                             protocol_version: wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-                            event_schema_version: wisp_protocol::EVENT_SCHEMA_VERSION,
                         },
                     )
                     .unwrap();

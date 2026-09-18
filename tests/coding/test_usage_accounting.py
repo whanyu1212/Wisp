@@ -15,7 +15,7 @@ from openai.types.responses import Response
 from openai.types.responses.response_usage import ResponseUsage
 from pydantic import ValidationError
 
-from wisp.events import EVENT_SCHEMA_VERSION, MessageCompleted, TokenUsage, wisp_event_from_json
+from wisp.events import MessageCompleted, TokenUsage, wisp_event_from_json
 from wisp.providers.anthropic import (
     _usage_from_anthropic_delta,
     _usage_from_anthropic_start,
@@ -196,35 +196,12 @@ def test_google_usage_counts_tool_results_as_input() -> None:
     )
 
 
-def test_token_usage_round_trips_on_current_schema_events() -> None:
+def test_token_usage_round_trips_on_events() -> None:
     event = MessageCompleted(
         turn=1,
         content="done",
         finish_reason="stop",
         usage=TokenUsage(input_tokens=12, output_tokens=7, total_tokens=19),
-    )
-
-    assert event.schema_version == EVENT_SCHEMA_VERSION
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_schema_v5_events_remain_readable() -> None:
-    event = MessageCompleted(
-        schema_version=5,
-        turn=1,
-        content="done",
-        finish_reason="stop",
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_schema_v6_events_remain_readable() -> None:
-    event = MessageCompleted(
-        schema_version=6,
-        turn=1,
-        content="done",
-        finish_reason="stop",
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event

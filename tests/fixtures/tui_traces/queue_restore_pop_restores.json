@@ -22,7 +22,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.updated",
-        "schema_version": 34,
         "steering": [],
         "follow_up": ["restore this follow-up"]
       },
@@ -36,7 +35,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.items.removed",
-        "schema_version": 34,
         "command_id": "pop_queue-1",
         "operation": "pop",
         "kind": "follow_up",
@@ -49,7 +47,6 @@
       "type": "rpc.event",
       "event": {
         "type": "rpc.command.finished",
-        "schema_version": 34,
         "command_id": "pop_queue-1",
         "command_type": "pop_queue",
         "ok": true

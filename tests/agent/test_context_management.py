@@ -10,7 +10,6 @@ from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
 from wisp.events import (
-    EVENT_SCHEMA_VERSION,
     ContextOverflow,
     ContextPressure,
     ErrorEvent,
@@ -416,16 +415,8 @@ def test_context_events_round_trip_on_current_schema() -> None:
         message="maximum context length exceeded",
     )
 
-    assert pressure.schema_version == EVENT_SCHEMA_VERSION
-    assert overflow.schema_version == EVENT_SCHEMA_VERSION
     assert wisp_event_from_json(pressure.model_dump_json()) == pressure
     assert wisp_event_from_json(overflow.model_dump_json()) == overflow
-    assert (
-        wisp_event_from_json(
-            pressure.model_copy(update={"schema_version": 11}).model_dump_json()
-        ).schema_version
-        == 11
-    )
 
 
 def test_model_registry_resolves_effective_context_window() -> None:

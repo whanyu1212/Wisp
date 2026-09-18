@@ -27,7 +27,6 @@
       "type": "rpc.event",
       "event": {
         "type": "rpc.command.finished",
-        "schema_version": 34,
         "command_id": "follow_up-1",
         "command_type": "follow_up",
         "ok": false,

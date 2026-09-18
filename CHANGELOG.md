@@ -1,14 +1,17 @@
 # Changelog
 
-Notable changes to Wisp, with an emphasis on the **event-schema contract** that JSON, RPC, and SDK
+Notable changes to Wisp, with an emphasis on the **event contract** that JSON, RPC, and SDK
 consumers integrate against.
 
-Every outbound `WispEvent` carries a `schema_version`. Consumers should branch on it and reject
-versions they do not support; Wisp's typed RPC client does this automatically. The current typed
-contract lives in `src/wisp/events.py`.
+Since live RPC protocol v9, `WispEvent` payloads carry no per-event version. The protocol bundle
+under `schemas/live-rpc/` is the single event compatibility contract, negotiated once in the
+handshake; the current typed models live in `src/wisp/events.py`. Additive event changes regenerate
+the current bundle in place and are recorded under the current protocol heading; breaking changes
+bump the protocol version and open a new `## Live RPC protocol vN` heading.
 
-The event history below covers every explicit schema version in the merged contract. The first
-versioned event contract was v2; earlier events were unversioned, so there is no schema v1 to infer.
+The `## Schema vN` history below is retained for sessions and clients written before protocol v9.
+Those events carried an integer `schema_version`; the first versioned event contract was v2, and
+earlier events were unversioned, so there is no schema v1 to infer.
 
 ## 0.2.0rc3 — release preparation
 
@@ -331,7 +334,20 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Schema v39 — current
+## Live RPC protocol v9 — current
+
+- Events no longer carry a per-event `schema_version`. The live RPC protocol bundle under
+  `schemas/live-rpc/` is the single compatibility contract: additive event changes regenerate the
+  current bundle in place, and breaking changes bump the protocol version. The handshake no longer
+  exchanges `event_schema_version`, and the `event_schema_version_mismatch` rejection code is gone.
+- Live JSONL-RPC now negotiates protocol v9. Published v1–v8 bundles remain immutable. Persisted
+  sessions written by earlier releases still load: the session reader drops a legacy
+  `schema_version` key from event payloads before typed validation.
+- Frontends speaking protocol v8 or earlier are rejected with `protocol_version_mismatch`. The
+  backend ignores the removed `min_event_schema_version` / `max_event_schema_version` request fields
+  a conforming v8 client still sends, so the rejection names the real cause.
+
+## Schema v39
 
 - Added nullable `message_entry_id` to `agent.started`, `message.completed`,
   `queue.message.injected`, `tool.execution.ended`, and `tool.result`. The coding session
@@ -570,10 +586,13 @@ Events at schema v5 through v39 remain readable.
 
 ### Adding an entry
 
-When you change the event schema, bump `EVENT_SCHEMA_VERSION` in `src/wisp/events.py`, add a named
-breadcrumb constant beside it, and record the change here under a new `## Schema vN` heading. Say
-what a consumer must do differently — new fields, changed meanings, dropped compatibility — not the
-implementation detail.
+When you change an event contract, decide whether it is additive or breaking. Additive changes
+(new event type, new optional field, new enum value) regenerate the current `schemas/live-rpc/vN/`
+bundle with `uv run python -m wisp.rpc.protocol_schema --write` and are recorded under the current
+`## Live RPC protocol vN — current` heading. Breaking changes bump `LIVE_RPC_PROTOCOL_VERSION` in
+`src/wisp/rpc/protocol.py`, pin the previous manifest hash in `src/wisp/rpc/protocol_schema.py`,
+generate the next bundle, and open a new `## Live RPC protocol vN` heading. Say what a consumer must
+do differently — new fields, changed meanings, dropped compatibility — not the implementation detail.
 
 Changes that do not touch the wire format go under the current release-preparation heading, or under
 `## Unreleased` after that release is published.

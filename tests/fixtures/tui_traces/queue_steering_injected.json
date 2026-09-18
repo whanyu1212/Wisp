@@ -27,7 +27,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.updated",
-        "schema_version": 34,
         "steering": ["steer now"],
         "follow_up": []
       },
@@ -37,7 +36,6 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.message.injected",
-        "schema_version": 34,
         "kind": "steering",
         "content": "steer now"
       },

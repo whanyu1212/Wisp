@@ -44,7 +44,7 @@ fn committed_wire_seeds_have_explicit_outcomes() {
 
 #[test]
 fn canonical_fixtures_use_the_strict_byte_decoder() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/live-rpc/v8");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/live-rpc/v9");
     for (schema, decode) in [
         ("commands.schema.json", wire::client_wire as Decoder),
         ("events.schema.json", wire::server_wire as Decoder),

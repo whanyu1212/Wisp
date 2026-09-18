@@ -152,7 +152,6 @@ fn draw(ui: &mut LiveUi, terminal: &mut Terminal<TestBackend>) {
         &ConnectionInfo {
             backend_version: "test".into(),
             protocol_version: LIVE_RPC_PROTOCOL_VERSION,
-            event_schema_version: EVENT_SCHEMA_VERSION,
         },
     )
     .unwrap();
@@ -196,7 +195,6 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
                     &ConnectionInfo {
                         backend_version: "test".into(),
                         protocol_version: 6,
-                        event_schema_version: 37,
                     },
                     ui.notice.as_deref(),
                 )
@@ -237,7 +235,6 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
                     &ConnectionInfo {
                         backend_version: "test".into(),
                         protocol_version: 6,
-                        event_schema_version: 37,
                     },
                     ui.notice.as_deref(),
                 )

@@ -28,7 +28,7 @@ def test_corpus_is_complete_reproducible_and_preserves_raw_seeds(tmp_path: Path)
         ("client_wire", "commands.schema.json"),
         ("server_wire", "events.schema.json"),
     ):
-        fixtures = json.loads((ROOT / "schemas/live-rpc/v8" / schema).read_text())[
+        fixtures = json.loads((ROOT / "schemas/live-rpc/v9" / schema).read_text())[
             "x-wisp-conformance-fixtures"
         ]
         generated = list((first / family).glob("fixture-*.json"))
