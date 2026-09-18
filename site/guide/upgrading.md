@@ -60,7 +60,7 @@ Update external clients together with the backend:
 4. Use backend-owned model and connection catalogs. Credential mutations belong to backend RPC;
    frontends must not read or write Wisp credential files themselves.
 
-Use the checked-in `schemas/live-rpc/v8/` bundle and the typed Python transport as implementation
+Use the checked-in `schemas/live-rpc/v9/` bundle and the typed Python transport as implementation
 references. Versioned schema bundles are release assets, not part of the Python wheel API.
 Historical bundles remain immutable. These live-connection requirements do not change the
 backward-readability policy for persisted sessions.

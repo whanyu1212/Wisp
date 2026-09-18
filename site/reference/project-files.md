@@ -7,7 +7,7 @@ protection policy. It does not accept client paths, queries, or policy overrides
 
 The report contains `command_id`, a process-local policy `generation`, `entries`
 with relative POSIX `path` and `kind` (`file` or `directory`), and `truncated`.
-Standard event version and timestamp fields also apply. No absolute root,
+The standard event `timestamp` field also applies. No absolute root,
 credential paths, denied-entry counts, file contents, or raw filesystem errors
 are returned. Paths are advisory names; later tool operations still perform their
 own access checks. Names that cannot be represented safely in UTF-8 or contain

@@ -189,8 +189,9 @@ the source file.
 
 Persisted event envelopes retain their payload as raw JSON. `read_events()` can therefore expose a
 future event payload for inspection without claiming to understand it. Typed access through
-`read_typed_events()` rejects an unsupported future event version. Malformed committed records remain
-errors rather than being silently discarded.
+`read_typed_events()` drops the legacy per-event `schema_version` stamp written before protocol v9 and
+rejects any other stamp or an unknown payload shape. Malformed committed records remain errors rather
+than being silently discarded.
 
 Any future on-disk migration must preserve append-only history, stable entry IDs, parent links,
 timestamps, active-branch meaning, and provider-visible message order. A migration must be explicit
