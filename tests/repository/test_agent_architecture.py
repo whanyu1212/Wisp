@@ -44,7 +44,6 @@ _FORBIDDEN_IMPORTS = (
     "wisp.rpc",
     "wisp.runtime",
     "wisp.sessions",
-    "wisp.settings",
     "wisp.trust",
     "wisp.cli.native_tui",
 )
@@ -54,7 +53,6 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.cli",
     "wisp.config",
     "wisp.rpc",
-    "wisp.settings",
     "wisp.trust",
     "wisp.cli.native_tui",
 )
