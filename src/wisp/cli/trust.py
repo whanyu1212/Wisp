@@ -17,19 +17,19 @@ from typing import Annotated
 import typer
 
 from wisp.agent.prompt import resolve_project_context_root
-from wisp.trust import (
+from wisp.trust.flow import TrustDecision, resolve_trust
+from wisp.trust.records import (
     _canonical_key,
     forget_trust,
     is_trusted,
     record_trust,
 )
-from wisp.trust import (
+from wisp.trust.records import (
     trust_override_from_env as _trust_override_from_env,
 )
-from wisp.trust import (
+from wisp.trust.records import (
     trusted_noninteractive as _trusted_noninteractive,
 )
-from wisp.trust_flow import TrustDecision, resolve_trust
 
 trust_app = typer.Typer(help="Manage Wisp project trust decisions.")
 

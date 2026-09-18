@@ -16,7 +16,7 @@ from wisp.cli import app
 from wisp.cli.native_tui.launch import TuiOptions, _rpc_command
 from wisp.cli.types import TuiFrontendKind
 from wisp.config.runtime import WispConfig
-from wisp.trust_flow import TrustDecision
+from wisp.trust.flow import TrustDecision
 
 
 def test_tui_rpc_command_forwards_tool_and_session_flags(tmp_path: Path) -> None:
@@ -271,7 +271,7 @@ def test_cli_resolves_trust_before_native_launch(
 def test_native_tui_loads_trusted_project_settings_from_subdirectory(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    from wisp.trust import record_trust
+    from wisp.trust.records import record_trust
 
     captured: list[dict[str, object]] = []
     project = tmp_path / "project"

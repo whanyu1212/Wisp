@@ -28,7 +28,7 @@ from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
 from wisp.runtime.api import WispRuntime
-from wisp.trust import trusted_noninteractive
+from wisp.trust.records import trusted_noninteractive
 
 _EVENT_BUFFER_CAPACITY = 1_024
 _CONTROL_BUFFER_CAPACITY = 100

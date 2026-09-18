@@ -373,7 +373,7 @@ def test_print_mode_loads_trusted_root_settings_from_subdirectory(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    from wisp.trust import record_trust
+    from wisp.trust.records import record_trust
 
     project = tmp_path / "project"
     nested = project / "src"

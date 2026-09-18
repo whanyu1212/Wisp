@@ -25,8 +25,8 @@ from wisp.config.settings import (
 )
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
 from wisp.openai_compatible import OpenAICompatibleSettings
-from wisp.permissions import permissions_directory
 from wisp.retry import RetryPolicy
+from wisp.trust.permissions import permissions_directory
 from wisp.validation import redact_validation_error_inputs
 
 DEFAULT_PROVIDER = "openai-codex"

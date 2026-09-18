@@ -76,6 +76,11 @@ _FRESH_IMPORT_MODULES = (
     "wisp.mcp.transport",
     "wisp.providers.base",
     "wisp.runtime.api",
+    # wisp.trust.permissions is a leaf below wisp.config; it must not import
+    # wisp.events at runtime or the events package cannot initialize first.
+    "wisp.trust.flow",
+    "wisp.trust.permissions",
+    "wisp.trust.records",
 )
 _FRESH_IMPORT_TIMEOUT_SECONDS = 30
 _RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
@@ -394,6 +399,35 @@ def test_config_package_keeps_sdk_import_path_and_defining_modules() -> None:
         and "wisp.config" in _module_imports(path)
     )
     assert internal_root_importers == [], internal_root_importers
+
+
+def test_trust_package_has_no_root_surface_and_permission_mode_lives_in_events() -> None:
+    """``wisp.trust`` groups trust records, the interactive flow, and permission I/O.
+
+    Nothing here is SDK-public, so the package root re-exports nothing and callers
+    import from the defining module. ``PermissionMode`` is RPC vocabulary and is
+    defined by ``wisp.events``; the trust package may only reference it for typing,
+    because ``wisp.config`` loads ``wisp.trust.permissions`` while ``wisp.events``
+    may still be initializing.
+    """
+
+    import wisp.events as events
+
+    trust_dir = REPO_ROOT / "src" / "wisp" / "trust"
+    assert not (trust_dir / "__init__.py").exists() or not _module_imports(
+        trust_dir / "__init__.py"
+    )
+    for removed in ("trust.py", "trust_flow.py", "permissions.py"):
+        assert not (REPO_ROOT / "src" / "wisp" / removed).exists()
+
+    assert "PermissionMode" in events.__all__
+    permissions_tree = ast.parse((trust_dir / "permissions.py").read_text(encoding="utf-8"))
+    runtime_imports = {
+        node.module
+        for node in permissions_tree.body
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+    assert not any(name.startswith("wisp.events") for name in runtime_imports), runtime_imports
 
 
 def test_agent_loop_package_exports_public_contracts() -> None:

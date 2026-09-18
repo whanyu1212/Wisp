@@ -26,7 +26,7 @@ def _write_project_settings(project: Path, **settings: object) -> None:
 
 
 def _trust_project(project: Path, trust_file: Path, monkeypatch: MonkeyPatch) -> None:
-    from wisp.trust import record_trust
+    from wisp.trust.records import record_trust
 
     monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
     record_trust(project, True, trust_path=trust_file)

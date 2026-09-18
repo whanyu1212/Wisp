@@ -8,9 +8,12 @@ import os
 import stat
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING
 
-type PermissionMode = Literal["ask", "yolo"]
+if TYPE_CHECKING:
+    # Type-only: ``wisp.config`` loads this module while ``wisp.events`` may still be
+    # initializing, so the runtime import graph must not point back at events.
+    from wisp.events import PermissionMode
 
 
 def permissions_directory() -> Path:

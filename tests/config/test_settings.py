@@ -20,7 +20,7 @@ from wisp.config.settings import (
     resolve_settings,
     user_settings_path,
 )
-from wisp.permissions import permissions_directory
+from wisp.trust.permissions import permissions_directory
 
 
 def _write_settings(directory: Path, **values: object) -> None:
