@@ -82,6 +82,70 @@ def should_auto_compact(budget: ContextBudget, *, enabled: bool) -> bool:
     return tokens > budget.context_window - budget.reserve_tokens
 
 
+def exceeds_provider_auto_compaction_limit(budget: ContextBudget) -> bool:
+    """Return whether ``budget`` is over a cataloged provider auto-compaction limit.
+
+    Unlike :func:`should_auto_compact`, an unfixable ``reserve_tokens >= context_window``
+    configuration also counts as exceeding the limit.
+    """
+
+    return (
+        budget.context_window is not None and budget.reserve_tokens >= budget.context_window
+    ) or should_auto_compact(budget, enabled=True)
+
+
+def provider_auto_compaction_excess_tokens(budget: ContextBudget) -> int | None:
+    """Return how far over the provider's auto-compaction limit ``budget`` is.
+
+    Returns ``None`` when the overage cannot be a truncatable token excess — a
+    ``reserve_tokens >= context_window`` configuration is unfixable by shrinking
+    message content, so the caller must not attempt truncation recovery for it.
+    """
+
+    if budget.context_window is None or budget.reserve_tokens >= budget.context_window:
+        return None
+    tokens = budget.effective_tokens or 0
+    excess = tokens - (budget.context_window - budget.reserve_tokens)
+    return excess if excess > 0 else None
+
+
+def matches_provider_suffix(messages: Sequence[Message], suffix: Sequence[Message]) -> bool:
+    """Compare provider-visible fields without persistence-only metadata.
+
+    Used after compaction to decide whether a rehydrated transcript still ends with
+    the loop's live continuation, which permits an additive context rebase instead
+    of a fresh replacement.
+    """
+
+    if not suffix:
+        return True
+    if len(messages) < len(suffix):
+        return False
+    for persisted, live in zip(messages[-len(suffix) :], suffix, strict=True):
+        if _provider_visible_fields(persisted) != _provider_visible_fields(live):
+            return False
+    return True
+
+
+def _provider_visible_fields(message: Message) -> tuple[object, ...]:
+    tool_calls = (
+        tuple(
+            (tool_call.call_id, tool_call.name, dict(tool_call.arguments), tool_call.parse_error)
+            for tool_call in message.tool_calls
+        )
+        if message.tool_calls is not None
+        else None
+    )
+    return (
+        message.role,
+        message.content,
+        message.tool_call_id,
+        message.tool_name,
+        tool_calls,
+        message.is_error,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ManualCompactionPlan:
     """A stable active-prefix replacement that retains the latest complete turn."""

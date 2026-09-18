@@ -106,6 +106,11 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
 - `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
   and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
+- For the coding runtime, start with `src/wisp/coding/session.py`: `CodingSession` coordinates one
+  run end to end, including the boundary and overflow hooks it hands to the harness. `compaction.py`
+  holds compaction planning, summarization, budget checks, and transcript comparison helpers;
+  `persistence.py` holds the branch-pinned writer a run uses to append entries;
+  `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
 - For session persistence, start with `src/wisp/sessions/jsonl.py`: `JsonlSessionStore` and
   `JsonlSession` own the append/read lifecycle and the public result models. `file_io.py` holds the
   durable-file boundary (fsync ordering, cross-process locking, private modes, tail recovery);

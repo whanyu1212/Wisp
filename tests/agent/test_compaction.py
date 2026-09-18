@@ -21,8 +21,11 @@ from wisp.coding.compaction import (
     NothingToCompactError,
     _sum_token_usage,
     build_compaction_checkpoint_prompt,
+    exceeds_provider_auto_compaction_limit,
+    matches_provider_suffix,
     plan_manual_compaction,
     plan_preflight_compaction,
+    provider_auto_compaction_excess_tokens,
     serialize_compaction_transcript,
     summarize_manual_compaction,
     truncate_active_turn_tool_results,
@@ -1658,6 +1661,50 @@ def test_coding_session_recovers_a_session_resumed_after_a_crashed_oversized_too
         isinstance(event, MessageCompleted) and event.content == "answer after resume"
         for event in events
     )
+
+
+def test_matches_provider_suffix_ignores_persistence_only_metadata() -> None:
+    call = ToolCallSnapshot(call_id="call-1", name="read", arguments={"path": "a.py"})
+    persisted = (
+        Message(role="user", content="hello"),
+        Message(role="assistant", content="", tool_calls=(call,)),
+        Message(role="tool", content="ok", tool_call_id="call-1", tool_name="read"),
+    )
+    live_call = ToolCallSnapshot(
+        call_id="call-1", name="read", arguments={"path": "a.py"}, provider_call_id="p-1"
+    )
+    live = (
+        Message(role="assistant", content="", tool_calls=(live_call,)),
+        Message(role="tool", content="ok", tool_call_id="call-1", tool_name="read"),
+    )
+
+    assert matches_provider_suffix(persisted, live)
+    assert matches_provider_suffix(persisted, ())
+    assert not matches_provider_suffix(persisted[:1], live)
+    assert not matches_provider_suffix(
+        persisted,
+        (live[0], Message(role="tool", content="changed", tool_call_id="call-1", tool_name="read")),
+    )
+
+
+def test_provider_auto_compaction_limit_helpers_distinguish_unfixable_reserve() -> None:
+    estimate = estimate_context((Message(role="user", content="x" * 4_000),))
+    tokens = estimate.total_tokens
+    over = build_context_budget(estimate, context_window=tokens + 100, reserve_tokens=200)
+    under = build_context_budget(estimate, context_window=tokens + 300, reserve_tokens=200)
+    unfixable = build_context_budget(estimate, context_window=1000, reserve_tokens=1000)
+    unknown = build_context_budget(estimate, context_window=None, reserve_tokens=200)
+
+    assert exceeds_provider_auto_compaction_limit(over)
+    assert not exceeds_provider_auto_compaction_limit(under)
+    # An unfixable reserve counts as over the limit but has no truncatable excess.
+    assert exceeds_provider_auto_compaction_limit(unfixable)
+    assert not exceeds_provider_auto_compaction_limit(unknown)
+
+    assert provider_auto_compaction_excess_tokens(over) == 100
+    assert provider_auto_compaction_excess_tokens(under) is None
+    assert provider_auto_compaction_excess_tokens(unfixable) is None
+    assert provider_auto_compaction_excess_tokens(unknown) is None
 
 
 def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
