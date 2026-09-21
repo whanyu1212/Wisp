@@ -31,6 +31,7 @@ from wisp.rpc.protocol import (
     RpcHandshakeRequest,
     RpcHandshakeResponseAdapter,
 )
+from wisp.rpc.protocol_history import ArtifactChange, immutable_artifact_changes
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_FORMAT_VERSION = 1
@@ -67,7 +68,7 @@ def protocol_schema_directory(
     *,
     protocol_version: int = LIVE_RPC_PROTOCOL_VERSION,
 ) -> Path:
-    """Return the immutable directory assigned to one live protocol version."""
+    """Return the directory assigned to one live protocol version."""
 
     return root / f"v{protocol_version}"
 
@@ -292,38 +293,57 @@ def modified_committed_protocol_artifacts(
     *,
     root: Path = DEFAULT_SCHEMA_ROOT,
 ) -> tuple[str, ...]:
-    """Return committed version artifacts modified since a trusted Git ref."""
+    """Check committed and local artifact changes against trusted history.
 
-    result = subprocess.run(
-        (
-            "git",
-            "diff",
-            "--name-only",
-            "--diff-filter=MDRTUXB",
-            base_ref,
-            "HEAD",
-            "--",
-            str(root),
-        ),
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or "git diff failed"
-        return (f"cannot verify immutable protocol history: {detail}",)
-    prefix = f"{root.as_posix().rstrip('/')}/"
-    modified: list[str] = []
-    for path in result.stdout.splitlines():
-        relative = path.removeprefix(prefix)
-        version_directory = relative.partition("/")[0]
-        if (
-            version_directory.startswith("v")
-            and version_directory[1:].isdigit()
-            and version_directory == f"v{int(version_directory[1:])}"
-        ):
-            modified.append(path)
-    return tuple(modified)
+    Args:
+        base_ref (str): Trusted Git revision defining existing bundles.
+        root (Path): Relative or absolute schema root inside the checkout.
+
+    Returns:
+        tuple[str, ...]: Violating paths or a Git failure diagnostic. Includes
+        staged, unstaged, and untracked files, not just changes committed to HEAD.
+    """
+
+    def git_fields(*arguments: str) -> list[str]:
+        result = subprocess.run(
+            ("git", "-C", str(repository_root), *arguments, "--", root.as_posix()),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError(result.stderr.strip() or "git inventory failed")
+        return result.stdout.rstrip("\0").split("\0") if result.stdout else []
+
+    try:
+        repository = subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if repository.returncode != 0:
+            raise ValueError(repository.stderr.strip() or "cannot locate Git checkout")
+        repository_root = Path(repository.stdout.rstrip("\n")).resolve()
+        root = root.resolve().relative_to(repository_root)
+        base_paths = git_fields("ls-tree", "-r", "--name-only", "-z", base_ref)
+        fields = git_fields(
+            "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base_ref
+        )
+        if len(fields) % 2:
+            raise ValueError("incomplete Git change inventory")
+        statuses = {"A": "added", "M": "modified", "D": "removed"}
+        changes = [
+            ArtifactChange(statuses.get(status, status), path)
+            for status, path in zip(fields[::2], fields[1::2], strict=True)
+        ]
+        changes.extend(
+            ArtifactChange("added", path)
+            for path in git_fields("ls-files", "--others", "--exclude-standard", "-z")
+        )
+    except (OSError, ValueError) as exc:
+        return (f"cannot verify immutable protocol history: {exc}",)
+    return immutable_artifact_changes(changes, base_paths, root=root.as_posix())
 
 
 def _shape_command_output_schema(schema: JsonObject) -> None:
@@ -1351,7 +1371,7 @@ def _parser() -> argparse.ArgumentParser:
     action.add_argument("--archive", type=Path, help="write a deterministic release archive")
     parser.add_argument(
         "--immutable-base",
-        help="trusted Git ref whose committed version artifacts must remain unchanged",
+        help="trusted Git ref defining historical bundles; also checks uncommitted changes",
     )
     parser.add_argument(
         "--output-dir",
