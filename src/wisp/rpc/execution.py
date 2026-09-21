@@ -142,9 +142,11 @@ class RpcCommandExecutor:
         defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
         project_files: RpcProjectFiles | None = None,
         publish_project_files: ProjectFilesPublisher | None = None,
+        outbound_frame_limit: int | None = None,
     ) -> None:
         self.project_files = project_files
         self.publish_project_files = publish_project_files
+        self.outbound_frame_limit = outbound_frame_limit
         self.agent = agent
         self.runtime = runtime
         self.sessions = sessions
@@ -530,6 +532,7 @@ class RpcCommandExecutor:
             agent=self.agent,
             session=self.session_state.session,
             write_event=self.write_event,
+            max_frame_bytes=self.outbound_frame_limit,
         )
         return _RpcDispatchResult(running_command=running_command)
 

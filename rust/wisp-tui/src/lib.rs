@@ -35,6 +35,7 @@ mod prompt_history;
 #[cfg(test)]
 mod prompt_history_tests;
 mod prompt_history_view;
+mod queue_view;
 pub mod reducer;
 mod session_picker;
 mod session_tree_picker;
@@ -493,6 +494,7 @@ enum OverlayKind {
     PromptHistory,
     Discovery,
     Context,
+    Queue,
     Help,
     Model,
     Connection,
@@ -567,6 +569,7 @@ struct LiveUi {
     rendered_overlay: Option<OverlayKind>,
     command_help: Option<Help>,
     context_view: Option<context_view::ContextView>,
+    queue_view: Option<queue_view::QueueView>,
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
     file_picker: FilePicker,
@@ -614,6 +617,7 @@ impl Default for LiveUi {
             rendered_overlay: None,
             command_help: None,
             context_view: None,
+            queue_view: None,
             discovery_view: None,
             completion: Completion::default(),
             file_picker: FilePicker::default(),
@@ -1369,6 +1373,8 @@ impl LiveUi {
             Some(OverlayKind::PromptHistory)
         } else if self.discovery_view.is_some() {
             Some(OverlayKind::Discovery)
+        } else if self.queue_view.is_some() {
+            Some(OverlayKind::Queue)
         } else if self.context_view.is_some() {
             Some(OverlayKind::Context)
         } else if self.command_help.is_some() {
@@ -1519,6 +1525,12 @@ impl LiveUi {
                     .as_mut()
                     .expect("active discovery")
                     .render(frame, area, &self.state, self.notice.as_deref(), palette),
+                OverlayKind::Queue => self.queue_view.as_mut().expect("active queue").render(
+                    frame,
+                    area,
+                    &self.state,
+                    palette,
+                ),
                 OverlayKind::Context => {
                     self.context_view.as_mut().expect("active context").render(
                         frame,
@@ -1825,6 +1837,16 @@ impl LiveUi {
                 ))
             }
             UiAction::RestoreNewestQueueDraft => {
+                if !self
+                    .state
+                    .queue
+                    .management
+                    .token
+                    .as_deref()
+                    .is_some_and(|token| self.state.queue_management_available(token))
+                {
+                    return self.dispatch(action, writer, limit).await;
+                }
                 let Some((kind, content)) = self.state.queue_restore_candidate() else {
                     return self.dispatch(action, writer, limit).await;
                 };
@@ -1838,12 +1860,62 @@ impl LiveUi {
                 }
                 Some((
                     "Queued-item restoration",
-                    WispTypedClientRpcCommands::pop_queue(
+                    WispTypedClientRpcCommands::guarded_pop_queue(
                         &self.ids.peek_id(CommandKind::PopQueue),
                         kind,
+                        self.state
+                            .queue
+                            .management
+                            .token
+                            .as_deref()
+                            .expect("checked token"),
                     )
                     .expect("validated queue kind builds a pop command"),
                 ))
+            }
+            UiAction::ManageQueue {
+                operation,
+                expected_token,
+            } => {
+                use reducer::queue_management::Operation;
+                if !self.state.queue_management_available(expected_token) {
+                    return self.dispatch(action, writer, limit).await;
+                }
+                let command = match *operation {
+                    Operation::Restore(kind) => {
+                        let messages = match kind {
+                            QueueKind::Steering => &self.state.queue.steering,
+                            QueueKind::FollowUp => &self.state.queue.follow_up,
+                        };
+                        let Some(message) = messages.last() else {
+                            return self.dispatch(action, writer, limit).await;
+                        };
+                        if !self.editor.can_prepend_restored(&message.content) {
+                            self.notice = Some(
+                                "Queued text does not fit with your draft; queue unchanged.".into(),
+                            );
+                            self.render_pending = true;
+                            return Ok(LoopControl::Continue);
+                        }
+                        WispTypedClientRpcCommands::guarded_pop_queue(
+                            &self.ids.peek_id(CommandKind::PopQueue),
+                            kind,
+                            expected_token,
+                        )?
+                    }
+                    Operation::Mode(kind, mode) => WispTypedClientRpcCommands::set_queue_mode(
+                        &self.ids.peek_id(CommandKind::SetQueueMode),
+                        kind,
+                        mode,
+                        expected_token,
+                    )?,
+                    Operation::Clear(kind) => WispTypedClientRpcCommands::clear_queue(
+                        &self.ids.peek_id(CommandKind::ClearQueue),
+                        kind,
+                        expected_token,
+                    )?,
+                };
+                Some(("Queue management", command))
             }
             _ => None,
         };
@@ -2288,6 +2360,13 @@ impl LiveUi {
                 self.editor.clear();
                 self.render_pending = true;
                 self.dispatch(UiAction::LoadCommandCatalog, writer, limit)
+                    .await
+            }
+            Command::Queue => {
+                self.editor.clear();
+                self.queue_view = Some(queue_view::QueueView::default());
+                self.render_pending = true;
+                self.dispatch(UiAction::RefreshQueueState, writer, limit)
                     .await
             }
             Command::Context => {
@@ -3313,6 +3392,17 @@ impl LiveUi {
             }
             return Ok(LoopControl::Continue);
         }
+        if self.active_overlay().is_none()
+            && self.editor_editable()
+            && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ManageQueue))
+        {
+            self.queue_view = Some(queue_view::QueueView::default());
+            self.rendered_overlay = None;
+            self.render_pending = true;
+            return self
+                .dispatch(UiAction::RefreshQueueState, writer, limit)
+                .await;
+        }
         self.completion.sync(&self.editor);
         let overlay = self.active_overlay();
         let decision_pending = matches!(
@@ -3334,7 +3424,8 @@ impl LiveUi {
                     | OverlayKind::Theme
                     | OverlayKind::Logo
                     | OverlayKind::Session
-                    | OverlayKind::PromptHistory => key.code == KeyCode::Enter,
+                    | OverlayKind::PromptHistory
+                    | OverlayKind::Queue => key.code == KeyCode::Enter,
                     OverlayKind::Discovery => self
                         .discovery_view
                         .as_ref()
@@ -3353,6 +3444,43 @@ impl LiveUi {
             }
         }
         match input {
+            Input::Key(key) if overlay == Some(OverlayKind::Queue) => {
+                if is_ctrl_c(key) {
+                    return self.interrupt(writer, limit, true).await;
+                }
+                if !key.modifiers.is_empty() {
+                    return Ok(LoopControl::Continue);
+                }
+                let action = self
+                    .queue_view
+                    .as_mut()
+                    .expect("active queue")
+                    .key(key.code, &self.state);
+                self.render_pending = true;
+                match action {
+                    queue_view::Action::None => Ok(LoopControl::Continue),
+                    queue_view::Action::Close => {
+                        self.queue_view = None;
+                        Ok(LoopControl::Continue)
+                    }
+                    queue_view::Action::Refresh => {
+                        self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                            .await
+                    }
+                    queue_view::Action::Mutate(operation, expected_token) => {
+                        self.dispatch_queue_action(
+                            UiAction::ManageQueue {
+                                operation,
+                                expected_token,
+                            },
+                            writer,
+                            limit,
+                        )
+                        .await
+                    }
+                }
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::Queue) => Ok(LoopControl::Continue),
             Input::Key(key) if overlay == Some(OverlayKind::Theme) => {
                 let action = self
                     .theme_picker
@@ -6323,6 +6451,7 @@ mod tests {
             .await
             .unwrap();
         live_ui.editor.insert_paste("newer draft");
+        live_ui.state.queue.management.token = Some("test-token".into());
 
         live_ui
             .handle_input(
@@ -6336,7 +6465,7 @@ mod tests {
         let frame_len = writer_server.read(&mut frame).await.unwrap();
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&frame[..frame_len - 1]).unwrap(),
-            json!({"type": "pop_queue", "id": "pop_queue-1", "kind": "steering"})
+            json!({"type": "pop_queue", "id": "pop_queue-1", "kind": "steering", "expected_token": "test-token"})
         );
         assert_eq!(live_ui.editor.text(), "newer draft");
         assert_eq!(live_ui.state.queued_steering(), 1);
@@ -6403,6 +6532,7 @@ mod tests {
             .await
             .unwrap();
         live_ui.editor.insert_paste("newer draft");
+        live_ui.state.queue.management.token = Some("test-token".into());
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)),
@@ -6786,6 +6916,13 @@ mod tests {
     #[test]
     fn unsent_queue_diagnostics_are_bounded_safe_and_deduplicated() {
         let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "active".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.queue.management.token = Some("test-token".into());
         let mut ids = SequentialCommandIds::default();
         reducer::reduce(
             &mut state,

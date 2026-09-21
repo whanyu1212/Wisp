@@ -158,6 +158,7 @@ async def _run_rpc_with_runtime(
                 render_events=render_events,
                 config_overrides=config_overrides,
                 runtime_builder=build_runtime_for_config,
+                outbound_frame_limit=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes,
             )
             send, receive = anyio.create_memory_object_stream[_RpcControlEvent](
                 _RPC_CONTROL_STREAM_BUFFER_SIZE

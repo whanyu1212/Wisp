@@ -1436,6 +1436,19 @@
       "additionalProperties": false,
       "description": "Current harness-owned steering and follow-up queue state.",
       "properties": {
+        "command_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Originating RPC command for a solicited snapshot; absent for run events.",
+          "title": "QueueUpdatedCommandId"
+        },
         "follow_up": {
           "default": [],
           "items": {
@@ -1475,6 +1488,21 @@
           "title": "QueueUpdatedTimestamp",
           "type": "string"
         },
+        "token": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opaque active-queue revision; absent for retained or legacy snapshots.",
+          "title": "QueueUpdatedToken"
+        },
         "type": {
           "const": "queue.updated",
           "default": "queue.updated",
@@ -1488,7 +1516,9 @@
         "steering",
         "follow_up",
         "steering_mode",
-        "follow_up_mode"
+        "follow_up_mode",
+        "token",
+        "command_id"
       ],
       "title": "QueueUpdated",
       "type": "object"

@@ -27,10 +27,11 @@ pub(crate) enum Action {
     Tail,
     LineUp,
     LineDown,
+    ManageQueue,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -44,6 +45,7 @@ impl Action {
         Self::Tail,
         Self::LineUp,
         Self::LineDown,
+        Self::ManageQueue,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -52,6 +54,7 @@ impl Action {
             Self::AlternateSubmit => "prompt.alternate_submit",
             Self::Newline => "prompt.newline",
             Self::RestoreQueue => "queue.restore",
+            Self::ManageQueue => "queue.manage",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -70,6 +73,7 @@ impl Action {
             Self::AlternateSubmit => "Insert a newline or queue a follow-up",
             Self::Newline => "Insert a newline",
             Self::RestoreQueue => "Restore the newest queued prompt",
+            Self::ManageQueue => "Inspect and manage queues (/queue)",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",

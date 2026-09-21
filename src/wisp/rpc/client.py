@@ -398,18 +398,44 @@ class RpcController:
         mode: QueueMode,
         *,
         command_id: str | None = None,
+        expected_token: str | None = None,
     ) -> str:
-        """Set one active queue's drain mode."""
+        """Submit a mode change for one active queue.
+
+        Args:
+            kind (QueueKind): Queue whose drain policy changes.
+            mode (QueueMode): One message per boundary or the current batch.
+            command_id (str | None): Caller-supplied correlation identity.
+            expected_token (str | None): Snapshot token; stale values fail without mutation.
+
+        Returns:
+            str: Command identity; completion is reported through typed events.
+        """
 
         selected_id = command_id or self._command_id_factory("queue-mode")
-        await self._transport.send(SetQueueModeCommand(id=selected_id, kind=kind, mode=mode))
+        await self._transport.send(
+            SetQueueModeCommand(id=selected_id, kind=kind, mode=mode, expected_token=expected_token)
+        )
         return selected_id
 
-    async def pop_queue(self, kind: QueueKind, *, command_id: str | None = None) -> str:
-        """Remove the latest item from one active queue."""
+    async def pop_queue(
+        self, kind: QueueKind, *, command_id: str | None = None, expected_token: str | None = None
+    ) -> str:
+        """Submit removal of the newest item from an active queue.
+
+        Args:
+            kind (QueueKind): Queue to pop from its newest end.
+            command_id (str | None): Caller-supplied correlation identity.
+            expected_token (str | None): Snapshot token; stale values fail without mutation.
+
+        Returns:
+            str: Command identity; removed text arrives in QueueItemsRemoved.
+        """
 
         selected_id = command_id or self._command_id_factory("queue-pop")
-        await self._transport.send(PopQueueCommand(id=selected_id, kind=kind))
+        await self._transport.send(
+            PopQueueCommand(id=selected_id, kind=kind, expected_token=expected_token)
+        )
         return selected_id
 
     async def clear_queue(
@@ -417,11 +443,23 @@ class RpcController:
         kind: QueueKind | None = None,
         *,
         command_id: str | None = None,
+        expected_token: str | None = None,
     ) -> str:
-        """Clear one or both active queues."""
+        """Submit removal of one or both active queues.
+
+        Args:
+            kind (QueueKind | None): Queue to clear, or both when omitted.
+            command_id (str | None): Caller-supplied correlation identity.
+            expected_token (str | None): Snapshot token; stale values fail without mutation.
+
+        Returns:
+            str: Command identity; removed contents and completion arrive as events.
+        """
 
         selected_id = command_id or self._command_id_factory("queue-clear")
-        await self._transport.send(ClearQueueCommand(id=selected_id, kind=kind))
+        await self._transport.send(
+            ClearQueueCommand(id=selected_id, kind=kind, expected_token=expected_token)
+        )
         return selected_id
 
     async def cancel(self, target_id: str, *, command_id: str | None = None) -> str:

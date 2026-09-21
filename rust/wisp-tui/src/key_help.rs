@@ -118,6 +118,11 @@ impl KeyHelp {
                 "Skills/MCP: arrows and Page/Home/End navigate; r refreshes.",
                 "Enter inserts a selected skill without submitting. Esc/Ctrl+C closes.",
             ],
+            Owner::Overlay(OverlayKind::Queue) => &[
+                "Queues: Up/Down/Home/End select; Enter activates; Esc closes.",
+                "Clear requires confirmation. Queue changes invalidate old choices.",
+                "Retained queues are read-only; mutations require an active run.",
+            ],
             Owner::Overlay(OverlayKind::Context | OverlayKind::Help) => {
                 &["Up/Down/Page/Home/End scroll; r refreshes; Esc/Ctrl+C closes."]
             }

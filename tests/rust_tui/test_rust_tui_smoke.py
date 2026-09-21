@@ -701,9 +701,16 @@ command_log = Path(sys.argv[1])
 active_prompt_id = None
 steering_content = "steer-via-enter"
 follow_up_content = "follow-up-via-alt-enter"
+queue_revision = 0
+queue_token = None
 
 
 def emit(event):
+    global queue_revision, queue_token
+    if isinstance(event, QueueUpdated):
+        queue_revision += 1
+        queue_token = f"queue-{queue_revision}"
+        event = event.model_copy(update={"token": queue_token})
     print(event.model_dump_json(), flush=True)
 
 
@@ -760,6 +767,7 @@ for line in sys.stdin:
         ))
         finish(command)
     elif command_type == "pop_queue":
+        assert command["expected_token"] == queue_token
         emit(QueueItemsRemoved(
             command_id=command["id"],
             operation="pop",
@@ -1621,8 +1629,12 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "help"
                 output.clear()
+            elif phase == "help" and b"/queue" in output and b"/compact" in output:
+                # The queue command adds a row; permissions is now on the next help page.
+                os.write(terminal_fd, b"\x1b[6~")
+                phase = "help scrolled"
             elif (
-                phase == "help"
+                phase == "help scrolled"
                 and b"/permissions" in output
                 and b"/compact" in output
                 and b"Esc close" in output
@@ -2248,16 +2260,21 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"preserve draft")
                 output.clear()
                 phase = "drafting"
-            elif phase == "drafting" and b"preserve draft" in output:
-                os.write(terminal_fd, b"\x1b[1;5H")
-                output.clear()
-                phase = "recovering"
-            elif phase == "recovering":
-                if b"durable row 0000" in output and b"preserve draft" in output:
+            elif phase in {"drafting", "recovering"}:
+                if phase == "drafting" and b"preserve draft" in output:
+                    os.write(terminal_fd, b"\x1b[1;5H")
+                    output.clear()
+                    phase = "recovering"
+                elif (
+                    phase == "recovering"
+                    and b"durable row 0000" in output
+                    and b"preserve draft" in output
+                ):
                     recovered = True
                     phase = "quitting"
                 elif time.monotonic() >= next_input:
-                    # Force a complete frame without fetching any history from the backend.
+                    # Typed text can be split by cursor updates even in one write.
+                    # Inspect complete frames in both phases, without history fetches.
                     fcntl.ioctl(
                         terminal_fd,
                         termios.TIOCSWINSZ,
@@ -2265,9 +2282,11 @@ for line in sys.stdin:
                     )
                     redraw_width = 104 if redraw_width == 103 else 103
                     next_input = time.monotonic() + 0.2
-            if phase == "quitting" and time.monotonic() >= next_input:
+            if phase == "quitting":
+                # Terminal settings return before backend shutdown finishes.
+                # Repeated Ctrl+C can then become SIGINT instead of TUI input.
                 os.write(terminal_fd, b"\x03")
-                next_input = time.monotonic() + 0.2
+                phase = "waiting for exit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
                 status = waited_status
@@ -2283,7 +2302,7 @@ for line in sys.stdin:
         older = [item for item in requests if item.get("before_entry_id")]
         assert exact == [], requests
         assert older == [], requests
-        assert os.waitstatus_to_exitcode(status) == 0
+        assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
         assert termios.tcgetattr(terminal_fd) == initial_terminal
     finally:
         if status is None:

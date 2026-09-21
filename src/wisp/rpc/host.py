@@ -441,6 +441,7 @@ class RpcHost:
         render_events: RpcEventRenderer,
         on_shutdown_dispatched: Callable[[], None] | None = None,
         on_shutdown_abandoned: Callable[[], None] | None = None,
+        outbound_frame_limit: int | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
@@ -452,6 +453,7 @@ class RpcHost:
         self.coordinator = coordinator
         self._write_event = write_event
         self._render_events = render_events
+        self._outbound_frame_limit = outbound_frame_limit
         self._on_shutdown_dispatched = on_shutdown_dispatched
         self._on_shutdown_abandoned = on_shutdown_abandoned
         self._event_render_lock = anyio.Lock()
@@ -474,6 +476,7 @@ class RpcHost:
         max_queued_commands: int | None = None,
         on_shutdown_dispatched: Callable[[], None] | None = None,
         on_shutdown_abandoned: Callable[[], None] | None = None,
+        outbound_frame_limit: int | None = None,
     ) -> RpcHost:
         """Build a host without starting a transport or event loop."""
 
@@ -613,6 +616,7 @@ class RpcHost:
             render_events=render_events,
             on_shutdown_dispatched=on_shutdown_dispatched,
             on_shutdown_abandoned=on_shutdown_abandoned,
+            outbound_frame_limit=outbound_frame_limit,
         )
         for event in runtime.startup_events:
             write_event(event)
@@ -658,6 +662,7 @@ class RpcHost:
                 write_event=write_event,
                 render_events=self._render_event_stream,
                 defer_until_after_flush=after_flush.append,
+                outbound_frame_limit=self._outbound_frame_limit,
             )
             try:
                 result = await executor.dispatch_parsed(command, running_command)

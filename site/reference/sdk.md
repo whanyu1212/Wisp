@@ -159,9 +159,9 @@ current setting untouched; use `clear_effort=True` to restore the provider defau
 | `steer` | `(content: str, *, command_id: str \| None = None)` |
 | `follow_up` | `(content: str, *, command_id: str \| None = None)` |
 | `get_queue_state` | `(*, command_id: str \| None = None)` |
-| `set_queue_mode` | `(kind: QueueKind, mode: QueueMode, *, command_id: str \| None = None)` |
-| `pop_queue` | `(kind: QueueKind, *, command_id: str \| None = None)` |
-| `clear_queue` | `(kind: QueueKind \| None = None, *, command_id: str \| None = None)` |
+| `set_queue_mode` | `(kind: QueueKind, mode: QueueMode, *, command_id: str \| None = None, expected_token: str \| None = None)` |
+| `pop_queue` | `(kind: QueueKind, *, command_id: str \| None = None, expected_token: str \| None = None)` |
+| `clear_queue` | `(kind: QueueKind \| None = None, *, command_id: str \| None = None, expected_token: str \| None = None)` |
 | `cancel` | `(target_id: str, *, command_id: str \| None = None)` |
 
 Connection catalogs and progress events contain sanitized status only. API keys and OAuth tokens are
@@ -171,6 +171,17 @@ clients must display them without logging or persistence.
 
 `QueueKind` is `"steering" | "follow_up"`. `QueueMode` is `"one_at_a_time" | "all"`.
 `cancel()` targets a running prompt or compaction command ID.
+
+`QueueUpdated.token` is an opaque revision of an active queue owner; retained/legacy snapshots have
+no token. Pass it as `expected_token` to guard a displayed mode/pop/clear operation. Any intervening
+mutation or a replacement run invalidates it, including removal and replacement with identical text.
+Stale guards fail through the ordinary command lifecycle without mutation. Omitting the guard retains
+legacy command semantics. Inspection works while idle; mutations still require an active run.
+
+Solicited `QueueUpdated` events carry `command_id`; spontaneous run events omit it. Successful removals
+publish `QueueItemsRemoved`, then `QueueUpdated`, then `RpcCommandFinished`. JSONL response-size
+preflight rejects oversized removal payloads before mutation. Transport loss after execution is not a
+transaction rollback: do not blindly retry a pop or clear after an unknown outcome.
 
 #### Trust and approval
 
