@@ -2260,16 +2260,21 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"preserve draft")
                 output.clear()
                 phase = "drafting"
-            elif phase == "drafting" and b"preserve draft" in output:
-                os.write(terminal_fd, b"\x1b[1;5H")
-                output.clear()
-                phase = "recovering"
-            elif phase == "recovering":
-                if b"durable row 0000" in output and b"preserve draft" in output:
+            elif phase in {"drafting", "recovering"}:
+                if phase == "drafting" and b"preserve draft" in output:
+                    os.write(terminal_fd, b"\x1b[1;5H")
+                    output.clear()
+                    phase = "recovering"
+                elif (
+                    phase == "recovering"
+                    and b"durable row 0000" in output
+                    and b"preserve draft" in output
+                ):
                     recovered = True
                     phase = "quitting"
                 elif time.monotonic() >= next_input:
-                    # Force a complete frame without fetching any history from the backend.
+                    # Typed text can be split by cursor updates even in one write.
+                    # Inspect complete frames in both phases, without history fetches.
                     fcntl.ioctl(
                         terminal_fd,
                         termios.TIOCSWINSZ,
