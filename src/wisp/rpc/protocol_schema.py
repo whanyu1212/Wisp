@@ -297,7 +297,7 @@ def modified_committed_protocol_artifacts(
 
     Args:
         base_ref (str): Trusted Git revision defining existing bundles.
-        root (Path): Repository-relative schema root.
+        root (Path): Relative or absolute schema root inside the checkout.
 
     Returns:
         tuple[str, ...]: Violating paths or a Git failure diagnostic. Includes
@@ -306,7 +306,7 @@ def modified_committed_protocol_artifacts(
 
     def git_fields(*arguments: str) -> list[str]:
         result = subprocess.run(
-            ("git", *arguments, "--", str(root)),
+            ("git", "-C", str(repository_root), *arguments, "--", root.as_posix()),
             check=False,
             capture_output=True,
             text=True,
@@ -316,6 +316,16 @@ def modified_committed_protocol_artifacts(
         return result.stdout.rstrip("\0").split("\0") if result.stdout else []
 
     try:
+        repository = subprocess.run(
+            ("git", "rev-parse", "--show-toplevel"),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if repository.returncode != 0:
+            raise ValueError(repository.stderr.strip() or "cannot locate Git checkout")
+        repository_root = Path(repository.stdout.rstrip("\n")).resolve()
+        root = root.resolve().relative_to(repository_root)
         base_paths = git_fields("ls-tree", "-r", "--name-only", "-z", base_ref)
         fields = git_fields(
             "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base_ref

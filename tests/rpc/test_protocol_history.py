@@ -23,6 +23,12 @@ NEW = f"{ROOT}/v10/events.schema.json"
         ([ArtifactChange("modified", CURRENT)], ()),
         ([ArtifactChange("added", f"{ROOT}/v9/new.schema.json")], ()),
         ([ArtifactChange("added", NEW)], ()),
+        ([ArtifactChange("copied", NEW, CURRENT)], ()),
+        ([ArtifactChange("copied", CURRENT, OLD)], ()),
+        ([ArtifactChange("copied", OLD, CURRENT)], (OLD,)),
+        ([ArtifactChange("copied", NEW)], ()),
+        ([ArtifactChange("copied", "archive.json", OLD)], ()),
+        ([ArtifactChange("copied", NEW, CURRENT), ArtifactChange("modified", CURRENT)], (CURRENT,)),
         ([ArtifactChange("modified", OLD)], (OLD,)),
         ([ArtifactChange("added", f"{ROOT}/v8/new.schema.json")], (f"{ROOT}/v8/new.schema.json",)),
         ([ArtifactChange("removed", OLD)], (OLD,)),
@@ -46,10 +52,15 @@ def test_missing_trusted_inventory_fails_closed() -> None:
 
 
 @pytest.mark.parametrize("stage", ["unstaged", "staged", "committed"])
+@pytest.mark.parametrize("absolute", [False, True])
 def test_local_guard_checks_changes_before_and_after_commit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, absolute: bool
 ) -> None:
     monkeypatch.chdir(tmp_path)
+
+    def check(base: str) -> tuple[str, ...]:
+        root = tmp_path / ROOT if absolute else Path(ROOT)
+        return modified_committed_protocol_artifacts(base, root=root)
 
     def git(*args: str) -> str:
         return subprocess.run(
@@ -68,32 +79,38 @@ def test_local_guard_checks_changes_before_and_after_commit(
     git("commit", "-qm", "trusted base")
     base = git("rev-parse", "HEAD")
     Path(CURRENT).write_text('{"additive": true}\n')
-    assert modified_committed_protocol_artifacts(base) == ()
+    assert check(base) == ()
     Path(OLD).write_text('{"forbidden": true}\n')
     if stage in {"staged", "committed"}:
         git("add", ".")
     if stage == "committed":
         git("commit", "-qm", "change artifacts")
-    assert modified_committed_protocol_artifacts(base) == (OLD,)
+    assert check(base) == (OLD,)
     Path(OLD).write_text("{}\n")
     if stage != "unstaged":
         git("add", OLD)
-    assert modified_committed_protocol_artifacts(base) == ()
+    assert check(base) == ()
     # A new untracked historical artifact must not escape the local guard.
     untracked = Path(ROOT) / "v8" / "new.schema.json"
     untracked.write_text("{}\n")
-    assert modified_committed_protocol_artifacts(base) == (untracked.as_posix(),)
+    assert check(base) == (untracked.as_posix(),)
     untracked.unlink()
     # Introducing the next version freezes the former current bundle too.
     Path(NEW).parent.mkdir()
     Path(NEW).write_text("{}\n")
-    assert modified_committed_protocol_artifacts(base) == (CURRENT,)
+    assert check(base) == (CURRENT,)
+    assert (
+        "cannot verify"
+        in modified_committed_protocol_artifacts(base, root=tmp_path.parent / "outside-checkout")[0]
+    )
 
 
 @pytest.mark.parametrize(
     ("pages", "count", "success"),
     [
         ([[{"status": "modified", "filename": CURRENT}]], 1, True),
+        ([[{"status": "copied", "filename": NEW, "previous_filename": CURRENT}]], 1, True),
+        ([[{"status": "copied", "filename": OLD, "previous_filename": CURRENT}]], 1, False),
         ([[{"status": "modified", "filename": OLD}]], 1, False),
         (
             [[{"status": "modified", "filename": CURRENT}], [{"status": "added", "filename": NEW}]],

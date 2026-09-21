@@ -75,8 +75,10 @@ transitively pins the old schemas and metadata outside their version directory.
 Both history guards compare against the trusted base inventory. They allow additions and
 modifications in its current bundle only while no newer bundle is introduced. Historical bundles
 cannot be modified or extended; removals, renames, and type changes are rejected even in the current
-bundle. Introducing a new version freezes the previous current bundle in that same change. The local
-`--immutable-base` check includes staged, unstaged, and untracked files, not only committed HEAD.
+bundle. GitHub copy metadata is treated as an added destination, not a modification of the source;
+copying into a historical bundle is still rejected. Introducing a new version freezes the previous
+current bundle in that same change. The local `--immutable-base` check accepts relative or absolute
+in-checkout schema paths and includes staged, unstaged, and untracked files, not only committed HEAD.
 These guards protect artifact history; schema conformance and review must still establish that a
 current-version change is additive.
 

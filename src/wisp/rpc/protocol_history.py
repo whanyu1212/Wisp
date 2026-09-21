@@ -42,6 +42,12 @@ def immutable_artifact_changes(
         modifications are allowed only when no newer bundle is introduced.
         Removal, rename, and type changes are never allowed in existing bundles.
     """
+    # GitHub can report a new destination as copied. Its source is unchanged;
+    # local `git diff --no-renames` represents the same operation as an addition.
+    changes = tuple(
+        ArtifactChange("added", change.path) if change.status == "copied" else change
+        for change in changes
+    )
     prefix = root.rstrip("/") + "/"
 
     def version(path: str) -> int | None:
