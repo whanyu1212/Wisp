@@ -31,6 +31,7 @@ from wisp.providers.fake import FakeProvider
 from wisp.providers.events import ProviderResponseStarted, ProviderTextDelta
 from wisp.rpc import execution
 from wisp.cli.application import main
+from wisp.cli import rpc
 
 log = Path(sys.argv[1])
 sessions = sys.argv[2]
@@ -50,6 +51,14 @@ async def recorded(command, **kwargs):
         }
         stream.write(json.dumps(record) + "\\n")
 execution.handle_rpc_queue_command = recorded
+write_event = rpc._write_json_event
+def record_finished(event):
+    write_event(event)
+    if event.type == "rpc.command.finished":
+        with log.open("a") as stream:
+            record = {"command": {"type": "finished:" + event.command_type}}
+            stream.write(json.dumps(record) + "\\n")
+rpc._write_json_event = record_finished
 sys.argv = ["wisp", "--mode", "rpc", "--provider", "fake", "--session-dir", sessions]
 main()
 """,
@@ -157,9 +166,34 @@ main()
         tui.send(b"\x1b")
         tui.resize(width=width + 1)
         tui.wait_for(b"draft-kept", since=offset, failure="queue overlay lost the composer draft")
+        # Keep work across cancellation, then restore it on the first attempt
+        # in a replacement run without opening the manager or manually refreshing.
+        tui.send(b"\x1b\r")
+        wait_report("follow_up", 2)
+        old_token = reports("follow_up")[-1]["state"]["token"]
+        stats_before_cancel = len(reports("finished:get_session_stats"))
         offset = len(tui.output)
         tui.send(b"\x03")
         tui.wait_for(b"idle", since=offset, failure="run did not cancel")
+        wait_report("finished:get_session_stats", stats_before_cancel + 1)
+        offset = len(tui.output)
+        tui.send(b"replacement run\r")
+        tui.wait_for(
+            b"blocked-provider-ready", since=offset, failure="replacement run did not start"
+        )
+        tui.send(b"\x1b[1;3A")
+        wait_report("pop_queue", 1)
+        restored = reports("pop_queue")[-1]
+        assert restored["command"]["expected_token"] != old_token
+        assert restored["state"]["follow_up"] == []
+        offset = len(tui.output)
+        tui.resize(width=width + 2)
+        tui.wait_for(
+            b"draft-kept", since=offset, failure="first restore did not recover retained work"
+        )
+        offset = len(tui.output)
+        tui.send(b"\x03")
+        tui.wait_for(b"idle", since=offset, failure="replacement run did not cancel")
         tui.quit()
     finally:
         tui.close()

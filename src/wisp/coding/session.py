@@ -582,6 +582,11 @@ class CodingSession:
         self._accepting_queued_messages = True
         if operation_ready is not None:
             await operation_ready()
+        if retained is not None:
+            # The replacement owner gives retained items a new guard token.
+            # Publish it before prompt preparation so the first queue mutation
+            # need not fail against the previous run's displayed snapshot.
+            yield await emit(harness.queue_updated_event())
         prompt_messages = await self._prompt_messages_async(
             effective_tools,
             registry=operation_registry,

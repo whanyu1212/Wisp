@@ -7,7 +7,10 @@ import pytest
 from tests.rpc_support import build_rpc_executor_fixture
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.tool_contracts import ToolExecutor
-from wisp.events import QueueItemsRemoved, QueueUpdated, RpcCommandFinished
+from wisp.coding import CodingSession
+from wisp.events import AgentStarted, QueueItemsRemoved, QueueUpdated, RpcCommandFinished, WispEvent
+from wisp.providers.events import ProviderResponseStarted
+from wisp.providers.fake import ScriptedProvider
 from wisp.rpc.commands import (
     ClearQueueCommand,
     GetQueueStateCommand,
@@ -16,6 +19,75 @@ from wisp.rpc.commands import (
     SetQueueModeCommand,
 )
 from wisp.rpc.session.queue import handle_rpc_queue_command
+from wisp.sessions.jsonl import JsonlSessionStore
+
+
+@pytest.mark.parametrize("interruption", ["failure", "cancellation"])
+def test_replacement_run_publishes_token_before_first_guarded_restore(
+    tmp_path: Path, interruption: str
+) -> None:
+    async def scenario() -> None:
+        store = JsonlSessionStore(tmp_path)
+        session = store.create()
+        provider = ScriptedProvider(
+            [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]
+        )
+        agent = CodingSession(provider=provider, sessions=store)
+        content = "retained follow-up\n你好"
+        old_token = None
+        first = agent.run("first", session=session)
+        try:
+            with anyio.CancelScope() as scope:
+                try:
+                    async for event in first:
+                        if isinstance(event, AgentStarted):
+                            agent.set_queue_mode("follow_up", "all")
+                            await agent.follow_up("older item")
+                            old_token = (await agent.follow_up(content)).token
+                            if interruption == "cancellation":
+                                scope.cancel()
+                except RuntimeError as exc:
+                    assert interruption == "failure" and str(exc) == "provider failed"
+        finally:
+            await first.aclose()
+        assert old_token is not None
+        assert agent.queue_state(session).follow_up == ("older item", content)
+        assert agent.queue_state(session).token is None
+
+        ready = False
+
+        async def mark_ready() -> None:
+            nonlocal ready
+            ready = True
+
+        retry = agent.run("retry", session=session, operation_ready=mark_ready)
+        try:
+            # This event precedes prompt preparation and provider work, not just
+            # a later drain or a refresh caused by a failed mutation.
+            event = await anext(retry)
+            assert isinstance(event, QueueUpdated)
+            assert ready and event.command_id is None
+            assert event.follow_up == ("older item", content)
+            assert event.follow_up_mode == "all"
+            assert event.token is not None and event.token != old_token
+            with pytest.raises(RuntimeError, match="Queue changed"):
+                agent.validate_queue_token(old_token)
+            events: list[WispEvent] = []
+            await handle_rpc_queue_command(
+                PopQueueCommand(id="restore", kind="follow_up", expected_token=event.token),
+                agent=agent,
+                session=session,
+                write_event=events.append,
+            )
+            finished = events[-1]
+            assert isinstance(finished, RpcCommandFinished) and finished.ok
+            removed = events[-3]
+            assert isinstance(removed, QueueItemsRemoved) and removed.follow_up == (content,)
+            assert agent.queue_state(session).follow_up == ("older item",)
+        finally:
+            await retry.aclose()
+
+    anyio.run(scenario)
 
 
 @pytest.mark.parametrize("operation", ["pop", "clear", "mode"])
