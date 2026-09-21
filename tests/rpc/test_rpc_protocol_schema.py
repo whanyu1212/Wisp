@@ -221,26 +221,18 @@ def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
     )
 
 
-def test_git_history_check_reports_modified_committed_version_artifacts(
+def test_git_history_check_reports_failed_git_inventory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(*args: object, **kwargs: object) -> object:
-        assert "--diff-filter=MDRTUXB" in cast(tuple[str, ...], args[0])
         return protocol_schema.subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout=(
-                "schemas/live-rpc/v1/events.schema.json\n"
-                "schemas/live-rpc/v01/manifest.json\n"
-                "site/reference/compatibility.md\n"
-            ),
-            stderr="",
+            args=args, returncode=128, stdout="", stderr="missing trusted base"
         )
 
     monkeypatch.setattr(protocol_schema.subprocess, "run", fake_run)
 
     assert modified_committed_protocol_artifacts("trusted-base") == (
-        "schemas/live-rpc/v1/events.schema.json",
+        "cannot verify immutable protocol history: missing trusted base",
     )
 
 
