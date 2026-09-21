@@ -171,11 +171,16 @@ main()
         tui.send(b"\x1b\r")
         wait_report("follow_up", 2)
         old_token = reports("follow_up")[-1]["state"]["token"]
-        stats_before_cancel = len(reports("finished:get_session_stats"))
+        metadata_before_cancel = {
+            kind: len(reports(f"finished:{kind}")) for kind in ("get_session_stats", "get_messages")
+        }
         offset = len(tui.output)
         tui.send(b"\x03")
         tui.wait_for(b"idle", since=offset, failure="run did not cancel")
-        wait_report("finished:get_session_stats", stats_before_cancel + 1)
+        # Statistics and branch metadata refresh independently after a prompt.
+        # Idle status (or statistics alone) does not mean both have completed.
+        for kind, count in metadata_before_cancel.items():
+            wait_report(f"finished:{kind}", count + 1)
         offset = len(tui.output)
         tui.send(b"replacement run\r")
         tui.wait_for(
