@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum, auto
+from uuid import uuid4
 
 import anyio
 
@@ -132,6 +133,7 @@ class AgentHarness:
         self._running = False
         self._steering_queue: deque[Message] = deque()
         self._follow_up_queue: deque[Message] = deque()
+        self._queue_token = uuid4().hex
 
     @property
     def config(self) -> AgentHarnessConfig:
@@ -178,6 +180,7 @@ class AgentHarness:
         """Replace provider/tool configuration between runs."""
         self._ensure_idle()
         self._config = config
+        self._queue_token = uuid4().hex
 
     def append_message(self, message: Message) -> None:
         """Append a detached copy of restored or application-provided state."""
@@ -215,6 +218,7 @@ class AgentHarness:
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
         self._steering_queue.append(message.model_copy(deep=True))
+        self._queue_token = uuid4().hex
         return self.queue_updated_event()
 
     def follow_up(self, content: str) -> QueueUpdated:
@@ -226,28 +230,33 @@ class AgentHarness:
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
         self._follow_up_queue.append(message.model_copy(deep=True))
+        self._queue_token = uuid4().hex
         return self.queue_updated_event()
 
     def set_steering_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many steering messages a future drain will inject."""
         self._config = replace(self._config, steering_mode=mode)
+        self._queue_token = uuid4().hex
         return self.queue_updated_event()
 
     def set_follow_up_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many follow-up messages a future drain will inject."""
         self._config = replace(self._config, follow_up_mode=mode)
+        self._queue_token = uuid4().hex
         return self.queue_updated_event()
 
     def pop_latest_steering(self) -> Message | None:
         """Remove and return the latest steering message for editing."""
         if not self._steering_queue:
             return None
+        self._queue_token = uuid4().hex
         return self._steering_queue.pop()
 
     def pop_latest_follow_up(self) -> Message | None:
         """Remove and return the latest follow-up message for editing."""
         if not self._follow_up_queue:
             return None
+        self._queue_token = uuid4().hex
         return self._follow_up_queue.pop()
 
     def clear_queue(self, kind: QueueKind) -> tuple[Message, ...]:
@@ -255,6 +264,7 @@ class AgentHarness:
         queue = self._queue_for(kind)
         cleared = tuple(queue)
         queue.clear()
+        self._queue_token = uuid4().hex
         return cleared
 
     def clear_queues(self) -> QueuedMessages:
@@ -262,6 +272,7 @@ class AgentHarness:
         cleared = self.queued_messages
         self._steering_queue.clear()
         self._follow_up_queue.clear()
+        self._queue_token = uuid4().hex
         return cleared
 
     def drain_steering(self) -> tuple[QueueMessageInjected | QueueUpdated, ...]:
@@ -281,12 +292,17 @@ class AgentHarness:
         return tuple(events)
 
     def queue_updated_event(self) -> QueueUpdated:
-        """Return current queue state as a portable versioned event."""
+        """Return current queues and their opaque revision.
+
+        Returns:
+            QueueUpdated: Detached contents, drain modes, and the current owner-state token.
+        """
         return QueueUpdated(
             steering=tuple(message.user_visible_content for message in self._steering_queue),
             follow_up=tuple(message.user_visible_content for message in self._follow_up_queue),
             steering_mode=self._config.steering_mode,
             follow_up_mode=self._config.follow_up_mode,
+            token=self._queue_token,
         )
 
     def prompt(
@@ -628,6 +644,7 @@ class AgentHarness:
         if not queue or queue[0] is not expected:
             return None
         message = queue.popleft()
+        self._queue_token = uuid4().hex
         self._messages.append(message)
         return QueueMessageInjected(
             kind=kind,

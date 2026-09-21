@@ -354,6 +354,7 @@ class SetQueueModeCommand(RpcCommandModel):
     type: Literal["set_queue_mode"] = "set_queue_mode"
     kind: QueueKind
     mode: QueueMode
+    expected_token: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class PopQueueCommand(RpcCommandModel):
@@ -361,6 +362,7 @@ class PopQueueCommand(RpcCommandModel):
 
     type: Literal["pop_queue"] = "pop_queue"
     kind: QueueKind
+    expected_token: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ClearQueueCommand(RpcCommandModel):
@@ -368,6 +370,7 @@ class ClearQueueCommand(RpcCommandModel):
 
     type: Literal["clear_queue"] = "clear_queue"
     kind: QueueKind | None = None
+    expected_token: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class CancelCommand(RpcCommandModel):

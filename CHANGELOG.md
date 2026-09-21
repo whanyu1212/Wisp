@@ -336,6 +336,13 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
 
 ## Live RPC protocol v9 — current
 
+- Added Rust `/queue` and the configurable `queue.manage` action for FIFO previews, drain modes,
+  newest-item restoration, and scoped clear confirmations. Existing Alt+Up uses guarded restoration.
+- Queue snapshots add optional `token` and `command_id`; mode/pop/clear commands add optional
+  `expected_token`. Stale requests and predictable oversized removal responses fail before mutation.
+  Legacy unguarded callers remain supported; retained idle queues remain read-only. This additive
+  change regenerates v9 in place without changing removal/snapshot/completion ordering.
+
 - Events no longer carry a per-event `schema_version`. The live RPC protocol bundle under
   `schemas/live-rpc/` is the single compatibility contract: additive event changes regenerate the
   current bundle in place, and breaking changes bump the protocol version. The handshake no longer

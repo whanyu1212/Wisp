@@ -701,9 +701,16 @@ command_log = Path(sys.argv[1])
 active_prompt_id = None
 steering_content = "steer-via-enter"
 follow_up_content = "follow-up-via-alt-enter"
+queue_revision = 0
+queue_token = None
 
 
 def emit(event):
+    global queue_revision, queue_token
+    if isinstance(event, QueueUpdated):
+        queue_revision += 1
+        queue_token = f"queue-{queue_revision}"
+        event = event.model_copy(update={"token": queue_token})
     print(event.model_dump_json(), flush=True)
 
 
@@ -760,6 +767,7 @@ for line in sys.stdin:
         ))
         finish(command)
     elif command_type == "pop_queue":
+        assert command["expected_token"] == queue_token
         emit(QueueItemsRemoved(
             command_id=command["id"],
             operation="pop",
@@ -1621,8 +1629,12 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "help"
                 output.clear()
+            elif phase == "help" and b"/queue" in output and b"/compact" in output:
+                # The queue command adds a row; permissions is now on the next help page.
+                os.write(terminal_fd, b"\x1b[6~")
+                phase = "help scrolled"
             elif (
-                phase == "help"
+                phase == "help scrolled"
                 and b"/permissions" in output
                 and b"/compact" in output
                 and b"Esc close" in output

@@ -48,6 +48,12 @@ superset. Event schemas describe the exact current serialized shape, including r
 nullable fields. Stateful lifecycle invariants remain model-level protocol requirements rather than
 JSON Schema constraints.
 
+Queue management adds optional `expected_token` fields to existing mode/pop/clear commands and
+optional `token`/`command_id` fields to queue snapshots within v9. Existing unguarded callers and
+historical snapshots remain accepted; lifecycle ordering is unchanged. This is an additive current-v9
+bundle regeneration, not a new protocol version or a per-event version counter. The Rust queue manager
+requires a snapshot token for destructive controls; it does not fall back to unguarded mutations.
+
 JSON Schema cannot compare two properties or express that one array is a subset of another. The
 handshake artifacts therefore record ordered ranges, selected-version containment, and the client
 required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce

@@ -1335,6 +1335,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
     assert [command["name"] for command in report["commands"]] == [
         "help",
         "init",
+        "queue",
         "compact",
         "context",
         "history",
@@ -1357,7 +1358,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "disconnect",
         "quit",
     ]
-    compact = report["commands"][2]
+    compact = next(command for command in report["commands"] if command["name"] == "compact")
     assert compact["slash_command"] == "/compact"
     assert compact["category"] == "session"
     assert compact["arguments"] == [

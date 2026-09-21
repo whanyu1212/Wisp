@@ -346,6 +346,19 @@ class CodingSession:
             pending_follow_up_count=len(queue.follow_up),
         )
 
+    def validate_queue_token(self, expected_token: str) -> None:
+        """Reject a stale queue snapshot before a synchronous mutation.
+
+        Args:
+            expected_token (str): Opaque token from the displayed queue snapshot.
+
+        Raises:
+            RuntimeError: No run accepts queue mutations or the snapshot is stale.
+        """
+        state = self._active_queue_harness().queue_updated_event()
+        if state.token != expected_token:
+            raise RuntimeError("Queue changed; refresh and retry the operation")
+
     def set_queue_mode(self, kind: QueueKind, mode: QueueMode) -> QueueUpdated:
         """Set one active queue's drain mode."""
 

@@ -785,6 +785,14 @@
               "then": {
                 "additionalProperties": false,
                 "properties": {
+                  "token": {
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "command_id": {
+                    "type": ["string", "null"]
+                  },
                   "follow_up": {
                     "items": {
                       "type": "string"

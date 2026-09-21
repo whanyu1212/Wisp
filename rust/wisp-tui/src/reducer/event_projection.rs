@@ -497,9 +497,28 @@ impl BackendEvent {
                     &event_type,
                     [("steering", steering), ("follow_up", follow_up)],
                 )?;
-                Self::QueueUpdated {
-                    steering: queue_strings(steering),
-                    follow_up: queue_strings(follow_up),
+                if value.get("steering_mode").is_some()
+                    || value.get("token").is_some()
+                    || value.get("command_id").is_some()
+                {
+                    Self::QueueSnapshot(super::queue_management::Snapshot {
+                        steering: queue_strings(steering),
+                        follow_up: queue_strings(follow_up),
+                        steering_mode: queue_mode(value, &event_type, "steering_mode")?,
+                        follow_up_mode: queue_mode(value, &event_type, "follow_up_mode")?,
+                        token: optional_exact_string_field(value, &event_type, "token", 128)?,
+                        command_id: optional_exact_string_field(
+                            value,
+                            &event_type,
+                            "command_id",
+                            256,
+                        )?,
+                    })
+                } else {
+                    Self::QueueUpdated {
+                        steering: queue_strings(steering),
+                        follow_up: queue_strings(follow_up),
+                    }
                 }
             }
             "queue.items.removed" => {
@@ -1074,6 +1093,22 @@ fn required_session_identity(
         session_path,
         session_name,
     })
+}
+
+fn queue_mode(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<wisp_protocol::commands::QueueMode, EventProjectionError> {
+    use wisp_protocol::commands::QueueMode;
+    match value.get(field).and_then(Value::as_str) {
+        Some("all") => Ok(QueueMode::All),
+        Some("one_at_a_time") | None => Ok(QueueMode::OneAtATime),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.into(),
+            field,
+        }),
+    }
 }
 
 fn optional_exact_string_field(

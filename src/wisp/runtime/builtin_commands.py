@@ -24,6 +24,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=15,
         ),
         CommandDescriptor(
+            name="queue",
+            title="Queues",
+            description="Inspect and manage steering and follow-up queues",
+            category=CommandCategory.session,
+            order=18,
+        ),
+        CommandDescriptor(
             name="compact",
             title="Compact",
             description="Compact the session context",

@@ -586,6 +586,23 @@ pub mod commands {
         FollowUp,
     }
 
+    /// Backend-owned drain policy for one queue.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub enum QueueMode {
+        #[default]
+        OneAtATime,
+        All,
+    }
+
+    impl QueueMode {
+        pub const fn as_wire_value(self) -> &'static str {
+            match self {
+                Self::OneAtATime => "one_at_a_time",
+                Self::All => "all",
+            }
+        }
+    }
+
     impl QueueKind {
         /// Return the canonical live-RPC wire value.
         pub const fn as_wire_value(self) -> &'static str {
@@ -1025,6 +1042,41 @@ pub mod commands {
         /// Request the active or retained queue state.
         pub fn get_queue_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_queue_state", "id": id}))
+        }
+
+        /// Mutate only the queue snapshot the caller actually displayed.
+        pub fn guarded_pop_queue(
+            id: &str,
+            kind: QueueKind,
+            token: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "pop_queue", "id": id, "kind": kind.as_wire_value(), "expected_token": token}),
+            )
+        }
+
+        pub fn set_queue_mode(
+            id: &str,
+            kind: QueueKind,
+            mode: QueueMode,
+            token: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "set_queue_mode", "id": id, "kind": kind.as_wire_value(), "mode": mode.as_wire_value(), "expected_token": token}),
+            )
+        }
+
+        pub fn clear_queue(
+            id: &str,
+            kind: Option<QueueKind>,
+            token: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value =
+                serde_json::json!({"type": "clear_queue", "id": id, "expected_token": token});
+            if let Some(kind) = kind {
+                value["kind"] = serde_json::json!(kind.as_wire_value());
+            }
+            deserialize(value)
         }
 
         /// Remove the latest item from one active queue.

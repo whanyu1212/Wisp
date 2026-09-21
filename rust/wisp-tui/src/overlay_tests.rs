@@ -9,12 +9,13 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 11] = [
+const KINDS: [OverlayKind; 12] = [
     OverlayKind::Theme,
     OverlayKind::Logo,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
     OverlayKind::Context,
+    OverlayKind::Queue,
     OverlayKind::Help,
     OverlayKind::Model,
     OverlayKind::Connection,
@@ -100,6 +101,7 @@ fn open(ui: &mut LiveUi, kind: OverlayKind) {
         }
         OverlayKind::Discovery => ui.discovery_view = Some(DiscoveryView::skills(None)),
         OverlayKind::Context => ui.context_view = Some(context_view::ContextView::default()),
+        OverlayKind::Queue => ui.queue_view = Some(queue_view::QueueView::default()),
         OverlayKind::Help => ui.command_help = Some(Help::default()),
         OverlayKind::Model => {
             let mut picker = ModelPicker::loading();
@@ -246,6 +248,92 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
             "{kind:?}"
         );
         assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[test]
+fn queue_overlay_renders_across_themes_sizes_and_no_color() {
+    for selected in theme::themes() {
+        for no_color in [false, true] {
+            for (width, height) in [(30, 8), (80, 24), (160, 40)] {
+                let mut ui = base();
+                ui.theme.active = selected;
+                ui.no_color = no_color;
+                open(&mut ui, OverlayKind::Queue);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                draw(&mut ui, &mut terminal);
+                assert!(text(terminal.backend().buffer()).contains("Steering"));
+                assert_eq!(ui.active_overlay(), Some(OverlayKind::Queue));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn queue_overlay_preserves_ctrl_c_cancellation_and_blocks_modified_activation() {
+    let mut ui = base();
+    ui.state.current_command = Some(ActiveCommand {
+        id: "prompt".into(),
+        command_type: ActiveCommandType::Prompt,
+    });
+    ui.state.view_status = ViewStatus::Running;
+    ui.state.interaction_status = InteractionStatus::Running;
+    ui.state.queue.management.token = Some("revision".into());
+    open(&mut ui, OverlayKind::Queue);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    let draft = ui.editor.clone();
+    let (writer, mut receiver) = mpsc::channel(16);
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(receiver.try_recv().is_err());
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.state.cancel_requested);
+    assert!(!ui.state.queue_management_available("revision"));
+    assert_eq!(ui.editor, draft);
+}
+
+#[tokio::test]
+async fn queue_management_frame_and_writer_failures_do_not_commit_local_mutations() {
+    for closed in [false, true] {
+        let mut ui = base();
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        ui.state.view_status = ViewStatus::Running;
+        ui.state.interaction_status = InteractionStatus::Running;
+        ui.state.queue.management.token = Some("revision".into());
+        let draft = ui.editor.clone();
+        let (writer, receiver) = mpsc::channel(16);
+        if closed {
+            drop(receiver);
+        }
+        let result = ui
+            .dispatch_queue_action(
+                UiAction::ManageQueue {
+                    operation: reducer::queue_management::Operation::Clear(None),
+                    expected_token: "revision".into(),
+                },
+                &writer,
+                if closed { 8192 } else { 1 },
+            )
+            .await;
+        assert_eq!(result.is_err(), closed);
+        assert!(ui.state.queue.management.pending.is_none());
+        assert_eq!(ui.state.queue.management.token.as_deref(), Some("revision"));
+        assert_eq!(ui.editor, draft);
     }
 }
 

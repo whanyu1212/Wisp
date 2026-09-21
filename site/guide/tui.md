@@ -278,6 +278,7 @@ the entire default keymap; other valid user settings still apply.
 | `prompt.alternate_submit` | Alt+Enter | Newline while idle; follow-up while running |
 | `prompt.newline` | Shift+Enter, Ctrl+J | Insert newline |
 | `queue.restore` | Alt+Up | Restore newest queued draft |
+| `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
 | `theme.toggle` | Ctrl+T | Toggle Paper / last dark theme |
 | `transcript.browse` | F6 | Select transcript cards |
@@ -395,6 +396,25 @@ draft. The Rust TUI clears a submitted draft only after the JSONL writer flushes
 state after startup and session changes, and reports queued or recovering text as unsent if the
 transport closes.
 
+Use `/queue` to inspect both queues, their FIFO previews, and their drain modes. The optional
+`queue.manage` action can be bound without replacing the current composer draft, for example
+`{"queue.manage": ["F7"]}` in the existing keybinding configuration. The overlay supports arrows,
+Home/End, Enter, and opt-in mouse navigation. Escape closes it; Ctrl+C retains cancellation behavior.
+
+- **One at a time** drains one message per eligible boundary. **All** drains the batch selected at
+  that boundary; messages added later wait for a subsequent boundary.
+- **Restore newest** acts on the selected queue, unlike Alt+Up's cross-queue newest-item selection.
+  Restored text is prepended to the current draft, never automatically submitted or silently truncated.
+- **Clear this queue** and **Clear both queues** require a scoped confirmation, defaulting to Cancel.
+  A changed snapshot invalidates the old choice. Modes and contents change only after backend events.
+- Mutations require an active editable run and a backend snapshot token. Retained queues after a run
+  are inspectable but read-only. A stale request fails without removing a replacement item; refresh
+  and review the new state before retrying. Missing token support never falls back to an unguarded pop.
+
+Opening the overlay does not change queue policy or pause draining. These queues are process-local,
+not persistent work across restarts. Predictable frame-limit failures preserve queued text; connection
+loss can leave a command outcome unknown, so destructive operations are not retried automatically.
+
 ## Slash commands
 
 ```text
@@ -409,6 +429,7 @@ transport closes.
 /resume [session-id]        browse or resume a persisted session
 /compact [instructions]     summarize older context while preserving the JSONL audit
 /context [auto on|off]      show or toggle compaction policy
+/queue                      inspect and manage steering and follow-up queues
 /plan                       switch to read-only planning mode
 /build                      switch to normal build mode
 /history                    search prompts submitted in this TUI run

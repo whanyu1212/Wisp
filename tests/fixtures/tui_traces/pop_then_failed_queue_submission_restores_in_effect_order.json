@@ -22,6 +22,7 @@
       "type": "rpc.event",
       "event": {
         "type": "queue.updated",
+        "token": "revision-1",
         "steering": [],
         "follow_up": ["popped draft"]
       },
@@ -75,7 +76,8 @@
       {
         "type": "pop_queue",
         "id": "pop_queue-1",
-        "kind": "follow_up"
+        "kind": "follow_up",
+        "expected_token": "revision-1"
       },
       {
         "type": "follow_up",

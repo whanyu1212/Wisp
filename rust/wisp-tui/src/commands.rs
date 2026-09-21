@@ -29,6 +29,7 @@ pub(crate) enum Command {
     Logo(Option<LogoChoice>),
     Mode(AgentMode),
     Context,
+    Queue,
     Skills,
     Mcp,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
@@ -52,6 +53,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
+        "queue" => "/queue",
         "skills" => "/skills",
         "mcp" => "/mcp",
         "permissions" => "/permissions [ask|yolo]",
@@ -116,7 +118,7 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let tail = &trimmed[token.len()..];
     let normalized = format!("/{canonical}{tail}");
     Some(match canonical {
-        "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
+        "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp" | "queue"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
@@ -124,6 +126,7 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         "help" => Command::Help,
         "init" => Command::Init,
         "history" => Command::History,
+        "queue" => Command::Queue,
         "update" => match tail.trim() {
             "" | "check" | "install" => Command::UpdateGuidance,
             _ => Command::Invalid("Usage: /update [check|install]".into()),

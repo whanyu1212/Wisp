@@ -22,6 +22,7 @@ use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
 mod model_selection;
 pub(crate) mod project_files;
+pub mod queue_management;
 use model_selection::ModelOperation;
 
 pub use event_projection::EventProjectionError;
@@ -463,6 +464,7 @@ pub struct QueuedMessage {
 pub struct QueueState {
     pub steering: Vec<QueuedMessage>,
     pub follow_up: Vec<QueuedMessage>,
+    pub management: queue_management::Management,
     next_identity: u64,
 }
 
@@ -740,6 +742,16 @@ impl UiState {
         }
     }
 
+    pub(crate) fn queue_management_pending(&self) -> bool {
+        self.pending_queue_restore.is_some() || self.queue.management.pending.is_some()
+    }
+
+    pub(crate) fn queue_management_available(&self, token: &str) -> bool {
+        self.active_prompt_editable()
+            && !self.queue_management_pending()
+            && self.queue.management.token.as_deref() == Some(token)
+    }
+
     pub fn queued_steering(&self) -> usize {
         self.queue.steering.len()
     }
@@ -870,6 +882,8 @@ pub enum CommandKind {
     Steer,
     FollowUp,
     PopQueue,
+    SetQueueMode,
+    ClearQueue,
     GetQueueState,
     Approval,
     Cancel,
@@ -908,6 +922,8 @@ impl CommandKind {
             Self::Steer => "steer",
             Self::FollowUp => "follow_up",
             Self::PopQueue => "pop_queue",
+            Self::SetQueueMode => "set_queue_mode",
+            Self::ClearQueue => "clear_queue",
             Self::GetQueueState => "get_queue_state",
             Self::Approval => "approval",
             Self::Cancel => "cancel",
@@ -1046,6 +1062,7 @@ pub enum BackendEvent {
         steering: Vec<String>,
         follow_up: Vec<String>,
     },
+    QueueSnapshot(queue_management::Snapshot),
     QueueItemsRemoved {
         command_id: String,
         operation: QueueRemovalOperation,
@@ -1135,6 +1152,10 @@ pub enum UiAction {
         presentation: String,
     },
     RestoreNewestQueueDraft,
+    ManageQueue {
+        operation: queue_management::Operation,
+        expected_token: String,
+    },
     RefreshQueueState,
     StartupHydration,
     OpenConnectionPanel,
@@ -1323,7 +1344,11 @@ pub fn reduce(
             presentation,
         } => queue_submission(state, QueueKind::FollowUp, content, Some(presentation), ids),
         UiAction::RestoreNewestQueueDraft => restore_newest_queue_draft(state, ids),
-        UiAction::RefreshQueueState => refresh_queue_state(ids),
+        UiAction::RefreshQueueState => refresh_queue_state(state, ids),
+        UiAction::ManageQueue {
+            operation,
+            expected_token,
+        } => queue_management::request(state, operation, expected_token, ids),
         UiAction::StartupHydration => start_startup_hydration(state, ids),
         UiAction::OpenConnectionPanel => Ok(vec![
             UiEffect::ShowConnectionPanel(state.connection_catalog.clone()),
@@ -1557,8 +1582,35 @@ fn restore_newest_queue_draft(
             UiEffect::RequestRender,
         ]);
     };
+    let Some(token) = state.queue.management.token.clone() else {
+        return Ok(vec![
+            UiEffect::Notice("Refresh queues before restoring a queued item.".into()),
+            queue_state_effect(state, ids)?,
+            UiEffect::RequestRender,
+        ]);
+    };
+    queue_management::request(
+        state,
+        queue_management::Operation::Restore(kind),
+        token,
+        ids,
+    )
+}
+
+fn restore_queue_draft(
+    state: &mut UiState,
+    kind: QueueKind,
+    token: &str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.queue.messages(kind).is_empty() {
+        return Ok(vec![
+            UiEffect::Notice("No queued item to restore.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     let id = ids.next_id(CommandKind::PopQueue);
-    let command = WispTypedClientRpcCommands::pop_queue(&id, kind)?;
+    let command = WispTypedClientRpcCommands::guarded_pop_queue(&id, kind, token)?;
     state.pending_queue_restore = Some(PendingQueueRestore {
         command_id: id,
         kind,
@@ -1572,12 +1624,26 @@ fn restore_newest_queue_draft(
     ])
 }
 
-fn refresh_queue_state(ids: &mut impl CommandIdSource) -> Result<Vec<UiEffect>, ReduceError> {
-    Ok(vec![queue_state_effect(ids)?, UiEffect::RequestRender])
+fn refresh_queue_state(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.queue.management.refresh.is_some() {
+        return Ok(vec![UiEffect::RequestRender]);
+    }
+    state.queue.management.error = None;
+    Ok(vec![
+        queue_state_effect(state, ids)?,
+        UiEffect::RequestRender,
+    ])
 }
 
-fn queue_state_effect(ids: &mut impl CommandIdSource) -> Result<UiEffect, ProtocolDecodeError> {
+fn queue_state_effect(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<UiEffect, ProtocolDecodeError> {
     let id = ids.next_id(CommandKind::GetQueueState);
+    state.queue.management.refresh = Some(id.clone());
     Ok(UiEffect::SendCommand(
         WispTypedClientRpcCommands::get_queue_state(&id)?,
     ))
@@ -2614,7 +2680,7 @@ fn commit_session_and_hydrate(
             command,
             session_id: selected.session_id,
         },
-        queue_state_effect(ids)?,
+        queue_state_effect(state, ids)?,
         UiEffect::RequestRender,
     ])
 }
@@ -3008,7 +3074,7 @@ fn handle_session_backend_event(
             state.input_ready = true;
             vec![
                 UiEffect::ReplaceTranscript,
-                queue_state_effect(ids)?,
+                queue_state_effect(state, ids)?,
                 UiEffect::RequestRender,
             ]
         }
@@ -3293,7 +3359,7 @@ fn handle_session_backend_event(
                 state.input_ready = true;
                 vec![
                     UiEffect::ReplaceTranscript,
-                    queue_state_effect(ids)?,
+                    queue_state_effect(state, ids)?,
                     UiEffect::RequestRender,
                 ]
             }
@@ -3853,9 +3919,17 @@ fn handle_queue_items_removed(
     follow_up: Vec<String>,
 ) -> Vec<UiEffect> {
     if operation == QueueRemovalOperation::Clear {
-        state.queue.clear_local_presentations();
+        for queue_kind in [QueueKind::Steering, QueueKind::FollowUp] {
+            if kind.is_none() || kind == Some(queue_kind) {
+                for message in state.queue.messages_mut(queue_kind) {
+                    message.local_display = None;
+                }
+            }
+        }
         for pending in state.pending_queue_submissions.values_mut() {
-            pending.local_display = None;
+            if kind.is_none() || kind == Some(pending.kind) {
+                pending.local_display = None;
+            }
         }
     }
     let pending_kind = {
@@ -4171,6 +4245,9 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(effects) = queue_management::finish(state, &event, ids)? {
+        return Ok(effects);
+    }
     if let Some(effects) = state.project_files.observe(&event) {
         return Ok(effects);
     }
@@ -4376,6 +4453,10 @@ fn handle_backend_event(
             effects.extend(command_controls::load_catalog(state, ids)?);
             Ok(effects)
         }
+        BackendEvent::QueueSnapshot(snapshot) => {
+            queue_management::apply_snapshot(state, snapshot);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::QueueUpdated {
             steering,
             follow_up,
@@ -4434,9 +4515,15 @@ fn handle_backend_event(
             ok,
             error,
         } => {
-            if let Some(effects) =
+            if let Some(mut effects) =
                 handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
             {
+                if command_type == "pop_queue" && !ok {
+                    state.queue.management.error =
+                        Some(error.unwrap_or_else(|| "Queue restoration failed.".into()));
+                    effects.push(queue_state_effect(state, ids)?);
+                    effects.push(UiEffect::RequestRender);
+                }
                 return Ok(effects);
             }
             let matches_current = state.current_command.as_ref().is_some_and(|current| {
@@ -7255,9 +7342,21 @@ mod tests {
         );
     }
 
+    fn editable_queue_state() -> UiState {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.current_command = Some(ActiveCommand {
+            id: "active".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.queue.management.token = Some("test-token".into());
+        state
+    }
+
     #[test]
     fn queue_restore_prefers_newest_local_order_over_fallback_queue_order() {
-        let mut state = UiState::new("fake".into(), None, None);
+        let mut state = editable_queue_state();
         let mut ids = DeterministicIds::default();
         reduce(
             &mut state,
@@ -7316,7 +7415,7 @@ mod tests {
 
     #[test]
     fn queue_restore_waits_for_matching_pop_removal_in_either_event_order() {
-        let mut fallback = UiState::new("fake".into(), None, None);
+        let mut fallback = editable_queue_state();
         let mut fallback_ids = DeterministicIds::default();
         reduce(
             &mut fallback,
@@ -7336,7 +7435,7 @@ mod tests {
         assert_eq!(command_value(&effects[0]).unwrap()["kind"], "follow_up");
 
         for removal_first in [true, false] {
-            let mut state = UiState::new("fake".into(), None, None);
+            let mut state = editable_queue_state();
             let mut ids = DeterministicIds::default();
             reduce(
                 &mut state,
@@ -7379,7 +7478,7 @@ mod tests {
 
     #[test]
     fn stale_queue_removal_and_cancel_leave_queue_state_intact() {
-        let mut state = UiState::new("fake".into(), None, None);
+        let mut state = editable_queue_state();
         let mut ids = DeterministicIds::default();
         reduce(
             &mut state,
@@ -7417,6 +7516,7 @@ mod tests {
             .is_empty()
         );
         assert_eq!(state.queue, before);
+        state.current_command = None;
 
         assert!(
             reduce(&mut state, UiAction::Cancel, &mut ids)
@@ -7490,7 +7590,7 @@ mod tests {
 
     #[test]
     fn queue_pop_removes_the_last_matching_duplicate() {
-        let mut state = UiState::new("fake".into(), None, None);
+        let mut state = editable_queue_state();
         let mut ids = DeterministicIds::default();
         reduce(
             &mut state,

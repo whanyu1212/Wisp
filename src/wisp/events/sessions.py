@@ -339,6 +339,16 @@ class QueueUpdated(WispEvent):
     follow_up: tuple[str, ...] = ()
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
+    token: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="Opaque active-queue revision; absent for retained or legacy snapshots.",
+    )
+    command_id: str | None = Field(
+        default=None,
+        description="Originating RPC command for a solicited snapshot; absent for run events.",
+    )
 
 
 class QueueItemsRemoved(WispEvent):

@@ -141,6 +141,16 @@
       "additionalProperties": false,
       "description": "Clear one or both active queues.",
       "properties": {
+        "expected_token": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "ClearQueueCommandExpectedToken"
+        },
         "id": {
           "anyOf": [
             {
@@ -969,6 +979,16 @@
       "additionalProperties": false,
       "description": "Remove the latest item from one active queue.",
       "properties": {
+        "expected_token": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "PopQueueCommandExpectedToken"
+        },
         "id": {
           "anyOf": [
             {
@@ -1102,6 +1122,16 @@
       "additionalProperties": false,
       "description": "Set one active queue's drain mode.",
       "properties": {
+        "expected_token": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "SetQueueModeCommandExpectedToken"
+        },
         "id": {
           "anyOf": [
             {

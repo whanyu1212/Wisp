@@ -273,6 +273,18 @@ impl LiveUi {
                 } else if self.rendered_overlay == Some(kind) {
                     if let Some(index) = frame.rows.hit(event) {
                         if self.select_mouse_row(kind, index) {
+                            if kind == OverlayKind::Queue {
+                                return self
+                                    .handle_focused_input(
+                                        Input::Key(KeyEvent::new(
+                                            KeyCode::Enter,
+                                            KeyModifiers::NONE,
+                                        )),
+                                        writer,
+                                        limit,
+                                    )
+                                    .await;
+                            }
                             self.invalidate_overlay(kind);
                             self.render_pending = true;
                         }
@@ -375,6 +387,10 @@ impl LiveUi {
                 .session_picker
                 .as_mut()
                 .is_some_and(|view| view.select_mouse(index)),
+            OverlayKind::Queue => self
+                .queue_view
+                .as_mut()
+                .is_some_and(|view| view.select_mouse(index, &self.state)),
             OverlayKind::Context | OverlayKind::Help | OverlayKind::Detail => false,
         }
     }
