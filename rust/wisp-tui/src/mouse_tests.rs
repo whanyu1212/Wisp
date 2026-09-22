@@ -767,6 +767,14 @@ async fn session_and_connection_clicks_only_select_visible_rows() {
             .as_mut()
             .unwrap()
             .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        SessionPickerAction::None,
+    );
+    draw(&mut ui, 80, 24);
+    assert_eq!(
+        ui.session_picker
+            .as_mut()
+            .unwrap()
+            .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
         SessionPickerAction::Selected("session-1".into())
     );
     ui.session_picker = None;

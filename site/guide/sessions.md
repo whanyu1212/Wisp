@@ -12,6 +12,16 @@ wisp -p "continue the work" --resume <session-id-prefix>
 - `--resume` accepts a JSONL path, filename, full session id, or unique id prefix.
 - Sessions live under `~/.wisp/sessions`; override with `--session-dir` or `WISP_SESSION_DIR`.
 
+## Finding older sessions
+
+In the Rust TUI, `/resume` searches and pages through persisted session summaries without retaining
+the entire catalog. Search matches current names or session IDs, not prompt or assistant text.
+Sessions are newest-first by file modification time, with filename descending breaking ties.
+Unnamed and duplicate-name sessions remain distinct; the picker displays an ID prefix, while
+selection uses the full ID. Refresh after renaming, deleting, or otherwise changing the catalog
+if a page cursor becomes stale. See [TUI controls](./tui) and the
+[SDK catalog contract](../reference/sdk#persisted-sessions) for navigation and error handling.
+
 ## What a session file contains
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries

@@ -23,6 +23,7 @@ mod event_projection;
 mod model_selection;
 pub(crate) mod project_files;
 pub mod queue_management;
+mod session_catalog;
 use model_selection::ModelOperation;
 
 pub use event_projection::EventProjectionError;
@@ -61,6 +62,12 @@ pub struct SessionSummary {
     pub name: Option<String>,
     pub updated_at: String,
     pub entry_count: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CatalogNavigation {
+    pub next_cursor: Option<String>,
+    pub previous_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -279,6 +286,7 @@ pub enum SessionOperation {
     },
     LoadingCatalog {
         command_id: String,
+        navigation: CatalogNavigation,
         sessions: Option<Vec<SessionSummary>>,
         selected_session_id: Option<Option<String>>,
         completion: Option<SessionCompletion>,
@@ -1076,6 +1084,7 @@ pub enum BackendEvent {
     },
     SessionsReported {
         command_id: String,
+        navigation: CatalogNavigation,
         sessions: Vec<SessionSummary>,
         selected_session: Option<SessionIdentity>,
     },
@@ -1182,6 +1191,10 @@ pub enum UiAction {
     },
     CancelDeviceCode,
     LoadSessionCatalog,
+    SearchSessionCatalog {
+        query: String,
+        cursor: Option<String>,
+    },
     SelectSession {
         session_id: String,
     },
@@ -1260,7 +1273,14 @@ pub enum UiEffect {
         content: String,
         local_order: Option<u64>,
     },
+    SessionCatalogStarted(String),
+    SessionCatalogFailed {
+        command_id: String,
+        error: String,
+    },
     ShowSessionPicker {
+        command_id: String,
+        navigation: CatalogNavigation,
         sessions: Vec<SessionSummary>,
         selected_session_id: Option<String>,
     },
@@ -1370,7 +1390,10 @@ pub fn reduce(
         UiAction::DisconnectProvider { provider } => disconnect_provider(state, provider, ids),
         UiAction::BeginDeviceCode { provider } => begin_device_code(state, provider, ids),
         UiAction::CancelDeviceCode => cancel_device_code(state, ids),
-        UiAction::LoadSessionCatalog => load_session_catalog(state, ids),
+        UiAction::LoadSessionCatalog => session_catalog::load(state, ids, "", None),
+        UiAction::SearchSessionCatalog { query, cursor } => {
+            session_catalog::load(state, ids, &query, cursor.as_deref())
+        }
         UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
         UiAction::NewSession => new_session(state, ids),
         UiAction::SetSessionName(name) => set_session_name(state, name, ids),
@@ -1967,28 +1990,6 @@ fn cancel_device_code(
     {
         *cancel_requested = true;
     }
-    Ok(vec![
-        UiEffect::SendCommand(command),
-        UiEffect::RequestRender,
-    ])
-}
-
-fn load_session_catalog(
-    state: &mut UiState,
-    ids: &mut impl CommandIdSource,
-) -> Result<Vec<UiEffect>, ReduceError> {
-    if let Some(effects) = begin_session_operation(state)? {
-        return Ok(effects);
-    }
-    let id = ids.next_id(CommandKind::GetSessions);
-    let command = WispTypedClientRpcCommands::get_sessions(&id)?;
-    state.input_ready = false;
-    state.session_operation = Some(SessionOperation::LoadingCatalog {
-        command_id: id,
-        sessions: None,
-        selected_session_id: None,
-        completion: None,
-    });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -2751,6 +2752,7 @@ fn handle_session_backend_event(
         },
         SessionOperation::LoadingCatalog {
             command_id,
+            navigation,
             sessions,
             selected_session_id,
             completion,
@@ -2758,9 +2760,11 @@ fn handle_session_backend_event(
             BackendEvent::SessionsReported {
                 command_id: received,
                 sessions: received_sessions,
+                navigation: received_navigation,
                 selected_session,
             } if received == command_id => {
                 if sessions.is_none() {
+                    *navigation = received_navigation.clone();
                     *sessions = Some(received_sessions.clone());
                     *selected_session_id = Some(
                         selected_session
@@ -3083,19 +3087,33 @@ fn handle_session_backend_event(
             return Ok(Some(Vec::new()));
         }
         SessionOperation::LoadingCatalog {
-            sessions: _,
+            command_id,
             completion: Some(completion),
             ..
-        } if !completion.ok => session_failure(state, "session catalog", completion.error),
+        } if !completion.ok => {
+            state.input_ready = true;
+            vec![
+                UiEffect::SessionCatalogFailed {
+                    command_id,
+                    error: completion
+                        .error
+                        .unwrap_or_else(|| "Session catalog request failed".into()),
+                },
+                UiEffect::RequestRender,
+            ]
+        }
         SessionOperation::LoadingCatalog {
+            command_id,
+            navigation,
             sessions: Some(sessions),
             selected_session_id,
             completion: Some(_),
-            ..
         } => {
             state.input_ready = true;
             vec![
                 UiEffect::ShowSessionPicker {
+                    command_id,
+                    navigation,
                     sessions,
                     selected_session_id: selected_session_id.flatten().or_else(|| {
                         state
@@ -4619,6 +4637,8 @@ mod tests {
             | UiEffect::FinishDeviceCode
             | UiEffect::RestoreDraft { .. }
             | UiEffect::ShowSessionPicker { .. }
+            | UiEffect::SessionCatalogStarted(_)
+            | UiEffect::SessionCatalogFailed { .. }
             | UiEffect::ShowSessionTreePage { .. }
             | UiEffect::CloseSessionTree
             | UiEffect::RestoreSessionDraft(_)
@@ -8097,6 +8117,7 @@ mod tests {
             &mut state,
             UiAction::BackendEvent(BackendEvent::SessionsReported {
                 command_id: "get_sessions-1".into(),
+                navigation: CatalogNavigation::default(),
                 sessions: sessions.clone(),
                 selected_session: Some(session("first")),
             }),
@@ -8111,7 +8132,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             effects.as_slice(),
-            [UiEffect::ShowSessionPicker { sessions: shown, selected_session_id: Some(selected) }, ..]
+            [UiEffect::ShowSessionPicker { sessions: shown, selected_session_id: Some(selected), .. }, ..]
                 if shown == &sessions && selected == "first"
         ));
         assert!(state.input_ready);

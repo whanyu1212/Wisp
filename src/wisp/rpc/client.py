@@ -279,11 +279,29 @@ class RpcController:
         )
         return selected_id
 
-    async def get_sessions(self, *, limit: int = 50, command_id: str | None = None) -> str:
-        """Request a bounded persisted session catalog."""
+    async def get_sessions(
+        self,
+        *,
+        limit: int = 50,
+        query: str = "",
+        cursor: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Request a bounded, searchable persisted session catalog page.
 
+        Args:
+            limit (int): Maximum summaries, from zero through 200.
+            query (str): Literal case-insensitive name or session ID substring.
+            cursor (str | None): Opaque next/previous cursor from a matching query.
+            command_id (str | None): Optional caller-supplied correlation ID.
+
+        Returns:
+            str: Command ID correlating the report and terminal event.
+        """
         selected_id = command_id or self._command_id_factory("sessions")
-        await self._transport.send(GetSessionsCommand(id=selected_id, limit=limit))
+        await self._transport.send(
+            GetSessionsCommand(id=selected_id, limit=limit, query=query or None, cursor=cursor)
+        )
         return selected_id
 
     async def new_session(self, *, command_id: str | None = None) -> str:

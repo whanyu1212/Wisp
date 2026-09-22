@@ -2785,14 +2785,18 @@ def test_executor_sessions_cancel_abandons_blocked_catalog_read(
         fixture = await build_rpc_executor_fixture(tmp_path)
         started = threading.Event()
         release = threading.Event()
-        original_summaries = fixture.sessions.summaries
+        original_catalog = fixture.sessions.catalog_page
 
-        def blocked_summaries(*, limit: int | None = None) -> object:
+        def blocked_catalog(
+            *, limit: int, query: str, cursor: str | None, check_cancelled: Callable[[], None]
+        ) -> object:
             started.set()
             release.wait(timeout=5)
-            return original_summaries(limit=limit)
+            return original_catalog(
+                limit=limit, query=query, cursor=cursor, check_cancelled=check_cancelled
+            )
 
-        monkeypatch.setattr(fixture.sessions, "summaries", blocked_summaries)
+        monkeypatch.setattr(fixture.sessions, "catalog_page", blocked_catalog)
 
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive, anyio.create_task_group() as task_group:

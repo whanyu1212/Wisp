@@ -810,7 +810,27 @@ pub mod commands {
 
         /// Construct a bounded persisted-session catalog request.
         pub fn get_sessions(id: &str) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(serde_json::json!({"type": "get_sessions", "id": id, "limit": 50}))
+            Self::search_sessions(id, "", None)
+        }
+
+        pub fn search_sessions(
+            id: &str,
+            query: &str,
+            cursor: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            if query.len() > 1024 {
+                return Err(super::ProtocolDecodeError(
+                    "Session query exceeds 1024 UTF-8 bytes".into(),
+                ));
+            }
+            let mut value = serde_json::json!({"type": "get_sessions", "id": id, "limit": 50});
+            if !query.is_empty() {
+                value["query"] = serde_json::json!(query);
+            }
+            if let Some(cursor) = cursor {
+                value["cursor"] = serde_json::json!(cursor);
+            }
+            deserialize(value)
         }
 
         /// Construct a request to deselect the active session.

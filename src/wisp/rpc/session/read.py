@@ -163,6 +163,8 @@ def start_rpc_sessions_command(
         send.clone(),
         write_event,
         command_completed_factory,
+        command.query or "",
+        command.cursor,
     )
     return running_command_factory(
         command_id=command_id,
@@ -375,6 +377,61 @@ def _write_messages_page(
             return
 
 
+def _session_catalog_report(
+    sessions: JsonlSessionStore,
+    *,
+    limit: int,
+    query: str,
+    cursor: str | None,
+    command_id: str,
+    selected_session: JsonlSession | None,
+    selected_session_name: str | None,
+    check_cancelled: Callable[[], None] = lambda: None,
+    max_frame_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
+) -> RpcSessionsReported:
+    """Fit a catalog report, recomputing cursors at the actual page boundary.
+
+    Args:
+        sessions (JsonlSessionStore): Authoritative session store.
+        limit (int): Requested maximum page size.
+        query (str): Literal search query.
+        cursor (str | None): Requested page boundary.
+        command_id (str): Request correlation ID.
+        selected_session (JsonlSession | None): Current session, independent of filtering.
+        selected_session_name (str | None): Current display name.
+        check_cancelled (Callable): Cooperative scan cancellation callback.
+        max_frame_bytes (int): Maximum encoded report size.
+
+    Returns:
+        RpcSessionsReported: A transport-safe page with truthful cursors.
+
+    Raises:
+        RpcFrameError: Even a single summary or empty report cannot fit.
+        SessionError: The catalog is stale or unreadable.
+    """
+    while True:
+        page = sessions.catalog_page(
+            limit=limit, query=query, cursor=cursor, check_cancelled=check_cancelled
+        )
+        report = RpcSessionsReported(
+            command_id=command_id,
+            sessions=tuple(_rpc_session_summary(item) for item in page.sessions),
+            query=page.query,
+            next_cursor=page.next_cursor,
+            previous_cursor=page.previous_cursor,
+            selected_session_id=selected_session.session_id if selected_session else None,
+            selected_session_path=selected_session.path if selected_session else None,
+            selected_session_name=selected_session_name,
+        )
+        try:
+            encode_rpc_frame(report, max_frame_bytes=max_frame_bytes)
+            return report
+        except RpcFrameError:
+            if len(page.sessions) <= 1:
+                raise
+            limit = max(1, len(page.sessions) // 2)
+
+
 async def run_rpc_sessions_command(
     sessions: JsonlSessionStore,
     selected_session: JsonlSession | None,
@@ -385,14 +442,13 @@ async def run_rpc_sessions_command(
     send: MemoryObjectSendStream[_RpcControlEvent],
     write_event: RpcEventWriter,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    query: str = "",
+    cursor: str | None = None,
 ) -> None:
     ok = False
     error: str | None = None
     try:
         with cancel_scope:
-            summaries = await _run_abandonable_session_read(
-                partial(sessions.summaries, limit=limit)
-            )
             selected_session_name = (
                 await _run_abandonable_session_read(selected_session.read_name)
                 if selected_session is not None
@@ -401,19 +457,20 @@ async def run_rpc_sessions_command(
             if cancel_scope.cancel_called:
                 error = "RPC get_sessions command cancelled"
             else:
-                write_event(
-                    RpcSessionsReported(
+                report = await _run_abandonable_session_read(
+                    partial(
+                        _session_catalog_report,
+                        sessions,
+                        limit=limit,
+                        query=query,
+                        cursor=cursor,
                         command_id=command_id,
-                        sessions=tuple(_rpc_session_summary(summary) for summary in summaries),
-                        selected_session_id=(
-                            selected_session.session_id if selected_session is not None else None
-                        ),
-                        selected_session_path=(
-                            selected_session.path if selected_session is not None else None
-                        ),
+                        selected_session=selected_session,
                         selected_session_name=selected_session_name,
+                        check_cancelled=anyio.from_thread.check_cancelled,
                     )
                 )
+                write_event(report)
                 ok = True
         if cancel_scope.cancel_called and error is None:
             error = "RPC get_sessions command cancelled"

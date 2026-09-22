@@ -252,6 +252,27 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
 }
 
 #[test]
+fn session_catalog_renders_across_themes_sizes_and_no_color() {
+    for selected in theme::themes() {
+        for no_color in [false, true] {
+            for (width, height) in [(30, 8), (80, 24), (160, 40)] {
+                let mut ui = base();
+                ui.theme.active = selected;
+                ui.no_color = no_color;
+                open(&mut ui, OverlayKind::Session);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                draw(&mut ui, &mut terminal);
+                assert!(text(terminal.backend().buffer()).contains("Search:"));
+                assert_eq!(
+                    ui.session_picker.as_ref().unwrap().rendered_selection(),
+                    Some("one")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn queue_overlay_renders_across_themes_sizes_and_no_color() {
     for selected in theme::themes() {
         for no_color in [false, true] {
@@ -516,10 +537,15 @@ async fn session_replacement_navigation_and_resize_require_the_new_choice_to_be_
     assert!(receiver.try_recv().is_err());
     draw(&mut ui, &mut terminal);
     ui.apply_effects(
-        vec![UiEffect::ShowSessionPicker {
-            sessions: vec![session("replacement")],
-            selected_session_id: None,
-        }],
+        vec![
+            UiEffect::SessionCatalogStarted("replacement".into()),
+            UiEffect::ShowSessionPicker {
+                command_id: "replacement".into(),
+                navigation: reducer::CatalogNavigation::default(),
+                sessions: vec![session("replacement")],
+                selected_session_id: None,
+            },
+        ],
         &writer,
         8192,
     )

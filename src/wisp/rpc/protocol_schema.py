@@ -1020,6 +1020,13 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
     )
 
     sessions = _named_definition(definitions, "RpcSessionsReported")
+    # Catalog discovery is additive within v9. Older reports omit these fields;
+    # the current emitter also omits absent cursors rather than emitting null.
+    sessions["required"] = [
+        name
+        for name in cast(list[JsonValue], sessions["required"])
+        if name not in ("query", "next_cursor", "previous_cursor")
+    ]
     sessions["allOf"] = cast(
         JsonValue,
         [
