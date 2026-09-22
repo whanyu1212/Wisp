@@ -93,8 +93,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   then `loop/runner.py` for execution within one run. Each package keeps configuration in `config.py`.
 - `harness/boundaries.py` prepares boundary decisions and transcript replacements; `harness/runner.py`
   applies replacements when the next turn starts. The loop's `model_response.py`,
-  `provider_lifecycle.py`, `tool_execution.py`, `prepared_tools.py`, and `continuation.py`
-  contain its supporting mechanisms.
+  `provider_lifecycle.py`, `tool_execution.py`, `tool_lifecycle.py`, `prepared_tools.py`, and
+  `continuation.py` contain its supporting mechanisms.
 - `prompt/builder.py` assembles instructions in order; `prompt/instructions.py` holds core instruction
   text; `prompt/project_context.py` discovers trusted files and bounded Git/project context.
   `prompt/text_budget.py` applies shared character limits to context and tool guidance.
