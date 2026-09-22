@@ -202,7 +202,7 @@ commands and may be submitted while a prompt is paused.
 
 | Method | Signature after `self` | Primary result event |
 |---|---|---|
-| `get_sessions` | `(*, limit: int = 50, command_id: str \| None = None)` | `RpcSessionsReported` |
+| `get_sessions` | `(*, limit: int = 50, query: str = "", cursor: str \| None = None, command_id: str \| None = None)` | `RpcSessionsReported` |
 | `new_session` | `(*, command_id: str \| None = None)` | Deselect; next prompt creates a session |
 | `select_session` | `(session_id: str, *, command_id: str \| None = None)` | `RpcSessionSelected` |
 | `set_session_name` | `(name: str, *, session_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionNameChanged` |
@@ -212,7 +212,27 @@ commands and may be submitted while a prompt is paused.
 | `navigate_session_tree` | `(entry_id: str, *, command_id: str \| None = None)` | `RpcSessionTreeNavigated` |
 | `unrevert_session_tree` | `(*, command_id: str \| None = None)` | `RpcSessionTreeUnreverted` |
 
-`get_sessions()` accepts `limit` from 0 through 200. Session tree pages accept 1 through 500 nodes.
+`get_sessions()` accepts `limit` from 0 through 200 (zero returns no rows or cursors).
+`query` is bounded to 1024 UTF-8 bytes and uses trimmed, Unicode-casefolded literal substring
+matching against current session names and full IDs. An empty query lists all sessions;
+unnamed sessions remain searchable by ID. Duplicate names remain separate identities.
+
+`RpcSessionsReported` includes the normalized `query`, `next_cursor`, and `previous_cursor`.
+Pass a non-null cursor back with the same query to navigate. Cursors are opaque, bounded to
+4096 bytes, and tied to the catalog's current file metadata; edits, renames, additions, or deletions
+can invalidate them. On a stale-cursor failure, retry without a cursor. Do not decode a cursor,
+reuse it with another query/store, or infer a total count from the page size. Reports can be smaller
+than requested to fit transport limits; their cursors still follow the actual returned boundary.
+An individually oversized summary fails instead of being silently skipped.
+
+Results are ordered newest-first by modification time, then filename descending as a deterministic
+tie-breaker. Search reads session metadata, not full transcript models, but scan cost still grows
+with the catalog and JSONL files; bounded result pages are not a durable index or constant-time search.
+Selected-session metadata is independent of the query. Existing calls without query/cursor retain
+their behavior. The shared `get_sessions` command and `rpc.sessions` event use additive optional
+fields in live RPC v9; historical protocol bundles and persisted records are unchanged.
+
+Session tree pages accept 1 through 500 nodes.
 
 Transcript pages use:
 

@@ -25,6 +25,7 @@ from wisp.sessions.branching import (
     project_fork_from_user_message,
     project_session_path,
 )
+from wisp.sessions.catalog import SessionCatalogPage, read_catalog_page
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -282,6 +283,38 @@ class JsonlSessionStore:
         selected = files[:limit] if limit is not None else files
         return tuple(self._summary_for_path(path) for path in selected)
 
+    def catalog_page(
+        self,
+        *,
+        limit: int = 50,
+        query: str = "",
+        cursor: str | None = None,
+        check_cancelled: Callable[[], None] = lambda: None,
+    ) -> SessionCatalogPage:
+        """Search current session names and IDs using bounded, stable pages.
+
+        Args:
+            limit (int): Maximum summaries, from zero through 200.
+            query (str): Case-insensitive literal name or ID substring.
+            cursor (str | None): Opaque continuation from an earlier result.
+            check_cancelled (Callable): Raise to stop scanning cancelled work.
+
+        Returns:
+            SessionCatalogPage: Results with opaque forward/backward cursors.
+
+        Raises:
+            ValueError: Query or limit bounds are invalid.
+            SessionError: Metadata is invalid or the catalog cursor is stale.
+        """
+        return read_catalog_page(
+            files=self._session_files,
+            summary=lambda path: self._summary_for_path(path, check_cancelled=check_cancelled),
+            limit=limit,
+            query=query,
+            cursor=cursor,
+            check_cancelled=check_cancelled,
+        )
+
     def _clone_once(
         self,
         source: JsonlSession,
@@ -342,9 +375,11 @@ class JsonlSessionStore:
         target._create_with_entries_once(copied_entries)  # noqa: SLF001
         return target
 
-    def _summary_for_path(self, path: Path) -> SessionSummary:
+    def _summary_for_path(
+        self, path: Path, *, check_cancelled: Callable[[], None] | None = None
+    ) -> SessionSummary:
         info = path.stat()
-        metadata = read_session_summary_metadata(path)
+        metadata = read_session_summary_metadata(path, check_cancelled=check_cancelled)
         return SessionSummary(
             session_id=metadata.session_id,
             path=path.resolve(strict=False),

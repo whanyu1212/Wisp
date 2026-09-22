@@ -6,10 +6,10 @@
   "schema_format_version": 1,
   "schema_hashes": {
     "client-handshake.schema.json": "7db831f7b10c011a3beecefb45b2c197938b3bfd2792782ab38676baae8a4623",
-    "commands.schema.json": "563c30fa9a1f9191afbb6b0fc04f58cfa9744e416fe44bc1e0aec3ba99c042fa",
-    "events.schema.json": "fed65ad275172b6e1f0b23d027adbd62a749f3e28fe8dd45cbfb97cb4e875212",
-    "rust-commands.schema.json": "fcc3578f69957b643561d84376eac8e29ead6aa2822ca45e66ac69f0270bad4b",
-    "rust-events.schema.json": "acc4524aedce54d9817ab17e683ba3b67f47057cdc1091dde77b06d3e16d1fd5",
+    "commands.schema.json": "11f947ab8b02b720166f9005afbc8581bce900d6f8cfca3f6a1797d01ea19606",
+    "events.schema.json": "2ccdc71dfcc281ab14d0cd2b479b8f76ef6f7fbe75e807c5f76fe61c92211c8d",
+    "rust-commands.schema.json": "d2b600cbbcba15a3421c8b51418a4f89fd28e1d869c960404bfab0250963db47",
+    "rust-events.schema.json": "bd5d1869d647b42b8d4343ae7b509e957b24995660a1d85e0e3be4851b956f89",
     "server-handshake.schema.json": "1448335859756ce0b6f927195fea96f6ee7822831fc62b9363f1566c3a8101f6"
   },
   "schemas": {

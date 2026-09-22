@@ -58,6 +58,8 @@ struct ActivationTarget {
     rendered_logo: Option<usize>,
     rendered_history: Option<u64>,
     rendered_skill: Option<String>,
+    rendered_session: Option<String>,
+    session_query: Option<(String, String)>,
     composer_copy: bool,
     mouse_frame: Option<mouse::Frame>,
 }
@@ -95,6 +97,15 @@ impl ActivationTarget {
                 .as_ref()
                 .and_then(|view| view.rendered_selection())
                 .map(str::to_owned),
+            rendered_session: ui
+                .session_picker
+                .as_ref()
+                .and_then(|picker| picker.rendered_selection())
+                .map(str::to_owned),
+            session_query: ui
+                .session_picker
+                .as_ref()
+                .and_then(|picker| picker.editing_identity()),
             composer_copy: matches!(input, Input::Key(key) if is_ctrl_c(*key)
                 && ui.composer_clipboard_action(*key)
                     == Some(crate::clipboard::ClipboardAction::Copy)),
@@ -110,6 +121,7 @@ pub(super) struct PendingInput {
     target: ActivationTarget,
     remaining: usize,
     editor_input: bool,
+    catalog_input: bool,
 }
 
 impl PendingInput {
@@ -142,11 +154,35 @@ impl PendingInput {
                 }
                 _ => false,
             };
+        let catalog_input = target.overlay == Some(OverlayKind::Session)
+            && target.help_owner.is_none()
+            && target.decision.is_none()
+            && match &input {
+                Input::Paste(_) => true,
+                Input::Key(key)
+                    if key.code == crossterm::event::KeyCode::Char('u')
+                        && key.modifiers == crossterm::event::KeyModifiers::CONTROL =>
+                {
+                    true
+                }
+                Input::Key(key) => {
+                    matches!(
+                        key.code,
+                        crossterm::event::KeyCode::Char(_) | crossterm::event::KeyCode::Backspace
+                    ) && !key.modifiers.intersects(
+                        crossterm::event::KeyModifiers::CONTROL
+                            | crossterm::event::KeyModifiers::ALT
+                            | crossterm::event::KeyModifiers::SUPER,
+                    )
+                }
+                _ => false,
+            };
         Self {
             input,
             target,
             remaining,
             editor_input,
+            catalog_input,
         }
     }
 
@@ -170,7 +206,17 @@ impl PendingInput {
             && self.target.browse_entry == current.browse_entry
             && self.target.editor_revision == current.editor_revision
             && self.target.editor_editable == current.editor_editable;
+        // A catalog result may replace rows, but must not swallow ordinary
+        // search editing captured before it. The first request ID identifies
+        // this picker instance across pages and prevents close/reopen ABA.
+        let same_catalog = self.catalog_input
+            && self.target.session_query.is_some()
+            && self.target.session_query == current.session_query
+            && self.target.help_owner == current.help_owner
+            && self.target.decision == current.decision
+            && self.target.overlay == current.overlay;
         if recovery
+            || same_catalog
             || matches!(self.input, Input::Redraw | Input::Error(_))
             || same_editor
             || self.target == current
@@ -376,6 +422,9 @@ async fn run_with_interrupts<B: FrameBackend>(
                 return Ok(Exit::User);
             }
         }
+        if !eof {
+            ui.poll_session_catalog(writer, limit).await?;
+        }
         let now = Instant::now();
         if now >= next_activity {
             ui.advance_activity_animation();
@@ -394,6 +443,15 @@ async fn run_with_interrupts<B: FrameBackend>(
             tokio::task::yield_now().await;
             continue;
         }
+        let catalog_deadline = ui
+            .session_picker
+            .as_ref()
+            .and_then(|picker| picker.request_deadline())
+            .filter(|_| {
+                ui.state.session_operation.is_none()
+                    && ui.state.input_ready
+                    && !ui.state.configuration_active()
+            });
         tokio::select! {
             biased;
             result = receive_writer(sources.writer) => {
@@ -421,6 +479,7 @@ async fn run_with_interrupts<B: FrameBackend>(
             }
             _ = tokio::time::sleep_until(next_paint), if ui.render_pending => {}
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() => {}
+            _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}
         }
     }
 }

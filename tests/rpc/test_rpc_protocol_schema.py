@@ -492,10 +492,16 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
     assert len(mapping) == 53
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
-    for definition in cast(dict[str, dict[str, object]], schema["$defs"]).values():
+    for name, definition in cast(dict[str, dict[str, object]], schema["$defs"]).items():
         properties = definition.get("properties")
         if isinstance(properties, dict):
-            assert set(cast(list[str], definition["required"])) == set(properties)
+            # Discovery fields were added within v9 and older reports omit them.
+            optional = (
+                {"query", "next_cursor", "previous_cursor"}
+                if name == "RpcSessionsReported"
+                else set()
+            )
+            assert set(cast(list[str], definition["required"])) == set(properties) - optional
             assert definition["additionalProperties"] is False
 
 

@@ -9,6 +9,7 @@ the full reader accepts.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
@@ -58,16 +59,33 @@ class SessionSummaryMetadata:
 _SESSION_TREE_ENTRY_KINDS = frozenset({"message", "event", "compaction"})
 
 
-def read_session_summary_metadata(path: Path) -> SessionSummaryMetadata:
+def read_session_summary_metadata(
+    path: Path, *, check_cancelled: Callable[[], None] | None = None
+) -> SessionSummaryMetadata:
+    """Scan committed metadata under the existing recovery and locking boundary.
+
+    Args:
+        path (Path): Authorized session file to inspect.
+        check_cancelled (Callable | None): Optional check between JSONL records.
+            Exceptions propagate after releasing the file locks.
+
+    Returns:
+        SessionSummaryMetadata: Current identity, name, leaf, and entry count.
+
+    Raises:
+        SessionError: The file or committed metadata cannot be read safely.
+    """
     state = session_file_state(path)
     with state.lock:
         with interprocess_lock(path, prepare_parent=False):
             if recover_incomplete_tail(path):
                 state.generation += 1
-            return _read_session_summary_metadata_unlocked(path)
+            return _read_session_summary_metadata_unlocked(path, check_cancelled=check_cancelled)
 
 
-def _read_session_summary_metadata_unlocked(path: Path) -> SessionSummaryMetadata:
+def _read_session_summary_metadata_unlocked(
+    path: Path, *, check_cancelled: Callable[[], None] | None = None
+) -> SessionSummaryMetadata:
     if not path.is_file():
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 
@@ -83,6 +101,8 @@ def _read_session_summary_metadata_unlocked(path: Path) -> SessionSummaryMetadat
     try:
         with path.open("r", encoding="utf-8") as session_file:
             for line_number, line in enumerate(session_file, start=1):
+                if check_cancelled is not None:
+                    check_cancelled()
                 if not line.strip():
                     continue
                 source = f"{path}:{line_number}"

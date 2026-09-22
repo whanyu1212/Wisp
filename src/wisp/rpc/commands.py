@@ -271,6 +271,14 @@ class GetSessionsCommand(RpcCommandModel):
 
     type: Literal["get_sessions"] = "get_sessions"
     limit: int = Field(default=50, ge=0, le=200, strict=True)
+    query: str | None = Field(default=None, max_length=1024)
+    cursor: str | None = Field(default=None, min_length=1, max_length=4096)
+
+    @model_validator(mode="after")
+    def _validate_catalog_query(self) -> Self:
+        if self.query is not None and len(self.query.encode("utf-8")) > 1024:
+            raise ValueError("Session query exceeds 1024 UTF-8 bytes")
+        return self
 
 
 class NewSessionCommand(RpcCommandModel):

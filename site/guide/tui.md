@@ -94,9 +94,17 @@ strip instead of a five-row args panel.
 The Rust TUI negotiates and validates live RPC v9, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and complete saved session history.
-`/resume` opens a picker for up to 50 persisted sessions (or accepts
-one exact session ID); `/new` deselects the current session and clears the local transcript after the
-backend confirms it. Startup and resumed history collect every transport page and build the
+`/resume` opens a searchable picker with backend-owned pages of up to 50 persisted sessions;
+`/resume <id>` still selects directly. Type or paste to search current names and session IDs
+(case-insensitive literal substrings, not transcript content). `Ctrl+U` clears the query.
+Use arrows, `PageUp`/`PageDown`, and `Home`/`End` to move within the page; `Ctrl+Left`/`Ctrl+Right`
+loads the previous/next page. `Enter` resumes the highlighted, rendered session; `Escape` closes.
+`Ctrl+R` refreshes from the first page, and `Ctrl+Y` retries the current page after an error.
+Narrow layouts abbreviate Ctrl as `^`; `Ctrl+G` shows the full action hints.
+Search and navigation preserve the composer draft and transcript viewport. Submitting `/resume`
+consumes that slash command, not the search text. A deleted session leaves the picker open for recovery.
+Catalog changes invalidate pagination cursors: refresh rather than continuing through shifted rows.
+`/new` deselects the current session and clears the local transcript after the backend confirms it. Startup and resumed history collect every transport page and build the
 complete transcript once before enabling input. Conversation entries are retained without a history
 cap; rendering caches and compact tool previews remain bounded. Large messages render in full as
 plain text. Very large sessions therefore require more startup time and memory.

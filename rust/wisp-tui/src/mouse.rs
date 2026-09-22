@@ -83,6 +83,10 @@ pub(crate) struct Rows {
 }
 
 impl Rows {
+    pub fn is_empty(&self) -> bool {
+        self.count == 0 || self.area.width == 0
+    }
+
     pub fn new(area: Rect, first: usize, total: usize, height: u16) -> Self {
         let height = height.max(1);
         Self {

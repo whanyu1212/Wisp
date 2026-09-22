@@ -2,12 +2,12 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::{
-    BackendEvent, MessageContentKind, PendingApproval, QUEUE_CONTENT_BYTES_LIMIT,
-    QUEUE_MESSAGE_LIMIT, QueueRemovalOperation, SESSION_CATALOG_LIMIT, SESSION_ENTRY_COUNT_MAX,
-    SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES, SESSION_TREE_PAGE_LIMIT,
-    SESSION_UPDATED_AT_MAX_BYTES, SessionDerivation, SessionIdentity, SessionMessages,
-    SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode, SessionTreeNodeKind,
-    SessionTreePage, SessionTreeUnrevert,
+    BackendEvent, CatalogNavigation, MessageContentKind, PendingApproval,
+    QUEUE_CONTENT_BYTES_LIMIT, QUEUE_MESSAGE_LIMIT, QueueRemovalOperation, SESSION_CATALOG_LIMIT,
+    SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
+    SESSION_TREE_PAGE_LIMIT, SESSION_UPDATED_AT_MAX_BYTES, SessionDerivation, SessionIdentity,
+    SessionMessages, SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode,
+    SessionTreeNodeKind, SessionTreePage, SessionTreeUnrevert,
 };
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
@@ -552,6 +552,20 @@ impl BackendEvent {
             "rpc.sessions" => Self::SessionsReported {
                 command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                 sessions: session_summaries(value, &event_type)?,
+                navigation: CatalogNavigation {
+                    next_cursor: optional_exact_string_field(
+                        value,
+                        &event_type,
+                        "next_cursor",
+                        4096,
+                    )?,
+                    previous_cursor: optional_exact_string_field(
+                        value,
+                        &event_type,
+                        "previous_cursor",
+                        4096,
+                    )?,
+                },
                 selected_session: optional_session_identity(
                     value,
                     &event_type,

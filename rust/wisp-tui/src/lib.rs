@@ -37,6 +37,8 @@ mod prompt_history_tests;
 mod prompt_history_view;
 mod queue_view;
 pub mod reducer;
+#[cfg(test)]
+mod session_catalog_tests;
 mod session_picker;
 mod session_tree_picker;
 mod startup_logo;
@@ -733,6 +735,7 @@ impl LiveUi {
                                     | "get_skills"
                                     | "get_mcp_status"
                                     | "get_project_files"
+                                    | "get_sessions"
                             )
                         ) || (command_type == Some("configure")
                             && (value.get("mode").is_some()
@@ -928,17 +931,33 @@ impl LiveUi {
                         self.render_pending = true;
                     }
                 }
+                UiEffect::SessionCatalogStarted(id) => {
+                    if let Some(picker) = &mut self.session_picker {
+                        picker.started(id);
+                    }
+                    self.render_pending = true;
+                }
+                UiEffect::SessionCatalogFailed { command_id, error } => {
+                    if let Some(picker) = &mut self.session_picker {
+                        picker.failed(&command_id, error);
+                    }
+                    self.render_pending = true;
+                }
                 UiEffect::ShowSessionPicker {
+                    command_id,
+                    navigation,
                     sessions,
                     selected_session_id,
                 } => {
-                    self.theme_picker = None;
-                    self.logo_picker = None;
                     self.invalidate_overlay(OverlayKind::Session);
-                    self.prompt_history_view = None;
-                    self.session_tree_picker = None;
-                    self.session_picker =
-                        Some(SessionPicker::new(sessions, selected_session_id.as_deref()));
+                    if let Some(picker) = &mut self.session_picker {
+                        picker.loaded(
+                            &command_id,
+                            sessions,
+                            navigation,
+                            selected_session_id.as_deref(),
+                        );
+                    }
                     self.render_pending = true;
                 }
                 UiEffect::ShowSessionTreePage { page, append } => {
@@ -1031,7 +1050,16 @@ impl LiveUi {
                     }
                     send_payload(writer, payload, limit).await?;
                 }
-                UiEffect::ReplaceTranscript => self.reset_transcript_presentation(),
+                UiEffect::ReplaceTranscript => {
+                    if self
+                        .session_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.selecting)
+                    {
+                        self.session_picker = None;
+                    }
+                    self.reset_transcript_presentation();
+                }
                 UiEffect::HistoryWindowChanged { .. } | UiEffect::ReanchorTranscript { .. } => {
                     self.render_pending = true
                 }
@@ -1138,6 +1166,32 @@ impl LiveUi {
         );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
+        if let UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok: false,
+            error,
+        }) = &action
+        {
+            if command_type == "select_session"
+                && matches!(
+                    &self.state.session_operation,
+                    Some(reducer::SessionOperation::SelectingSession { command_id: expected, .. }) if expected == command_id
+                )
+            {
+                if let Some(picker) = self
+                    .session_picker
+                    .as_mut()
+                    .filter(|picker| picker.selecting)
+                {
+                    picker.selection_failed(
+                        error
+                            .clone()
+                            .unwrap_or_else(|| "Session selection failed".into()),
+                    );
+                }
+            }
+        }
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
         if previous_decision != self.current_decision_context() {
             self.rendered_overlay = None;
@@ -1600,6 +1654,11 @@ impl LiveUi {
         self.rendered_decision_context = rendered_decision_context;
         self.rendered_model_picker = rendered_model_picker;
         self.rendered_overlay = rendered_overlay;
+        if rendered_overlay == Some(OverlayKind::Session) && !painted.rows.is_empty() {
+            if let Some(picker) = &mut self.session_picker {
+                picker.mark_rendered();
+            }
+        }
         self.mouse_frame = self.mouse_enabled.then_some(painted);
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
@@ -2450,8 +2509,20 @@ impl LiveUi {
                 }
                 match command {
                     SessionCommand::ResumeCatalog => {
-                        self.dispatch_session_action(UiAction::LoadSessionCatalog, writer, limit)
-                            .await
+                        // Consume the submitted slash command, not an unrelated draft
+                        // when this action is invoked programmatically.
+                        if matches!(
+                            commands::classify(
+                                self.editor.text(),
+                                self.state.command_catalog.as_deref()
+                            ),
+                            Some(Command::Session(SessionCommand::ResumeCatalog))
+                        ) {
+                            self.editor.clear();
+                        }
+                        self.session_picker = Some(SessionPicker::loading());
+                        self.render_pending = true;
+                        self.poll_session_catalog(writer, limit).await
                     }
                     SessionCommand::ResumeSession(session_id) => {
                         if !reducer::valid_session_id(&session_id) {
@@ -2722,6 +2793,32 @@ impl LiveUi {
             .await
     }
 
+    async fn poll_session_catalog(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.state.session_operation.is_some()
+            || !self.state.input_ready
+            || self.state.configuration_active()
+        {
+            return Ok(LoopControl::Continue);
+        }
+        let Some((query, cursor)) = self
+            .session_picker
+            .as_ref()
+            .and_then(SessionPicker::request_due)
+        else {
+            return Ok(LoopControl::Continue);
+        };
+        self.dispatch(
+            UiAction::SearchSessionCatalog { query, cursor },
+            writer,
+            limit,
+        )
+        .await
+    }
+
     async fn handle_session_picker_key(
         &mut self,
         key: KeyEvent,
@@ -2760,7 +2857,9 @@ impl LiveUi {
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
-                self.session_picker = None;
+                if let Some(picker) = &mut self.session_picker {
+                    picker.selecting = true;
+                }
                 self.dispatch(UiAction::SelectSession { session_id }, writer, limit)
                     .await
             }
@@ -3622,7 +3721,13 @@ impl LiveUi {
             Input::Key(key) if overlay == Some(OverlayKind::Session) => {
                 self.handle_session_picker_key(key, writer, limit).await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Session) => Ok(LoopControl::Continue),
+            Input::Paste(text) if overlay == Some(OverlayKind::Session) => {
+                if let Some(picker) = &mut self.session_picker {
+                    picker.insert_paste(&text);
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if overlay == Some(OverlayKind::Detail) => {
                 Ok(self.handle_detail_key(key))
             }

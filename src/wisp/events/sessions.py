@@ -168,6 +168,9 @@ class RpcSessionsReported(WispEvent):
     type: Literal["rpc.sessions"] = "rpc.sessions"
     command_id: str
     sessions: tuple[RpcSessionSummary, ...] = ()
+    query: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    next_cursor: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    previous_cursor: str | None = Field(default=None, exclude_if=lambda value: value is None)
     selected_session_id: str | None = Field(default=None, min_length=1)
     selected_session_path: Path | None = None
     selected_session_name: str | None = None

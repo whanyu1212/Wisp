@@ -967,6 +967,16 @@
       "additionalProperties": false,
       "description": "Return a bounded catalog of persisted sessions.",
       "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Cursor"
+        },
         "id": {
           "anyOf": [
             {
@@ -983,6 +993,15 @@
           "minimum": 0,
           "title": "Limit",
           "type": "integer"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          ],
+          "title": "Query"
         },
         "type": {
           "const": "get_sessions",

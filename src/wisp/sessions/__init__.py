@@ -1,5 +1,6 @@
 """Session persistence package."""
 
+from .catalog import SessionCatalogPage
 from .entries import (
     PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
     SESSION_ENTRY_SCHEMA_VERSION,
@@ -63,6 +64,7 @@ __all__ = [
     "MalformedSessionEntryError",
     "MessageSessionEntry",
     "PersistedEventEnvelope",
+    "SessionCatalogPage",
     "SessionContextRow",
     "SessionEntry",
     "SessionError",

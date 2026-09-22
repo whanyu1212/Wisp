@@ -3740,6 +3740,42 @@
           "title": "RpcSessionsReportedCommandId",
           "type": "string"
         },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcSessionsReportedNextCursor"
+        },
+        "previous_cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcSessionsReportedPreviousCursor"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcSessionsReportedQuery"
+        },
         "selected_session_id": {
           "anyOf": [
             {

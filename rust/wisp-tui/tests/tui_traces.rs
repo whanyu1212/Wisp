@@ -412,6 +412,8 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::DeviceCodeProgress(_)
                 | UiEffect::FinishDeviceCode
                 | UiEffect::ShowSessionPicker { .. }
+                | UiEffect::SessionCatalogStarted(_)
+                | UiEffect::SessionCatalogFailed { .. }
                 | UiEffect::ShowSessionTreePage { .. }
                 | UiEffect::CloseSessionTree
                 | UiEffect::ReplaceTranscript
