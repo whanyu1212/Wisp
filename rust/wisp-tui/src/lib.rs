@@ -1166,33 +1166,32 @@ impl LiveUi {
         );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
-        if let UiAction::BackendEvent(BackendEvent::CommandFinished {
-            command_id,
-            command_type,
-            ok: false,
-            error,
-        }) = &action
+        let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        // The reducer can reject a selection report before its terminal event.
+        // Follow the authoritative phase exit, not a particular wire event; a
+        // committed selection instead replaces the transcript and closes the picker.
+        if self.state.session_operation.is_none()
+            && !effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::ReplaceTranscript))
         {
-            if command_type == "select_session"
-                && matches!(
-                    &self.state.session_operation,
-                    Some(reducer::SessionOperation::SelectingSession { command_id: expected, .. }) if expected == command_id
-                )
+            if let Some(picker) = self
+                .session_picker
+                .as_mut()
+                .filter(|picker| picker.selecting)
             {
-                if let Some(picker) = self
-                    .session_picker
-                    .as_mut()
-                    .filter(|picker| picker.selecting)
-                {
-                    picker.selection_failed(
-                        error
-                            .clone()
-                            .unwrap_or_else(|| "Session selection failed".into()),
-                    );
-                }
+                let error = effects
+                    .iter()
+                    .find_map(|effect| match effect {
+                        UiEffect::Notice(notice) => Some(notice.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| {
+                        "Session selection did not complete; refresh and try again.".into()
+                    });
+                picker.selection_failed(error);
             }
         }
-        let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
         if previous_decision != self.current_decision_context() {
             self.rendered_overlay = None;
             self.rendered_decision_context = None;

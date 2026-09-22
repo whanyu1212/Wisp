@@ -196,6 +196,93 @@ async fn buffered_result_does_not_swallow_search_edits_or_retarget_reopened_pick
 }
 
 #[tokio::test]
+async fn rejected_selection_report_restores_picker_and_ignores_late_completion() {
+    let mut ui = ui();
+    draw(&mut ui);
+    let draft = ui.editor.clone();
+    let viewport = ui.transcript_viewport.clone();
+    let (writer, mut receiver) = mpsc::channel(16);
+    ui.session_picker = Some(SessionPicker::loading());
+    ui.poll_session_catalog(&writer, 8192).await.unwrap();
+    let catalog = command(&mut receiver);
+    complete(
+        &mut ui,
+        &writer,
+        catalog["id"].as_str().unwrap(),
+        "requested",
+    )
+    .await;
+    draw(&mut ui);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let selection = command(&mut receiver);
+    let selected_event = |id: &str| {
+        UiAction::BackendEvent(BackendEvent::SessionSelected {
+            command_id: id.into(),
+            session: reducer::SessionIdentity {
+                session_id: "unexpected".into(),
+                session_path: "/unexpected.jsonl".into(),
+                session_name: None,
+            },
+        })
+    };
+    ui.dispatch(selected_event("unrelated"), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.session_picker.as_ref().unwrap().selecting);
+    ui.dispatch(
+        selected_event(selection["id"].as_str().unwrap()),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.state.session_operation.is_none());
+    assert!(!ui.session_picker.as_ref().unwrap().selecting);
+    assert!(ui.notice.as_deref().unwrap().contains("another session"));
+    assert_eq!(ui.editor, draft);
+    assert_eq!(ui.transcript_viewport, viewport);
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.poll_session_catalog(&writer, 8192).await.unwrap();
+    let refresh = command(&mut receiver);
+    complete(
+        &mut ui,
+        &writer,
+        refresh["id"].as_str().unwrap(),
+        "requested",
+    )
+    .await;
+    draw(&mut ui);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let retry = command(&mut receiver);
+    assert_ne!(retry["id"], selection["id"]);
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: selection["id"].as_str().unwrap().into(),
+            command_type: "select_session".into(),
+            ok: false,
+            error: Some("late failure".into()),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.session_picker.as_ref().unwrap().selecting);
+    assert_eq!(ui.editor, draft);
+    assert_eq!(ui.transcript_viewport, viewport);
+}
+
+#[tokio::test]
 async fn oversized_search_command_is_recoverable() {
     let mut ui = ui();
     let (writer, mut receiver) = mpsc::channel(16);

@@ -95,12 +95,14 @@ main()
     tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
     width = 112
 
-    def wait_page(count: int, label: bytes) -> dict[str, object]:
+    def wait_page(count: int, label: bytes, *, query: str = "") -> dict[str, object]:
         nonlocal width
         tui.wait_until(
             lambda _: len(reports("rpc.sessions")) >= count, failure="missing catalog page"
         )
         report = reports("rpc.sessions")[-1]
+        assert report.get("query", "") == query, report
+        assert report["sessions"], report
         tui.wait_until(
             lambda _: any(
                 event["command_id"] == report["command_id"]
@@ -129,16 +131,22 @@ main()
         assert older.get("next_cursor") is None
         tui.send(b"\x1b[1;5D")
         wait_page(3, b"Catalog item 62")
-        tui.send(b"old needle")
-        found = wait_page(4, b"old needle")
+        tui.send(b"\x1b[200~old needle\x1b[201~")
+        found = wait_page(4, b"old needle", query="old needle")
         assert [row["session_id"] for row in found["sessions"]] == [sessions[0].session_id]
         # Dismissal does not submit the search text as a prompt.
+        offset = len(tui.output)
         tui.send(b"\x1b")
+        # Escape has a terminal decoding delay. Wait for the UI acknowledgement
+        # before sending '/', which could otherwise be decoded as Alt+/.
+        width += 1
+        tui.resize(width=width)
+        tui.wait_for(b"Session selection cancelled.", since=offset, failure="picker did not close")
         assert not reports("rpc.session.selected")
         tui.send(b"/resume\r")
         wait_page(5, b"Catalog item 62")
-        tui.send(b"old needle")
-        wait_page(6, b"old needle")
+        tui.send(b"\x1b[200~old needle\x1b[201~")
+        wait_page(6, b"old needle", query="old needle")
         tui.send(b"\r")
         tui.wait_until(
             lambda _: bool(reports("rpc.session.selected")), failure="older session not selected"

@@ -1475,6 +1475,7 @@ active = None
 auto_compaction = True
 refresh_after_cancel = False
 refresh_after_auto_configure = False
+command_catalog_requests = 0
 
 def emit(event):
     print(event.model_dump_json(), flush=True)
@@ -1532,12 +1533,19 @@ for line in sys.stdin:
         emit(RpcConnectionCatalogReported(command_id=command["id"],
                                          catalog=RpcConnectionCatalogSnapshot()))
     elif kind == "get_commands":
+        command_catalog_requests += 1
         emit(RpcCommandsReported(command_id=command["id"], commands=tuple(
             RpcCommandDescriptor(
                 name=d.name, title=d.title, description=d.description, category=d.category,
                 slash_command=d.slash_command, slash_aliases=d.slash_aliases, order=d.order,
             ) for d in builtin_command_descriptors()
         )))
+        finish(command)
+        if command_catalog_requests > 1:
+            # Cached/fallback help rows may already be visible. Only this
+            # post-completion diagnostic proves the refresh was consumed.
+            emit(ErrorEvent(message="HELPCATALOGREADY"))
+        continue
     elif kind == "get_state":
         emit(RpcStateReported(command_id=command["id"], state=RpcStateSnapshot(
             provider="fake", mode=mode, auto_compaction_enabled=True,
@@ -1629,7 +1637,14 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "help"
                 output.clear()
-            elif phase == "help" and b"/queue" in output and b"/compact" in output:
+            elif (
+                phase == "help"
+                and b"/queue" in output
+                and b"/compact" in output
+                and b"HELPCATALOGREADY"
+                in b"".join(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output).split())
+            ):
+                # Paging before refresh completion can be rejected as stale input.
                 # The queue command adds a row; permissions is now on the next help page.
                 os.write(terminal_fd, b"\x1b[6~")
                 phase = "help scrolled"
