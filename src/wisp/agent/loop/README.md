@@ -31,8 +31,10 @@ the boundary decision.
 | Module | Read it when changing |
 | --- | --- |
 | [`runner.py`](./runner.py) | Top-level turn sequencing, context events, limits, and failure or cancellation transitions |
-| [`model_response.py`](./model_response.py) | Provider stream arguments, deltas, completion metadata, retries, or usage |
+| [`model_response.py`](./model_response.py) | Provider event translation, response outcomes, deltas, and retries |
+| [`provider_request.py`](./provider_request.py) | Optional provider capabilities, request invocation, overflow normalization, and owned stream cleanup |
 | [`provider_lifecycle.py`](./provider_lifecycle.py) | Provider response start, retry, tool-call, and terminal validation |
+| [`response_projection.py`](./response_projection.py) | Usage, cost, context observation, and completed-message projection |
 | [`tool_execution.py`](./tool_execution.py) | ToolBatch facade plus sequential and truncated execution |
 | [`tool_lifecycle.py`](./tool_lifecycle.py) | Shared tool event contracts and executor lifecycle validation |
 | [`prepared_tools.py`](./prepared_tools.py) | Two-phase preparation, bounded scheduling, and cancellation settlement |

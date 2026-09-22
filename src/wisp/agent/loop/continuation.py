@@ -12,12 +12,17 @@ from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
     RequestBoundaryUnsupportedError,
+    RequestContextRebase,
 )
 from wisp.events import ContextBudget, ToolResultReady
 from wisp.providers.base import (
-    Provider,
     ToolCallResult,
     structured_tool_replacement_support,
+)
+
+from .provider_request import (
+    provider_supports_context_rebase,
+    provider_supports_continuation_messages,
 )
 
 if TYPE_CHECKING:
@@ -251,28 +256,170 @@ def validate_replacement_messages(
     return replacement
 
 
-def provider_supports_continuation_messages(provider: Provider) -> bool:
-    """Check the adapter's explicit opt-in to extra continuation messages.
+def _validated_extra_messages(
+    decision: RequestBoundaryDecision,
+    *,
+    allow_extra_messages: bool,
+) -> tuple[Message, ...]:
+    """Validate and return plain user messages carried by a boundary decision.
 
     Args:
-        provider (Provider): Adapter to inspect without requiring a new protocol member.
+        decision (RequestBoundaryDecision): Boundary transition containing optional input.
+        allow_extra_messages (bool): Whether this boundary permits user-message injection.
 
     Returns:
-        bool: True only when supports_continuation_messages is literally True.
+        tuple[Message, ...]: Validated extra messages in their original order.
+
+    Raises:
+        RequestBoundaryUnsupportedError: Injection is disabled or a message is not a
+            plain user message.
     """
-    return getattr(provider, "supports_continuation_messages", False) is True
+
+    extra_messages = tuple(decision.extra_messages)
+    if not allow_extra_messages and extra_messages:
+        raise RequestBoundaryUnsupportedError(
+            "Context-overflow recovery cannot append extra messages"
+        )
+    if any(message.role != "user" or is_tool_shaped(message) for message in extra_messages):
+        raise RequestBoundaryUnsupportedError(
+            "RequestBoundaryDecision.extra_messages must contain only plain user messages"
+        )
+    return extra_messages
 
 
-def provider_supports_context_rebase(provider: Provider) -> bool:
-    """Check the adapter's explicit opt-in to rebasing beneath a live cursor.
+def _apply_fresh_replacement(
+    config: AgentLoopConfig,
+    state: ContinuationState,
+    replacement_messages: Sequence[Message],
+    extra_messages: Sequence[Message],
+) -> Sequence[Message]:
+    """Install self-contained portable history and clear native continuation.
 
     Args:
-        provider (Provider): Adapter whose optional capability is inspected.
+        config (AgentLoopConfig): Provider settings used to validate structured replay.
+        state (ContinuationState): Live continuation state to clear after validation.
+        replacement_messages (Sequence[Message]): Self-contained replacement history.
+        extra_messages (Sequence[Message]): Plain user messages to append to the new base.
 
     Returns:
-        bool: True only when supports_context_rebase is literally True.
+        Sequence[Message]: Validated replacement followed by extra messages.
+
+    Raises:
+        RequestBoundaryUnsupportedError: Replacement history is invalid or unsupported.
     """
-    return getattr(provider, "supports_context_rebase", False) is True
+
+    replacement = validate_replacement_messages(config, replacement_messages)
+    # A replacement may retain the active structured tool pair. Extras become
+    # part of the fresh base, so this path needs no optional provider capability.
+    state.replace_context()
+    return (*replacement, *extra_messages)
+
+
+def _apply_context_rebase(
+    config: AgentLoopConfig,
+    state: ContinuationState,
+    rebase: RequestContextRebase,
+    *,
+    had_tool_calls: bool,
+    extra_messages: Sequence[Message],
+) -> Sequence[Message]:
+    """Replace the portable base while retaining a guarded native continuation.
+
+    Args:
+        config (AgentLoopConfig): Provider settings and context-rebase capability.
+        state (ContinuationState): Live cursor, pending inputs, and replay tail.
+        rebase (RequestContextRebase): Replacement base and expected live tail.
+        had_tool_calls (bool): Whether the preceding turn produced a tool batch.
+        extra_messages (Sequence[Message]): Plain user messages to queue after rebasing.
+
+    Returns:
+        Sequence[Message]: Validated replacement base.
+
+    Raises:
+        RequestBoundaryUnsupportedError: Rebasing is unsupported, lacks a cursor, has a
+            stale expected tail, or contains invalid replacement history.
+    """
+
+    if not provider_supports_context_rebase(config.provider):
+        raise RequestBoundaryUnsupportedError(
+            "The provider cannot rebase portable context beneath its continuation"
+        )
+    if state.previous_response_id is None:
+        raise RequestBoundaryUnsupportedError(
+            "Cannot rebase context without a usable provider continuation"
+        )
+    expected = tuple(rebase.expected_continuation_messages)
+    if expected != tuple(state.continuation_messages):
+        raise RequestBoundaryUnsupportedError(
+            "RequestContextRebase expected continuation does not match live state"
+        )
+    replacement = validate_replacement_messages(config, rebase.base_messages)
+    # Rebase deliberately retains the provider cursor and opaque replay tail.
+    # Results remain pending only at the immediate post-tool boundary.
+    if not had_tool_calls:
+        state.consume_pending_tool_results()
+    if extra_messages:
+        state.queue_extra_messages(extra_messages)
+    return replacement
+
+
+def _apply_continuation(
+    config: AgentLoopConfig,
+    state: ContinuationState,
+    messages: Sequence[Message],
+    *,
+    had_tool_calls: bool,
+    extra_messages: Sequence[Message],
+) -> Sequence[Message]:
+    """Continue natively or fold a clean cursor-less response into portable history.
+
+    Args:
+        config (AgentLoopConfig): Provider continuation capabilities.
+        state (ContinuationState): Live cursor, pending inputs, and replay tail.
+        messages (Sequence[Message]): Current portable base history.
+        had_tool_calls (bool): Whether the preceding turn produced a tool batch.
+        extra_messages (Sequence[Message]): Plain user messages for the next request.
+
+    Returns:
+        Sequence[Message]: Unchanged or folded portable base for the next request.
+
+    Raises:
+        RequestBoundaryUnsupportedError: Tool history cannot be continued safely with
+            the provider's available cursor and capabilities.
+    """
+
+    has_tool_history = had_tool_calls or any(
+        is_tool_shaped(message) for message in state.continuation_messages
+    )
+    supports_continuation_messages = provider_supports_continuation_messages(config.provider)
+    if not had_tool_calls:
+        # The preceding provider request already consumed these outputs. Clear
+        # them only when another request will actually be made.
+        state.consume_pending_tool_results()
+
+    if extra_messages:
+        if supports_continuation_messages and state.previous_response_id is not None:
+            state.queue_extra_messages(extra_messages)
+            return messages
+        if has_tool_history:
+            raise RequestBoundaryUnsupportedError(
+                "Cannot append messages without a usable provider continuation after a tool round"
+            )
+        # A cursor-less clean response has portable assistant text only. Fold
+        # that history and make this a fresh request.
+        return (*state.fold_clean(messages), *extra_messages)
+
+    # Current tool results make the immediate post-tool request valid for every
+    # legacy adapter. A cursor is needed only after a clean response consumes them.
+    if had_tool_calls:
+        return messages
+    if supports_continuation_messages and state.previous_response_id is not None:
+        return messages
+    if has_tool_history:
+        raise RequestBoundaryUnsupportedError(
+            "Cannot continue after a tool round without a usable provider continuation"
+        )
+    return state.fold_clean(messages)
 
 
 def apply_request_boundary_decision(
@@ -329,85 +476,39 @@ def apply_request_boundary_decision(
             "RequestBoundaryDecision.messages and context_rebase are mutually exclusive"
         )
 
-    extra_messages = tuple(decision.extra_messages)
-    if not allow_extra_messages and extra_messages:
-        raise RequestBoundaryUnsupportedError(
-            "Context-overflow recovery cannot append extra messages"
-        )
-    if any(message.role != "user" or is_tool_shaped(message) for message in extra_messages):
-        raise RequestBoundaryUnsupportedError(
-            "RequestBoundaryDecision.extra_messages must contain only plain user messages"
-        )
+    extra_messages = _validated_extra_messages(
+        decision,
+        allow_extra_messages=allow_extra_messages,
+    )
 
     if decision.messages is not None:
-        replacement = validate_replacement_messages(config, decision.messages)
-        # A replacement is caller-owned, self-contained context. It may retain
-        # the active structured tool pair; each adapter is responsible for
-        # encoding that fresh context natively. Extras become part of the fresh
-        # base, so this transition never depends on an optional capability.
-        state.replace_context()
-        return (*replacement, *extra_messages), False
+        return (
+            _apply_fresh_replacement(config, state, decision.messages, extra_messages),
+            False,
+        )
 
     rebase = decision.context_rebase
     if rebase is not None:
-        if not provider_supports_context_rebase(config.provider):
-            raise RequestBoundaryUnsupportedError(
-                "The provider cannot rebase portable context beneath its continuation"
-            )
-        if state.previous_response_id is None:
-            raise RequestBoundaryUnsupportedError(
-                "Cannot rebase context without a usable provider continuation"
-            )
-        expected = tuple(rebase.expected_continuation_messages)
-        if expected != tuple(state.continuation_messages):
-            raise RequestBoundaryUnsupportedError(
-                "RequestContextRebase expected continuation does not match live state"
-            )
-        replacement = validate_replacement_messages(config, rebase.base_messages)
-        # Do not call `replace_context`: rebase deliberately keeps the live
-        # provider cursor and opaque replay tail. Tool results remain pending
-        # only at the immediate post-tool boundary; a clean response has
-        # already consumed them.
-        if not had_tool_calls:
-            state.consume_pending_tool_results()
-        if extra_messages:
-            state.queue_extra_messages(extra_messages)
-        return replacement, False
-
-    has_tool_history = had_tool_calls or any(
-        is_tool_shaped(message) for message in state.continuation_messages
-    )
-    supports_continuation_messages = provider_supports_continuation_messages(config.provider)
-    if not had_tool_calls:
-        # The preceding provider request already consumed these outputs. Clear
-        # them only when another request will actually be made.
-        state.consume_pending_tool_results()
-
-    if extra_messages:
-        if supports_continuation_messages and state.previous_response_id is not None:
-            state.queue_extra_messages(extra_messages)
-            return messages, False
-        if has_tool_history:
-            raise RequestBoundaryUnsupportedError(
-                "Cannot append messages without a usable provider continuation after a tool round"
-            )
-        # A cursor-less clean response has portable assistant text only. Fold
-        # that history and make this a fresh request rather than inventing a
-        # provider response ID.
-        return (*state.fold_clean(messages), *extra_messages), False
-
-    # The current tool results themselves make the immediate post-tool
-    # request a valid continuation for every legacy adapter. A cursor becomes
-    # necessary only after a later clean response has consumed those results.
-    if had_tool_calls:
-        return messages, False
-    if supports_continuation_messages and state.previous_response_id is not None:
-        return messages, False
-    if has_tool_history:
-        raise RequestBoundaryUnsupportedError(
-            "Cannot continue after a tool round without a usable provider continuation"
+        return (
+            _apply_context_rebase(
+                config,
+                state,
+                rebase,
+                had_tool_calls=had_tool_calls,
+                extra_messages=extra_messages,
+            ),
+            False,
         )
-    return state.fold_clean(messages), False
+    return (
+        _apply_continuation(
+            config,
+            state,
+            messages,
+            had_tool_calls=had_tool_calls,
+            extra_messages=extra_messages,
+        ),
+        False,
+    )
 
 
 async def at_request_boundary(
