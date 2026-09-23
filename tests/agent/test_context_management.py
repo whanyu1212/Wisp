@@ -7,6 +7,7 @@ import pytest
 
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
+from wisp.agent.request_boundary import ContextOverflowFailure, ContextOverflowSnapshot
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
 from wisp.events import (
@@ -14,6 +15,8 @@ from wisp.events import (
     ContextPressure,
     ErrorEvent,
     MessageCompleted,
+    TurnCompleted,
+    WispEvent,
     wisp_event_from_json,
 )
 from wisp.providers.base import ContextOverflowError, is_context_overflow_message
@@ -268,6 +271,57 @@ def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -
     assert len(provider.calls) == 1
 
 
+@pytest.mark.parametrize("raised", [False, True])
+@pytest.mark.parametrize("failure_message", [None, "Context overflow recovery failed: boom"])
+def test_declined_overflow_recovery_ends_the_turn_once(
+    raised: bool, failure_message: str | None
+) -> None:
+    class DeclineRecovery:
+        async def recover_context_overflow(
+            self, *, snapshot: ContextOverflowSnapshot
+        ) -> ContextOverflowFailure | None:
+            del snapshot
+            return None if failure_message is None else ContextOverflowFailure(failure_message)
+
+    overflow = ContextOverflowError("context_length_exceeded")
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test-model"),
+                overflow if raised else ProviderResponseFailed(message=str(overflow)),
+            ]
+        ]
+    )
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                context_window=100,
+                context_overflow_hook=DeclineRecovery(),
+            ),
+            messages=(Message(role="user", content="hello"),),
+        ):
+            events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert [event.type for event in events if isinstance(event, WispEvent)][-3:] == [
+        "context.overflow",
+        "error",
+        "turn.completed",
+    ]
+    error = next(event for event in events if isinstance(event, ErrorEvent))
+    assert error.message == (failure_message or "context_length_exceeded")
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [(1, "failed")]
+    assert len(provider.calls) == 1
+
+
 def test_deferred_context_overflow_leaves_terminal_events_to_the_session() -> None:
     provider = ScriptedProvider(
         [
@@ -292,7 +346,8 @@ def test_deferred_context_overflow_leaves_terminal_events_to_the_session() -> No
             events.append(event)
         return events
 
-    events = anyio.run(run)
+    with pytest.warns(DeprecationWarning, match="defer_context_overflow_errors"):
+        events = anyio.run(run)
 
     assert [event.type for event in events] == [
         "turn.started",

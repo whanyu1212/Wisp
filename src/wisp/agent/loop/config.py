@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
@@ -48,8 +49,10 @@ class AgentLoopConfig:
         turn_offset (int, optional): Number of turns preceding this invocation.
         tool_iteration_offset (int, optional): Tool batches already consumed.
         cost_estimator (UsageCostEstimator | None, optional): Optional usage-pricing callback.
-        defer_context_overflow_errors (bool, optional): Leave terminal overflow error
-            events to the caller. Does not suppress every raised overflow exception.
+        defer_context_overflow_errors (bool, optional): Deprecated. Leave terminal
+            overflow error events to the caller. Does not suppress every raised overflow
+            exception. Decline recovery with `ContextOverflowFailure` to supply the
+            error message instead.
         prompt_cache_key (str | None, optional): Cache key sent to supporting adapters.
         request_boundary_hook (RequestBoundaryHook | None, optional): Policy consulted
             after a successful turn to stop, continue, or change request context.
@@ -82,6 +85,9 @@ class AgentLoopConfig:
     def __post_init__(self) -> None:
         """Validate runtime limits and continuation offsets after construction.
 
+        Warns:
+            DeprecationWarning: `defer_context_overflow_errors` is set.
+
         Raises:
             ValueError: A limit, threshold, or offset is outside its accepted range
                 or has an unsupported type.
@@ -94,6 +100,14 @@ class AgentLoopConfig:
         )
         validate_non_negative_integer(self.turn_offset, field="turn_offset")
         validate_non_negative_integer(self.tool_iteration_offset, field="tool_iteration_offset")
+        if self.defer_context_overflow_errors:
+            warnings.warn(
+                "defer_context_overflow_errors is deprecated; the loop now publishes "
+                "overflow terminals itself. Return ContextOverflowFailure from the "
+                "overflow hook to supply the error message.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
 
     @property
     def selected_model(self) -> str | None:

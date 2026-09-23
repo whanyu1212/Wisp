@@ -30,6 +30,7 @@ from wisp.agent.messages import (
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
 from wisp.agent.request_boundary import (
+    ContextOverflowFailure,
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestContextRebase,
@@ -836,6 +837,20 @@ class CodingSession:
             async def prepare_boundary(
                 _self, *, context: HarnessBoundaryContext
             ) -> RequestBoundaryDecision | None:
+                try:
+                    return await _self._prepare(context)
+                except ContextOverflowError:
+                    # A boundary overflow follows an already-completed tool turn. Roll
+                    # the active branch back to its pre-prompt leaf before the loop
+                    # publishes this error, so the error is recorded on the restored
+                    # branch and an irreducible tool result cannot poison later requests.
+                    await self._flush_pending_entries()
+                    await rollback_active_prompt()
+                    raise
+
+            async def _prepare(
+                _self, context: HarnessBoundaryContext
+            ) -> RequestBoundaryDecision | None:
                 assert session is not None
                 if context.stop_by_default or not provider_auto_compaction:
                     return None
@@ -895,7 +910,7 @@ class CodingSession:
         class _SessionOverflowHook:
             async def recover_context_overflow(
                 _self, *, snapshot: ContextOverflowSnapshot
-            ) -> RequestBoundaryDecision | None:
+            ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
                 assert session is not None
                 nonlocal overflow_recovery_attempted
                 nonlocal overflow_recovery_failure
@@ -956,7 +971,7 @@ class CodingSession:
                     overflow_recovery_failure = ContextOverflowError(
                         f"Context overflow recovery failed: {exc}"
                     )
-                    return None
+                    return ContextOverflowFailure(str(overflow_recovery_failure))
 
                 retry_decision: RequestBoundaryDecision | None = None
 
@@ -996,12 +1011,11 @@ class CodingSession:
                     overflow_recovery_failure = ContextOverflowError(
                         f"Context overflow recovery failed: {detail}"
                     )
-                    return None
+                    return ContextOverflowFailure(str(overflow_recovery_failure))
                 recovered_from_overflow = True
                 return retry_decision
 
         harness_events = harness.continue_(
-            defer_context_overflow_errors=True,
             boundary_preparer=_SessionBoundaryPreparer(),
             context_overflow_hook=_SessionOverflowHook(),
         )
@@ -1125,19 +1139,15 @@ class CodingSession:
                 break
 
             # The primary loop's overflow hook already made the sole retry
-            # decision. A declined decision reaches this terminal path without
-            # closing/recreating a harness generator.
+            # decision. The loop publishes the overflow's error and closes its
+            # turn, and a boundary overflow rolled the prompt back before it was
+            # raised, so only the run's own terminal remains here.
             terminal_overflow = overflow_recovery_failure or overflow_error
-            # A boundary failure follows an already-completed tool turn. Roll
-            # the active branch back to its pre-prompt leaf so an irreducible
-            # tool result cannot poison every later request, and do not publish
-            # a contradictory second terminal event for that completed turn.
-            if turn_lifecycle.open_turn is None:
-                await rollback_active_prompt()
-            for terminal_event in turn_lifecycle.terminal_events(
-                str(terminal_overflow), outcome="failed"
-            ):
-                yield await emit(terminal_event)
+            if not saw_loop_error:
+                for terminal_event in turn_lifecycle.terminal_events(
+                    str(terminal_overflow), outcome="failed"
+                ):
+                    yield await emit(terminal_event)
             yield await emit(
                 AgentCompleted(
                     session_id=session.session_id,

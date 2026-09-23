@@ -364,9 +364,10 @@ async def run_agent_loop(
                 # the outer handler owns its terminal events and re-raises.
                 if action.raise_overflow is not None:
                     raise action.raise_overflow
+                failure_message = action.message
                 if action.kind == "context_overflow":
                     yield _context_overflow_event(config, turn=turn, message=action.message)
-                    messages, retry = await at_context_overflow(
+                    recovery = await at_context_overflow(
                         config,
                         state.continuation,
                         turn=state.turn,
@@ -376,13 +377,17 @@ async def run_agent_loop(
                         had_streamed_delta=action.had_streamed_delta,
                         message=action.message,
                     )
-                    if retry:
+                    messages = recovery.messages
+                    if recovery.retry:
                         yield lifecycle.complete("failed", "error")
                         continue
                     if config.defer_context_overflow_errors:
+                        # Deprecated: the caller publishes the error and closes the turn.
                         return
+                    if recovery.failure_message is not None:
+                        failure_message = recovery.failure_message
                 for event in lifecycle.terminal_events(
-                    action.message,
+                    failure_message,
                     outcome="cancelled" if action.kind == "aborted" else "failed",
                 ):
                     yield event
