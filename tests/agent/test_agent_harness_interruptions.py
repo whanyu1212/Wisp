@@ -366,7 +366,7 @@ def test_harness_interruption_at_every_emitted_boundary(
                             assert workflow.harness.cancel()
                             observed.extend([event async for event in stream])
                             assert_cancellation_settled(observed)
-                            if scenario == "parallel":
+                            if scenario in ("sequential", "parallel"):
                                 requested = [
                                     event.call_id
                                     for event in observed

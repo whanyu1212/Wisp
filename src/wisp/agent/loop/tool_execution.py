@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from wisp.agent.tool_contracts import (
     PreparedToolExecutor,
     ToolExecutionEvent,
-    ToolExecutionProtocolError,
     ToolExecutor,
 )
 from wisp.events import ToolExecutionEnded, ToolResultReady
@@ -19,58 +18,54 @@ from .prepared_tools import _PreparedToolBatch
 from .stream_cleanup import closing_stream
 from .tool_lifecycle import (
     CancellationCheck,
+    RequestedCancellation,
     ToolBatchEvent,
+    ToolBatchSettlement,
     ToolExecutionLifecycle,
-    tool_call_requested,
     tool_execution_started,
 )
 
 
 async def _execute_tool_call(
     executor: ToolExecutor,
-    tool_call: ToolCall,
-) -> AsyncIterator[ToolExecutionEvent | ToolResultReady]:
-    """Run one executor stream and publish its validated terminal/result pair.
+    lifecycle: ToolExecutionLifecycle,
+) -> AsyncIterator[ToolExecutionEvent]:
+    """Drive one executor stream through its lifecycle and forward approval events.
+
+    The terminal result stays in `lifecycle` for the caller to publish, so a batch can
+    record it as settled before anything reaches the consumer.
 
     Args:
         executor (ToolExecutor): Executor supplying approval and terminal events.
-        tool_call (ToolCall): Requested call whose identity and arguments must be preserved.
+        lifecycle (ToolExecutionLifecycle): Lifecycle for the requested call; it
+            validates identity, approval order, and the terminal result.
 
     Yields:
-        ToolExecutionEvent | ToolResultReady: Validated approval events, followed by
-            adjacent ToolExecutionEnded and ToolResultReady events after stream exhaustion.
+        ToolExecutionEvent: Validated approval events, detached from the executor.
 
     Raises:
-        ToolExecutionProtocolError: The executor's event stream is malformed or incomplete.
+        ToolExecutionProtocolError: The executor's event stream is malformed.
         Exception: Executor errors propagate rather than becoming synthetic tool outputs.
     """
-    lifecycle = ToolExecutionLifecycle(tool_call)
-    async with closing_stream(executor.execute(tool_call)) as execution:
+    async with closing_stream(executor.execute(lifecycle.tool_call)) as execution:
         async for raw_event in execution:
             event = lifecycle.accept(raw_event)
             if not isinstance(event, ToolExecutionEnded):
                 # Approval arguments may alias the executor's pending inputs.
                 yield event.model_copy(deep=True)
 
-    terminal = lifecycle.finish()
-    yield terminal
-    yield ToolResultReady.from_execution_ended(terminal)
 
-
-def _truncated_tool_call_events(
-    tool_call: ToolCall,
-) -> tuple[ToolExecutionEnded, ToolResultReady]:
+def _truncated_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
     """Reject one call from an incomplete model response without invoking tools.
 
     Args:
         tool_call (ToolCall): Call emitted by a response whose finish reason is length.
 
     Returns:
-        tuple[ToolExecutionEnded, ToolResultReady]: Synthetic invalid-arguments error
-            and matching provider-visible result, in publication order.
+        ToolExecutionEnded: Synthetic invalid-arguments error for the call.
     """
 
-    terminal = ToolExecutionEnded(
+    return ToolExecutionEnded(
         call_id=tool_call.call_id,
         name=tool_call.name,
         output=(
@@ -82,7 +77,6 @@ def _truncated_tool_call_events(
         retryable=True,
         recovery_hint="Re-issue the tool call with complete arguments.",
     )
-    return terminal, ToolResultReady.from_execution_ended(terminal)
 
 
 def _provider_result(result_event: ToolResultReady) -> ToolCallResult:
@@ -122,15 +116,18 @@ type ToolBatchOutcome = CompletedToolBatch | CancelledToolBatch
 class ToolBatch:
     """Execute one model-requested tool batch and retain its provider-facing results.
 
+    Whatever path runs the calls, every requested call ends with exactly one published
+    terminal/result pair: its own result, a truncation rejection, or an interrupted
+    result when the run's token cancels the batch.
+
     Args:
         tool_executor (ToolExecutor): Executor, optionally supporting two-phase preparation.
         tool_calls (Sequence[ToolCall]): Calls to execute in source order.
         truncated (bool): Whether the model response was incomplete. If True, synthesize
             error results without executing tools.
         is_cancelled (CancellationCheck): Cooperative stop callback.
-        on_result (Callable[[ToolResultReady], None]): Callback recording results retained
-            by the batch after their public yield. Ordinary executor cancellation can
-            omit the just-yielded result from both this callback and the outcome.
+        on_result (Callable[[ToolResultReady], None]): Callback recording each published
+            result, in publication order, after its public yield.
         outcome (ToolBatchOutcome | None, optional): Terminal result, initially None.
             Normally left unset and populated by exhausting events.
     """
@@ -144,13 +141,13 @@ class ToolBatch:
     _cancelled: bool = field(default=False, init=False)
 
     async def events(self) -> AsyncIterator[ToolBatchEvent]:
-        """Stream this batch's execution and store its terminal outcome.
+        """Stream this batch's execution, settle it if cancelled, and store its outcome.
 
         Yields:
-            ToolBatchEvent: Tool lifecycle events. Prepared executors may run
-                safe calls concurrently; ordinary executors run sequentially. Exhaust
-                the iterator before reading outcome. A publicly yielded result is not
-                necessarily retained when cancellation intervenes before its callback.
+            ToolBatchEvent: Tool lifecycle events. Prepared executors may run safe calls
+                concurrently; ordinary executors run sequentially. If the run's token
+                cancels the batch, the calls left unfinished are settled afterwards in
+                source order. Exhaust the iterator before reading outcome.
 
         Examples:
             Run a batch using an application-supplied executor and tool calls::
@@ -169,16 +166,26 @@ class ToolBatch:
             Exception: Executor, cancellation-check, or result-callback errors propagate;
                 an exception or early consumer exit may leave outcome unset.
         """
+        settlement = ToolBatchSettlement(self.tool_calls)
         results: list[ToolCallResult] = []
         if self.truncated:
-            batch_events = self._reject_truncated_calls(results)
+            batch_events = self._reject_truncated_calls(settlement)
         elif isinstance(self.tool_executor, PreparedToolExecutor):
-            batch_events = self._run_prepared_calls(self.tool_executor, results)
+            batch_events = self._run_prepared_calls(self.tool_executor, settlement)
         else:
-            batch_events = self._run_sequential_calls(results)
+            batch_events = self._run_sequential_calls(settlement)
         async with closing_stream(batch_events) as events:
             async for event in events:
                 yield event
+                if isinstance(event, ToolResultReady):
+                    self._retain_result(results, event)
+        if self._cancelled:
+            # Settle every call the path left open, whichever path ran. This yields
+            # without awaiting, so it also works after absorbing a requested cancellation.
+            for event in settlement.settle_unfinished():
+                yield event
+                if isinstance(event, ToolResultReady):
+                    self._retain_result(results, event)
         self.outcome = (
             CancelledToolBatch(tuple(results))
             if self._cancelled
@@ -195,38 +202,45 @@ class ToolBatch:
         results.append(_provider_result(result_event))
         self.on_result(result_event)
 
+    def _cancellation_requested(self) -> bool:
+        """Check the run's token, remembering a request to stop this batch.
+
+        Returns:
+            bool: True once the run has requested cancellation.
+        """
+        if self.is_cancelled():
+            self._cancelled = True
+        return self._cancelled
+
     async def _reject_truncated_calls(
-        self, results: list[ToolCallResult]
+        self, settlement: ToolBatchSettlement
     ) -> AsyncIterator[ToolBatchEvent]:
-        """Publish synthetic errors for calls from a truncated response without executing them.
+        """Reject every call from a truncated response without executing any of them.
+
+        Rejection has no side effects, so all calls are rejected even if the run asks
+        to stop midway; the batch then reports cancellation.
 
         Args:
-            results (list[ToolCallResult]): Receives each rejected call's result in order.
+            settlement (ToolBatchSettlement): Batch record of requests and results.
 
         Yields:
             ToolBatchEvent: Request, terminal, and result events for each call.
         """
         for tool_call in self.tool_calls:
-            if self.is_cancelled():
-                self._cancelled = True
-                return
-            yield tool_call_requested(tool_call)
-            terminal, result = _truncated_tool_call_events(tool_call)
+            yield settlement.request(tool_call)
+            terminal, result = settlement.publish_result(_truncated_tool_execution(tool_call))
             yield terminal
             yield result
-            self._retain_result(results, result)
-            if self.is_cancelled():
-                self._cancelled = True
-                return
+        self._cancellation_requested()
 
     async def _run_prepared_calls(
-        self, executor: PreparedToolExecutor, results: list[ToolCallResult]
+        self, executor: PreparedToolExecutor, settlement: ToolBatchSettlement
     ) -> AsyncIterator[ToolBatchEvent]:
-        """Delegate to the two-phase scheduler, which settles its own cancellation.
+        """Delegate to the two-phase scheduler, which stops when cancelled.
 
         Args:
             executor (PreparedToolExecutor): Executor separating approval from side effects.
-            results (list[ToolCallResult]): Receives each published result in order.
+            settlement (ToolBatchSettlement): Batch record the scheduler updates.
 
         Yields:
             ToolBatchEvent: Events from the prepared scheduler, unchanged.
@@ -235,54 +249,55 @@ class ToolBatch:
             executor,
             self.tool_calls,
             is_cancelled=self.is_cancelled,
+            settlement=settlement,
         )
         async with closing_stream(prepared_batch.events()) as prepared_events:
             async for event in prepared_events:
                 yield event
-                if isinstance(event, ToolResultReady):
-                    self._retain_result(results, event)
         self._cancelled = prepared_batch.cancelled
 
     async def _run_sequential_calls(
-        self, results: list[ToolCallResult]
+        self, settlement: ToolBatchSettlement
     ) -> AsyncIterator[ToolBatchEvent]:
-        """Execute calls one at a time, stopping at the next cancellation check.
+        """Execute calls one at a time, stopping when the run requests cancellation.
+
+        Cancellation is checked between events and, while an executor runs, through a
+        requested scope cancellation. Any other cancellation propagates.
 
         Args:
-            results (list[ToolCallResult]): Receives each completed call's result in order.
+            settlement (ToolBatchSettlement): Batch record of requests, lifecycles, and
+                published results.
 
         Yields:
             ToolBatchEvent: Request, start, approval, terminal, and result events.
 
         Raises:
-            ToolExecutionProtocolError: An executor stream produced no provider result.
+            ToolExecutionProtocolError: An executor stream ended without a valid result.
         """
         for tool_call in self.tool_calls:
-            if self.is_cancelled():
-                self._cancelled = True
+            if self._cancellation_requested():
                 return
-            yield tool_call_requested(tool_call)
-            if self.is_cancelled():
-                self._cancelled = True
+            yield settlement.request(tool_call)
+            if self._cancellation_requested():
                 return
             yield tool_execution_started(tool_call)
-            if self.is_cancelled():
-                self._cancelled = True
+            if self._cancellation_requested():
                 return
 
-            result_event: ToolResultReady | None = None
-            async with closing_stream(
-                _execute_tool_call(self.tool_executor, tool_call)
-            ) as execution_events:
-                async for event in execution_events:
-                    yield event
-                    if isinstance(event, ToolResultReady):
-                        result_event = event
-                    if self.is_cancelled() and not isinstance(event, ToolExecutionEnded):
-                        self._cancelled = True
-                        return
-            if result_event is None:
-                raise ToolExecutionProtocolError(
-                    f"Tool executor produced no provider result for {tool_call.call_id}"
-                )
-            self._retain_result(results, result_event)
+            lifecycle = settlement.begin_lifecycle(tool_call)
+            with RequestedCancellation(self.is_cancelled) as cancellation:
+                async with closing_stream(
+                    _execute_tool_call(self.tool_executor, lifecycle)
+                ) as approval_events:
+                    async for event in approval_events:
+                        yield event
+                        if self._cancellation_requested():
+                            return
+            if cancellation.absorbed:
+                self._cancelled = True
+                return
+            terminal, result = settlement.publish_result(lifecycle.finish())
+            yield terminal
+            yield result
+        # A request made while the last result was published still cancels the batch.
+        self._cancellation_requested()

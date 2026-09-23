@@ -35,9 +35,9 @@ the boundary decision.
 | [`provider_request.py`](./provider_request.py) | Optional provider capabilities, request invocation, overflow normalization, and owned stream cleanup |
 | [`provider_lifecycle.py`](./provider_lifecycle.py) | Provider response start, retry, tool-call, and terminal validation |
 | [`response_projection.py`](./response_projection.py) | Usage, cost, context observation, and completed-message projection |
-| [`tool_execution.py`](./tool_execution.py) | ToolBatch facade plus sequential and truncated execution |
-| [`tool_lifecycle.py`](./tool_lifecycle.py) | Shared tool event contracts and executor lifecycle validation |
-| [`prepared_tools.py`](./prepared_tools.py) | Two-phase preparation, bounded scheduling, and cancellation settlement |
+| [`tool_execution.py`](./tool_execution.py) | ToolBatch facade, sequential and truncated execution, and cancellation settlement |
+| [`tool_lifecycle.py`](./tool_lifecycle.py) | Shared tool event contracts, executor lifecycle validation, and the per-batch settlement record |
+| [`prepared_tools.py`](./prepared_tools.py) | Two-phase preparation and bounded scheduling |
 | [`continuation.py`](./continuation.py) | Provider cursors, pending tool results, injected user messages, context replacement, or rebasing |
 | [`stream_cleanup.py`](./stream_cleanup.py) | Owned iterator close, cleanup exception precedence, and shielded aclose |
 | [`config.py`](./config.py) | Public loop dependencies, hooks, limits, offsets, and cancellation contracts |
@@ -76,6 +76,8 @@ Preserve these rules when changing control flow:
 - Optional approval is ordered request, resolution, then result.
 - A tool batch absorbs a scope cancellation only when the run's cancellation token requested it;
   a caller's own timeout or task cancellation propagates instead of becoming a cancelled turn.
+- When the run's token cancels a tool batch, every requested call still ends with exactly one
+  terminal/result pair, whatever executor type ran it.
 - Provider response lifecycle events remain ordered and terminal.
 - A request-boundary `stop` wins over other decision fields.
 - Provider capabilities are detected; new optional keywords are not sent unconditionally.

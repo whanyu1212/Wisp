@@ -1,4 +1,4 @@
-"""Prepared-executor scheduling and cancellation settlement for one tool batch."""
+"""Prepared-executor scheduling for one tool batch."""
 
 from __future__ import annotations
 
@@ -12,12 +12,7 @@ from wisp.agent.tool_contracts import (
     PreparedToolExecutor,
     ToolExecutionProtocolError,
 )
-from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
-from wisp.events import (
-    ToolApprovalResolved,
-    ToolExecutionEnded,
-    ToolResultReady,
-)
+from wisp.events import ToolExecutionEnded
 from wisp.providers.events import ToolCall
 
 from .stream_cleanup import closing_stream
@@ -25,8 +20,8 @@ from .tool_lifecycle import (
     CancellationCheck,
     RequestedCancellation,
     ToolBatchEvent,
+    ToolBatchSettlement,
     ToolExecutionLifecycle,
-    tool_call_requested,
     tool_execution_started,
 )
 
@@ -90,52 +85,31 @@ async def _run_prepared_chunk(
     return tuple(outcomes), cancellation.absorbed
 
 
-def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
-    """Build a terminal record for an interrupted call whose effects may be uncertain.
-
-    Args:
-        tool_call (ToolCall): Requested call to settle.
-
-    Returns:
-        ToolExecutionEnded: Cancelled error result advising retry only when effects
-            can safely be repeated. This function does not execute the tool.
-    """
-    return ToolExecutionEnded(
-        call_id=tool_call.call_id,
-        name=tool_call.name,
-        output=INTERRUPTED_TOOL_RESULT_TEXT,
-        is_error=True,
-        failure_code="internal_error",
-        retryable=True,
-        recovery_hint="Retry the tool call if its effects can be safely repeated.",
-        process_state="cancelled",
-    )
-
-
 @dataclass(slots=True)
 class _PreparedToolBatch:
-    """Prepare, execute, and settle one two-phase tool batch.
+    """Prepare and execute one two-phase tool batch.
 
-    Each instance is single-use: consume events() once, then read cancelled.
+    Each instance is single-use: consume events() once, then read cancelled. When
+    cancelled, it stops and leaves unfinished calls to the batch's shared settlement.
 
     Args:
         executor (PreparedToolExecutor): Executor separating approval from side effects.
         tool_calls (Sequence[ToolCall]): Requested calls in model order.
         is_cancelled (CancellationCheck): Cooperative cancellation callback.
+        settlement (ToolBatchSettlement): Batch record of requests, lifecycles, and
+            published results.
     """
 
     executor: PreparedToolExecutor
     tool_calls: Sequence[ToolCall]
     is_cancelled: CancellationCheck
+    settlement: ToolBatchSettlement
     # Set while events() runs; ToolBatch reads it after the stream is exhausted.
     cancelled: bool = field(default=False, init=False)
     _prepared_calls: list[_PreparedCallState] = field(default_factory=list, init=False)
-    _lifecycles: dict[str, ToolExecutionLifecycle] = field(default_factory=dict, init=False)
-    _requested_call_ids: set[str] = field(default_factory=set, init=False)
-    _result_call_ids: set[str] = field(default_factory=set, init=False)
 
     async def events(self) -> AsyncIterator[ToolBatchEvent]:
-        """Prepare calls, execute eligible chunks, and settle cancellation.
+        """Prepare calls, then execute eligible chunks until done or cancelled.
 
         All calls are prepared before execution begins. Prepared calls run concurrently
         only if every prepared execution is marked parallel safe; otherwise they run one
@@ -143,8 +117,8 @@ class _PreparedToolBatch:
         finish out of order.
 
         Yields:
-            ToolBatchEvent: Request, start, approval, and result events. Cancellation
-                preserves completed results and settles remaining calls in source order.
+            ToolBatchEvent: Request, start, approval, and result events. On cancellation
+                it stops after publishing completed results; the caller settles the rest.
 
         Examples:
             For three prepared calls A, B, and C, all marked parallel_safe, their runners
@@ -163,9 +137,6 @@ class _PreparedToolBatch:
             async for event in preparation_events:
                 yield event
         if self.cancelled:
-            async with closing_stream(self._finalize_interrupted()) as interrupted_events:
-                async for event in interrupted_events:
-                    yield event
             return
         async with closing_stream(self._run_prepared_calls()) as execution_events:
             async for event in execution_events:
@@ -179,8 +150,7 @@ class _PreparedToolBatch:
         """
 
         for tool_call in self.tool_calls:
-            self._requested_call_ids.add(tool_call.call_id)
-            yield tool_call_requested(tool_call)
+            yield self.settlement.request(tool_call)
             if self.is_cancelled():
                 self.cancelled = True
                 return
@@ -190,8 +160,7 @@ class _PreparedToolBatch:
                 self.cancelled = True
                 return
 
-            lifecycle = ToolExecutionLifecycle(tool_call)
-            self._lifecycles[tool_call.call_id] = lifecycle
+            lifecycle = self.settlement.begin_lifecycle(tool_call)
             prepared: PreparedToolExecution | None = None
             async with closing_stream(self.executor.prepare(tool_call)) as preparation:
                 with RequestedCancellation(self.is_cancelled) as cancellation:
@@ -251,9 +220,6 @@ class _PreparedToolBatch:
         for chunk_start in range(0, len(self._prepared_calls), chunk_size):
             if self.is_cancelled():
                 self.cancelled = True
-                async with closing_stream(self._finalize_interrupted()) as interrupted_events:
-                    async for event in interrupted_events:
-                        yield event
                 return
             chunk = self._prepared_calls[chunk_start : chunk_start + chunk_size]
             outcomes, chunk_cancelled = await _run_prepared_chunk(
@@ -275,56 +241,16 @@ class _PreparedToolBatch:
                     continue
                 try:
                     call.lifecycle.accept(outcome.terminal)
-                    terminal = call.lifecycle.finish()
-                    result = ToolResultReady.from_execution_ended(terminal)
+                    terminal, result = self.settlement.publish_result(call.lifecycle.finish())
                 except Exception as exc:  # Preserve the first source-order failure.
                     if fatal_error is None:
                         fatal_error = exc
                     continue
-                self._result_call_ids.add(call.tool_call.call_id)
                 yield terminal
                 yield result
                 self.cancelled = self.cancelled or self.is_cancelled()
             if self.cancelled:
-                async with closing_stream(self._finalize_interrupted()) as interrupted_events:
-                    async for event in interrupted_events:
-                        yield event
+                # Cancellation takes precedence over a sibling's stored runner error.
                 return
             if fatal_error is not None:
                 raise fatal_error
-
-    async def _finalize_interrupted(self) -> AsyncIterator[ToolBatchEvent]:
-        """Settle requested calls that have no published result yet.
-
-        Yields:
-            ToolBatchEvent: Missing request events, unresolved approval denials, and
-                interrupted terminal/result pairs in source order.
-        """
-        for tool_call in self.tool_calls:
-            if tool_call.call_id in self._result_call_ids:
-                continue
-            if tool_call.call_id not in self._requested_call_ids:
-                self._requested_call_ids.add(tool_call.call_id)
-                yield tool_call_requested(tool_call)
-            lifecycle = self._lifecycles.get(tool_call.call_id)
-            if (
-                lifecycle is not None
-                and lifecycle.approval_requested
-                and not lifecycle.approval_resolved
-            ):
-                approval = ToolApprovalResolved(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    approved=False,
-                    reason="Agent run cancelled",
-                )
-                lifecycle.accept(approval)
-                yield approval
-            terminal = _interrupted_tool_execution(tool_call)
-            if lifecycle is not None:
-                lifecycle.accept(terminal)
-                terminal = lifecycle.finish()
-            result = ToolResultReady.from_execution_ended(terminal)
-            self._result_call_ids.add(tool_call.call_id)
-            yield terminal
-            yield result
