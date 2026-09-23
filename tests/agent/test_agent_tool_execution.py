@@ -9,8 +9,8 @@ from wisp.agent.loop.tool_execution import (
     CancelledToolBatch,
     CompletedToolBatch,
     ToolBatch,
-    ToolExecutionLifecycle,
 )
+from wisp.agent.loop.tool_lifecycle import ToolExecutionLifecycle
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     ToolExecutionEvent,

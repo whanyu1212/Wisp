@@ -34,6 +34,7 @@ _PURE_AGENT_MODULES = (
     "loop/runner.py",
     "loop/stream_cleanup.py",
     "loop/tool_execution.py",
+    "loop/tool_lifecycle.py",
 )
 _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
@@ -149,6 +150,71 @@ def test_pure_agent_modules_do_not_import_application_layers() -> None:
                 violations.append(f"{filename}: {imported}")
 
     assert violations == []
+
+
+def _loop_module_dependencies() -> dict[str, set[str]]:
+    """Map each loop module to the sibling loop modules it imports anywhere.
+
+    Relative, absolute, package-level, type-only, and function-local imports all
+    count, so a cycle cannot hide behind an alternative import spelling.
+    """
+
+    loop_dir = REPO_ROOT / "src" / "wisp" / "agent" / "loop"
+    module_names = {path.stem for path in loop_dir.glob("*.py")}
+    package = "wisp.agent.loop"
+    dependencies: dict[str, set[str]] = {}
+    for path in sorted(loop_dir.glob("*.py")):
+        imported: set[str] = set()
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(
+                    alias.name.removeprefix(f"{package}.").split(".")[0]
+                    for alias in node.names
+                    if alias.name.startswith(f"{package}.")
+                )
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if node.level == 1 and module:
+                    imported.add(module.split(".")[0])
+                elif (node.level == 1 and not module) or module == package:
+                    imported.update(alias.name for alias in node.names)
+                elif node.level == 0 and module.startswith(f"{package}."):
+                    imported.add(module.removeprefix(f"{package}.").split(".")[0])
+        dependencies[path.stem] = (imported & module_names) - {path.stem}
+    return dependencies
+
+
+def test_loop_modules_have_no_import_cycles() -> None:
+    dependencies = _loop_module_dependencies()
+    visiting: list[str] = []
+    finished: set[str] = set()
+    cycles: list[str] = []
+
+    def visit(module: str) -> None:
+        if module in finished:
+            return
+        if module in visiting:
+            cycles.append(" -> ".join((*visiting[visiting.index(module) :], module)))
+            return
+        visiting.append(module)
+        for dependency in sorted(dependencies[module]):
+            visit(dependency)
+        visiting.pop()
+        finished.add(module)
+
+    for module in sorted(dependencies):
+        visit(module)
+
+    assert cycles == []
+
+
+def test_prepared_tools_depend_on_shared_lifecycle_not_tool_execution() -> None:
+    dependencies = _loop_module_dependencies()
+
+    assert "tool_lifecycle" in dependencies["prepared_tools"]
+    assert "tool_execution" not in dependencies["prepared_tools"]
+    assert {"prepared_tools", "tool_lifecycle"} <= dependencies["tool_execution"]
 
 
 @pytest.mark.parametrize(

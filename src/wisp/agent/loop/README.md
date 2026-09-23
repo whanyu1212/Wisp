@@ -33,8 +33,9 @@ the boundary decision.
 | [`runner.py`](./runner.py) | Top-level turn sequencing, context events, limits, and failure or cancellation transitions |
 | [`model_response.py`](./model_response.py) | Provider stream arguments, deltas, completion metadata, retries, or usage |
 | [`provider_lifecycle.py`](./provider_lifecycle.py) | Provider response start, retry, tool-call, and terminal validation |
-| [`tool_execution.py`](./tool_execution.py) | ToolBatch facade, sequential and truncated execution, and executor protocol validation |
-| [`prepared_tools.py`](./prepared_tools.py) | Prepared-executor scheduling, bounded parallelism, and cancellation settlement |
+| [`tool_execution.py`](./tool_execution.py) | ToolBatch facade plus sequential and truncated execution |
+| [`tool_lifecycle.py`](./tool_lifecycle.py) | Shared tool event contracts and executor lifecycle validation |
+| [`prepared_tools.py`](./prepared_tools.py) | Two-phase preparation, bounded scheduling, and cancellation settlement |
 | [`continuation.py`](./continuation.py) | Provider cursors, pending tool results, injected user messages, context replacement, or rebasing |
 | [`stream_cleanup.py`](./stream_cleanup.py) | Owned iterator close, cleanup exception precedence, and shielded aclose |
 | [`config.py`](./config.py) | Public loop dependencies, hooks, limits, offsets, and cancellation contracts |
