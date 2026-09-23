@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncGenerator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from uuid import uuid4
 
@@ -18,9 +18,9 @@ from wisp.agent.messages import (
 )
 from wisp.agent.request_boundary import ContextOverflowHook
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
+from wisp.agent.turn_lifecycle import TurnLifecycle
 from wisp.agent.validation import validate_non_negative_integer
 from wisp.events import (
-    ErrorEvent,
     MessageCompleted,
     QueueKind,
     QueueMessageInjected,
@@ -66,47 +66,12 @@ class SimpleCancellationToken:
         return self._cancelled
 
 
-def _cancelled_events(
-    active_turn: int | None,
-    *,
-    active_turn_completed: bool,
-) -> tuple[AgentLoopEvent, ...]:
-    events: list[AgentLoopEvent] = [ErrorEvent(message="Agent run cancelled")]
-    if active_turn is not None and not active_turn_completed:
-        events.append(
-            TurnCompleted(
-                turn=active_turn,
-                outcome="cancelled",
-                finish_reason="cancelled",
-            )
-        )
-    return tuple(events)
-
-
 @dataclass(slots=True)
 class _HarnessRunState:
     """Turn lifecycle and cancellation drain state for one primary loop invocation."""
 
-    active_turn: int | None = None
-    active_turn_completed: bool = False
-    had_tool_calls: bool = False
+    turns: TurnLifecycle = field(default_factory=TurnLifecycle)
     draining_cancellation: bool = False
-
-    def observe(self, event: AgentLoopEvent) -> None:
-        if isinstance(event, TurnStarted):
-            self.active_turn = event.turn
-            self.active_turn_completed = False
-            self.had_tool_calls = False
-        elif isinstance(event, MessageCompleted) and event.tool_calls:
-            self.had_tool_calls = True
-        elif isinstance(event, TurnCompleted):
-            self.active_turn_completed = True
-
-    def cancelled_events(self) -> tuple[AgentLoopEvent, ...]:
-        return _cancelled_events(
-            self.active_turn,
-            active_turn_completed=self.active_turn_completed,
-        )
 
 
 class _LoopStepAction(Enum):
@@ -492,7 +457,7 @@ class AgentHarness:
             while True:
                 step = await self._next_loop_step(loop_events, token=token, run=run)
                 if step is _LoopStepAction.CANCEL_AND_STOP:
-                    for cancellation_event in run.cancelled_events():
+                    for cancellation_event in run.turns.cancelled_events():
                         yield cancellation_event
                     return
                 if step is _LoopStepAction.STREAM_ENDED:
@@ -501,7 +466,7 @@ class AgentHarness:
                     continue
 
                 event = step
-                run.observe(event)
+                run.turns.observe(event)
                 if isinstance(event, TurnStarted):
                     replacement = boundary.take_transcript_replacement()
                     if replacement is not None:
@@ -526,7 +491,7 @@ class AgentHarness:
                 queue_kind: QueueKind | None = None
                 if self._steering_queue:
                     queue_kind = "steering"
-                elif not run.had_tool_calls and self._follow_up_queue:
+                elif not run.turns.had_tool_calls and self._follow_up_queue:
                     queue_kind = "follow_up"
 
                 injected_messages: list[Message] = []
@@ -534,7 +499,7 @@ class AgentHarness:
                     drain_batch = self._queued_batch(queue_kind)
                     for message in drain_batch:
                         if token.is_cancelled():
-                            for cancellation_event in run.cancelled_events():
+                            for cancellation_event in run.turns.cancelled_events():
                                 yield cancellation_event
                             return
                         injected_event = self._inject_queued_message(queue_kind, message)
@@ -546,15 +511,15 @@ class AgentHarness:
                     # visible between each individual injected event.
                     yield self.queue_updated_event()
                     if token.is_cancelled():
-                        for cancellation_event in run.cancelled_events():
+                        for cancellation_event in run.turns.cancelled_events():
                             yield cancellation_event
                         return
 
                 boundary.arm(
                     turn=event.turn,
-                    had_tool_calls=run.had_tool_calls,
+                    had_tool_calls=run.turns.had_tool_calls,
                     injected_messages=injected_messages,
-                    stop_by_default=not run.had_tool_calls and not injected_messages,
+                    stop_by_default=not run.turns.had_tool_calls and not injected_messages,
                 )
         finally:
             self._current_scope = None
@@ -597,7 +562,7 @@ class AgentHarness:
         if (
             token.is_cancelled()
             and not run.draining_cancellation
-            and (not run.had_tool_calls or run.active_turn_completed)
+            and (not run.turns.had_tool_calls or run.turns.open_turn is None)
         ):
             # A completed tool turn has no outstanding batch to settle.
             return _LoopStepAction.CANCEL_AND_STOP

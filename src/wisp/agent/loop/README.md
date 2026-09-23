@@ -68,7 +68,8 @@ transitions fail explicitly rather than being flattened.
 
 Preserve these rules when changing control flow:
 
-- Every emitted `TurnStarted` has exactly one matching terminal `TurnCompleted`.
+- Every emitted `TurnStarted` has exactly one matching terminal `TurnCompleted`. The runner opens
+  and closes turns through `TurnLifecycle`, which rejects a second start or completion.
 - An invocation that never starts a turn emits no turn terminal, even with a nonzero offset.
 - A settled tool call emits one `ToolExecutionEnded` immediately followed by one matching
   `ToolResultReady`.

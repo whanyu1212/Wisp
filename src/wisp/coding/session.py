@@ -35,6 +35,7 @@ from wisp.agent.request_boundary import (
     RequestContextRebase,
 )
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
+from wisp.agent.turn_lifecycle import TurnLifecycle
 from wisp.agent.validation import (
     validate_non_negative_integer,
     validate_optional_non_negative_integer,
@@ -779,7 +780,7 @@ class CodingSession:
             finally:
                 self._accepting_queued_messages = True
 
-        turns = 0
+        turn_lifecycle = TurnLifecycle()
         had_unsafe_tool_round = False
         overflow_recovery_attempted = False
         recovered_from_overflow = False
@@ -788,10 +789,7 @@ class CodingSession:
         started_tool_calls: set[str] = set()
         boundary_events: deque[WispEvent] = deque()
         active_compaction_entry_id = user_entry.id
-        current_turn_had_tool_calls = False
-        completed_turn_had_tool_calls = False
         queue_batch_started_new_turn = False
-        active_loop_turn = False
 
         async def replacement_after_compaction(
             continuation_messages: Sequence[Message],
@@ -1016,24 +1014,16 @@ class CodingSession:
                 async for event in harness_events:
                     while boundary_events:
                         yield boundary_events.popleft()
+                    turn_lifecycle.observe(event)
                     if isinstance(event, TurnStarted):
-                        turns = event.turn
-                        active_loop_turn = True
-                        current_turn_had_tool_calls = False
                         if recovered_from_overflow:
                             overflow_error = None
-                    elif isinstance(event, MessageCompleted) and (
-                        event.tool_calls or event.finish_reason == "tool_calls"
-                    ):
-                        current_turn_had_tool_calls = True
                     elif isinstance(event, ErrorEvent):
                         saw_loop_error = True
                     elif isinstance(event, ContextOverflow):
                         overflow_error = ContextOverflowError(event.message)
                     elif isinstance(event, TurnCompleted):
-                        active_loop_turn = False
                         terminal_outcome = event.outcome
-                        completed_turn_had_tool_calls = current_turn_had_tool_calls
                         queue_batch_started_new_turn = False
                     elif isinstance(event, ToolExecutionStarted):
                         started_tool_calls.add(event.call_id)
@@ -1057,7 +1047,7 @@ class CodingSession:
                             operation_id=operation_id,
                         )
                         event = event.model_copy(update={"message_entry_id": queue_entry_id})
-                        if not completed_turn_had_tool_calls and not queue_batch_started_new_turn:
+                        if not turn_lifecycle.had_tool_calls and not queue_batch_started_new_turn:
                             active_compaction_entry_id = queue_entry_id
                             queue_batch_started_new_turn = True
                         if event.skill_invocation is not None:
@@ -1106,13 +1096,18 @@ class CodingSession:
                 overflow_error = exc
             except Exception as exc:
                 if not saw_loop_error:
-                    yield await emit(ErrorEvent(message=str(exc)))
-                    if turns > 0:
-                        yield await emit(
-                            TurnCompleted(turn=turns, outcome="failed", finish_reason="error")
-                        )
+                    # Only an open turn gets a failed completion; one the loop already
+                    # completed must not receive a second terminal.
+                    for terminal_event in turn_lifecycle.terminal_events(
+                        str(exc), outcome="failed"
+                    ):
+                        yield await emit(terminal_event)
                 yield await emit(
-                    AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                    AgentCompleted(
+                        session_id=session.session_id,
+                        turns=turn_lifecycle.latest_turn,
+                        outcome="failed",
+                    )
                 )
                 raise
             finally:
@@ -1137,13 +1132,18 @@ class CodingSession:
             # the active branch back to its pre-prompt leaf so an irreducible
             # tool result cannot poison every later request, and do not publish
             # a contradictory second terminal event for that completed turn.
-            if not active_loop_turn:
+            if turn_lifecycle.open_turn is None:
                 await rollback_active_prompt()
-            yield await emit(ErrorEvent(message=str(terminal_overflow)))
-            if active_loop_turn:
-                yield await emit(TurnCompleted(turn=turns, outcome="failed", finish_reason="error"))
+            for terminal_event in turn_lifecycle.terminal_events(
+                str(terminal_overflow), outcome="failed"
+            ):
+                yield await emit(terminal_event)
             yield await emit(
-                AgentCompleted(session_id=session.session_id, turns=turns, outcome="failed")
+                AgentCompleted(
+                    session_id=session.session_id,
+                    turns=turn_lifecycle.latest_turn,
+                    outcome="failed",
+                )
             )
             raise terminal_overflow from None
 
@@ -1163,7 +1163,7 @@ class CodingSession:
             yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
         completed = AgentCompleted(
             session_id=session.session_id,
-            turns=turns,
+            turns=turn_lifecycle.latest_turn,
             outcome=terminal_outcome,
         )
         if auto_compaction_status.skip_final_save:

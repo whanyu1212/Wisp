@@ -173,7 +173,8 @@ with local change and test maps.
 
 Runtime event order is observable through the SDK, RPC, persistence, and frontends. In particular:
 
-- every started turn has exactly one terminal `TurnCompleted`;
+- every started turn has exactly one terminal `TurnCompleted`, across the loop, harness, and
+  session (all three track turns with `wisp.agent.turn_lifecycle.TurnLifecycle`);
 - completed tool executions emit `ToolExecutionEnded` immediately before the matching
   `ToolResultReady`;
 - approval events are ordered request, resolution, then terminal result;
