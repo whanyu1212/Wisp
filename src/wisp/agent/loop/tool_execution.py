@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Sequence
-from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from wisp.agent.tool_contracts import (
     PreparedToolExecutor,
@@ -12,12 +11,7 @@ from wisp.agent.tool_contracts import (
     ToolExecutionProtocolError,
     ToolExecutor,
 )
-from wisp.events import (
-    ToolCallRequested,
-    ToolExecutionEnded,
-    ToolExecutionStarted,
-    ToolResultReady,
-)
+from wisp.events import ToolExecutionEnded, ToolResultReady
 from wisp.providers.base import ToolCallResult
 from wisp.providers.events import ToolCall
 
@@ -27,6 +21,8 @@ from .tool_lifecycle import (
     CancellationCheck,
     ToolBatchEvent,
     ToolExecutionLifecycle,
+    tool_call_requested,
+    tool_execution_started,
 )
 
 
@@ -145,6 +141,7 @@ class ToolBatch:
     is_cancelled: CancellationCheck
     on_result: Callable[[ToolResultReady], None]
     outcome: ToolBatchOutcome | None = None
+    _cancelled: bool = field(default=False, init=False)
 
     async def events(self) -> AsyncIterator[ToolBatchEvent]:
         """Stream this batch's execution and store its terminal outcome.
@@ -173,67 +170,104 @@ class ToolBatch:
                 an exception or early consumer exit may leave outcome unset.
         """
         results: list[ToolCallResult] = []
-
         if self.truncated:
-            for tool_call in self.tool_calls:
-                if self.is_cancelled():
-                    self.outcome = CancelledToolBatch(tuple(results))
-                    return
-                yield ToolCallRequested(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    arguments=deepcopy(dict(tool_call.arguments)),
-                )
-                terminal, result = _truncated_tool_call_events(tool_call)
-                yield terminal
-                yield result
-                results.append(_provider_result(result))
-                self.on_result(result)
-                if self.is_cancelled():
-                    self.outcome = CancelledToolBatch(tuple(results))
-                    return
-            self.outcome = CompletedToolBatch(tuple(results))
-            return
+            batch_events = self._reject_truncated_calls(results)
+        elif isinstance(self.tool_executor, PreparedToolExecutor):
+            batch_events = self._run_prepared_calls(self.tool_executor, results)
+        else:
+            batch_events = self._run_sequential_calls(results)
+        async with closing_stream(batch_events) as events:
+            async for event in events:
+                yield event
+        self.outcome = (
+            CancelledToolBatch(tuple(results))
+            if self._cancelled
+            else CompletedToolBatch(tuple(results))
+        )
 
-        if isinstance(self.tool_executor, PreparedToolExecutor):
-            prepared_batch = _PreparedToolBatch(
-                self.tool_executor,
-                self.tool_calls,
-                is_cancelled=self.is_cancelled,
-            )
-            async with closing_stream(prepared_batch.events()) as prepared_events:
-                async for event in prepared_events:
-                    yield event
-                    if isinstance(event, ToolResultReady):
-                        results.append(_provider_result(event))
-                        self.on_result(event)
-            outcome = (
-                CancelledToolBatch(tuple(results))
-                if prepared_batch.cancelled
-                else CompletedToolBatch(tuple(results))
-            )
-            self.outcome = outcome
-            return
+    def _retain_result(self, results: list[ToolCallResult], result_event: ToolResultReady) -> None:
+        """Record a published result for the next request and the continuation transcript.
 
+        Args:
+            results (list[ToolCallResult]): Provider-facing results collected so far.
+            result_event (ToolResultReady): Result that has already been yielded.
+        """
+        results.append(_provider_result(result_event))
+        self.on_result(result_event)
+
+    async def _reject_truncated_calls(
+        self, results: list[ToolCallResult]
+    ) -> AsyncIterator[ToolBatchEvent]:
+        """Publish synthetic errors for calls from a truncated response without executing them.
+
+        Args:
+            results (list[ToolCallResult]): Receives each rejected call's result in order.
+
+        Yields:
+            ToolBatchEvent: Request, terminal, and result events for each call.
+        """
         for tool_call in self.tool_calls:
             if self.is_cancelled():
-                self.outcome = CancelledToolBatch(tuple(results))
+                self._cancelled = True
                 return
-            yield ToolCallRequested(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=deepcopy(dict(tool_call.arguments)),
-            )
+            yield tool_call_requested(tool_call)
+            terminal, result = _truncated_tool_call_events(tool_call)
+            yield terminal
+            yield result
+            self._retain_result(results, result)
             if self.is_cancelled():
-                self.outcome = CancelledToolBatch(tuple(results))
+                self._cancelled = True
                 return
-            yield ToolExecutionStarted(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=deepcopy(dict(tool_call.arguments)),
-            )
+
+    async def _run_prepared_calls(
+        self, executor: PreparedToolExecutor, results: list[ToolCallResult]
+    ) -> AsyncIterator[ToolBatchEvent]:
+        """Delegate to the two-phase scheduler, which settles its own cancellation.
+
+        Args:
+            executor (PreparedToolExecutor): Executor separating approval from side effects.
+            results (list[ToolCallResult]): Receives each published result in order.
+
+        Yields:
+            ToolBatchEvent: Events from the prepared scheduler, unchanged.
+        """
+        prepared_batch = _PreparedToolBatch(
+            executor,
+            self.tool_calls,
+            is_cancelled=self.is_cancelled,
+        )
+        async with closing_stream(prepared_batch.events()) as prepared_events:
+            async for event in prepared_events:
+                yield event
+                if isinstance(event, ToolResultReady):
+                    self._retain_result(results, event)
+        self._cancelled = prepared_batch.cancelled
+
+    async def _run_sequential_calls(
+        self, results: list[ToolCallResult]
+    ) -> AsyncIterator[ToolBatchEvent]:
+        """Execute calls one at a time, stopping at the next cancellation check.
+
+        Args:
+            results (list[ToolCallResult]): Receives each completed call's result in order.
+
+        Yields:
+            ToolBatchEvent: Request, start, approval, terminal, and result events.
+
+        Raises:
+            ToolExecutionProtocolError: An executor stream produced no provider result.
+        """
+        for tool_call in self.tool_calls:
             if self.is_cancelled():
-                self.outcome = CancelledToolBatch(tuple(results))
+                self._cancelled = True
+                return
+            yield tool_call_requested(tool_call)
+            if self.is_cancelled():
+                self._cancelled = True
+                return
+            yield tool_execution_started(tool_call)
+            if self.is_cancelled():
+                self._cancelled = True
                 return
 
             result_event: ToolResultReady | None = None
@@ -245,13 +279,10 @@ class ToolBatch:
                     if isinstance(event, ToolResultReady):
                         result_event = event
                     if self.is_cancelled() and not isinstance(event, ToolExecutionEnded):
-                        self.outcome = CancelledToolBatch(tuple(results))
+                        self._cancelled = True
                         return
             if result_event is None:
                 raise ToolExecutionProtocolError(
                     f"Tool executor produced no provider result for {tool_call.call_id}"
                 )
-            results.append(_provider_result(result_event))
-            self.on_result(result_event)
-
-        self.outcome = CompletedToolBatch(tuple(results))
+            self._retain_result(results, result_event)

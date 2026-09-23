@@ -95,6 +95,16 @@ class AgentLoopConfig:
         validate_non_negative_integer(self.turn_offset, field="turn_offset")
         validate_non_negative_integer(self.tool_iteration_offset, field="tool_iteration_offset")
 
+    @property
+    def selected_model(self) -> str | None:
+        """Return the requested model, falling back to the provider default.
+
+        Returns:
+            str | None: Model identity used for context estimates and public events.
+        """
+
+        return self.model or self.provider.default_model
+
     def cancellation_requested(self) -> bool:
         """Return whether this run's optional token requests cancellation.
 

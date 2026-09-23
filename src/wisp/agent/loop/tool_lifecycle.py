@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 
 from wisp.agent.tool_contracts import (
@@ -66,6 +67,38 @@ def _json_payloads_match(left: object, right: object) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
+    """Build the public request event for a model-requested call.
+
+    Args:
+        tool_call (ToolCall): Requested call to publish.
+
+    Returns:
+        ToolCallRequested: Event whose arguments are detached from the provider's call.
+    """
+    return ToolCallRequested(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        arguments=deepcopy(dict(tool_call.arguments)),
+    )
+
+
+def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
+    """Build the public start event for a call about to reach its executor.
+
+    Args:
+        tool_call (ToolCall): Requested call to publish.
+
+    Returns:
+        ToolExecutionStarted: Event whose arguments are detached from the provider's call.
+    """
+    return ToolExecutionStarted(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        arguments=deepcopy(dict(tool_call.arguments)),
+    )
 
 
 @dataclass(slots=True)
@@ -190,4 +223,10 @@ class ToolExecutionLifecycle:
         return self.terminal
 
 
-__all__ = ["CancellationCheck", "ToolBatchEvent", "ToolExecutionLifecycle"]
+__all__ = [
+    "CancellationCheck",
+    "ToolBatchEvent",
+    "ToolExecutionLifecycle",
+    "tool_call_requested",
+    "tool_execution_started",
+]

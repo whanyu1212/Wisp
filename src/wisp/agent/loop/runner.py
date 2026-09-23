@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from wisp.agent.context_budget import estimate_context_budget
 from wisp.agent.messages import Message
 from wisp.events import (
+    ContextBudget,
     ContextEstimated,
     ContextOverflow,
     ContextPressure,
@@ -16,6 +17,7 @@ from wisp.events import (
     MessageDelta,
     MessageStarted,
     ProviderRetrying,
+    TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
@@ -29,6 +31,7 @@ from wisp.providers.base import (
     ContextOverflowError,
     is_context_overflow_message,
 )
+from wisp.providers.events import ProviderFailureKind
 
 from .config import AgentLoopConfig
 from .continuation import (
@@ -87,7 +90,7 @@ class _FailedResponseAction:
     """Classify a failed or overflowed model response without publishing events."""
 
     message: str
-    kind: str
+    kind: ProviderFailureKind
     content: str
     response_id: str | None
     started: bool
@@ -122,7 +125,7 @@ def _classify_failed_response(
             raise_overflow=(outcome.error if config.context_overflow_hook is None else None),
         )
     failure = outcome.failed.response
-    kind = (
+    kind: ProviderFailureKind = (
         "context_overflow"
         if failure.failure_kind == "context_overflow"
         or is_context_overflow_message(failure.message)
@@ -154,9 +157,72 @@ def _context_overflow_event(config: AgentLoopConfig, *, turn: int, message: str)
     return ContextOverflow(
         turn=turn,
         provider=config.provider.name,
-        model=config.model or config.provider.default_model,
+        model=config.selected_model,
         context_window=config.context_window,
         message=message,
+    )
+
+
+def _estimate_request_context(
+    config: AgentLoopConfig, request_messages: Sequence[Message]
+) -> ContextBudget:
+    """Estimate the next request's context use from its messages and tool schemas.
+
+    Args:
+        config (AgentLoopConfig): Provider identity, tools, and context limits.
+        request_messages (Sequence[Message]): Base history followed by the continuation.
+
+    Returns:
+        ContextBudget: Estimate calibrated by the latest provider-observed usage, if any.
+    """
+
+    previous_observation = next(
+        (
+            message.context_observation
+            for message in reversed(request_messages)
+            if message.context_observation is not None
+        ),
+        None,
+    )
+    return estimate_context_budget(
+        request_messages,
+        config.tools,
+        context_window=config.context_window,
+        reserve_tokens=config.context_reserve_tokens,
+        observation=previous_observation,
+        provider=config.provider.name,
+        model=config.selected_model,
+    )
+
+
+def _context_pressure_event(
+    config: AgentLoopConfig, *, turn: int, usage: TokenUsage | None
+) -> ContextPressure | None:
+    """Build a pressure event when observed input usage crosses the configured threshold.
+
+    Args:
+        config (AgentLoopConfig): Provider identity, context window, and threshold.
+        turn (int): Number of the completed turn.
+        usage (TokenUsage | None): Usage reported for the completed response.
+
+    Returns:
+        ContextPressure | None: Event for the turn, or None when usage or the window is
+            unknown, or the threshold has not been reached.
+    """
+
+    if usage is None or config.context_window is None:
+        return None
+    pressure_ratio = usage.input_tokens / config.context_window
+    if pressure_ratio < config.context_pressure_threshold:
+        return None
+    return ContextPressure(
+        turn=turn,
+        provider=config.provider.name,
+        model=config.selected_model,
+        context_window=config.context_window,
+        observed_tokens=usage.input_tokens,
+        remaining_tokens=max(0, config.context_window - usage.input_tokens),
+        pressure_ratio=pressure_ratio,
     )
 
 
@@ -263,28 +329,11 @@ async def run_agent_loop(
                     yield event
                 break
             request_messages = (*messages, *state.continuation.continuation_messages)
-            selected_model = config.model or config.provider.default_model
-            previous_observation = next(
-                (
-                    message.context_observation
-                    for message in reversed(request_messages)
-                    if message.context_observation is not None
-                ),
-                None,
-            )
-            context_budget = estimate_context_budget(
-                request_messages,
-                config.tools,
-                context_window=config.context_window,
-                reserve_tokens=config.context_reserve_tokens,
-                observation=previous_observation,
-                provider=config.provider.name,
-                model=selected_model,
-            )
+            context_budget = _estimate_request_context(config, request_messages)
             yield ContextEstimated(
                 turn=turn,
                 provider=config.provider.name,
-                model=selected_model,
+                model=config.selected_model,
                 budget=context_budget,
             )
 
@@ -368,25 +417,15 @@ async def run_agent_loop(
                 completed,
                 turn=turn,
                 request_messages=request_messages,
-                selected_model=selected_model,
+                selected_model=config.selected_model,
             )
             yield projection.event
             state.continuation.record_response(
                 projection.to_continuation_message(), response_id=completed.response_id
             )
-            usage = projection.event.usage
-            if usage is not None and config.context_window is not None:
-                pressure_ratio = usage.input_tokens / config.context_window
-                if pressure_ratio >= config.context_pressure_threshold:
-                    yield ContextPressure(
-                        turn=turn,
-                        provider=config.provider.name,
-                        model=config.model or config.provider.default_model,
-                        context_window=config.context_window,
-                        observed_tokens=usage.input_tokens,
-                        remaining_tokens=max(0, config.context_window - usage.input_tokens),
-                        pressure_ratio=pressure_ratio,
-                    )
+            pressure = _context_pressure_event(config, turn=turn, usage=projection.event.usage)
+            if pressure is not None:
+                yield pressure
 
             had_tool_calls = bool(tool_calls)
             if had_tool_calls:
@@ -441,18 +480,13 @@ async def run_agent_loop(
         # Cleanup cannot publish events into a closed consumer or recover a cancelled turn.
         if consumer_closed or response_cancelled:
             raise
-        overflow_error = exc if isinstance(exc, ContextOverflowError) else None
-        if overflow_error is not None:
-            yield _context_overflow_event(config, turn=turn, message=str(overflow_error))
+        if isinstance(exc, ContextOverflowError):
+            yield _context_overflow_event(config, turn=turn, message=str(exc))
             if config.defer_context_overflow_errors:
-                if overflow_error is not exc:
-                    raise overflow_error from exc
                 raise
         yield ErrorEvent(message=str(exc))
         if turn_started:
             yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
-        if overflow_error is not None and overflow_error is not exc:
-            raise overflow_error from exc
         raise
 
 
