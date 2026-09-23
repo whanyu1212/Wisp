@@ -11,12 +11,15 @@ from wisp.agent.prompt import (
     build_project_context,
     build_prompt_messages,
     build_untrusted_project_context,
+    read_repository_status,
     resolve_project_context_root,
 )
 from wisp.agent.prompt import project_context as project_context_module
 from wisp.agent.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
+
+_GIT_SNAPSHOT = "git (snapshot; run `git status` for the current state):"
 
 
 def test_build_prompt_messages_includes_default_instructions_and_context(tmp_path: Path) -> None:
@@ -469,7 +472,7 @@ def test_project_context_scans_git_root_from_subdirectory(
 
     assert f"cwd: {subdir.resolve(strict=False)}" in context
     assert f"project root: {repo.resolve(strict=False)}" in context
-    assert "git: branch main; status clean" in context
+    assert f"{_GIT_SNAPSHOT} branch main; status clean" in context
     assert "project files:\n  pyproject.toml" in context
     assert "  README.md" in context
     assert "project files: none detected" not in context
@@ -507,7 +510,7 @@ def test_project_context_includes_bounded_git_status(
 
     context = build_project_context(cwd=tmp_path)
 
-    assert "git: branch feature/test; 20 changed file(s)" in context
+    assert f"{_GIT_SNAPSHOT} branch feature/test; 20 changed file(s)" in context
     assert "M file-0.py" in context
     assert "... 8 more" in context
     assert "M file-19.py" not in context
@@ -557,4 +560,36 @@ def test_project_context_applies_one_aggregate_git_deadline(
     context = build_project_context(cwd=tmp_path)
 
     assert timeouts == [pytest.approx(1.0), pytest.approx(0.5)]
-    assert "git: branch unknown; status unavailable" in context
+    assert f"{_GIT_SNAPSHOT} branch unknown; status unavailable" in context
+
+
+def test_repository_status_is_read_once_and_reused_verbatim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    status_reads = 0
+
+    def fake_run_git(_cwd: Path, *args: str) -> str | None:
+        nonlocal status_reads
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(repo)
+        if args == ("rev-parse", "--is-inside-work-tree"):
+            return "true"
+        if args == ("branch", "--show-current"):
+            return "main"
+        if args == ("status", "--short"):
+            status_reads += 1
+            return " M src/app.py"
+        return None
+
+    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+
+    snapshot = read_repository_status(repo)
+    context = build_project_context(cwd=repo, repository_status=snapshot)
+
+    assert snapshot == f"{_GIT_SNAPSHOT} branch main; 1 changed file(s)\n   M src/app.py"
+    assert snapshot in context
+    # The supplied snapshot replaces the status read; Git is not asked again.
+    assert status_reads == 1

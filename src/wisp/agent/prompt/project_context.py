@@ -69,6 +69,7 @@ def build_project_context(
     max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
     trusted_context_root: Path | None = None,
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
+    repository_status: str | None = None,
 ) -> str:
     """Collect project context within a shared Git deadline and character budget.
 
@@ -80,6 +81,9 @@ def build_project_context(
         trusted_context_root (Path | None): Allowed instruction-file root; defaults
             to the discovered project root.
         protected_paths (tuple[str, ...]): Paths excluded from instruction discovery.
+        repository_status (str | None): Status from `read_repository_status` to reuse
+            instead of reading Git again. Reusing one snapshot keeps the prompt, and so
+            the provider's cached prefix, identical across a session's runs.
 
     Returns:
         str: Bounded project metadata and allowed instructions, ordered from the
@@ -101,7 +105,7 @@ def build_project_context(
             "[WISP PROJECT CONTEXT]",
             f"cwd: {resolved_cwd}",
             root_section,
-            _git_summary(resolved_cwd),
+            repository_status if repository_status is not None else _git_summary(resolved_cwd),
             _project_files_summary(project_root),
             _tool_summary(tools),
         ]
@@ -119,6 +123,28 @@ def build_project_context(
         if context_file_section:
             sections.append(context_file_section)
         return _truncate_context("\n".join(section for section in sections if section), max_chars)
+    finally:
+        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
+
+
+def read_repository_status(cwd: Path) -> str:
+    """Read the Git status section of the project context once.
+
+    A session takes this once and passes it to `build_project_context` on later runs.
+    The working tree changes as the agent edits files; putting the fresh status in
+    every run's prompt would change the prompt prefix and miss the provider's
+    prompt cache for the whole conversation after it.
+
+    Args:
+        cwd (Path): Working directory whose repository is summarized.
+
+    Returns:
+        str: The status section, labeled as a snapshot, or an unavailable status when
+            the directory is not a work tree or Git does not answer in time.
+    """
+    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
+    try:
+        return _git_summary(cwd.resolve(strict=False))
     finally:
         _GIT_CONTEXT_DEADLINE.reset(deadline_token)
 
@@ -178,6 +204,11 @@ def resolve_project_context_root(cwd: Path) -> Path:
         _GIT_CONTEXT_DEADLINE.reset(deadline_token)
 
 
+# Sessions reuse one status across runs to keep the prompt cacheable, so tell the model
+# it may be out of date.
+_GIT_SNAPSHOT_LABEL = "git (snapshot; run `git status` for the current state):"
+
+
 def _git_summary(cwd: Path) -> str:
     inside_work_tree = _run_git(cwd, "rev-parse", "--is-inside-work-tree")
     if inside_work_tree != "true":
@@ -189,16 +220,16 @@ def _git_summary(cwd: Path) -> str:
 
     status = _run_git(cwd, "status", "--short")
     if status is None:
-        return f"git: branch {branch}; status unavailable"
+        return f"{_GIT_SNAPSHOT_LABEL} branch {branch}; status unavailable"
     if not status:
-        return f"git: branch {branch}; status clean"
+        return f"{_GIT_SNAPSHOT_LABEL} branch {branch}; status clean"
 
     status_lines = status.splitlines()
     shown = status_lines[:MAX_GIT_STATUS_LINES]
     hidden_count = max(0, len(status_lines) - len(shown))
     suffix = f"\n  ... {hidden_count} more" if hidden_count else ""
     return (
-        f"git: branch {branch}; {len(status_lines)} changed file(s)"
+        f"{_GIT_SNAPSHOT_LABEL} branch {branch}; {len(status_lines)} changed file(s)"
         f"\n  " + "\n  ".join(shown) + suffix
     )
 

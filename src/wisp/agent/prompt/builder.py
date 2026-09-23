@@ -35,6 +35,7 @@ def build_prompt_messages(
     include_project_context: bool = True,
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
     trusted_context_root: Path | None = None,
+    repository_status: str | None = None,
 ) -> tuple[Message, ...]:
     """Assemble system messages in their instruction-precedence order.
 
@@ -49,6 +50,7 @@ def build_prompt_messages(
         include_project_context (bool): Whether project-local state may be read.
         protected_paths (tuple[str, ...]): Paths excluded from instruction discovery.
         trusted_context_root (Path | None): Boundary for trusted instruction files.
+        repository_status (str | None): Git status snapshot to reuse; None reads Git.
 
     Returns:
         tuple[Message, ...]: Core instructions, project context, optional tool and
@@ -73,6 +75,7 @@ def build_prompt_messages(
             max_context_file_chars=max_context_file_chars,
             trusted_context_root=trusted_context_root,
             protected_paths=protected_paths,
+            repository_status=repository_status,
         )
         if include_project_context
         else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)

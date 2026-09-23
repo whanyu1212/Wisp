@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
@@ -573,6 +574,66 @@ def test_coding_session_failure_after_completed_turn_does_not_complete_it_again(
     completed = events[-1]
     assert isinstance(completed, AgentCompleted)
     assert (completed.turns, completed.outcome) == (1, "failed")
+
+
+def test_coding_session_reuses_one_git_status_across_its_runs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Wisp",
+                "-c",
+                "user.email=wisp@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / "app.py").write_text("print('v1')\n")
+    git("add", "app.py")
+    git("commit", "-q", "-m", "initial")
+
+    def reply() -> list[ProviderEvent]:
+        return [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]
+
+    provider = ScriptedProvider([reply(), reply(), reply()])
+    store = JsonlSessionStore(tmp_path / "sessions")
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        tool_context=ToolContext(cwd=repo),
+        trusted=True,
+    )
+
+    def system_prompt(call_index: int) -> tuple[str, ...]:
+        return tuple(
+            message.content
+            for message in provider.calls[call_index].messages
+            if message.role == "system"
+        )
+
+    async def run() -> None:
+        session = store.create()
+        _ = [event async for event in agent.run("first", session=session)]
+        (repo / "app.py").write_text("print('v2')\n")
+        _ = [event async for event in agent.run("second", session=session)]
+        _ = [event async for event in agent.run("fresh", session=store.create())]
+
+    anyio.run(run)
+
+    # The edit between runs must not change the prompt prefix the provider caches.
+    assert system_prompt(1) == system_prompt(0)
+    assert any("branch main; status clean" in content for content in system_prompt(0))
+    # A different session takes its own snapshot of the current working tree.
+    assert any("branch main; 1 changed file(s)" in content for content in system_prompt(2))
 
 
 def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
