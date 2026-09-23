@@ -525,6 +525,56 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
     assert messages[-2].created_at == injected.timestamp
 
 
+def test_coding_session_failure_after_completed_turn_does_not_complete_it_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="first answer"),
+            ],
+        ]
+    )
+    store = JsonlSessionStore(tmp_path)
+    event_bus = EventBus()
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+    queue_message = agent._queue_message
+
+    def fail_follow_up(session: Any, message: Message, **kwargs: Any) -> str:
+        if message.content == "continue":
+            raise RuntimeError("follow-up persistence failed")
+        return queue_message(session, message, **kwargs)
+
+    monkeypatch.setattr(agent, "_queue_message", fail_follow_up)
+
+    async def queue_follow_up(event: WispEvent) -> None:
+        await agent.follow_up("continue")
+
+    event_bus.on("agent.started", queue_follow_up)
+
+    async def run_agent() -> list[WispEvent]:
+        events: list[WispEvent] = []
+        with pytest.raises(RuntimeError, match="follow-up persistence failed"):
+            async for event in agent.run("initial", session=store.create()):
+                events.append(event)
+        return events
+
+    events = anyio.run(run_agent)
+
+    # The loop completed turn 1 before the session failed to persist the follow-up,
+    # so the failure publishes an error without a second terminal for that turn.
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [(1, "completed")]
+    errors = [event.message for event in events if isinstance(event, ErrorEvent)]
+    assert errors == ["follow-up persistence failed"]
+    completed = events[-1]
+    assert isinstance(completed, AgentCompleted)
+    assert (completed.turns, completed.outcome) == (1, "failed")
+
+
 def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
     async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
         provider = ScriptedProvider(

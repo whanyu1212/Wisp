@@ -21,6 +21,7 @@ _PURE_AGENT_MODULES = (
     "transcript_repair.py",
     "request_boundary.py",
     "tool_contracts.py",
+    "turn_lifecycle.py",
     "harness/__init__.py",
     "harness/config.py",
     "harness/boundaries.py",

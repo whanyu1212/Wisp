@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from wisp.agent.context_budget import estimate_context_budget
 from wisp.agent.messages import Message
+from wisp.agent.turn_lifecycle import TurnLifecycle
 from wisp.events import (
     ContextBudget,
     ContextEstimated,
@@ -68,21 +69,6 @@ type AgentLoopEvent = (
     | TurnCompleted
     | ErrorEvent
 )
-
-
-def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
-    """Build terminal cancellation events for a turn that has already started.
-
-    Args:
-        turn (int): Number of the active turn.
-
-    Returns:
-        tuple[ErrorEvent, TurnCompleted]: Cancellation error followed by turn completion.
-    """
-    return (
-        ErrorEvent(message="Agent run cancelled"),
-        TurnCompleted(turn=turn, outcome="cancelled", finish_reason="cancelled"),
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,29 +289,26 @@ async def run_agent_loop(
         turn=config.turn_offset,
         tool_iterations=config.tool_iteration_offset,
     )
-    # Bind `turn`/`turn_started` before the loop so the outer `except` below
-    # can always reference them, even if an exception (e.g. a raising
-    # CancellationToken) fires before the first `state.begin_turn()` call.
-    # `turn_started` -- rather than `turn > 0` -- distinguishes "no turn
-    # started this invocation" from "a real turn is in flight", since a
-    # nonzero `turn_offset` would otherwise make `turn > 0` true even when
-    # this call never emitted a matching `TurnStarted`.
+    # Bind `turn` before the loop so the outer `except` below can always
+    # reference it, even if an exception (e.g. a raising CancellationToken)
+    # fires before the first `state.begin_turn()` call. `lifecycle` -- not
+    # `turn > 0` -- knows whether this invocation has a turn in flight, since a
+    # nonzero `turn_offset` makes `turn > 0` true before any `TurnStarted`.
     turn = config.turn_offset
-    turn_started = False
+    lifecycle = TurnLifecycle()
     consumer_closed = False
     response_cancelled = False
 
     try:
         while True:
-            turn_started = False
             if config.cancellation_requested():
-                yield ErrorEvent(message="Agent run cancelled")
+                for event in lifecycle.cancelled_events():
+                    yield event
                 break
             turn = state.begin_turn()
-            turn_started = True
-            yield TurnStarted(turn=turn)
+            yield lifecycle.start(turn)
             if config.cancellation_requested():
-                for event in _cancelled_turn_events(turn):
+                for event in lifecycle.cancelled_events():
                     yield event
                 break
             request_messages = (*messages, *state.continuation.continuation_messages)
@@ -354,8 +337,7 @@ async def run_agent_loop(
                             # Publish cancellation terminals before model-stream cleanup,
                             # but keep public turn ownership in this runner.
                             response_cancelled = True
-                            turn_started = False
-                            for event in _cancelled_turn_events(turn):
+                            for event in lifecycle.cancelled_events():
                                 yield event
                             continue
                         yield provider_event
@@ -395,17 +377,15 @@ async def run_agent_loop(
                         message=action.message,
                     )
                     if retry:
-                        yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
-                        turn_started = False
+                        yield lifecycle.complete("failed", "error")
                         continue
                     if config.defer_context_overflow_errors:
                         return
-                yield ErrorEvent(message=action.message)
-                yield TurnCompleted(
-                    turn=turn,
+                for event in lifecycle.terminal_events(
+                    action.message,
                     outcome="cancelled" if action.kind == "aborted" else "failed",
-                    finish_reason="cancelled" if action.kind == "aborted" else "error",
-                )
+                ):
+                    yield event
                 return
             if not isinstance(outcome, CompletedModelResponse):
                 raise RuntimeError("Provider turn ended without a completed response")
@@ -430,7 +410,7 @@ async def run_agent_loop(
             had_tool_calls = bool(tool_calls)
             if had_tool_calls:
                 if config.cancellation_requested():
-                    for event in _cancelled_turn_events(turn):
+                    for event in lifecycle.cancelled_events():
                         yield event
                     break
                 state.begin_tool_round(config.max_tool_iterations)
@@ -453,16 +433,12 @@ async def run_agent_loop(
                     raise RuntimeError("Tool round ended without a typed outcome")
                 state.continuation.complete_tool_round(tool_outcome.results)
                 if isinstance(tool_outcome, CancelledToolBatch):
-                    for event in _cancelled_turn_events(turn):
+                    for event in lifecycle.cancelled_events():
                         yield event
                     return
-            yield TurnCompleted(
-                turn=turn,
-                outcome="completed",
-                finish_reason=response.finish_reason,
-            )
-            # A boundary-hook failure must not complete this turn a second time.
-            turn_started = False
+            # Completing here closes the turn, so a boundary-hook failure below
+            # cannot complete it a second time.
+            yield lifecycle.complete("completed", response.finish_reason)
             stop = not had_tool_calls
             if not config.cancellation_requested():
                 messages, stop = await at_request_boundary(
@@ -484,9 +460,8 @@ async def run_agent_loop(
             yield _context_overflow_event(config, turn=turn, message=str(exc))
             if config.defer_context_overflow_errors:
                 raise
-        yield ErrorEvent(message=str(exc))
-        if turn_started:
-            yield TurnCompleted(turn=turn, outcome="failed", finish_reason="error")
+        for event in lifecycle.terminal_events(str(exc), outcome="failed"):
+            yield event
         raise
 
 
