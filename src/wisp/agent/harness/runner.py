@@ -180,7 +180,7 @@ class AgentHarness:
         """Replace provider/tool configuration between runs."""
         self._ensure_idle()
         self._config = config
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
 
     def append_message(self, message: Message) -> None:
         """Append a detached copy of restored or application-provided state."""
@@ -218,7 +218,7 @@ class AgentHarness:
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
         self._steering_queue.append(message.model_copy(deep=True))
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self.queue_updated_event()
 
     def follow_up(self, content: str) -> QueueUpdated:
@@ -230,33 +230,33 @@ class AgentHarness:
         self._require_user_queue_message(message)
         self._require_queue_capacity(message)
         self._follow_up_queue.append(message.model_copy(deep=True))
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self.queue_updated_event()
 
     def set_steering_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many steering messages a future drain will inject."""
         self._config = replace(self._config, steering_mode=mode)
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self.queue_updated_event()
 
     def set_follow_up_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many follow-up messages a future drain will inject."""
         self._config = replace(self._config, follow_up_mode=mode)
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self.queue_updated_event()
 
     def pop_latest_steering(self) -> Message | None:
         """Remove and return the latest steering message for editing."""
         if not self._steering_queue:
             return None
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self._steering_queue.pop()
 
     def pop_latest_follow_up(self) -> Message | None:
         """Remove and return the latest follow-up message for editing."""
         if not self._follow_up_queue:
             return None
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return self._follow_up_queue.pop()
 
     def clear_queue(self, kind: QueueKind) -> tuple[Message, ...]:
@@ -264,7 +264,7 @@ class AgentHarness:
         queue = self._queue_for(kind)
         cleared = tuple(queue)
         queue.clear()
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return cleared
 
     def clear_queues(self) -> QueuedMessages:
@@ -272,7 +272,7 @@ class AgentHarness:
         cleared = self.queued_messages
         self._steering_queue.clear()
         self._follow_up_queue.clear()
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         return cleared
 
     def drain_steering(self) -> tuple[QueueMessageInjected | QueueUpdated, ...]:
@@ -644,7 +644,7 @@ class AgentHarness:
         if not queue or queue[0] is not expected:
             return None
         message = queue.popleft()
-        self._queue_token = uuid4().hex
+        self._bump_queue_revision()
         self._messages.append(message)
         return QueueMessageInjected(
             kind=kind,
@@ -652,6 +652,10 @@ class AgentHarness:
             skill_invocation=message.skill_invocation,
             timestamp=message.created_at,
         )
+
+    def _bump_queue_revision(self) -> None:
+        """Invalidate the queue token so stale queue edits can be detected."""
+        self._queue_token = uuid4().hex
 
     def _ensure_idle(self) -> None:
         if self._running:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from copy import deepcopy
 from dataclasses import dataclass, field
 
 import anyio
@@ -16,9 +15,7 @@ from wisp.agent.tool_contracts import (
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ToolApprovalResolved,
-    ToolCallRequested,
     ToolExecutionEnded,
-    ToolExecutionStarted,
     ToolResultReady,
 )
 from wisp.providers.events import ToolCall
@@ -28,6 +25,8 @@ from .tool_lifecycle import (
     CancellationCheck,
     ToolBatchEvent,
     ToolExecutionLifecycle,
+    tool_call_requested,
+    tool_execution_started,
 )
 
 _MAX_PARALLEL_TOOL_EXECUTIONS = 8
@@ -177,20 +176,12 @@ class _PreparedToolBatch:
 
         for tool_call in self.tool_calls:
             self._requested_call_ids.add(tool_call.call_id)
-            yield ToolCallRequested(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=deepcopy(dict(tool_call.arguments)),
-            )
+            yield tool_call_requested(tool_call)
             if self.is_cancelled():
                 self.cancelled = True
                 return
 
-            yield ToolExecutionStarted(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                arguments=deepcopy(dict(tool_call.arguments)),
-            )
+            yield tool_execution_started(tool_call)
             if self.is_cancelled():
                 self.cancelled = True
                 return
@@ -308,11 +299,7 @@ class _PreparedToolBatch:
                 continue
             if tool_call.call_id not in self._requested_call_ids:
                 self._requested_call_ids.add(tool_call.call_id)
-                yield ToolCallRequested(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    arguments=deepcopy(dict(tool_call.arguments)),
-                )
+                yield tool_call_requested(tool_call)
             lifecycle = self._lifecycles.get(tool_call.call_id)
             if (
                 lifecycle is not None
