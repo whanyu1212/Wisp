@@ -288,7 +288,6 @@ def _run_sample(
     order: int,
 ) -> BenchmarkSample:
     prompt = " ".join((START_TOKEN, *("payload" for _ in range(config.prompt_words)), FINAL_TOKEN))
-    response_start_marker = f"{_FAKE_RESPONSE_PREFIX}{START_TOKEN}"
 
     with tempfile.TemporaryDirectory(prefix=f"wisp-tui-e2e-{renderer}-") as temporary:
         root = Path(temporary)
@@ -397,17 +396,15 @@ def _run_sample(
                     plain = _plain_text(phase_output)
                     if prompt_echo_ns is None and START_TOKEN in plain:
                         prompt_echo_ns = now_ns
-                    response_index = plain.find(response_start_marker)
-                    if first_response_ns is None and response_index >= 0:
+                    response_tail = _response_tail(plain)
+                    if first_response_ns is None and response_tail is not None:
                         first_response_ns = now_ns
-                    if first_response_ns is not None and final_response_ns is None:
-                        response_tail = (
-                            plain[response_index + len(response_start_marker) :]
-                            if response_index >= 0
-                            else ""
-                        )
-                        if FINAL_TOKEN in response_tail:
-                            final_response_ns = now_ns
+                    if (
+                        final_response_ns is None
+                        and response_tail is not None
+                        and FINAL_TOKEN in response_tail
+                    ):
+                        final_response_ns = now_ns
                     if final_response_ns is not None and settled_ns is None:
                         final_index = plain.rfind(FINAL_TOKEN)
                         if final_index >= 0 and _settled_after_final(
@@ -611,6 +608,26 @@ def _ready(plain: str, renderer: Renderer) -> bool:
     return (
         provider_ready and context_hydrated and any(marker in compact for marker in _READY_MARKERS)
     )
+
+
+def _response_tail(plain: str) -> str | None:
+    """Return the painted text after the fake response's start marker.
+
+    Incremental repaints write only changed cells, so blank cells between words
+    may never appear in the PTY stream. Match without whitespace, as ``_ready``
+    does, so a streamed response cannot be split by the gaps a repaint skips.
+
+    Args:
+        plain: Printable PTY text since the prompt was submitted.
+
+    Returns:
+        Whitespace-free text after the start marker, or ``None`` before it paints.
+    """
+
+    compact = "".join(plain.split())
+    marker = "".join(f"{_FAKE_RESPONSE_PREFIX}{START_TOKEN}".split())
+    index = compact.find(marker)
+    return None if index < 0 else compact[index + len(marker) :]
 
 
 def _settled_after_final(tail: str, renderer: Renderer) -> bool:

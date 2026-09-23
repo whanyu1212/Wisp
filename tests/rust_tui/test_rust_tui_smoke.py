@@ -50,10 +50,19 @@ def report_stats(command, session_id=None, enabled=True):
 """
 
 
+def _rendered_without_spacing(output: bytes | bytearray) -> bytes:
+    """Return painted text without escapes or whitespace.
+
+    Incremental frames skip cells that already hold the same content, so a phrase
+    that replaces similar text can arrive as words separated by cursor moves.
+    """
+    emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
+    return b"".join(emitted.split())
+
+
 def _welcome_ready(output: bytes | bytearray) -> bool:
     """Recognize the hydrated welcome screen with or without a provider."""
-    emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
-    rendered = b"".join(emitted.split())
+    rendered = _rendered_without_spacing(output)
     return b"Typeapromptor/forcommands." in rendered or b"/connecttoaddaprovider" in rendered
 
 
@@ -577,15 +586,12 @@ for line in sys.stdin:
             ):
                 os.write(terminal_fd, b"tools\r")
                 prompt_sent = True
-            cards_visible = all(
-                marker in output
-                for marker in (
-                    b"README.md",
-                    b"Process completed",
-                    b"demo.txt",
-                )
-            )
-            if cards_visible and cards_redraw_offset is None:
+            # A slow backend can paint "Running process" before the completed card;
+            # the shared blank cell then never reaches the PTY stream.
+            if cards_redraw_offset is None and all(
+                marker in _rendered_without_spacing(output)
+                for marker in (b"README.md", b"Processcompleted", b"demo.txt")
+            ):
                 cards_redraw_offset = len(output)
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 continue
