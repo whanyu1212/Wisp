@@ -89,6 +89,21 @@ def test_validate_config_rejects_invalid_dimensions_and_missing_binary() -> None
         validate_config(BenchmarkConfig(rust_binary=Path("wisp-tui")))
 
 
+def test_response_markers_survive_blank_cells_skipped_by_incremental_repaint() -> None:
+    # Only changed cells are written, so a response painted over blank rows can
+    # reach the PTY as words separated by cursor moves instead of spaces.
+    echo = b"you\x1b[3;14HWISP_E2E_START_7F3A payload WISP_E2E_FINAL_9C2D"
+    response = (
+        b"\x1b[6;14Hfake\x1b[6;19Hresponse\x1b[6;28Hto:"
+        b"\x1b[6;32HWISP_E2E_START_7F3A\x1b[6;52Hpayload\x1b[7;14HWISP_E2E_FINAL_9C2D"
+    )
+
+    assert rust_tui_e2e._response_tail(rust_tui_e2e._plain_text(echo)) is None
+    assert rust_tui_e2e._response_tail(rust_tui_e2e._plain_text(echo + response)) == (
+        "payloadWISP_E2E_FINAL_9C2D"
+    )
+
+
 @pytest.mark.parametrize("foreground", [0, os.getpgrp()])
 def test_timeout_cleanup_never_signals_the_benchmark_process_group(
     monkeypatch: pytest.MonkeyPatch,

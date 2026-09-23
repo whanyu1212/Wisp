@@ -7,6 +7,8 @@ import pty
 import struct
 import sys
 import termios
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -105,19 +107,74 @@ main()
     tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
     width = 102
 
-    def repaint(label: bytes) -> None:
+    def full_repaint_after(output: bytes, offset: int) -> bytes | None:
+        # A resize clears the screen inside the next synchronized frame.
+        start = output.find(b"\x1b[?2026h\x1b[2J", offset)
+        end = output.find(b"\x1b[?2026l", start) if start >= 0 else -1
+        return output[start:end] if end >= 0 else None
+
+    idle_footer = "↑↓ select".encode()
+
+    def wait_for_full_repaint(accept: Callable[[bytes], bool], *, failure: str) -> None:
+        """Force full repaints until one shows the expected current state.
+
+        Incremental frames can split text across cursor moves, so each resize is
+        checked as one complete repaint. A resize can be handled before earlier
+        input or backend events, so request another until one is accepted.
+
+        Args:
+            accept (Callable[[bytes], bool]): Checks the bytes of one full repaint.
+            failure (str): Message used if no repaint is accepted in time.
+        """
         nonlocal width
-        offset = len(tui.output)
-        width += 1
-        tui.resize(width=width)
-        tui.wait_for(
-            label, "↑↓ select".encode(), since=offset, failure="queue choice did not paint"
+        deadline = time.monotonic() + 15
+        while True:
+            offset = len(tui.output)
+            width = 103 if width == 102 else 102
+            tui.resize(width=width)
+
+            def repainted(output: bytes, start: int = offset) -> bool:
+                return full_repaint_after(output, start) is not None
+
+            output = tui.wait_until(repainted, failure="TUI did not repaint after resize")
+            frame = full_repaint_after(output, offset)
+            assert frame is not None
+            if accept(frame):
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(f"{failure}; last full repaint={frame!r}")
+
+    def settle() -> None:
+        """Wait until the TUI has consumed every event of the last queue action.
+
+        The TUI discards input that arrives while workflow events are still queued,
+        so input must not race the previous action's results. Actions mark
+        themselves pending before sending a command, so once the backend has
+        reported the result, a repaint forced after that point shows the idle footer
+        only after the TUI has applied the result.
+        """
+        wait_for_full_repaint(
+            lambda frame: idle_footer in frame, failure="queue manager did not settle"
         )
 
-    def select_row(index: int, label: bytes) -> None:
+    def select_row(index: int, label: bytes) -> int:
+        """Navigate to a row and activate it.
+
+        The current selection must differ from ``index``: the highlighted target row
+        is then painted only after every navigation key was applied, and Enter is
+        ignored until the new choice has been painted. No resize happens between
+        that paint and Enter, because a resize also invalidates the painted choice.
+
+        Returns:
+            int: Output offset from just before Enter, for waiting on its effect.
+        """
+        settle()
+        offset = len(tui.output)
         tui.send(b"\x1b[H" + b"\x1b[B" * index)
-        repaint(label)
+        tui.wait_for("› ".encode() + label, since=offset, failure="queue choice did not paint")
+        offset = len(tui.output)
         tui.send(b"\r")
+        return offset
 
     def wait_report(kind: str, count: int) -> None:
         tui.wait_until(lambda _: len(reports(kind)) >= count, failure=f"missing {kind} result")
@@ -138,8 +195,8 @@ main()
         assert reports("set_queue_mode")[-1]["state"]["steering_mode"] == "all"
         assert reports("set_queue_mode")[-1]["command"]["expected_token"]
 
-        select_row(3, b"Clear this queue")
-        repaint(b"Confirm clear")
+        chosen = select_row(3, b"Clear this queue")
+        tui.wait_for("› Cancel".encode(), since=chosen, failure="confirmation did not open")
         select_row(1, b"Confirm clear")
         wait_report("clear_queue", 1)
         cleared = reports("clear_queue")[-1]
@@ -147,8 +204,8 @@ main()
         assert cleared["state"]["steering"] == []
         assert cleared["state"]["follow_up"] == ["later follow-up"]
 
-        select_row(4, b"Clear both queues")
-        repaint(b"Confirm clear")
+        chosen = select_row(4, b"Clear both queues")
+        tui.wait_for("› Cancel".encode(), since=chosen, failure="confirmation did not open")
         tui.send(b"\r")  # Cancel is the default; no destructive command.
         before = len(reports("get_queue_state"))
         select_row(5, b"Refresh")
@@ -162,10 +219,14 @@ main()
         assert "kind" not in cleared["command"]
         assert cleared["state"]["steering"] == cleared["state"]["follow_up"] == []
 
-        offset = len(tui.output)
+        settle()
         tui.send(b"\x1b")
-        tui.resize(width=width + 1)
-        tui.wait_for(b"draft-kept", since=offset, failure="queue overlay lost the composer draft")
+        # The draft is visible under the overlay too, so wait until the overlay is
+        # gone: an unread Esc followed by Alt+Enter parses as Esc and a plain Enter.
+        wait_for_full_repaint(
+            lambda frame: b"draft-kept" in frame and idle_footer not in frame,
+            failure="queue overlay lost the composer draft",
+        )
         # Keep work across cancellation, then restore it on the first attempt
         # in a replacement run without opening the manager or manually refreshing.
         tui.send(b"\x1b\r")

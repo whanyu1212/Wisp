@@ -20,7 +20,7 @@ import tempfile
 import termios
 import time
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import psutil
@@ -206,6 +206,10 @@ def validate_config(config: BenchmarkConfig) -> None:
 def snapshot_process_memory(child_pid: int) -> tuple[ProcessMemory, ...]:
     """Read resident memory for the CLI and its live descendants.
 
+    Direct children of the RPC backend other than the TUI are classified as
+    ``backend_helper``. The backend runs short-lived tools such as Git while it
+    builds project context, and one may still be alive at a checkpoint.
+
     Args:
         child_pid: PID of the source CLI launched by this benchmark.
 
@@ -219,12 +223,13 @@ def snapshot_process_memory(child_pid: int) -> tuple[ProcessMemory, ...]:
         processes = (root, *root.children(recursive=True))
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return ()
-    samples = []
+    observed: list[tuple[ProcessMemory, int]] = []
     for process in processes:
         try:
             with process.oneshot():
                 arguments = process.cmdline()
                 name = process.name()
+                parent_pid = process.ppid()
                 rss = process.memory_info().rss
             if process.pid == child_pid:
                 role = "launcher"
@@ -237,9 +242,16 @@ def snapshot_process_memory(child_pid: int) -> tuple[ProcessMemory, ...]:
                 role = "rpc_backend"
             else:
                 role = "other"
-            samples.append(ProcessMemory(role, process.pid, rss))
+            observed.append((ProcessMemory(role, process.pid, rss), parent_pid))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
+    backend_pids = {sample.pid for sample, _ in observed if sample.role == "rpc_backend"}
+    samples = [
+        replace(sample, role="backend_helper")
+        if sample.role == "other" and parent_pid in backend_pids
+        else sample
+        for sample, parent_pid in observed
+    ]
     return tuple(sorted(samples, key=lambda sample: (sample.role, sample.pid)))
 
 
@@ -587,7 +599,7 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             ("ready", ready_process_memory),
             ("settled", settled_process_memory),
         ):
-            roles = {process.role for process in process_memory}
+            roles = {process.role for process in process_memory} - {"backend_helper"}
             if roles != {"launcher", "rpc_backend", "rust_tui"}:
                 raise RuntimeError(
                     f"{checkpoint} process snapshot has unexpected roles: {sorted(roles)}"

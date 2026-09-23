@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -163,6 +165,59 @@ def test_config_rejects_invalid_history_and_missing_binary(tmp_path: Path) -> No
         validate_config(BenchmarkConfig(rust_binary=binary, ready_hold_seconds=-1))
     with pytest.raises(ValueError, match="required"):
         validate_config(BenchmarkConfig())
+
+
+@dataclass(frozen=True)
+class _FakeProcess:
+    pid: int
+    parent_pid: int
+    process_name: str
+    arguments: tuple[str, ...]
+    descendants: tuple[_FakeProcess, ...] = ()
+
+    def oneshot(self) -> contextlib.nullcontext[None]:
+        return contextlib.nullcontext()
+
+    def cmdline(self) -> list[str]:
+        return list(self.arguments)
+
+    def name(self) -> str:
+        return self.process_name
+
+    def ppid(self) -> int:
+        return self.parent_pid
+
+    def memory_info(self) -> SimpleNamespace:
+        return SimpleNamespace(rss=self.pid * 100)
+
+    def children(self, *, recursive: bool) -> tuple[_FakeProcess, ...]:
+        assert recursive
+        return self.descendants
+
+
+def test_process_snapshot_attributes_backend_helpers_but_keeps_strays(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The RPC backend runs Git while building project context; a checkpoint can
+    # land while that helper is still alive.
+    tui = _FakeProcess(2, 1, "wisp-tui", ("wisp-tui", "--", "python"))
+    backend = _FakeProcess(3, 2, "python3.12", ("python", "-m", "wisp", "--mode", "rpc"))
+    git = _FakeProcess(4, 3, "git", ("git", "rev-parse", "--show-toplevel"))
+    stray = _FakeProcess(5, 1, "python3.12", ("python", "-c", "pass"))
+    launcher = _FakeProcess(
+        1, 0, "python3.12", ("python", "-m", "wisp", "tui"), (tui, backend, git, stray)
+    )
+    monkeypatch.setattr(rust_tui_hydration.psutil, "Process", lambda _pid: launcher)
+
+    samples = rust_tui_hydration.snapshot_process_memory(1)
+
+    assert [(sample.role, sample.pid) for sample in samples] == [
+        ("backend_helper", 4),
+        ("launcher", 1),
+        ("other", 5),
+        ("rpc_backend", 3),
+        ("rust_tui", 2),
+    ]
 
 
 def test_run_order_alternates_histories(monkeypatch: pytest.MonkeyPatch) -> None:
