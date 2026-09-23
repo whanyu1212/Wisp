@@ -386,7 +386,8 @@ class ToolBatchSettlement:
         Yields:
             ToolBatchEvent: For each unfinished call: its request event if it was never
                 requested, a denial if its approval is still pending, then an
-                interrupted terminal/result pair.
+                interrupted terminal/result pair. A call whose executor already returned
+                a result that was not yet published settles with that result instead.
 
         Examples:
             >>> calls = (
@@ -409,6 +410,11 @@ class ToolBatchSettlement:
             if tool_call.call_id not in self._requested:
                 yield self.request(tool_call)
             lifecycle = self._lifecycles.get(tool_call.call_id)
+            if lifecycle is not None and lifecycle.terminal is not None:
+                # The executor already returned this call's result but was cancelled
+                # while its stream was still closing; publish that real result.
+                yield from self.publish_result(lifecycle.finish())
+                continue
             if (
                 lifecycle is not None
                 and lifecycle.approval_requested
