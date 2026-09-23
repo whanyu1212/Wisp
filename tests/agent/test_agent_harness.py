@@ -412,7 +412,7 @@ def test_boundary_coordinator_returns_replacement_without_mutating_transcript() 
     assert coordinator.take_transcript_replacement() is None
     assert harness.messages == (original,)
     assert coordinator.active_from == 1
-    assert coordinator.pending_transcript_transition is None
+    assert coordinator.pending_transcript_replacement is None
 
 
 def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition() -> None:
@@ -447,7 +447,7 @@ def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition()
     decision = anyio.run(run)
 
     assert decision.messages is not None
-    assert coordinator.pending_transcript_transition is None
+    assert coordinator.pending_transcript_replacement is None
     assert coordinator.take_transcript_replacement() is None
     assert harness.messages == (user, injected)
 

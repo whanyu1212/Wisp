@@ -551,3 +551,63 @@ def test_overflow_recovery_requires_replacement_or_rebase() -> None:
             )
 
     anyio.run(run)
+
+
+def test_transcript_replacement_keeps_the_conversation_unless_replaced_or_rebased() -> None:
+    continuation = (_assistant(),)
+
+    stopped = RequestBoundaryDecision(stop=True, messages=(_user("compacted"),))
+    extras_only = RequestBoundaryDecision(extra_messages=(_user("next"),))
+    cleared = RequestBoundaryDecision(messages=())
+
+    assert stopped.transcript_replacement(continuation) is None
+    assert extras_only.transcript_replacement(continuation) is None
+    assert RequestBoundaryDecision().transcript_replacement(continuation) is None
+    assert cleared.transcript_replacement(continuation) == ()
+
+
+_AGREEMENT_CASES = [
+    (kind, had_tool_calls, with_extra, allow_extra_messages)
+    for kind in ("replacement", "rebase")
+    for had_tool_calls in (False, True)
+    for with_extra in (False, True)
+    # Overflow recovery (allow_extra_messages=False) cannot carry extras.
+    for allow_extra_messages in (True, False)
+    if allow_extra_messages or not with_extra
+]
+
+
+@pytest.mark.parametrize(
+    ("kind", "had_tool_calls", "with_extra", "allow_extra_messages"), _AGREEMENT_CASES
+)
+def test_loop_state_matches_the_decision_transcript(
+    kind: str, had_tool_calls: bool, with_extra: bool, allow_extra_messages: bool
+) -> None:
+    state = _state_with_cursor(tool_history=had_tool_calls)
+    snapshot = state.snapshot()
+    extras = (_user("steer"),) if with_extra else ()
+    compacted = (_user("compacted"),)
+    decision = (
+        RequestBoundaryDecision(messages=compacted, extra_messages=extras)
+        if kind == "replacement"
+        else RequestBoundaryDecision(
+            context_rebase=RequestContextRebase(
+                base_messages=compacted, expected_continuation_messages=snapshot
+            ),
+            extra_messages=extras,
+        )
+    )
+
+    base, stop = apply_request_boundary_decision(
+        _config(),
+        state,
+        messages=(_user("original"),),
+        had_tool_calls=had_tool_calls,
+        decision=decision,
+        allow_extra_messages=allow_extra_messages,
+    )
+
+    # The loop keeps a portable base and a live continuation; together they must be
+    # the conversation the harness installs from the same decision.
+    assert stop is False
+    assert (*base, *state.continuation_messages) == decision.transcript_replacement(snapshot)

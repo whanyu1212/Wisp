@@ -85,6 +85,52 @@ class RequestBoundaryDecision:
     extra_messages: Sequence[Message] = ()
     stop: bool = False
 
+    def transcript_replacement(
+        self, continuation_messages: Sequence[Message]
+    ) -> tuple[Message, ...] | None:
+        """Return the conversation this decision installs for the next request.
+
+        This is the single definition of a decision's effect on the logical
+        transcript. The loop applies it by splitting the result into a portable
+        base and its live continuation; the harness replaces its transcript with it.
+
+        Args:
+            continuation_messages (Sequence[Message]): Loop-owned continuation from the
+                snapshot the decision was made against.
+
+        Returns:
+            tuple[Message, ...] | None: The replacement followed by extra messages, or
+                the rebased base followed by the continuation and extra messages. None
+                when the decision stops or keeps the current conversation, including
+                when it only adds extra messages. An empty tuple clears the conversation.
+
+        Examples:
+            >>> summary = Message(role="user", content="Summary")
+            >>> answer = Message(role="assistant", content="Done")
+            >>> steer = Message(role="user", content="Next")
+            >>> decision = RequestBoundaryDecision(
+            ...     context_rebase=RequestContextRebase(
+            ...         base_messages=(summary,), expected_continuation_messages=(answer,)
+            ...     ),
+            ...     extra_messages=(steer,),
+            ... )
+            >>> [message.content for message in decision.transcript_replacement((answer,))]
+            ['Summary', 'Done', 'Next']
+            >>> RequestBoundaryDecision(extra_messages=(steer,)).transcript_replacement(()) is None
+            True
+        """
+        if self.stop:
+            return None
+        if self.messages is not None:
+            return (*self.messages, *self.extra_messages)
+        if self.context_rebase is not None:
+            return (
+                *self.context_rebase.base_messages,
+                *continuation_messages,
+                *self.extra_messages,
+            )
+        return None
+
 
 @dataclass(frozen=True, slots=True)
 class ContextOverflowFailure:
