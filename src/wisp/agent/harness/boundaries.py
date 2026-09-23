@@ -74,7 +74,7 @@ class _HarnessBoundaryCoordinator:
     boundary_preparer: HarnessBoundaryPreparer | None
     context_overflow_hook: ContextOverflowHook | None
     armed_boundary: _ArmedRequestBoundary | None = None
-    pending_transcript_transition: tuple[RequestBoundaryDecision, tuple[Message, ...]] | None = None
+    pending_transcript_replacement: tuple[Message, ...] | None = None
 
     def arm(
         self,
@@ -115,7 +115,9 @@ class _HarnessBoundaryCoordinator:
             )
             if decision is not None:
                 decision = deepcopy(decision)
-                self._remember_transcript_transition(decision, snapshot.continuation_messages)
+                self.pending_transcript_replacement = decision.transcript_replacement(
+                    snapshot.continuation_messages
+                )
                 return decision
 
         if boundary.injected_messages:
@@ -148,7 +150,9 @@ class _HarnessBoundaryCoordinator:
         )
         if isinstance(decision, RequestBoundaryDecision):
             decision = deepcopy(decision)
-            self._remember_transcript_transition(decision, snapshot.continuation_messages)
+            self.pending_transcript_replacement = decision.transcript_replacement(
+                snapshot.continuation_messages
+            )
         return decision
 
     def take_transcript_replacement(self) -> tuple[Message, ...] | None:
@@ -159,27 +163,6 @@ class _HarnessBoundaryCoordinator:
             or None if no replacement is pending or the decision stopped the run.
             An empty tuple is a valid replacement that clears the transcript.
         """
-        pending = self.pending_transcript_transition
-        self.pending_transcript_transition = None
-        if pending is None:
-            return None
-        decision, continuation_messages = pending
-        if decision.stop:
-            return None
-        if decision.messages is not None:
-            return (*decision.messages, *decision.extra_messages)
-        if decision.context_rebase is not None:
-            return (
-                *decision.context_rebase.base_messages,
-                *continuation_messages,
-                *decision.extra_messages,
-            )
-        return None
-
-    def _remember_transcript_transition(
-        self,
-        decision: RequestBoundaryDecision,
-        continuation_messages: Sequence[Message],
-    ) -> None:
-        if decision.messages is not None or decision.context_rebase is not None:
-            self.pending_transcript_transition = (decision, tuple(continuation_messages))
+        replacement = self.pending_transcript_replacement
+        self.pending_transcript_replacement = None
+        return replacement

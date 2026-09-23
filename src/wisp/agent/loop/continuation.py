@@ -296,6 +296,9 @@ def _apply_fresh_replacement(
 ) -> Sequence[Message]:
     """Install self-contained portable history and clear native continuation.
 
+    The returned base is the whole conversation that
+    `RequestBoundaryDecision.transcript_replacement` defines for this decision.
+
     Args:
         config (AgentLoopConfig): Provider settings used to validate structured replay.
         state (ContinuationState): Live continuation state to clear after validation.
@@ -325,6 +328,9 @@ def _apply_context_rebase(
     extra_messages: Sequence[Message],
 ) -> Sequence[Message]:
     """Replace the portable base while retaining a guarded native continuation.
+
+    The returned base plus the retained continuation, with any extras queued onto it,
+    is the conversation `RequestBoundaryDecision.transcript_replacement` defines.
 
     Args:
         config (AgentLoopConfig): Provider settings and context-rebase capability.
