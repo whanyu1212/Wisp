@@ -32,6 +32,7 @@ from wisp.events import (
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
+    TurnCompleted,
 )
 from wisp.providers.events import (
     ProviderEvent,
@@ -410,6 +411,71 @@ def test_cancelled_turn_is_not_completed_twice_when_provider_close_fails(
                 if isinstance(event, MessageDelta):
                     token.cancel()
         assert provider.closed == 1
+        assert_turn_invariants(events)
+
+    anyio.run(run)
+
+
+def test_cancellation_terminals_publish_before_provider_cleanup() -> None:
+    from wisp.agent.harness import SimpleCancellationToken
+
+    provider = _ClosingProvider()
+    token = SimpleCancellationToken()
+
+    async def run() -> None:
+        events: list[object] = []
+        closed_at_terminal: list[int] = []
+        async for event in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=_Executor(), cancellation_token=token),
+            messages=(Message(role="user", content="go"),),
+        ):
+            events.append(event)
+            if isinstance(event, MessageDelta):
+                token.cancel()
+            if isinstance(event, TurnCompleted):
+                closed_at_terminal.append(provider.closed)
+
+        # The runner owns the terminal but still publishes it while the model stream is open.
+        assert closed_at_terminal == [0]
+        assert provider.closed == 1
+        terminal = events[-1]
+        assert isinstance(terminal, TurnCompleted)
+        assert terminal.outcome == "cancelled"
+        assert_turn_invariants(events)
+
+    anyio.run(run)
+
+
+def test_loop_rejects_model_response_events_after_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import wisp.agent.loop.runner as runner_module
+    from wisp.agent.loop.model_response import CancelledModelResponse
+
+    class LateEventResponseStream:
+        def __init__(self, config: AgentLoopConfig, **kwargs: object) -> None:
+            del config, kwargs
+            self.outcome: CancelledModelResponse | None = None
+
+        async def events(self, *, turn: int) -> AsyncIterator[object]:
+            cancelled = CancelledModelResponse()
+            yield cancelled
+            self.outcome = cancelled
+            yield MessageDelta(turn=turn, delta="late")
+
+    monkeypatch.setattr(runner_module, "ModelResponseStream", LateEventResponseStream)
+
+    async def run() -> None:
+        events: list[object] = []
+        with pytest.raises(RuntimeError, match="after cancellation"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=_ClosingProvider(), tool_executor=_Executor()),
+                messages=(Message(role="user", content="go"),),
+            ):
+                events.append(event)
+
+        assert not any(isinstance(event, MessageDelta) for event in events)
+        assert sum(isinstance(event, TurnCompleted) for event in events) == 1
         assert_turn_invariants(events)
 
     anyio.run(run)

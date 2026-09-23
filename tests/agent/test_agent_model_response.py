@@ -6,7 +6,11 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.loop.model_response import ModelResponseStream, OverflowModelResponse
+from wisp.agent.loop.model_response import (
+    CancelledModelResponse,
+    ModelResponseStream,
+    OverflowModelResponse,
+)
 from wisp.agent.loop.provider_lifecycle import (
     CompletedProviderResponse,
     ProviderResponseLifecycle,
@@ -37,6 +41,11 @@ class _NeverExecutor:
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         raise AssertionError(f"Unexpected tool call: {tool_call.name}")
         yield  # pragma: no cover - makes this an async generator
+
+
+class _CancelledToken:
+    def is_cancelled(self) -> bool:
+        return True
 
 
 class _LegacyProvider:
@@ -283,6 +292,25 @@ def test_completed_response_does_not_classify_overflow_worded_close_as_overflow(
         assert not isinstance(stream.outcome, OverflowModelResponse)
 
     anyio.run(run)
+
+
+def test_model_response_reports_cancellation_to_the_loop_as_an_internal_outcome() -> None:
+    stream = ModelResponseStream(
+        config=_config(cancellation_token=_CancelledToken()),
+        messages=(Message(role="user", content="go"),),
+        tool_results=(),
+        extra_messages=(),
+        previous_response_id=None,
+    )
+
+    async def run() -> list[object]:
+        return [event async for event in stream.events(turn=1)]
+
+    events = anyio.run(run)
+
+    assert len(events) == 1
+    assert isinstance(events[0], CancelledModelResponse)
+    assert stream.outcome is events[0]
 
 
 def test_lifecycle_records_text_but_not_thinking() -> None:
