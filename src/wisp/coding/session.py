@@ -1762,14 +1762,17 @@ class CodingSession:
             cwd (Path): Working directory the status describes.
 
         Returns:
-            str: The status taken the first time this session built a prompt here.
+            str: The status stored first for this session and directory. Concurrent
+                first reads may both run, but every caller gets the one stored value.
         """
         key = (session_id, cwd)
         snapshot = self._repository_status_snapshots.get(key)
-        if snapshot is None:
-            snapshot = read_repository_status(cwd)
-            self._repository_status_snapshots[key] = snapshot
-        return snapshot
+        if snapshot is not None:
+            return snapshot
+        # Prompts are built on worker threads that a cancelled run abandons, so an
+        # abandoned read can finish after a retry already stored its snapshot. The
+        # first stored snapshot wins; a later read never replaces what prompts used.
+        return self._repository_status_snapshots.setdefault(key, read_repository_status(cwd))
 
     async def _prompt_messages_async(
         self,

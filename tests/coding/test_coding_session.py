@@ -636,6 +636,47 @@ def test_coding_session_reuses_one_git_status_across_its_runs(tmp_path: Path) ->
     assert any("branch main; 1 changed file(s)" in content for content in system_prompt(2))
 
 
+def test_abandoned_repository_status_read_cannot_replace_a_stored_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = CodingSession(
+        provider=FakeProvider(),
+        sessions=JsonlSessionStore(tmp_path),
+        tool_context=ToolContext(cwd=tmp_path),
+        trusted=True,
+    )
+    reads = ["old", "new"]
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+
+    def fake_read_repository_status(_cwd: Path) -> str:
+        value = reads.pop(0)
+        if value == "old":
+            # Stands in for a cancelled run whose abandoned worker is still reading Git.
+            first_read_started.set()
+            release_first_read.wait(5)
+        return value
+
+    monkeypatch.setattr(session_module, "read_repository_status", fake_read_repository_status)
+    abandoned_result: list[str] = []
+    abandoned = threading.Thread(
+        target=lambda: abandoned_result.append(
+            agent._repository_status_snapshot("session-1", tmp_path)
+        )
+    )
+    abandoned.start()
+    assert first_read_started.wait(5)
+
+    # The retry stores its snapshot while the abandoned read is still running.
+    assert agent._repository_status_snapshot("session-1", tmp_path) == "new"
+    release_first_read.set()
+    abandoned.join(5)
+
+    assert agent._repository_status_snapshot("session-1", tmp_path) == "new"
+    assert abandoned_result == ["new"]
+
+
 def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
     async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
         provider = ScriptedProvider(
