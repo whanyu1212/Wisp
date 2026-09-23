@@ -18,6 +18,7 @@ from .project_context import (
     PROJECT_FILE_CANDIDATES,
     build_project_context,
     build_untrusted_project_context,
+    read_repository_status,
     resolve_project_context_root,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "PROJECT_FILE_CANDIDATES",
     "build_project_context",
     "build_untrusted_project_context",
+    "read_repository_status",
     "resolve_project_context_root",
 ]

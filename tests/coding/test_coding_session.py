@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping, Sequence
 from pathlib import Path
@@ -573,6 +574,107 @@ def test_coding_session_failure_after_completed_turn_does_not_complete_it_again(
     completed = events[-1]
     assert isinstance(completed, AgentCompleted)
     assert (completed.turns, completed.outcome) == (1, "failed")
+
+
+def test_coding_session_reuses_one_git_status_across_its_runs(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Wisp",
+                "-c",
+                "user.email=wisp@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    git("init", "-q", "-b", "main")
+    (repo / "app.py").write_text("print('v1')\n")
+    git("add", "app.py")
+    git("commit", "-q", "-m", "initial")
+
+    def reply() -> list[ProviderEvent]:
+        return [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]
+
+    provider = ScriptedProvider([reply(), reply(), reply()])
+    store = JsonlSessionStore(tmp_path / "sessions")
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        tool_context=ToolContext(cwd=repo),
+        trusted=True,
+    )
+
+    def system_prompt(call_index: int) -> tuple[str, ...]:
+        return tuple(
+            message.content
+            for message in provider.calls[call_index].messages
+            if message.role == "system"
+        )
+
+    async def run() -> None:
+        session = store.create()
+        _ = [event async for event in agent.run("first", session=session)]
+        (repo / "app.py").write_text("print('v2')\n")
+        _ = [event async for event in agent.run("second", session=session)]
+        _ = [event async for event in agent.run("fresh", session=store.create())]
+
+    anyio.run(run)
+
+    # The edit between runs must not change the prompt prefix the provider caches.
+    assert system_prompt(1) == system_prompt(0)
+    assert any("branch main; status clean" in content for content in system_prompt(0))
+    # A different session takes its own snapshot of the current working tree.
+    assert any("branch main; 1 changed file(s)" in content for content in system_prompt(2))
+
+
+def test_abandoned_repository_status_read_cannot_replace_a_stored_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = CodingSession(
+        provider=FakeProvider(),
+        sessions=JsonlSessionStore(tmp_path),
+        tool_context=ToolContext(cwd=tmp_path),
+        trusted=True,
+    )
+    reads = ["old", "new"]
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+
+    def fake_read_repository_status(_cwd: Path) -> str:
+        value = reads.pop(0)
+        if value == "old":
+            # Stands in for a cancelled run whose abandoned worker is still reading Git.
+            first_read_started.set()
+            release_first_read.wait(5)
+        return value
+
+    monkeypatch.setattr(session_module, "read_repository_status", fake_read_repository_status)
+    abandoned_result: list[str] = []
+    abandoned = threading.Thread(
+        target=lambda: abandoned_result.append(
+            agent._repository_status_snapshot("session-1", tmp_path)
+        )
+    )
+    abandoned.start()
+    assert first_read_started.wait(5)
+
+    # The retry stores its snapshot while the abandoned read is still running.
+    assert agent._repository_status_snapshot("session-1", tmp_path) == "new"
+    release_first_read.set()
+    abandoned.join(5)
+
+    assert agent._repository_status_snapshot("session-1", tmp_path) == "new"
+    assert abandoned_result == ["new"]
 
 
 def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:

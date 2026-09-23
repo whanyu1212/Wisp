@@ -28,7 +28,11 @@ from wisp.agent.messages import (
     message_from_completion_event,
 )
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
-from wisp.agent.prompt import DEFAULT_CONTEXT_MAX_CHARS, build_prompt_messages
+from wisp.agent.prompt import (
+    DEFAULT_CONTEXT_MAX_CHARS,
+    build_prompt_messages,
+    read_repository_status,
+)
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -201,6 +205,10 @@ class CodingSession:
         self._operation_lock = anyio.Semaphore(1)
         self._history_refresh_session_ids: set[str] = set()
         self._context_observations: dict[str, _ContextObservation] = {}
+        # One Git status per session and working directory: a status that changed on
+        # every run would change the prompt prefix and miss the provider's cache for
+        # the whole conversation after it.
+        self._repository_status_snapshots: dict[tuple[str, Path], str] = {}
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
@@ -593,6 +601,7 @@ class CodingSession:
             effective_tools,
             registry=operation_registry,
             context=operation_context,
+            session_id=session.session_id,
         )
         if operation_instructions:
             prompt_messages = (
@@ -1622,7 +1631,9 @@ class CodingSession:
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
             provider_messages = (
-                *await self._prompt_messages_async(),
+                *await self._prompt_messages_async(
+                    session_id=session.session_id if session is not None else None
+                ),
                 *self._normalize_provider_messages(history),
             )
             observation = self._context_observations.get(
@@ -1698,6 +1709,7 @@ class CodingSession:
         *,
         registry: ToolRegistry | None = None,
         context: ToolContext | None = None,
+        session_id: str | None = None,
     ) -> tuple[Message, ...]:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
         operation_context = context or self.tool_context
@@ -1735,7 +1747,32 @@ class CodingSession:
             include_project_context=self.trusted,
             protected_paths=operation_context.protected_paths,
             trusted_context_root=self.project_context_root,
+            repository_status=(
+                self._repository_status_snapshot(session_id, operation_context.cwd)
+                if self.trusted and session_id is not None
+                else None
+            ),
         )
+
+    def _repository_status_snapshot(self, session_id: str, cwd: Path) -> str:
+        """Return the session's Git status snapshot, reading Git on first use.
+
+        Args:
+            session_id (str): Session whose runs share the snapshot.
+            cwd (Path): Working directory the status describes.
+
+        Returns:
+            str: The status stored first for this session and directory. Concurrent
+                first reads may both run, but every caller gets the one stored value.
+        """
+        key = (session_id, cwd)
+        snapshot = self._repository_status_snapshots.get(key)
+        if snapshot is not None:
+            return snapshot
+        # Prompts are built on worker threads that a cancelled run abandons, so an
+        # abandoned read can finish after a retry already stored its snapshot. The
+        # first stored snapshot wins; a later read never replaces what prompts used.
+        return self._repository_status_snapshots.setdefault(key, read_repository_status(cwd))
 
     async def _prompt_messages_async(
         self,
@@ -1743,11 +1780,14 @@ class CodingSession:
         *,
         registry: ToolRegistry | None = None,
         context: ToolContext | None = None,
+        session_id: str | None = None,
     ) -> tuple[Message, ...]:
         """Build the operation prompt without blocking the event-loop thread."""
 
         return await anyio.to_thread.run_sync(
-            lambda: self._prompt_messages(tools, registry=registry, context=context),
+            lambda: self._prompt_messages(
+                tools, registry=registry, context=context, session_id=session_id
+            ),
             abandon_on_cancel=True,
         )
 
