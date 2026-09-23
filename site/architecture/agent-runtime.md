@@ -141,8 +141,10 @@ snapshots. Transcript transitions remain deferred until the next accepted turn.
 | Module | Responsibility |
 | --- | --- |
 | `runner.py` | Top-level turn lifecycle, context estimation, and provider/tool orchestration |
-| `model_response.py` | Provider stream adaptation and completion metadata |
+| `model_response.py` | Provider event translation, response outcomes, deltas, and retries |
+| `provider_request.py` | Optional capabilities, request invocation, overflow normalization, and stream cleanup |
 | `provider_lifecycle.py` | Provider response start, retry, tool-call, and terminal validation |
+| `response_projection.py` | Usage, cost, context observation, and completed-message projection |
 | `tool_execution.py` | ToolBatch facade plus sequential and truncated execution |
 | `tool_lifecycle.py` | Shared tool event contracts and executor lifecycle validation |
 | `prepared_tools.py` | Two-phase preparation, bounded scheduling, and cancellation settlement |

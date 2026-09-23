@@ -6,18 +6,14 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.loop.model_response import (
-    ModelResponseStream,
-    OverflowModelResponse,
-    iter_provider_events,
-    open_provider_stream,
-    project_usage_and_cost,
-)
+from wisp.agent.loop.model_response import ModelResponseStream, OverflowModelResponse
 from wisp.agent.loop.provider_lifecycle import (
     CompletedProviderResponse,
     ProviderResponseLifecycle,
     resolve_provider_response_id,
 )
+from wisp.agent.loop.provider_request import iter_provider_events, open_provider_stream
+from wisp.agent.loop.response_projection import project_usage_and_cost
 from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import UsageCost

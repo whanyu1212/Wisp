@@ -42,8 +42,8 @@ from .model_response import (
     FailedModelResponse,
     ModelResponseStream,
     OverflowModelResponse,
-    project_completed_response,
 )
+from .response_projection import project_completed_response
 from .stream_cleanup import closing_stream
 from .tool_execution import CancelledToolBatch, ToolBatch
 
