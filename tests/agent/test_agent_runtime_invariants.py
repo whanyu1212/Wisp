@@ -652,32 +652,12 @@ def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() ->
     assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_allows_ended_without_ready() -> None:
+def test_assert_cancellation_settled_rejects_ended_without_ready() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-1"),
         ErrorEvent(message="Agent run cancelled"),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
-    )
-    assert_cancellation_settled(events)
-
-
-def test_assert_cancellation_settled_rejects_multiple_unpaired_ended() -> None:
-    events = (
-        TurnStarted(turn=1),
-        _ended("call-1"),
-        _ended("call-2"),
-        ErrorEvent(message="Agent run cancelled"),
-        TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
-    )
-    with pytest.raises(AssertionError, match="without ToolResultReady"):
-        assert_cancellation_settled(events)
-
-
-def test_assert_cancellation_settled_rejects_unpaired_ended_without_cancelled_turn() -> None:
-    events = (
-        _ended("call-1"),
-        ErrorEvent(message="Agent run cancelled"),
     )
     with pytest.raises(AssertionError, match="without ToolResultReady"):
         assert_cancellation_settled(events)

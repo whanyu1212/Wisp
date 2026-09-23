@@ -147,9 +147,9 @@ snapshots. Transcript transitions remain deferred until the next accepted turn.
 | `provider_request.py` | Optional capabilities, request invocation, overflow normalization, and stream cleanup |
 | `provider_lifecycle.py` | Provider response start, retry, tool-call, and terminal validation |
 | `response_projection.py` | Usage, cost, context observation, and completed-message projection |
-| `tool_execution.py` | ToolBatch facade plus sequential and truncated execution |
-| `tool_lifecycle.py` | Shared tool event contracts and executor lifecycle validation |
-| `prepared_tools.py` | Two-phase preparation, bounded scheduling, and cancellation settlement |
+| `tool_execution.py` | ToolBatch facade, sequential and truncated execution, and cancellation settlement |
+| `tool_lifecycle.py` | Shared tool event contracts, executor lifecycle validation, and the per-batch settlement record |
+| `prepared_tools.py` | Two-phase preparation and bounded scheduling |
 | `continuation.py` | Native cursor, pending request data, and request-boundary transitions |
 | `stream_cleanup.py` | Owned iterator close and cleanup exception precedence |
 | `config.py` | Provider-neutral dependencies, limits, hooks, and cancellation contracts |

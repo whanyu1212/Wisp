@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import TracebackType
 
 import anyio
@@ -15,6 +15,7 @@ from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
 )
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -292,10 +293,153 @@ class ToolExecutionLifecycle:
         return self.terminal
 
 
+def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
+    """Build a terminal record for an interrupted call whose effects may be uncertain.
+
+    Args:
+        tool_call (ToolCall): Requested call to settle.
+
+    Returns:
+        ToolExecutionEnded: Cancelled error result advising retry only when effects
+            can safely be repeated. This function does not execute the tool.
+    """
+    return ToolExecutionEnded(
+        call_id=tool_call.call_id,
+        name=tool_call.name,
+        output=INTERRUPTED_TOOL_RESULT_TEXT,
+        is_error=True,
+        failure_code="internal_error",
+        retryable=True,
+        recovery_hint="Retry the tool call if its effects can be safely repeated.",
+        process_state="cancelled",
+    )
+
+
+@dataclass(slots=True)
+class ToolBatchSettlement:
+    """Guarantee that every call in one batch ends with exactly one published result.
+
+    Execution paths record the calls they request, each call's lifecycle, and the
+    results they publish. When a batch stops early, `settle_unfinished()` closes
+    whatever they left open, so the guarantee holds however the calls were run.
+
+    Calls are tracked by call ID. A provider may repeat an ID within one response;
+    such a repeat is settled once, and a later occurrence's lifecycle replaces the
+    earlier one.
+
+    Args:
+        tool_calls (Sequence[ToolCall]): Requested calls in model order.
+    """
+
+    tool_calls: Sequence[ToolCall]
+    _requested: set[str] = field(default_factory=set, init=False)
+    _published: set[str] = field(default_factory=set, init=False)
+    _lifecycles: dict[str, ToolExecutionLifecycle] = field(default_factory=dict, init=False)
+
+    def request(self, tool_call: ToolCall) -> ToolCallRequested:
+        """Record a call as requested and build its public request event.
+
+        Args:
+            tool_call (ToolCall): Call about to be published.
+
+        Returns:
+            ToolCallRequested: Event whose arguments are detached from the provider's call.
+        """
+        self._requested.add(tool_call.call_id)
+        return tool_call_requested(tool_call)
+
+    def begin_lifecycle(self, tool_call: ToolCall) -> ToolExecutionLifecycle:
+        """Start validating one occurrence of a call, visible to settlement.
+
+        Args:
+            tool_call (ToolCall): Call whose executor events will be validated.
+
+        Returns:
+            ToolExecutionLifecycle: A new lifecycle that replaces any earlier occurrence's.
+        """
+        lifecycle = ToolExecutionLifecycle(tool_call)
+        self._lifecycles[tool_call.call_id] = lifecycle
+        return lifecycle
+
+    def publish_result(
+        self, terminal: ToolExecutionEnded
+    ) -> tuple[ToolExecutionEnded, ToolResultReady]:
+        """Build a call's provider-facing result and record the pair as published.
+
+        Args:
+            terminal (ToolExecutionEnded): Validated terminal event for the call.
+
+        Returns:
+            tuple[ToolExecutionEnded, ToolResultReady]: The terminal and its result, to
+                be published adjacently in that order.
+        """
+        result = ToolResultReady.from_execution_ended(terminal)
+        self._published.add(terminal.call_id)
+        return terminal, result
+
+    def settle_unfinished(self) -> Iterator[ToolBatchEvent]:
+        """Close every call that has no published result, in source order.
+
+        This is a plain generator with no awaits, so a batch can settle after it
+        absorbed a requested cancellation without reaching another checkpoint.
+
+        Yields:
+            ToolBatchEvent: For each unfinished call: its request event if it was never
+                requested, a denial if its approval is still pending, then an
+                interrupted terminal/result pair. A call whose executor already returned
+                a result that was not yet published settles with that result instead.
+
+        Examples:
+            >>> calls = (
+            ...     ToolCall(call_id="a", name="read", arguments={}),
+            ...     ToolCall(call_id="b", name="read", arguments={}),
+            ... )
+            >>> settlement = ToolBatchSettlement(calls)
+            >>> _ = settlement.request(calls[0])
+            >>> for event in settlement.settle_unfinished():
+            ...     print(event.type, event.call_id)
+            tool.execution.ended a
+            tool.result a
+            tool.call b
+            tool.execution.ended b
+            tool.result b
+        """
+        for tool_call in self.tool_calls:
+            if tool_call.call_id in self._published:
+                continue
+            if tool_call.call_id not in self._requested:
+                yield self.request(tool_call)
+            lifecycle = self._lifecycles.get(tool_call.call_id)
+            if lifecycle is not None and lifecycle.terminal is not None:
+                # The executor already returned this call's result but was cancelled
+                # while its stream was still closing; publish that real result.
+                yield from self.publish_result(lifecycle.finish())
+                continue
+            if (
+                lifecycle is not None
+                and lifecycle.approval_requested
+                and not lifecycle.approval_resolved
+            ):
+                approval = ToolApprovalResolved(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    approved=False,
+                    reason="Agent run cancelled",
+                )
+                lifecycle.accept(approval)
+                yield approval
+            terminal = _interrupted_tool_execution(tool_call)
+            if lifecycle is not None:
+                lifecycle.accept(terminal)
+                terminal = lifecycle.finish()
+            yield from self.publish_result(terminal)
+
+
 __all__ = [
     "CancellationCheck",
     "RequestedCancellation",
     "ToolBatchEvent",
+    "ToolBatchSettlement",
     "ToolExecutionLifecycle",
     "tool_call_requested",
     "tool_execution_started",

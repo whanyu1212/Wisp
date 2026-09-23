@@ -91,11 +91,7 @@ def assert_turn_terminals(events: Sequence[object]) -> None:
     raise AssertionError(f"{noun} {labels} started without a terminal TurnCompleted")
 
 
-def assert_tool_result_pairing(
-    events: Sequence[object],
-    *,
-    allow_unpaired_ended_before_cancel: bool = False,
-) -> None:
+def assert_tool_result_pairing(events: Sequence[object]) -> None:
     """Require Ended/Ready pairing for each tool execution occurrence.
 
     Uniqueness is per unmatched occurrence, not per run. Gemini may omit
@@ -109,15 +105,8 @@ def assert_tool_result_pairing(
     Ready, so ID-and-adjacency-only pairing would miss divergent histories.
 
     Does not require a terminal merely because `ToolCallRequested` or
-    `ToolExecutionStarted` was emitted. Sequential cancellation may stop after
-    those events; use `assert_settled_tool_calls` only on paths that promise
-    settlement.
-
-    `allow_unpaired_ended_before_cancel` covers the harness projection boundary
-    where cancel is observed on `ToolExecutionEnded`: the consumer may see that
-    Ended, then the cancellation error and matching cancelled TurnCompleted,
-    without a following Ready. Pre-turn cancellation cannot emit tool activity,
-    so the exemption requires that cancelled terminal.
+    `ToolExecutionStarted` was emitted; use `assert_settled_tool_calls` to require
+    that every requested call settled.
     """
 
     pending_ended: dict[str, tuple[int, ToolExecutionEnded]] = {}
@@ -152,28 +141,6 @@ def assert_tool_result_pairing(
                     f"ToolExecutionEnded ({mismatched})"
                 )
     unmatched = sorted(pending_ended)
-    if allow_unpaired_ended_before_cancel and len(pending_ended) == 1:
-        ended_index = next(iter(pending_ended.values()))[0]
-        trailing = events[ended_index + 1 :]
-        cancelled_terminal = next(
-            (
-                item
-                for item in trailing
-                if isinstance(item, TurnCompleted) and item.outcome == "cancelled"
-            ),
-            None,
-        )
-        if (
-            cancelled_terminal is not None
-            and trailing
-            and isinstance(trailing[0], ErrorEvent)
-            and all(isinstance(item, (ErrorEvent, TurnCompleted)) for item in trailing)
-            and any(
-                isinstance(item, TurnStarted) and item.turn == cancelled_terminal.turn
-                for item in events[:ended_index]
-            )
-        ):
-            return
     assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
 
 
@@ -181,9 +148,8 @@ def assert_settled_tool_calls(events: Sequence[object], call_ids: Sequence[str])
     """Require an Ended/Ready pair for each listed call occurrence.
 
     `call_ids` is a bag, not a set: two entries with the same fallback ID
-    require two Ended/Ready pairs. Use for prepared-batch and truncated-batch
-    paths that synthesize a terminal result per requested call. Do not use for
-    sequential execute cancellation.
+    require two Ended/Ready pairs. Every tool-batch path settles each requested
+    call, including when the run's token cancels the batch.
     """
 
     assert_tool_result_pairing(events)
@@ -292,12 +258,11 @@ def assert_cancellation_settled(events: Sequence[object]) -> None:
     3. If the last turn already completed, cancellation may emit only a trailing
        ErrorEvent after that TurnCompleted (no cancelled terminal). Queue events may
        precede that error, but the error must be unique after the turn and end the stream.
-    4. Tool execution Ended/Ready pairing is preserved, except for a single
-       unmatched Ended immediately followed by the cancellation ErrorEvent.
+    4. Tool execution Ended/Ready pairing is preserved.
     5. Started turns obey sequencing and event containment invariants.
     """
 
-    assert_tool_result_pairing(events, allow_unpaired_ended_before_cancel=True)
+    assert_tool_result_pairing(events)
     assert_turn_terminals(events)
 
     turns = [e for e in events if isinstance(e, TurnCompleted)]

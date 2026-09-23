@@ -1836,6 +1836,134 @@ def test_harness_cancellation_drains_prepared_batch_results_in_source_order() ->
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
+def test_harness_cancellation_settles_a_blocked_sequential_batch() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    class BlockingExecutor:
+        def __init__(self) -> None:
+            self.blocked = anyio.Event()
+            self.closed = False
+
+        async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+            try:
+                self.blocked.set()
+                await anyio.sleep_forever()
+            finally:
+                self.closed = True
+            yield  # pragma: no cover - makes this an async generator
+
+    async def run() -> tuple[AgentHarness, BlockingExecutor, list[object]]:
+        executor = BlockingExecutor()
+        harness = _harness(provider, executor=executor)
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("initial")])
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await executor.blocked.wait()
+                assert harness.cancel()
+        return harness, executor, events
+
+    harness, executor, events = anyio.run(run)
+
+    assert executor.closed
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(event.call_id, event.process_state) for event in results] == [
+        ("call-1", "cancelled"),
+        ("call-2", "cancelled"),
+    ]
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert [(event.outcome, event.finish_reason) for event in completed] == [
+        ("cancelled", "cancelled")
+    ]
+    # Settlement is retained live, so the next run has nothing left to repair.
+    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("tool", "call-2"),
+    ]
+    assert harness.repair_interrupted_tool_calls() == ()
+    assert_turn_terminals(events)
+    assert_settled_tool_calls(events, ("call-1", "call-2"))
+
+
+def test_harness_cancellation_publishes_a_result_returned_before_executor_cleanup() -> None:
+    tool_call = ToolCall(call_id="call-1", name="read", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderToolCallCompleted(tool_call=tool_call),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=(tool_call,),
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    class SlowCleanupExecutor:
+        def __init__(self) -> None:
+            self.cleaning_up = anyio.Event()
+
+        async def execute(self, call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+            yield ToolExecutionEnded(
+                call_id=call.call_id, name=call.name, output="real output", is_error=False
+            )
+            # The result is already returned; cancellation arrives while cleaning up.
+            self.cleaning_up.set()
+            await anyio.sleep_forever()
+
+    async def run() -> list[object]:
+        executor = SlowCleanupExecutor()
+        harness = _harness(provider, executor=executor)
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("initial")])
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await executor.cleaning_up.wait()
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(event.call_id, event.output, event.process_state) for event in results] == [
+        ("call-1", "real output", None)
+    ]
+    assert [
+        (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
+    ] == [("cancelled", "cancelled")]
+    assert_settled_tool_calls(events, ("call-1",))
+
+
 def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),

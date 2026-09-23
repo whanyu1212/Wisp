@@ -61,7 +61,12 @@ class ToolResultProcessingError(RuntimeError):
 
 
 class ToolExecutor(Protocol):
-    """Execute one provider-neutral tool call as a typed event stream."""
+    """Execute one provider-neutral tool call as a typed event stream.
+
+    Executors do not handle run cancellation themselves. When the run's token cancels
+    a batch, the loop closes the executor's stream and settles every requested call
+    with exactly one result, whether or not the executor supports `prepare()`.
+    """
 
     def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         """Yield an optional ordered approval pair, then exactly one terminal result.

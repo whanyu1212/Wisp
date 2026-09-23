@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import anyio
 import pytest
 
+from tests.agent_runtime import assert_settled_tool_calls
 from wisp.agent.loop.tool_execution import (
     CancelledToolBatch,
     CompletedToolBatch,
@@ -17,6 +18,7 @@ from wisp.agent.tool_contracts import (
     ToolExecutionProtocolError,
     ToolPreparationEvent,
 )
+from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -335,3 +337,163 @@ def test_cancellation_check_errors_propagate() -> None:
                 pass
 
     anyio.run(run)
+
+
+class _ApprovingExecutor:
+    """Request approval, receive it, then finish each call; records started calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        self.calls.append(tool_call.call_id)
+        yield _approval(tool_call)
+        yield _resolution(tool_call)
+        yield _ended(tool_call, output=f"{tool_call.call_id} output")
+
+
+# (event that triggers cancellation, calls the executor started, calls that finished)
+_SEQUENTIAL_CANCEL_POINTS = [
+    (("tool.call", "call-1"), [], []),
+    (("tool.execution.started", "call-1"), [], []),
+    (("tool.approval.requested", "call-1"), ["call-1"], []),
+    (("tool.approval.resolved", "call-1"), ["call-1"], []),
+    (("tool.execution.ended", "call-1"), ["call-1"], ["call-1"]),
+    (("tool.result", "call-1"), ["call-1"], ["call-1"]),
+    (("tool.call", "call-2"), ["call-1"], ["call-1"]),
+    (("tool.result", "call-2"), ["call-1", "call-2"], ["call-1", "call-2"]),
+]
+
+
+@pytest.mark.parametrize(
+    ("cancel_at", "executed", "finished"),
+    _SEQUENTIAL_CANCEL_POINTS,
+    ids=[f"{call_id}:{event_type}" for (event_type, call_id), _, _ in _SEQUENTIAL_CANCEL_POINTS],
+)
+def test_sequential_cancellation_settles_every_requested_call(
+    cancel_at: tuple[str, str], executed: list[str], finished: list[str]
+) -> None:
+    calls = (_call("call-1"), _call("call-2"))
+    executor = _ApprovingExecutor()
+    cancelled = False
+    recorded: list[ToolResultReady] = []
+    batch = ToolBatch(
+        tool_executor=executor,
+        tool_calls=calls,
+        truncated=False,
+        is_cancelled=lambda: cancelled,
+        on_result=recorded.append,
+    )
+
+    async def run() -> list[object]:
+        nonlocal cancelled
+        events: list[object] = []
+        async for event in batch.events():
+            events.append(event)
+            if (event.type, event.call_id) == cancel_at:
+                cancelled = True
+        return events
+
+    events = anyio.run(run)
+
+    assert_settled_tool_calls(events, ("call-1", "call-2"))
+    assert executor.calls == executed
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [result.call_id for result in results] == ["call-1", "call-2"]
+    assert [result.output for result in results] == [
+        f"{result.call_id} output" if result.call_id in finished else INTERRUPTED_TOOL_RESULT_TEXT
+        for result in results
+    ]
+    # Every published result is retained, in publication order.
+    assert recorded == results
+    assert isinstance(batch.outcome, CancelledToolBatch)
+    assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
+    if cancel_at == ("tool.approval.requested", "call-1"):
+        # The pending approval is denied before the interrupted result.
+        call_1_types = [
+            event.type for event in events if getattr(event, "call_id", None) == "call-1"
+        ]
+        assert call_1_types[-3:] == [
+            "tool.approval.resolved",
+            "tool.execution.ended",
+            "tool.result",
+        ]
+        denial = [event for event in events if isinstance(event, ToolApprovalResolved)][-1]
+        assert (denial.approved, denial.reason) == (False, "Agent run cancelled")
+
+
+def test_truncated_batch_rejects_every_call_even_when_cancelled_midway() -> None:
+    calls = (_call("call-1"), _call("call-2"))
+    executor = _NeverExecutor()
+    cancelled = False
+    batch = ToolBatch(
+        tool_executor=executor,
+        tool_calls=calls,
+        truncated=True,
+        is_cancelled=lambda: cancelled,
+        on_result=lambda _result: None,
+    )
+
+    async def run() -> list[object]:
+        nonlocal cancelled
+        events: list[object] = []
+        async for event in batch.events():
+            events.append(event)
+            if isinstance(event, ToolResultReady):
+                cancelled = True
+        return events
+
+    events = anyio.run(run)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(result.call_id, result.failure_code) for result in results] == [
+        ("call-1", "invalid_arguments"),
+        ("call-2", "invalid_arguments"),
+    ]
+    assert executor.calls == []
+    assert isinstance(batch.outcome, CancelledToolBatch)
+    assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
+
+
+def test_sequential_batch_propagates_an_unrequested_cancellation() -> None:
+    blocked = anyio.Event()
+
+    class BlockingExecutor:
+        async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+            blocked.set()
+            await anyio.sleep_forever()
+            yield _ended(tool_call)  # pragma: no cover - never reached
+
+    batch = ToolBatch(
+        tool_executor=BlockingExecutor(),
+        tool_calls=(_call("call-1"), _call("call-2")),
+        truncated=False,
+        is_cancelled=lambda: False,
+        on_result=lambda _result: None,
+    )
+
+    async def run() -> tuple[bool, list[object]]:
+        events: list[object] = []
+        scope = anyio.CancelScope()
+
+        async def consume() -> None:
+            with scope:
+                async for event in batch.events():
+                    events.append(event)
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(consume)
+                await blocked.wait()
+                scope.cancel()
+        return scope.cancelled_caught, events
+
+    cancelled_caught, events = anyio.run(run)
+
+    # The caller's own cancellation is not the run's: nothing is settled.
+    assert cancelled_caught
+    assert [getattr(event, "type", None) for event in events] == [
+        "tool.call",
+        "tool.execution.started",
+    ]
+    assert batch.outcome is None
