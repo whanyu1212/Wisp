@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
+    ContextOverflowFailure,
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
@@ -563,6 +564,22 @@ async def at_request_boundary(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class ContextOverflowRecovery:
+    """Result of offering a rejected request to the context-overflow hook.
+
+    Attributes:
+        messages (Sequence[Message]): Base history for a retry, or the unchanged history.
+        retry (bool): Whether the loop should retry the request in a new turn.
+        failure_message (str | None): Caller-supplied error text when the hook declined
+            with a `ContextOverflowFailure`; None keeps the provider's message.
+    """
+
+    messages: Sequence[Message]
+    retry: bool
+    failure_message: str | None = None
+
+
 async def at_context_overflow(
     config: AgentLoopConfig,
     state: ContinuationState,
@@ -573,7 +590,7 @@ async def at_context_overflow(
     context_budget: ContextBudget,
     had_streamed_delta: bool,
     message: str,
-) -> tuple[Sequence[Message], bool]:
+) -> ContextOverflowRecovery:
     """Ask the optional hook to replace or rebase a rejected request's context.
 
     Args:
@@ -587,9 +604,9 @@ async def at_context_overflow(
         message (str): Provider's overflow description.
 
     Returns:
-        tuple[Sequence[Message], bool]: Updated history and a retry flag. True means retry,
-            unlike the stop flag returned by at_request_boundary. False means no hook,
-            declined recovery, or a stop decision.
+        ContextOverflowRecovery: Updated history and whether to retry. No hook, a
+            declined recovery, or a stop decision does not retry; a declined recovery
+            may carry the caller's failure message.
 
     Examples:
         A recovery hook can supply caller-owned compacted history::
@@ -610,7 +627,7 @@ async def at_context_overflow(
     """
 
     if config.context_overflow_hook is None:
-        return messages, False
+        return ContextOverflowRecovery(messages, retry=False)
     snapshot = ContextOverflowSnapshot(
         turn=turn,
         tool_iterations=tool_iterations,
@@ -621,8 +638,10 @@ async def at_context_overflow(
         message=message,
     )
     decision = await config.context_overflow_hook.recover_context_overflow(snapshot=snapshot)
+    if isinstance(decision, ContextOverflowFailure):
+        return ContextOverflowRecovery(messages, retry=False, failure_message=decision.message)
     if decision is None or decision.stop:
-        return messages, False
+        return ContextOverflowRecovery(messages, retry=False)
     if decision.messages is None and decision.context_rebase is None:
         raise RequestBoundaryUnsupportedError(
             "Context-overflow recovery must provide a fresh replacement or context rebase"
@@ -635,4 +654,4 @@ async def at_context_overflow(
         decision=decision,
         allow_extra_messages=False,
     )
-    return rebased_messages, not stop
+    return ContextOverflowRecovery(rebased_messages, retry=not stop)

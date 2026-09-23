@@ -821,22 +821,23 @@ def test_prepared_tool_batch_with_sequential_call_runs_entire_batch_serially() -
 
 
 def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:
-    config = AgentLoopConfig(
-        ScriptedProvider([]),
-        NeverToolExecutor(),
-        None,
-        (),
-        None,
-        None,
-        None,
-        None,
-        16_384,
-        0.8,
-        0,
-        0,
-        None,
-        True,
-    )
+    with pytest.warns(DeprecationWarning, match="defer_context_overflow_errors"):
+        config = AgentLoopConfig(
+            ScriptedProvider([]),
+            NeverToolExecutor(),
+            None,
+            (),
+            None,
+            None,
+            None,
+            None,
+            16_384,
+            0.8,
+            0,
+            0,
+            None,
+            True,
+        )
 
     assert config.defer_context_overflow_errors is True
     assert config.prompt_cache_key is None
@@ -3995,7 +3996,13 @@ def test_unrecovered_overflow_preserves_events_and_exception_contract(
         ):
             events.append(event)
 
-    with pytest.raises(ContextOverflowError) if raised and not with_hook else nullcontext():
+    deprecation = (
+        pytest.warns(DeprecationWarning, match="defer_context_overflow_errors")
+        if deferred
+        else nullcontext()
+    )
+    overflow = pytest.raises(ContextOverflowError) if raised and not with_hook else nullcontext()
+    with deprecation, overflow:
         anyio.run(run)
 
     expected = [

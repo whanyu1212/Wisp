@@ -286,8 +286,8 @@ class AgentHarness:
             content (str): User text to append when the stream is consumed.
             turn_offset (int): Number of turns preceding this run.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Whether overflow recovery is
-                delegated to the enclosing session.
+            defer_context_overflow_errors (bool): Deprecated. Whether overflow
+                terminal events are delegated to the enclosing session.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked between completed turns and new provider requests.
             context_overflow_hook (ContextOverflowHook | None): Recovery hook for
@@ -323,7 +323,8 @@ class AgentHarness:
                 iteration begins. Later caller mutations do not affect the run.
             turn_offset (int): Number of turns preceding this run.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Whether to defer overflow errors.
+            defer_context_overflow_errors (bool): Deprecated. Whether to defer
+                overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked before subsequent requests.
             context_overflow_hook (ContextOverflowHook | None): Provider-overflow
@@ -361,7 +362,8 @@ class AgentHarness:
         Args:
             turn_offset (int): Number of turns preceding this continuation.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Whether to defer overflow errors.
+            defer_context_overflow_errors (bool): Deprecated. Whether to defer
+                overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked before subsequent requests.
             context_overflow_hook (ContextOverflowHook | None): Provider-overflow
@@ -401,7 +403,8 @@ class AgentHarness:
             prompt_message (Message | None): Detached prompt to append when consumed.
             turn_offset (int): Number of turns preceding this invocation.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Whether the session handles overflow errors.
+            defer_context_overflow_errors (bool): Deprecated. Whether the caller
+                publishes overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session-owned boundary policy.
             context_overflow_hook (ContextOverflowHook | None): Optional overflow recovery.
 

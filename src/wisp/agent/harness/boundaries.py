@@ -9,6 +9,7 @@ from typing import Protocol
 
 from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
+    ContextOverflowFailure,
     ContextOverflowHook,
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -139,13 +140,13 @@ class _HarnessBoundaryCoordinator:
 
     async def recover_context_overflow(
         self, *, snapshot: ContextOverflowSnapshot
-    ) -> RequestBoundaryDecision | None:
+    ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
         if self.context_overflow_hook is None:
             raise RuntimeError("AgentHarness received context overflow without a recovery hook")
         decision = await self.context_overflow_hook.recover_context_overflow(
             snapshot=deepcopy(snapshot)
         )
-        if decision is not None:
+        if isinstance(decision, RequestBoundaryDecision):
             decision = deepcopy(decision)
             self._remember_transcript_transition(decision, snapshot.continuation_messages)
         return decision

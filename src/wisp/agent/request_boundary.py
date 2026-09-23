@@ -87,6 +87,17 @@ class RequestBoundaryDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class ContextOverflowFailure:
+    """Decline context-overflow recovery and explain why the run fails.
+
+    The loop publishes `message` as the run's error instead of the provider's
+    overflow text, then completes the rejected turn as failed.
+    """
+
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class ContextOverflowSnapshot:
     """Read-only state for one rejected provider request.
 
@@ -126,6 +137,10 @@ class ContextOverflowHook(Protocol):
 
     async def recover_context_overflow(
         self, *, snapshot: ContextOverflowSnapshot
-    ) -> RequestBoundaryDecision | None:
-        """Return a fresh/rebased retry decision, or ``None`` to decline recovery."""
+    ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
+        """Return a fresh/rebased retry decision, or decline recovery.
+
+        Returning ``None`` declines and keeps the provider's overflow message;
+        returning a ``ContextOverflowFailure`` declines with the caller's message.
+        """
         ...

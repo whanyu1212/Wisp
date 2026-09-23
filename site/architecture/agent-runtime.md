@@ -73,7 +73,9 @@ should use:
 
 Context-overflow recovery uses the same decision model through a separate hook. Decisions are
 validated centrally so unsupported structured-history transitions are rejected instead of being
-silently flattened for a provider.
+silently flattened for a provider. A hook that declines recovery can return
+`ContextOverflowFailure(message)` to supply the run's error text; either way, the loop publishes
+the error and completes the rejected turn itself.
 
 ## The harness
 

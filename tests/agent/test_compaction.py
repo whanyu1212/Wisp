@@ -68,7 +68,12 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry
-from wisp.sessions.entries import CompactionSessionEntry, MessageSessionEntry, SessionEntry
+from wisp.sessions.entries import (
+    CompactionSessionEntry,
+    EventSessionEntry,
+    MessageSessionEntry,
+    SessionEntry,
+)
 from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
@@ -1931,6 +1936,14 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
         (event.turn, event.outcome) for event in first_events if isinstance(event, TurnCompleted)
     ] == [(1, "completed")]
     assert not session.read_context_messages()
+    # The rollback runs before the loop publishes the overflow, so its records land
+    # on the restored branch that later prompts continue from.
+    active_event_types = [
+        entry.event.payload["type"]
+        for entry in session.read_active_path()
+        if isinstance(entry, EventSessionEntry)
+    ]
+    assert active_event_types[-2:] == ["context.overflow", "error"]
 
     retry_events = anyio.run(run_retry)
     assert len(provider.calls) == 2
@@ -2371,6 +2384,14 @@ def test_coding_session_overflow_summary_failure_is_terminal(tmp_path: Path) -> 
     assert completed.will_retry is False
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
     assert len(provider.calls) == 2
+    # The loop ends the rejected turn once, using the session's recovery-failure message.
+    errors = [event.message for event in emitted if isinstance(event, ErrorEvent)]
+    assert len(errors) == 1
+    assert errors[0].startswith("Context overflow recovery failed")
+    assert [
+        (event.turn, event.outcome) for event in emitted if isinstance(event, TurnCompleted)
+    ] == [(1, "failed")]
+    assert [event.type for event in emitted][-3:] == ["error", "turn.completed", "agent.completed"]
 
 
 def test_coding_session_overflow_retry_setup_failure_does_not_claim_retry(

@@ -75,7 +75,8 @@ def _build_loop_config(
         tool_iteration_offset (int): Number of earlier tool iterations.
         request_boundary_hook (RequestBoundaryHook): Coordinator for subsequent requests.
         context_overflow_hook (ContextOverflowHook | None): Optional recovery coordinator.
-        defer_context_overflow_errors (bool): Whether the session handles overflow errors.
+        defer_context_overflow_errors (bool): Deprecated. Whether the caller publishes
+            overflow terminal events.
 
     Returns:
         AgentLoopConfig: Validated configuration retaining the supplied dependencies.
