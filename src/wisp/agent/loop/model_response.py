@@ -9,11 +9,9 @@ from typing import TYPE_CHECKING
 import wisp.providers.events as provider_events
 from wisp.agent.messages import Message
 from wisp.events import (
-    ErrorEvent,
     MessageDelta,
     MessageStarted,
     ProviderRetrying,
-    TurnCompleted,
 )
 from wisp.providers.base import (
     ContextOverflowError,
@@ -72,7 +70,7 @@ class OverflowModelResponse:
 
 @dataclass(frozen=True, slots=True)
 class CancelledModelResponse:
-    """Mark a stream that already emitted its turn-cancellation events."""
+    """Ask the loop runner to publish cancellation terminals for this response."""
 
     pass
 
@@ -80,37 +78,7 @@ class CancelledModelResponse:
 type ModelResponseOutcome = (
     CompletedModelResponse | FailedModelResponse | OverflowModelResponse | CancelledModelResponse
 )
-type ModelResponseEvent = (
-    MessageStarted | ProviderRetrying | MessageDelta | ErrorEvent | TurnCompleted
-)
-
-
-def _is_cancelled(config: AgentLoopConfig) -> bool:
-    """Read the optional cooperative cancellation token.
-
-    Args:
-        config (AgentLoopConfig): Configuration for the active stream.
-
-    Returns:
-        bool: True when cancellation is requested; False when no token is configured.
-    """
-    token = config.cancellation_token
-    return token is not None and token.is_cancelled()
-
-
-def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
-    """Build cancellation events for the stream's active turn.
-
-    Args:
-        turn (int): Number of the turn being cancelled.
-
-    Returns:
-        tuple[ErrorEvent, TurnCompleted]: Error followed by cancelled turn completion.
-    """
-    return (
-        ErrorEvent(message="Agent run cancelled"),
-        TurnCompleted(turn=turn, outcome="cancelled", finish_reason="cancelled"),
-    )
+type ModelResponseEvent = MessageStarted | ProviderRetrying | MessageDelta | CancelledModelResponse
 
 
 @dataclass(slots=True)
@@ -141,9 +109,9 @@ class ModelResponseStream:
             turn (int): Active turn number for all public events.
 
         Yields:
-            ModelResponseEvent: Start, text/thinking delta, and retry events, plus terminal
-                turn events on cancellation. Successful MessageCompleted publication
-                belongs to the runner, which first prepares usage and continuation data.
+            ModelResponseEvent: Start, text/thinking delta, and retry events, plus an
+                internal cancellation marker. Public completion and turn-terminal
+                publication belong to the runner.
 
         Examples:
             Given a configured ModelResponseStream, consume it before inspecting outcome::
@@ -176,10 +144,10 @@ class ModelResponseStream:
             ) as provider_events_stream:
                 try:
                     async for provider_event in provider_events_stream:
-                        if _is_cancelled(self.config):
-                            for event in _cancelled_turn_events(turn):
-                                yield event
-                            self.outcome = CancelledModelResponse()
+                        if self.config.cancellation_requested():
+                            cancelled = CancelledModelResponse()
+                            yield cancelled
+                            self.outcome = cancelled
                             return
                         lifecycle.require_open()
                         if isinstance(provider_event, ProviderResponseStarted):
@@ -251,10 +219,10 @@ class ModelResponseStream:
             )
             return
 
-        if _is_cancelled(self.config):
-            for event in _cancelled_turn_events(turn):
-                yield event
-            self.outcome = CancelledModelResponse()
+        if self.config.cancellation_requested():
+            cancelled = CancelledModelResponse()
+            yield cancelled
+            self.outcome = cancelled
             return
         finished = lifecycle.finish()
         if isinstance(finished, FailedProviderResponse):

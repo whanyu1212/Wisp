@@ -67,19 +67,6 @@ type AgentLoopEvent = (
 )
 
 
-def _is_cancelled(config: AgentLoopConfig) -> bool:
-    """Read the optional cooperative cancellation token.
-
-    Args:
-        config (AgentLoopConfig): Configuration for the current run.
-
-    Returns:
-        bool: True if the token reports cancellation; False if no token is configured.
-    """
-    token = config.cancellation_token
-    return token is not None and token.is_cancelled()
-
-
 def _cancelled_turn_events(turn: int) -> tuple[ErrorEvent, TurnCompleted]:
     """Build terminal cancellation events for a turn that has already started.
 
@@ -265,13 +252,13 @@ async def run_agent_loop(
     try:
         while True:
             turn_started = False
-            if _is_cancelled(config):
+            if config.cancellation_requested():
                 yield ErrorEvent(message="Agent run cancelled")
                 break
             turn = state.begin_turn()
             turn_started = True
             yield TurnStarted(turn=turn)
-            if _is_cancelled(config):
+            if config.cancellation_requested():
                 for event in _cancelled_turn_events(turn):
                     yield event
                 break
@@ -311,10 +298,17 @@ async def run_agent_loop(
             async with closing_stream(response_stream.events(turn=turn)) as response_events:
                 try:
                     async for provider_event in response_events:
-                        if isinstance(provider_event, TurnCompleted):
-                            # Model cancellation settles the turn before stream cleanup.
+                        if response_cancelled:
+                            # The turn is already terminal; never forward a later event.
+                            raise RuntimeError("Model response emitted an event after cancellation")
+                        if isinstance(provider_event, CancelledModelResponse):
+                            # Publish cancellation terminals before model-stream cleanup,
+                            # but keep public turn ownership in this runner.
                             response_cancelled = True
                             turn_started = False
+                            for event in _cancelled_turn_events(turn):
+                                yield event
+                            continue
                         yield provider_event
                 except GeneratorExit:
                     consumer_closed = True
@@ -396,7 +390,7 @@ async def run_agent_loop(
 
             had_tool_calls = bool(tool_calls)
             if had_tool_calls:
-                if _is_cancelled(config):
+                if config.cancellation_requested():
                     for event in _cancelled_turn_events(turn):
                         yield event
                     break
@@ -405,7 +399,7 @@ async def run_agent_loop(
                     tool_executor=config.tool_executor,
                     tool_calls=tool_calls,
                     truncated=response.finish_reason == "length",
-                    is_cancelled=lambda: _is_cancelled(config),
+                    is_cancelled=config.cancellation_requested,
                     on_result=state.continuation.record_tool_result,
                 )
                 async with closing_stream(tool_batch.events()) as tool_events:
@@ -431,7 +425,7 @@ async def run_agent_loop(
             # A boundary-hook failure must not complete this turn a second time.
             turn_started = False
             stop = not had_tool_calls
-            if not _is_cancelled(config):
+            if not config.cancellation_requested():
                 messages, stop = await at_request_boundary(
                     config,
                     state.continuation,

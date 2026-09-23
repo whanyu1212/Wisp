@@ -95,5 +95,15 @@ class AgentLoopConfig:
         validate_non_negative_integer(self.turn_offset, field="turn_offset")
         validate_non_negative_integer(self.tool_iteration_offset, field="tool_iteration_offset")
 
+    def cancellation_requested(self) -> bool:
+        """Return whether this run's optional token requests cancellation.
+
+        Returns:
+            bool: True when a configured token requests cancellation; otherwise False.
+        """
+
+        token = self.cancellation_token
+        return token is not None and token.is_cancelled()
+
 
 __all__ = ["AgentLoopConfig", "CancellationToken", "UsageCostEstimator"]
