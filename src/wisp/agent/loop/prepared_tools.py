@@ -23,6 +23,7 @@ from wisp.providers.events import ToolCall
 from .stream_cleanup import closing_stream
 from .tool_lifecycle import (
     CancellationCheck,
+    RequestedCancellation,
     ToolBatchEvent,
     ToolExecutionLifecycle,
     tool_call_requested,
@@ -51,16 +52,22 @@ class _PreparedRunOutcome:
 
 async def _run_prepared_chunk(
     calls: Sequence[_PreparedCallState],
+    *,
+    is_cancelled: CancellationCheck,
 ) -> tuple[tuple[_PreparedRunOutcome, ...], bool]:
     """Execute one prepared chunk concurrently while retaining input order.
 
     Args:
         calls (Sequence[_PreparedCallState]): Prepared calls selected by the batch scheduler.
+        is_cancelled (CancellationCheck): The run's cancellation-token check.
 
     Returns:
         tuple[tuple[_PreparedRunOutcome, ...], bool]: Results or exceptions in call order,
-            plus whether the task group was cancelled. An interrupted call may have
-            neither a terminal result nor a stored exception.
+            plus whether the run's requested cancellation interrupted the chunk. An
+            interrupted call may have neither a terminal result nor a stored exception.
+
+    Raises:
+        BaseException: A cancellation the run did not request propagates to the caller.
     """
     outcomes = [_PreparedRunOutcome() for _ in calls]
 
@@ -76,14 +83,11 @@ async def _run_prepared_chunk(
         except Exception as exc:  # noqa: BLE001 - preserve the original fatal error
             outcomes[index].error = exc
 
-    cancelled = False
-    try:
+    with RequestedCancellation(is_cancelled) as cancellation:
         async with anyio.create_task_group() as task_group:
             for index, call in enumerate(calls):
                 task_group.start_soon(run_one, index, call)
-    except anyio.get_cancelled_exc_class():
-        cancelled = True
-    return tuple(outcomes), cancelled
+    return tuple(outcomes), cancellation.absorbed
 
 
 def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
@@ -190,7 +194,7 @@ class _PreparedToolBatch:
             self._lifecycles[tool_call.call_id] = lifecycle
             prepared: PreparedToolExecution | None = None
             async with closing_stream(self.executor.prepare(tool_call)) as preparation:
-                try:
+                with RequestedCancellation(self.is_cancelled) as cancellation:
                     async for raw_event in preparation:
                         if isinstance(raw_event, PreparedToolExecution):
                             if prepared is not None:
@@ -219,7 +223,7 @@ class _PreparedToolBatch:
                         if self.is_cancelled():
                             self.cancelled = True
                             break
-                except anyio.get_cancelled_exc_class():
+                if cancellation.absorbed:
                     self.cancelled = True
             if self.cancelled:
                 return
@@ -252,7 +256,9 @@ class _PreparedToolBatch:
                         yield event
                 return
             chunk = self._prepared_calls[chunk_start : chunk_start + chunk_size]
-            outcomes, chunk_cancelled = await _run_prepared_chunk(chunk)
+            outcomes, chunk_cancelled = await _run_prepared_chunk(
+                chunk, is_cancelled=self.is_cancelled
+            )
             self.cancelled = self.cancelled or chunk_cancelled or self.is_cancelled()
             fatal_error: Exception | None = None
             for call, outcome in zip(chunk, outcomes, strict=True):

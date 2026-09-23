@@ -6,6 +6,9 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
+from types import TracebackType
+
+import anyio
 
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
@@ -67,6 +70,72 @@ def _json_payloads_match(left: object, right: object) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+class RequestedCancellation:
+    """Absorb a scope cancellation only when the run requested it through its token.
+
+    `AgentHarness.cancel()` sets the run's cancellation token and then cancels the
+    scope advancing the loop, so a tool batch can settle unfinished calls before the
+    turn ends. Any other cancellation, such as a caller's timeout, task
+    cancellation, or an RPC command scope, belongs to the caller and propagates
+    unchanged instead of being turned into a cancelled turn.
+
+    Wrap the await that may be cancelled, then read `absorbed` after the block exits.
+
+    Attributes:
+        absorbed (bool): Whether a requested cancellation was caught by the block.
+
+    Examples:
+        Stop a batch only when the run asked for it::
+
+            with RequestedCancellation(is_cancelled) as cancellation:
+                async with anyio.create_task_group() as task_group:
+                    ...
+            if cancellation.absorbed:
+                ...  # settle unfinished calls
+    """
+
+    __slots__ = ("_is_cancelled", "absorbed")
+
+    def __init__(self, is_cancelled: CancellationCheck) -> None:
+        """Create a guard for one cancellable block.
+
+        Args:
+            is_cancelled (CancellationCheck): The run's cancellation-token check.
+        """
+        self._is_cancelled = is_cancelled
+        self.absorbed = False
+
+    def __enter__(self) -> RequestedCancellation:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool:
+        """Suppress the block's cancellation only when the run's token requested it.
+
+        Args:
+            exc_type (type[BaseException] | None): Exception type raised by the block.
+            exc (BaseException | None): Exception raised by the block.
+            traceback (TracebackType | None): Traceback of that exception.
+
+        Returns:
+            bool: True to suppress a requested cancellation; False lets every other
+                exception, including an unrequested cancellation, propagate.
+
+        Raises:
+            Exception: An error from the cancellation check replaces the cancellation.
+        """
+        if exc_type is None or not issubclass(exc_type, anyio.get_cancelled_exc_class()):
+            return False
+        if not self._is_cancelled():
+            return False
+        self.absorbed = True
+        return True
 
 
 def tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
@@ -225,6 +294,7 @@ class ToolExecutionLifecycle:
 
 __all__ = [
     "CancellationCheck",
+    "RequestedCancellation",
     "ToolBatchEvent",
     "ToolExecutionLifecycle",
     "tool_call_requested",

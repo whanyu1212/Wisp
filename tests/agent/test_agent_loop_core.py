@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import shlex
 import sys
 from collections import deque
@@ -7,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mappin
 from contextlib import nullcontext
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock
 
 import anyio
@@ -21,6 +22,7 @@ from tests.agent_runtime import (
     assert_turn_terminals,
 )
 from wisp.agent.context_budget import observe_context
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
@@ -526,6 +528,143 @@ def test_prepared_failure_matches_later_repeated_call_occurrence() -> None:
         (event.call_id, event.output) for event in events if isinstance(event, ToolExecutionEnded)
     ] == [("middle", "2"), ("repeat", "3")]
     assert_continuation_invariants(events)
+
+
+class _BlockingPreparedExecutor:
+    """Block while preparing or while running a prepared call until cancelled."""
+
+    def __init__(self, phase: Literal["preparation", "execution"]) -> None:
+        self.phase = phase
+        self.blocked = anyio.Event()
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            self.blocked.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+        if self.phase == "preparation":
+            # Stands in for an approval prompt that is still waiting on the user.
+            self.blocked.set()
+            await anyio.sleep_forever()
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=True,
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        raise AssertionError("prepared executors are scheduled through prepare()")
+        yield  # pragma: no cover - makes this an async generator
+
+
+def _blocking_batch_loop(
+    executor: _BlockingPreparedExecutor, events: list[object]
+) -> Callable[[], Awaitable[None]]:
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+
+    async def consume() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=_scripted_tool_batch_provider((call,)), tool_executor=executor
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    return consume
+
+
+def _assert_batch_left_unsettled(events: Sequence[object]) -> None:
+    # The caller's cancellation is not the run's: no settlement or cancelled turn.
+    assert [getattr(event, "type", None) for event in events][-2:] == [
+        "tool.call",
+        "tool.execution.started",
+    ]
+    assert not any(
+        isinstance(event, ToolResultReady | ErrorEvent | TurnCompleted) for event in events
+    )
+
+
+@pytest.mark.parametrize("phase", ["preparation", "execution"])
+def test_prepared_batch_propagates_an_unrequested_scope_cancellation(
+    phase: Literal["preparation", "execution"],
+) -> None:
+    async def run() -> tuple[bool, list[object]]:
+        executor = _BlockingPreparedExecutor(phase)
+        events: list[object] = []
+        consume = _blocking_batch_loop(executor, events)
+        scope = anyio.CancelScope()
+
+        async def consume_in_scope() -> None:
+            with scope:
+                await consume()
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(consume_in_scope)
+                await executor.blocked.wait()
+                scope.cancel()
+        return scope.cancelled_caught, events
+
+    cancelled_caught, events = anyio.run(run)
+
+    assert cancelled_caught
+    _assert_batch_left_unsettled(events)
+
+
+@pytest.mark.parametrize("phase", ["preparation", "execution"])
+def test_prepared_batch_propagates_native_asyncio_task_cancellation(
+    phase: Literal["preparation", "execution"],
+) -> None:
+    async def main() -> list[object]:
+        executor = _BlockingPreparedExecutor(phase)
+        events: list[object] = []
+        task = asyncio.create_task(_blocking_batch_loop(executor, events)())
+        await asyncio.wait_for(executor.blocked.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        return events
+
+    _assert_batch_left_unsettled(asyncio.run(main()))
+
+
+@pytest.mark.parametrize("phase", ["preparation", "execution"])
+def test_prepared_batch_settles_a_cancellation_requested_by_the_harness(
+    phase: Literal["preparation", "execution"],
+) -> None:
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+
+    async def run() -> list[object]:
+        executor = _BlockingPreparedExecutor(phase)
+        harness = AgentHarness(
+            AgentHarnessConfig(
+                provider=_scripted_tool_batch_provider((call,)),
+                tool_executor=executor,
+            )
+        )
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("hi")])
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await executor.blocked.wait()
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(event.call_id, event.process_state) for event in results] == [("call-1", "cancelled")]
+    assert [
+        (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
+    ] == [("cancelled", "cancelled")]
+    assert_settled_tool_calls(events, ("call-1",))
 
 
 def test_prepared_cancellation_skips_already_settled_duplicate_snapshot() -> None:
