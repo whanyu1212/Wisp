@@ -74,6 +74,8 @@ Preserve these rules when changing control flow:
 - A settled tool call emits one `ToolExecutionEnded` immediately followed by one matching
   `ToolResultReady`.
 - Optional approval is ordered request, resolution, then result.
+- A tool batch absorbs a scope cancellation only when the run's cancellation token requested it;
+  a caller's own timeout or task cancellation propagates instead of becoming a cancelled turn.
 - Provider response lifecycle events remain ordered and terminal.
 - A request-boundary `stop` wins over other decision fields.
 - Provider capabilities are detected; new optional keywords are not sent unconditionally.
