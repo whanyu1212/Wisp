@@ -34,7 +34,7 @@ import math
 import re
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -244,7 +244,7 @@ def split_prompts(
             if continued is not None and entry.parent_id is not None:
                 prompt_by_entry_id[entry.id] = continued
                 branch_by_entry_id[entry.id] = branch_by_entry_id[entry.parent_id]
-        elif isinstance(entry, MessageSessionEntry) and _starts_prompt(entry, parent):
+        elif isinstance(entry, MessageSessionEntry) and _starts_prompt(entry, parent, entry_by_id):
             # The prompt's own sections end right before it, in the same operation.
             own_block = (
                 system_block
@@ -294,7 +294,22 @@ def split_prompts(
     return prompts
 
 
-def _starts_prompt(entry: MessageSessionEntry, parent: SessionEntry | None) -> bool:
+def _nearest_message(
+    entry: SessionEntry | None, entry_by_id: Mapping[str, SessionEntry]
+) -> MessageSessionEntry | None:
+    """Return the closest message at or above ``entry``, skipping other entries."""
+
+    while entry is not None and not isinstance(entry, MessageSessionEntry):
+        parent_id = entry.parent_id if is_session_tree_entry(entry) else None
+        entry = entry_by_id.get(parent_id) if parent_id else None
+    return entry
+
+
+def _starts_prompt(
+    entry: MessageSessionEntry,
+    parent: SessionEntry | None,
+    entry_by_id: Mapping[str, SessionEntry],
+) -> bool:
     """Return whether a user message starts a new prompt rather than steering one.
 
     With operation IDs, a prompt starts at a user message whose parent belongs to
@@ -302,22 +317,25 @@ def _starts_prompt(entry: MessageSessionEntry, parent: SessionEntry | None) -> b
     running operation's ID.
 
     Without IDs (legacy entries, or SDK runs that pass none), the log does not
-    record which run wrote a message, so the parent's shape decides: a prompt
-    starts after nothing, after a system message, or after a final assistant
-    answer (one without tool calls). Steering is injected after tool results, so
-    a user message there stays in the running prompt. A queued follow-up after a
+    record which run wrote a message, so the nearest message before it decides:
+    a prompt starts after nothing, after a system message, or after a final
+    assistant answer (one without tool calls). Events and compactions in between
+    (for example ``context.pressure`` after a response, an ``error``, or a manual
+    compaction) are looked through. Steering is injected after tool results, so a
+    user message there stays in the running prompt. A queued follow-up after a
     final answer is indistinguishable from a new run and is counted as a prompt.
     """
 
     if entry.message.role != "user":
         return False
     if entry.operation_id is None:
-        if parent is None:
+        message = _nearest_message(parent, entry_by_id)
+        if message is None:
             return True
-        if not isinstance(parent, MessageSessionEntry) or parent.operation_id is not None:
+        if message.operation_id is not None:
             return False
-        role = parent.message.role
-        return role == "system" or (role == "assistant" and not parent.message.tool_calls)
+        role = message.message.role
+        return role == "system" or (role == "assistant" and not message.message.tool_calls)
     return (
         parent is None
         or parent.operation_id != entry.operation_id
@@ -617,16 +635,22 @@ def copied_entry_ids(
 ) -> list[frozenset[str]]:
     """Return, per session file, the entry IDs it copied from another file.
 
-    A clone or fork copies its source's entries with their original IDs into a
-    new file created after they were written. An entry is a copy when either:
+    A clone or fork copies one root-to-leaf path of its source, with the original
+    entry IDs, into a new file that starts with exactly that path. An entry is a
+    copy when either:
 
-    * another file with a strictly earlier creation time holds the same ID, or
+    * another file holds the same ID and is the original: its creation second is
+      earlier, or, when the seconds tie, its first entry beyond the shared path
+      was written before this file's (or this file adds nothing of its own), or
     * it was written before its own file's creation second began.
 
     Creation times come from store file names, floored to the second, and an
     entry written after its file was created is never earlier than that second.
-    Both rules can therefore miss a copy (same second, renamed files, or a source
-    outside the report) but never report a false one.
+    The same-second tie-break is exact for a fork from a user message, which is
+    where a missed copy would merge two system blocks. For a clone continued in
+    both files within one second it can pick the wrong original, which only
+    moves a ``session changed`` cause. Renamed files and sources outside the
+    report are never treated as copies.
 
     Args:
         sessions (Sequence[tuple[Path, Sequence[SessionEntry]]]): Each session
@@ -637,25 +661,58 @@ def copied_entry_ids(
     """
 
     created = [session_file_created_at(path) for path, _ in sessions]
-    earliest_holder: dict[str, datetime] = {}
-    for created_at, (_, entries) in zip(created, sessions, strict=True):
-        if created_at is None:
-            continue
-        for entry in entries:
-            known = earliest_holder.get(entry.id)
-            if known is None or created_at < known:
-                earliest_holder[entry.id] = created_at
+    tree_ids = [
+        [entry.id for entry in entries if is_session_tree_entry(entry)] for _, entries in sessions
+    ]
+    holders: dict[str, list[int]] = {}
+    for index, ids in enumerate(tree_ids):
+        for entry_id in ids:
+            holders.setdefault(entry_id, []).append(index)
+    # For each pair of files sharing entries: when the first entry of `a` that `b`
+    # lacks was written.
+    first_unshared: dict[tuple[int, int], datetime] = {}
+    for a, (_, entries) in enumerate(sessions):
+        partners = {b for entry_id in tree_ids[a] for b in holders[entry_id] if b != a}
+        for b in partners:
+            b_ids = set(tree_ids[b])
+            first = next(
+                (e.created_at for e in entries if is_session_tree_entry(e) and e.id not in b_ids),
+                None,
+            )
+            if first is not None:
+                first_unshared[(a, b)] = first
+
+    def is_original_of(other: int, index: int, entry_id: str) -> bool:
+        other_created, own_created = created[other], created[index]
+        if other_created is None or own_created is None:
+            return False
+        if other_created != own_created:
+            return other_created < own_created
+        # Same creation second: both files begin with the shared path, so compare
+        # what follows it. A fork from a user message needs that message in the
+        # source, written before the fork existed; everything the fork adds comes
+        # later. The file whose own entries start earlier is the original, and a
+        # file with no entries of its own is a pure copy.
+        own_first = first_unshared.get((index, other))
+        other_first = first_unshared.get((other, index))
+        if other_first is None:
+            return False
+        return own_first is None or other_first < own_first
 
     result: list[frozenset[str]] = []
-    for created_at, (_, entries) in zip(created, sessions, strict=True):
+    for index, (created_at, (_, entries)) in enumerate(zip(created, sessions, strict=True)):
+        if created_at is None:
+            result.append(frozenset())
+            continue
         result.append(
             frozenset(
                 entry.id
                 for entry in entries
-                if created_at is not None
-                and (
-                    earliest_holder.get(entry.id, created_at) < created_at
-                    or entry.created_at < created_at
+                if entry.created_at < created_at
+                or any(
+                    is_original_of(other, index, entry.id)
+                    for other in holders.get(entry.id, ())
+                    if other != index
                 )
             )
         )

@@ -17,11 +17,13 @@ from scripts.cache_reuse_report import (
     split_prompts,
 )
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.events import ContextObservation, TokenUsage, ToolCallSnapshot
+from wisp.events import ContextObservation, JsonObject, TokenUsage, ToolCallSnapshot
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
+    EventSessionEntry,
     MessageSessionEntry,
+    PersistedEventEnvelope,
     SessionEntry,
     session_entry_to_json,
 )
@@ -161,6 +163,20 @@ class SessionBuilder:
         call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
         self._message(Message(role="assistant", content="", usage=usage, tool_calls=(call,)))
         self._message(Message(role="tool", content="ok", tool_call_id="call-1", tool_name="read"))
+
+    def event(self, payload: dict[str, object]) -> None:
+        """Append a persisted runtime event, e.g. ``context.pressure``."""
+
+        self.clock += timedelta(seconds=1)
+        self._append(
+            EventSessionEntry(
+                session_id="s",
+                parent_id=self.leaf,
+                event=PersistedEventEnvelope(payload=cast(JsonObject, payload)),
+                created_at=self.clock,
+                operation_id=self.operation_id,
+            )
+        )
 
     def steer(self, text: str) -> None:
         """Append a steering message inside the running prompt's operation."""
@@ -450,6 +466,37 @@ def test_fork_blocks_stay_apart_without_operation_ids(tmp_path: Path) -> None:
     assert edited.causes == ()
 
 
+def test_fork_created_in_the_source_files_second_is_still_recognized(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(20_000, 9_900)])
+    created = builder.entries[0].created_at.replace(microsecond=0)
+    # The source keeps going after the fork point; the fork copies only the path
+    # up to the second prompt's system block, then appends its edited prompt.
+    builder.prompt("source only", [(21_000, 19_900)])
+    source = builder.write(tmp_path / builder.file_name(created), session_id="source")
+    edit_point = next(
+        e.id
+        for e in reversed(builder.entries)
+        if isinstance(e, MessageSessionEntry) and e.message.content == "second"
+    )
+    fork_path = _entry(builder, edit_point).parent_id
+    assert fork_path is not None
+    builder.entries = builder.entries[: builder.entries.index(_entry(builder, fork_path)) + 1]
+    builder.leaf = fork_path
+    builder.prompt("second, edited", [(11_000, 9_900)])
+    # Both files were created in the same second, and no operation IDs are set.
+    for_fork = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+    builder.entries = for_fork
+    fork = builder.write(tmp_path / builder.file_name(created), session_id="fork")
+
+    [report] = build_report([source, fork], split_at=None, idle_minutes=60).values()
+    edited = next(p for p in report.prompts if p.session == fork.stem)
+
+    assert edited.estimated_instruction_tokens == estimate_tokens((STATIC, CONTEXT))
+    assert "system changed" not in " ".join(edited.causes)
+
+
 def test_system_messages_with_a_repeated_tag_stay_in_one_block() -> None:
     builder = SessionBuilder()
     builder.prompt("first", [(10_000, 0)])
@@ -491,6 +538,26 @@ def test_id_less_prompts_without_system_messages_are_recognized() -> None:
     assert len(prompts) == 2
     assert prompts[1].previous is prompts[0]
     assert outcomes(builder) == [None, "previous-tail"]
+
+
+@pytest.mark.parametrize("between", ["event", "compaction"])
+def test_id_less_prompt_after_an_event_or_compaction_is_recognized(between: str) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)], system_sections=())
+    # A context.pressure event after the response, or a manual compaction, can be
+    # the active leaf when the next ID-less, system-less run starts.
+    if between == "event":
+        builder.event({"type": "context.pressure"})
+    else:
+        builder.compaction()
+    builder.prompt("second", [(11_000, 9_900)], system_sections=())
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert len(prompts) == 2
+    assert prompts[1].previous is prompts[0]
+    assert [r.input_tokens for r in prompts[0].responses] == [10_000]
 
 
 def test_id_less_steering_after_tool_results_stays_in_the_run() -> None:
