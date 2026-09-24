@@ -101,7 +101,10 @@ class Prompt:
     # response mid-run and prompting from there abandons the responses after it.
     previous_responses: tuple[Response, ...] = ()
     previous_compactions: int = 0
+    # Responses in append order; `pairs` holds each later response with the
+    # response right before it on its own branch, for the within-run summary.
     responses: list[Response] = field(default_factory=list)
+    pairs: list[tuple[Response, Response]] = field(default_factory=list)
     compactions: int = 0
 
 
@@ -113,9 +116,11 @@ class PromptReuse:
     started_at: datetime
     outcome: Outcome
     cached_tokens: int
-    input_tokens: int
-    previous_first_input_tokens: int
-    previous_last_input_tokens: int
+    # None when the provider reported no usage for that request; a reported zero
+    # cache read is still classified as `zero` without them.
+    input_tokens: int | None
+    previous_first_input_tokens: int | None
+    previous_last_input_tokens: int | None
     estimated_instruction_tokens: int
     idle_minutes: float
     causes: tuple[str, ...]
@@ -181,9 +186,11 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
 
     prompts: list[Prompt] = []
     prompt_by_entry_id: dict[str, Prompt] = {}
-    # How far each entry's prompt had progressed when the entry was appended:
-    # (responses so far, compactions so far). A branch point resolves through it.
-    progress_by_entry_id: dict[str, tuple[int, int]] = {}
+    # Each entry's own branch within its prompt: the responses and compaction
+    # count on the path from the prompt's user message to that entry. Anything
+    # appended to an entry extends exactly that path, so abandoned siblings from
+    # tree navigation never leak into a later branch.
+    branch_by_entry_id: dict[str, _Branch] = {}
     system_block: list[MessageSessionEntry] = []
     previous_kind: str | None = None
 
@@ -211,14 +218,14 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
             continued = prompt_by_entry_id.get(entry.parent_id) if entry.parent_id else None
             if continued is not None and entry.parent_id is not None:
                 prompt_by_entry_id[entry.id] = continued
-                progress_by_entry_id[entry.id] = progress_by_entry_id[entry.parent_id]
+                branch_by_entry_id[entry.id] = branch_by_entry_id[entry.parent_id]
         elif (
             isinstance(entry, MessageSessionEntry) and role == "user" and previous_kind == "system"
         ):
             parent_id = system_block[0].parent_id
             previous = prompt_by_entry_id.get(parent_id) if parent_id else None
-            response_count, compaction_count = (
-                progress_by_entry_id[parent_id] if previous is not None and parent_id else (0, 0)
+            branch_point = (
+                branch_by_entry_id[parent_id] if previous is not None and parent_id else _Branch()
             )
             prompt = Prompt(
                 session=session,
@@ -226,30 +233,40 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
                 started_at=entry.created_at,
                 system_sections=tuple(item.message.content for item in system_block),
                 previous=previous,
-                previous_responses=(
-                    tuple(previous.responses[:response_count]) if previous is not None else ()
-                ),
-                previous_compactions=compaction_count,
+                previous_responses=branch_point.responses,
+                previous_compactions=branch_point.compactions,
             )
             prompts.append(prompt)
             prompt_by_entry_id[entry.id] = prompt
-            progress_by_entry_id[entry.id] = (0, 0)
+            branch_by_entry_id[entry.id] = _Branch()
         else:
-            # Every other entry belongs to the prompt of the branch it was appended
-            # to. That is not always the last prompt in the file: navigating to an
-            # older point and then compacting appends onto an earlier prompt.
+            # Every other entry extends the branch of its parent, which is not always
+            # the last one appended: navigating to an older point and then compacting
+            # or prompting appends onto an earlier prompt or response.
             owner = prompt_by_entry_id.get(entry.parent_id) if entry.parent_id else None
-            if owner is not None:
+            if owner is not None and entry.parent_id is not None:
+                branch = branch_by_entry_id[entry.parent_id]
                 if isinstance(entry, CompactionSessionEntry):
                     owner.compactions += 1
+                    branch = _Branch(branch.responses, branch.compactions + 1)
                 elif isinstance(entry, MessageSessionEntry) and role == "assistant":
-                    owner.responses.append(
-                        _response(entry.message, entry.created_at, owner.compactions)
-                    )
+                    response = _response(entry.message, entry.created_at, branch.compactions)
+                    owner.responses.append(response)
+                    if branch.responses:
+                        owner.pairs.append((branch.responses[-1], response))
+                    branch = _Branch((*branch.responses, response), branch.compactions)
                 prompt_by_entry_id[entry.id] = owner
-                progress_by_entry_id[entry.id] = (len(owner.responses), owner.compactions)
+                branch_by_entry_id[entry.id] = branch
         previous_kind = role or entry.kind
     return prompts
+
+
+@dataclass(frozen=True)
+class _Branch:
+    """The responses and compactions on one path through a prompt's run."""
+
+    responses: tuple[Response, ...] = ()
+    compactions: int = 0
 
 
 def _response(message: Message, created_at: datetime, compactions: int) -> Response:
@@ -312,8 +329,9 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
 
     Returns:
         PromptReuse | None: The classification, or None for a session's first
-            prompt, for prompts where either run has no response, and when a
-            request size or cache read needed for the comparison is unknown.
+            prompt, for prompts where either run has no response, when the first
+            response's cache reads are unknown, and when a nonzero cache read
+            cannot be compared because a request size is unknown.
     """
 
     previous = prompt.previous
@@ -321,21 +339,19 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
     if previous is None or not previous_responses or not prompt.responses:
         return None
     first = prompt.responses[0]
+    if first.cached_tokens is None:
+        return None
     previous_first = previous_responses[0]
     previous_last = previous_responses[-1]
-    if (
-        first.cached_tokens is None
-        or first.input_tokens is None
-        or previous_first.input_tokens is None
-        or previous_last.input_tokens is None
-    ):
-        return None
     instruction_tokens = estimate_tokens(prompt.system_sections)
     idle = (prompt.started_at - previous_last.created_at).total_seconds() / 60
 
     outcome: Outcome
     if first.cached_tokens == 0:
+        # A reported zero is a miss whatever the request sizes were.
         outcome = "zero"
+    elif previous_first.input_tokens is None or previous_last.input_tokens is None:
+        return None
     elif reached(first.cached_tokens, previous_last.input_tokens):
         outcome = "previous-tail"
     elif stopped_at(first.cached_tokens, previous_first.input_tokens):
@@ -377,10 +393,12 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
 def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
     """Count whether each later response in a run reused the previous request.
 
-    Pairs separated by a compaction are skipped because the transcript was
-    replaced between them. A pair is skipped when the later response's cache
-    reads or the earlier request's size are unknown; unknown responses still
-    separate their neighbours, so only adjacent requests are compared.
+    Each response is compared with the response right before it on its own
+    branch. Pairs separated by a compaction are skipped because the transcript
+    was replaced between them. A pair is skipped when the later response's cache
+    reads are unknown; a reported zero is counted even if the earlier request's
+    size is unknown, and any other result needs that size. Unknown responses
+    still separate their neighbours, so only adjacent requests are compared.
 
     Args:
         prompt (Prompt): Prompt whose run is summarized.
@@ -390,15 +408,13 @@ def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
     """
 
     counts: Counter[WithinRunOutcome] = Counter()
-    for before, after in zip(prompt.responses, prompt.responses[1:], strict=False):
-        if (
-            after.compactions_before != before.compactions_before
-            or after.cached_tokens is None
-            or before.input_tokens is None
-        ):
+    for before, after in prompt.pairs:
+        if after.compactions_before != before.compactions_before or after.cached_tokens is None:
             continue
         if after.cached_tokens == 0:
             counts["zero"] += 1
+        elif before.input_tokens is None:
+            continue
         elif reached(after.cached_tokens, before.input_tokens):
             counts["reached-previous"] += 1
         else:

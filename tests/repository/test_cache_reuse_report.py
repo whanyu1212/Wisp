@@ -277,6 +277,47 @@ def test_responses_without_any_usage_keep_their_positions() -> None:
     assert classify_within_run(second) == {}
 
 
+def test_a_reported_zero_is_counted_even_when_the_earlier_size_is_unknown() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [])
+    builder.unmeasured_response()
+    builder.prompt("second", [(12_000, 0)])
+    builder.unmeasured_response()
+    builder.response(14_000, 0)
+
+    [_, second] = split_prompts(builder.entries, session="s")
+    result = classify_prompt(second, idle_minutes=60)
+
+    assert result is not None
+    assert result.outcome == "zero"
+    assert (result.previous_first_input_tokens, result.previous_last_input_tokens) == (None, None)
+    assert classify_within_run(second) == {"zero": 1}
+
+
+def test_navigating_back_within_a_run_then_compacting_drops_the_abandoned_responses() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    earlier = builder.leaf
+    assert earlier is not None
+    builder.response(40_000, 9_900)
+    # Navigate back to the first response of the same prompt, compact there,
+    # then prompt again: the abandoned 40k response is no longer on the branch.
+    builder.navigate(earlier)
+    builder.compaction()
+    builder.prompt("after", [(3_000, 1_536)])
+
+    [first, after] = split_prompts(builder.entries, session="s")
+    result = classify_prompt(after, idle_minutes=60)
+
+    assert [r.input_tokens for r in after.previous_responses] == [10_000]
+    assert after.previous_compactions == 1
+    assert result is not None
+    assert result.previous_last_input_tokens == 10_000
+    assert "compaction" in result.causes
+    # The within-run pair (10k -> 40k) is still counted once for the first prompt.
+    assert classify_within_run(first) == {"reached-previous": 1}
+
+
 def test_entries_after_navigating_back_belong_to_the_selected_branch() -> None:
     builder = SessionBuilder()
     first_leaf = builder.prompt("first", [(10_000, 0)])
