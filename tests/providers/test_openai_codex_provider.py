@@ -271,6 +271,41 @@ def test_openai_codex_provider_sends_prompt_cache_key_when_provided(tmp_path: Pa
     assert provider.seen_headers["session_id"] == "wisp:session-1"
 
 
+@pytest.mark.parametrize("prompt_cache_key", ["wisp:sessión-1", "wisp:a\r\nX-Injected: 1"])
+def test_openai_codex_provider_sends_header_safe_session_id_for_any_cache_key(
+    tmp_path: Path, prompt_cache_key: str
+) -> None:
+    store = _store_with_oauth(tmp_path)
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            _completed_event("response-id"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(store),
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hi")],
+                prompt_cache_key=prompt_cache_key,
+            )
+        ]
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["prompt_cache_key"] == prompt_cache_key
+    assert provider.seen_headers is not None
+    session_id = provider.seen_headers["session_id"]
+    assert session_id.startswith("sha256:")
+    # httpx must be able to build the request, with no extra header smuggled in.
+    request = httpx.Request("POST", "https://example.test", headers=provider.seen_headers)
+    assert request.headers["session_id"] == session_id
+    assert "x-injected" not in request.headers
+
+
 def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
     tmp_path: Path,
 ) -> None:

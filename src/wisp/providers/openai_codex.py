@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections import OrderedDict
@@ -574,8 +575,23 @@ def _codex_headers(
         # The Codex backend reuses cached prefixes only for requests that carry the
         # conversation's `session_id` header, as the official Codex CLI sends; the
         # `prompt_cache_key` body field alone left most identical requests uncached.
-        headers["session_id"] = session_id
+        headers["session_id"] = _header_safe_session_id(session_id)
     return headers
+
+
+def _header_safe_session_id(session_id: str) -> str:
+    """Return a value that is safe to send as the ``session_id`` header.
+
+    Wisp's own keys (``wisp:<hex>``) pass through unchanged. A key an SDK caller
+    supplies may contain non-ASCII text, which httpx cannot encode in a header,
+    or CR/LF, which it would forward and so split the header. Such keys are
+    replaced by a stable digest, so requests with the same key still share one
+    header value.
+    """
+
+    if session_id.isascii() and session_id.isprintable():
+        return session_id
+    return f"sha256:{hashlib.sha256(session_id.encode('utf-8', 'surrogatepass')).hexdigest()}"
 
 
 def _resolve_codex_url(base_url: str) -> str:
