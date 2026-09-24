@@ -42,7 +42,7 @@ class SessionBuilder:
         self.leaf: str | None = None
         self.clock = START
         # Each run writes its system block, user message, and responses under one ID.
-        self.operation_id = "prompt-0"
+        self.operation_id: str | None = "prompt-0"
         self.prompt_count = 0
         self.file_count = 0
         self.fork_created_at: datetime | None = None
@@ -622,6 +622,26 @@ def test_a_new_sessions_first_message_is_not_mistaken_for_a_copy(tmp_path: Path)
     [report] = build_report([path], split_at=None, idle_minutes=60).values()
 
     assert [p.causes for p in report.prompts] == [()]
+
+
+def test_id_less_prompt_after_an_id_bearing_run_starts_a_new_prompt() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    # The next SDK run passes no operation ID and no system block.
+    builder.prompt("second", [], system_sections=())
+    builder.entries = [
+        *builder.entries[:-1],
+        builder.entries[-1].model_copy(update={"operation_id": None}),
+    ]
+    builder.operation_id = None
+    builder.response(11_000, 9_900)
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert len(prompts) == 2
+    assert prompts[1].previous is prompts[0]
+    assert outcomes(builder) == [None, "previous-tail"]
+    assert classify_within_run(prompts[0]) == {}
 
 
 def test_id_less_steering_after_tool_results_stays_in_the_run() -> None:

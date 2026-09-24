@@ -303,6 +303,9 @@ def _follows_run_end(entry: SessionEntry | None, entry_by_id: Mapping[str, Sessi
     message before it is a user or tool row. Otherwise the run ended when the
     nearest message is a system message or a final assistant answer (one without
     tool calls), or when there is no message at all.
+
+    Called for a user message without an operation ID. When the nearest message
+    has one, it was written by a different, earlier run, so that run has ended.
     """
 
     while entry is not None and not isinstance(entry, MessageSessionEntry):
@@ -310,10 +313,8 @@ def _follows_run_end(entry: SessionEntry | None, entry_by_id: Mapping[str, Sessi
             return True
         parent_id = entry.parent_id if is_session_tree_entry(entry) else None
         entry = entry_by_id.get(parent_id) if parent_id else None
-    if entry is None:
+    if entry is None or entry.operation_id is not None:
         return True
-    if entry.operation_id is not None:
-        return False
     role = entry.message.role
     return role == "system" or (role == "assistant" and not entry.message.tool_calls)
 
