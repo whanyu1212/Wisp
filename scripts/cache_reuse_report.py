@@ -12,8 +12,9 @@ cached:
 * ``zero``: nothing was cached.
 
 Each prompt also lists recorded changes that can explain a miss: the first
-changed system section, a compaction, a model change, or a long idle gap.
-Responses after the first one in a run are summarized separately.
+changed system section, a compaction, a provider or model change, or a long
+idle gap. Responses after the first one in a run are summarized separately.
+Prompts copied into clones or forks are counted once.
 
 Usage::
 
@@ -78,7 +79,9 @@ class Response:
     """Usage reported for one successful model response."""
 
     input_tokens: int
-    cached_tokens: int
+    # None when the provider did not report cache reads ("unknown", not zero).
+    cached_tokens: int | None
+    provider: str | None
     model: str | None
     created_at: datetime
     # Compactions seen earlier in the same prompt; a change marks a replaced transcript.
@@ -216,25 +219,30 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
 
 
 def _response(message: Message, created_at: datetime, compactions: int) -> Response | None:
-    """Project one assistant message's usage, or None when it cannot be compared.
+    """Project one assistant message's usage, or None when it has no usable usage.
 
-    Responses whose provider did not report cache reads are dropped rather than
-    counted as zero-cache misses: ``None`` means "not reported", not "nothing cached".
+    A response whose provider did not report cache reads keeps its position with
+    ``cached_tokens=None`` so it is neither counted as a zero-cache miss nor
+    skipped over when finding a run's first response or adjacent pairs.
     """
 
     usage = message.usage
-    if usage is None or usage.cache_read_input_tokens is None:
+    if usage is None:
         return None
-    observation = message.context_observation
     input_tokens = request_input_tokens(message)
     if input_tokens <= 0:
         return None
-    model = message.cost.model if message.cost is not None else None
-    if model is None and observation is not None:
-        model = observation.model
+    observation = message.context_observation
+    cost = message.cost
+    model = cost.model if cost is not None else None
+    provider = cost.provider if cost is not None else None
+    if observation is not None:
+        model = model or observation.model
+        provider = provider or observation.provider
     return Response(
         input_tokens=input_tokens,
         cached_tokens=usage.cache_read_input_tokens,
+        provider=provider,
         model=model,
         created_at=created_at,
         compactions_before=compactions,
@@ -273,13 +281,16 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
 
     Returns:
         PromptReuse | None: The classification, or None for a session's first
-            prompt and for prompts where either run has no usable response.
+            prompt, for prompts where either run has no usable response, and when
+            the first response did not report cache reads.
     """
 
     previous = prompt.previous
     if previous is None or not previous.responses or not prompt.responses:
         return None
     first = prompt.responses[0]
+    if first.cached_tokens is None:
+        return None
     previous_first = previous.responses[0]
     previous_last = previous.responses[-1]
     instruction_tokens = estimate_tokens(prompt.system_sections)
@@ -304,6 +315,9 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
     compacted_during_previous = previous.compactions > previous_first.compactions_before
     if compacted_during_previous or first.compactions_before > 0:
         causes.append("compaction")
+    # Providers never share a prompt cache, even when the model name matches.
+    if previous_last.provider and first.provider and previous_last.provider != first.provider:
+        causes.append("provider changed")
     if previous_last.model and first.model and previous_last.model != first.model:
         causes.append("model changed")
     if idle >= idle_minutes:
@@ -327,7 +341,8 @@ def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
     """Count whether each later response in a run reused the previous request.
 
     Pairs separated by a compaction are skipped because the transcript was
-    replaced between them.
+    replaced between them. A response without reported cache reads is skipped,
+    but still separates its neighbours: only adjacent requests are compared.
 
     Args:
         prompt (Prompt): Prompt whose run is summarized.
@@ -338,7 +353,7 @@ def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
 
     counts: Counter[WithinRunOutcome] = Counter()
     for before, after in zip(prompt.responses, prompt.responses[1:], strict=False):
-        if after.compactions_before != before.compactions_before:
+        if after.compactions_before != before.compactions_before or after.cached_tokens is None:
             continue
         if after.cached_tokens == 0:
             counts["zero"] += 1
@@ -434,6 +449,7 @@ def build_report(
     periods = (
         {"before": PeriodReport(), "after": PeriodReport()} if split_at else {"all": PeriodReport()}
     )
+    seen_prompt_ids: set[str] = set()
     for path in files:
         try:
             entries = read_session_entries(path)
@@ -442,6 +458,11 @@ def build_report(
             print(f"warning: skipped {path}: {exc}", file=sys.stderr)
             continue
         for prompt in split_prompts(entries, session=path.stem):
+            # Clones and forks copy history with the original entry IDs. Count each
+            # prompt once; the copy still serves as `previous` for later prompts.
+            if prompt.entry_id in seen_prompt_ids:
+                continue
+            seen_prompt_ids.add(prompt.entry_id)
             period = periods[_period_name(prompt.started_at, split_at)]
             period.within_run.update(classify_within_run(prompt))
             reuse = classify_prompt(prompt, idle_minutes=idle_minutes)

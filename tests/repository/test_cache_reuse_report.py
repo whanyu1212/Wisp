@@ -63,6 +63,7 @@ class SessionBuilder:
         cached_tokens: int | None,
         *,
         observed_input_tokens: int | None = None,
+        provider: str = "anthropic",
     ) -> None:
         usage = TokenUsage(
             input_tokens=input_tokens,
@@ -70,16 +71,12 @@ class SessionBuilder:
             total_tokens=input_tokens + 10,
             cache_read_input_tokens=cached_tokens,
         )
-        observation = (
-            ContextObservation(
-                provider="anthropic",
-                model="claude-test",
-                input_tokens=observed_input_tokens,
-                message_count=1,
-                context_fingerprint="f",
-            )
-            if observed_input_tokens is not None
-            else None
+        observation = ContextObservation(
+            provider=provider,
+            model="same-model",
+            input_tokens=observed_input_tokens or input_tokens,
+            message_count=1,
+            context_fingerprint="f",
         )
         self._message(
             Message(role="assistant", content="ok", usage=usage, context_observation=observation)
@@ -113,8 +110,9 @@ class SessionBuilder:
         self.entries.append(entry)
         self.leaf = entry.id
 
-    def write(self, path: Path) -> Path:
-        path.write_text("".join(session_entry_to_json(e) + "\n" for e in self.entries))
+    def write(self, path: Path, *, session_id: str = "s") -> Path:
+        entries = [e.model_copy(update={"session_id": session_id}) for e in self.entries]
+        path.write_text("".join(session_entry_to_json(e) + "\n" for e in entries))
         return path
 
 
@@ -209,9 +207,53 @@ def test_responses_without_reported_cache_reads_are_not_counted_as_misses() -> N
 
     prompts = split_prompts(builder.entries, session="s")
 
-    assert [p.responses for p in prompts] == [[], []]
     assert outcomes(builder) == [None, None]
     assert classify_within_run(prompts[0]) == {}
+
+
+def test_unknown_cache_usage_keeps_response_positions() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    # The second prompt's real first response is unknown; the next one must not
+    # stand in for it, and the pair around the unknown one must not be compared.
+    # Each reported response is judged against the request right before it, even
+    # when that request's own cache usage is unknown; nothing pairs across a gap.
+    builder.prompt("second", [(11_000, None), (12_000, 10_900), (13_000, None), (20_000, 12_900)])
+
+    [_, second] = split_prompts(builder.entries, session="s")
+
+    assert outcomes(builder) == [None, None]
+    assert classify_within_run(second) == {"reached-previous": 2}
+
+
+def test_reports_a_provider_change_even_when_the_model_name_matches() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [])
+    builder.response(10_000, 0, provider="openai-compatible-a")
+    builder.prompt("second", [])
+    builder.response(11_000, 0, provider="openai-compatible-b")
+
+    result = classify_prompt(split_prompts(builder.entries, session="s")[1], idle_minutes=60)
+
+    assert result is not None
+    assert result.causes == ("provider changed",)
+
+
+def test_prompts_copied_into_a_fork_are_counted_once(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(11_000, 9_900)])
+    source = builder.write(tmp_path / "a-source.jsonl", session_id="source")
+    # A fork copies the source history with the same entry IDs, then continues.
+    builder.prompt("fork only", [(12_000, 10_900)])
+    fork = builder.write(tmp_path / "b-fork.jsonl", session_id="fork")
+
+    [report] = build_report([source, fork], split_at=None, idle_minutes=60).values()
+
+    assert [(p.session, p.outcome) for p in report.prompts] == [
+        ("a-source", "previous-tail"),
+        ("b-fork", "previous-tail"),
+    ]
 
 
 def test_uses_the_observed_full_request_size_when_usage_excludes_cached_input() -> None:
