@@ -11,6 +11,7 @@ from scripts.cache_reuse_report import (
     build_report,
     classify_prompt,
     classify_within_run,
+    copied_entry_ids,
     estimate_tokens,
     main,
     read_session_entries,
@@ -502,6 +503,30 @@ def test_fork_created_in_the_source_files_second_is_still_recognized(tmp_path: P
 
     assert edited.estimated_instruction_tokens == estimate_tokens((STATIC, CONTEXT))
     assert "system changed" not in " ".join(edited.causes)
+
+
+def test_same_second_clone_continued_alone_never_marks_the_source_as_copied(
+    tmp_path: Path,
+) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [])
+    builder.response(10_000, 0, provider="openai-codex")
+    builder.prompt("second", [])
+    builder.response(11_000, 10_900, provider="openai-codex")
+    created = builder.entries[0].created_at.replace(microsecond=0)
+    source = builder.write(tmp_path / builder.file_name(created), session_id="source")
+    # Clone at the current leaf in the same second; only the clone continues.
+    builder.prompt("clone only", [])
+    builder.response(12_000, 0, provider="openai-codex")
+    clone = builder.write(tmp_path / builder.file_name(created), session_id="clone")
+
+    sessions = [(path, read_session_entries(path)) for path in (source, clone)]
+
+    # Ambiguous: neither file is marked as the copy. The source is never marked as
+    # a copy of its own clone; the clone's `session changed` is omitted, not faked.
+    assert copied_entry_ids(sessions) == [frozenset(), frozenset()]
+    [report] = build_report([source, clone], split_at=None, idle_minutes=60).values()
+    assert [p.causes for p in report.prompts] == [(), ()]
 
 
 def test_system_messages_with_a_repeated_tag_stay_in_one_block() -> None:

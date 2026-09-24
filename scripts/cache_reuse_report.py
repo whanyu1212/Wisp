@@ -644,18 +644,16 @@ def copied_entry_ids(
     A clone or fork copies one root-to-leaf path of its source, with the original
     entry IDs, into a new file that starts with exactly that path. An entry is a
     copy when another file holds the same ID and is the original: its creation
-    second is earlier, or, when the seconds tie, its first entry beyond the
-    shared path was written before this file's (or this file adds nothing of its
-    own). Creation times come from store file names, floored to the second.
+    second is earlier, or, when the seconds tie and both files continued past
+    the shared path, its continuation was written first. Creation times come
+    from store file names, floored to the second.
 
     Only entries shared with another file are considered: a session's own first
     message can predate its file's name, because the user message is prepared
     before the session file is created. So a copy whose source is not in the
-    report is not detected, nor are renamed files. The same-second tie-break is
-    exact for a fork from a user message, which is where a missed copy would
-    merge two system blocks; for a clone continued in both files within one
-    second it can pick the wrong original, which only moves a ``session
-    changed`` cause.
+    report is not detected, nor are renamed files, nor a same-second copy when
+    only one of the two files continued. These gaps only omit a ``session
+    changed`` cause; the rules never mark an original as a copy.
 
     Args:
         sessions (Sequence[tuple[Path, Sequence[SessionEntry]]]): Each session
@@ -694,15 +692,17 @@ def copied_entry_ids(
         if other_created != own_created:
             return other_created < own_created
         # Same creation second: both files begin with the shared path, so compare
-        # what follows it. A fork from a user message needs that message in the
-        # source, written before the fork existed; everything the fork adds comes
-        # later. The file whose own entries start earlier is the original, and a
-        # file with no entries of its own is a pure copy.
+        # what follows it. When both continued, the source's own entries were
+        # written before the copy existed and the copy's after, so the earlier
+        # continuation is the original. This covers a continued fork from a user
+        # message, where a missed copy would merge two system blocks. When only
+        # one continued, it may be the source (continued after the copy) or the
+        # copy (continued after cloning); that is ambiguous, so neither is marked.
         own_first = first_unshared.get((index, other))
         other_first = first_unshared.get((other, index))
-        if other_first is None:
+        if own_first is None or other_first is None:
             return False
-        return own_first is None or other_first < own_first
+        return other_first < own_first
 
     result: list[frozenset[str]] = []
     for index, (created_at, (_, entries)) in enumerate(zip(created, sessions, strict=True)):
