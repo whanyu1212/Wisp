@@ -46,6 +46,7 @@ from wisp.config.runtime import default_session_dir
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
+    EventSessionEntry,
     MessageSessionEntry,
     SessionEntry,
     is_session_tree_entry,
@@ -294,15 +295,27 @@ def split_prompts(
     return prompts
 
 
-def _nearest_message(
-    entry: SessionEntry | None, entry_by_id: Mapping[str, SessionEntry]
-) -> MessageSessionEntry | None:
-    """Return the closest message at or above ``entry``, skipping other entries."""
+def _follows_run_end(entry: SessionEntry | None, entry_by_id: Mapping[str, SessionEntry]) -> bool:
+    """Return whether the nearest message above ``entry`` ended its run.
+
+    Walks up past events and compactions. A persisted ``error`` event is the
+    terminal of a failed or cancelled run, so it ends the run even when the
+    message before it is a user or tool row. Otherwise the run ended when the
+    nearest message is a system message or a final assistant answer (one without
+    tool calls), or when there is no message at all.
+    """
 
     while entry is not None and not isinstance(entry, MessageSessionEntry):
+        if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") == "error":
+            return True
         parent_id = entry.parent_id if is_session_tree_entry(entry) else None
         entry = entry_by_id.get(parent_id) if parent_id else None
-    return entry
+    if entry is None:
+        return True
+    if entry.operation_id is not None:
+        return False
+    role = entry.message.role
+    return role == "system" or (role == "assistant" and not entry.message.tool_calls)
 
 
 def _starts_prompt(
@@ -317,25 +330,18 @@ def _starts_prompt(
     running operation's ID.
 
     Without IDs (legacy entries, or SDK runs that pass none), the log does not
-    record which run wrote a message, so the nearest message before it decides:
-    a prompt starts after nothing, after a system message, or after a final
-    assistant answer (one without tool calls). Events and compactions in between
-    (for example ``context.pressure`` after a response, an ``error``, or a manual
-    compaction) are looked through. Steering is injected after tool results, so a
-    user message there stays in the running prompt. A queued follow-up after a
-    final answer is indistinguishable from a new run and is counted as a prompt.
+    record which run wrote a message, so a prompt starts where the previous run
+    visibly ended (see ``_follows_run_end``): after nothing, a system message, a
+    final assistant answer, or a terminal ``error`` event, looking through other
+    events and compactions. Steering is injected after tool results, so a user
+    message there stays in the running prompt. A queued follow-up after a final
+    answer is indistinguishable from a new run and is counted as a prompt.
     """
 
     if entry.message.role != "user":
         return False
     if entry.operation_id is None:
-        message = _nearest_message(parent, entry_by_id)
-        if message is None:
-            return True
-        if message.operation_id is not None:
-            return False
-        role = message.message.role
-        return role == "system" or (role == "assistant" and not message.message.tool_calls)
+        return _follows_run_end(parent, entry_by_id)
     return (
         parent is None
         or parent.operation_id != entry.operation_id
@@ -637,20 +643,19 @@ def copied_entry_ids(
 
     A clone or fork copies one root-to-leaf path of its source, with the original
     entry IDs, into a new file that starts with exactly that path. An entry is a
-    copy when either:
+    copy when another file holds the same ID and is the original: its creation
+    second is earlier, or, when the seconds tie, its first entry beyond the
+    shared path was written before this file's (or this file adds nothing of its
+    own). Creation times come from store file names, floored to the second.
 
-    * another file holds the same ID and is the original: its creation second is
-      earlier, or, when the seconds tie, its first entry beyond the shared path
-      was written before this file's (or this file adds nothing of its own), or
-    * it was written before its own file's creation second began.
-
-    Creation times come from store file names, floored to the second, and an
-    entry written after its file was created is never earlier than that second.
-    The same-second tie-break is exact for a fork from a user message, which is
-    where a missed copy would merge two system blocks. For a clone continued in
-    both files within one second it can pick the wrong original, which only
-    moves a ``session changed`` cause. Renamed files and sources outside the
-    report are never treated as copies.
+    Only entries shared with another file are considered: a session's own first
+    message can predate its file's name, because the user message is prepared
+    before the session file is created. So a copy whose source is not in the
+    report is not detected, nor are renamed files. The same-second tie-break is
+    exact for a fork from a user message, which is where a missed copy would
+    merge two system blocks; for a clone continued in both files within one
+    second it can pick the wrong original, which only moves a ``session
+    changed`` cause.
 
     Args:
         sessions (Sequence[tuple[Path, Sequence[SessionEntry]]]): Each session
@@ -708,8 +713,7 @@ def copied_entry_ids(
             frozenset(
                 entry.id
                 for entry in entries
-                if entry.created_at < created_at
-                or any(
+                if any(
                     is_original_of(other, index, entry.id)
                     for other in holders.get(entry.id, ())
                     if other != index

@@ -429,11 +429,14 @@ def test_fork_from_a_user_message_keeps_the_projected_and_fresh_system_blocks_ap
     assert result.causes == ()
 
 
-def _fork_and_edit_second_prompt(*, provider: str = "anthropic") -> SessionBuilder:
-    """Build a fork from the second prompt's user message, then its edited prompt.
+def _fork_and_edit_second_prompt(
+    tmp_path: Path, *, provider: str = "anthropic"
+) -> tuple[SessionBuilder, Path]:
+    """Build a source session, then a fork from its second prompt's user message.
 
     The fork's history ends with the second prompt's copied system block (without
     its user message); the edited prompt appends a fresh block right after it.
+    Returns the builder (holding the fork) and the written source file.
     """
 
     builder = SessionBuilder()
@@ -441,6 +444,10 @@ def _fork_and_edit_second_prompt(*, provider: str = "anthropic") -> SessionBuild
     builder.response(10_000, 0, provider=provider)
     builder.prompt("second", [])
     builder.response(20_000, 9_900, provider=provider)
+    source = builder.write(
+        tmp_path / builder.file_name(builder.entries[0].created_at.replace(microsecond=0)),
+        session_id="source",
+    )
     projected_block_end = builder.last_system_entry_id()
     builder.entries = builder.entries[
         : builder.entries.index(_entry(builder, projected_block_end)) + 1
@@ -450,17 +457,17 @@ def _fork_and_edit_second_prompt(*, provider: str = "anthropic") -> SessionBuild
     builder.clock = builder.fork_created_at + timedelta(seconds=30)
     builder.prompt("second, edited", [], minutes_later=0)
     builder.response(11_000, 0, provider=provider)
-    return builder
+    return builder, source
 
 
 def test_fork_blocks_stay_apart_without_operation_ids(tmp_path: Path) -> None:
-    builder = _fork_and_edit_second_prompt()
+    builder, source = _fork_and_edit_second_prompt(tmp_path)
     # SDK runs may pass no operation ID, and legacy entries carry none.
     builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
     fork = builder.write(tmp_path / builder.fork_file_name(), session_id="fork")
 
-    [report] = build_report([fork], split_at=None, idle_minutes=60).values()
-    [edited] = report.prompts
+    [report] = build_report([source, fork], split_at=None, idle_minutes=60).values()
+    edited = next(p for p in report.prompts if p.session == fork.stem)
 
     assert edited.estimated_instruction_tokens == estimate_tokens((STATIC, CONTEXT))
     assert edited.causes == ()
@@ -558,6 +565,38 @@ def test_id_less_prompt_after_an_event_or_compaction_is_recognized(between: str)
     assert len(prompts) == 2
     assert prompts[1].previous is prompts[0]
     assert [r.input_tokens for r in prompts[0].responses] == [10_000]
+
+
+def test_id_less_prompt_after_a_failed_run_starts_a_new_prompt() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)], system_sections=())
+    # The provider fails before any response: the run ends with an error event
+    # right after its user message.
+    builder.prompt("failed", [], system_sections=())
+    builder.event({"type": "error", "message": "provider failed"})
+    builder.prompt("retry", [(11_000, 9_900)], system_sections=())
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert [len(p.responses) for p in prompts] == [1, 0, 1]
+    assert prompts[2].previous is prompts[1]
+
+
+def test_a_new_sessions_first_message_is_not_mistaken_for_a_copy(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    # The user message is prepared before the session file is created, so it can
+    # predate the file name's second.
+    builder.prompt("first", [], system_sections=())
+    builder.response(10_000, 0, provider="openai-codex")
+    builder.prompt("second", [], system_sections=())
+    builder.response(11_000, 0, provider="openai-codex")
+    created = builder.entries[0].created_at.replace(microsecond=0) + timedelta(seconds=1)
+    path = builder.write(tmp_path / builder.file_name(created))
+
+    [report] = build_report([path], split_at=None, idle_minutes=60).values()
+
+    assert [p.causes for p in report.prompts] == [()]
 
 
 def test_id_less_steering_after_tool_results_stays_in_the_run() -> None:
