@@ -168,7 +168,8 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
     also holds after branching. A system block belongs to the prompt *before* its
     user message: editing a historical message branches from the entry just
     before that message, i.e. the edited prompt's system block, and the new
-    prompt continues the conversation up to there.
+    prompt continues the conversation up to there. Blocks are split by operation
+    ID, so a fork's copied block and the edited prompt's fresh block stay apart.
 
     Args:
         entries (Sequence[SessionEntry]): Entries in append order.
@@ -192,9 +193,25 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
         role = entry.message.role if isinstance(entry, MessageSessionEntry) else None
 
         if isinstance(entry, MessageSessionEntry) and role == "system":
-            if previous_kind != "system":
+            # A run writes its system block and user message under one operation ID.
+            # A fork from a user message ends with that prompt's copied system block,
+            # and the edited prompt appends a fresh block right after it, so a change
+            # of operation ID starts a new block. Legacy entries have no ID.
+            continues_block = (
+                previous_kind == "system"
+                and bool(system_block)
+                and entry.operation_id == system_block[-1].operation_id
+            )
+            if not continues_block:
                 system_block = []
             system_block.append(entry)
+            # A system entry belongs to the prompt it continues, at the progress of
+            # its parent. Recording this now (not when the user message arrives)
+            # also covers a fork's copied block, which has no user message after it.
+            continued = prompt_by_entry_id.get(entry.parent_id) if entry.parent_id else None
+            if continued is not None and entry.parent_id is not None:
+                prompt_by_entry_id[entry.id] = continued
+                progress_by_entry_id[entry.id] = progress_by_entry_id[entry.parent_id]
         elif (
             isinstance(entry, MessageSessionEntry) and role == "user" and previous_kind == "system"
         ):
@@ -203,13 +220,6 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
             response_count, compaction_count = (
                 progress_by_entry_id[parent_id] if previous is not None and parent_id else (0, 0)
             )
-            for item in system_block:
-                if previous is None:
-                    prompt_by_entry_id.pop(item.id, None)
-                    progress_by_entry_id.pop(item.id, None)
-                else:
-                    prompt_by_entry_id[item.id] = previous
-                    progress_by_entry_id[item.id] = (response_count, compaction_count)
             prompt = Prompt(
                 session=session,
                 entry_id=entry.id,
@@ -481,7 +491,25 @@ def build_report(
     periods = (
         {"before": PeriodReport(), "after": PeriodReport()} if split_at else {"all": PeriodReport()}
     )
-    seen_prompt_ids: set[str] = set()
+    for prompt in _unique_prompts(files):
+        period = periods[_period_name(prompt.started_at, split_at)]
+        period.within_run.update(classify_within_run(prompt))
+        reuse = classify_prompt(prompt, idle_minutes=idle_minutes)
+        if reuse is not None:
+            period.prompts.append(reuse)
+    return periods
+
+
+def _unique_prompts(files: Sequence[Path]) -> list[Prompt]:
+    """Return each prompt once, choosing its most complete copy across files.
+
+    Clones and forks copy history with the original entry IDs, and a copy can be
+    truncated mid-run (a clone of an intermediate entry has fewer responses). The
+    copy with the most responses wins regardless of file order; on a tie the
+    first one read is kept. Copies still serve as ``previous`` within their file.
+    """
+
+    best: dict[str, Prompt] = {}
     for path in files:
         try:
             entries = read_session_entries(path)
@@ -490,17 +518,10 @@ def build_report(
             print(f"warning: skipped {path}: {exc}", file=sys.stderr)
             continue
         for prompt in split_prompts(entries, session=path.stem):
-            # Clones and forks copy history with the original entry IDs. Count each
-            # prompt once; the copy still serves as `previous` for later prompts.
-            if prompt.entry_id in seen_prompt_ids:
-                continue
-            seen_prompt_ids.add(prompt.entry_id)
-            period = periods[_period_name(prompt.started_at, split_at)]
-            period.within_run.update(classify_within_run(prompt))
-            reuse = classify_prompt(prompt, idle_minutes=idle_minutes)
-            if reuse is not None:
-                period.prompts.append(reuse)
-    return periods
+            kept = best.get(prompt.entry_id)
+            if kept is None or len(prompt.responses) > len(kept.responses):
+                best[prompt.entry_id] = prompt
+    return list(best.values())
 
 
 def _period_name(started_at: datetime, split_at: datetime | None) -> str:

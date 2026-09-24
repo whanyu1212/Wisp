@@ -35,6 +35,9 @@ class SessionBuilder:
         self.entries: list[SessionEntry] = []
         self.leaf: str | None = None
         self.clock = START
+        # Each run writes its system block, user message, and responses under one ID.
+        self.operation_id = "prompt-0"
+        self.prompt_count = 0
 
     def prompt(
         self,
@@ -48,6 +51,8 @@ class SessionBuilder:
         """Append one prompt; ``responses`` holds (input, cached) token pairs."""
 
         self.clock += timedelta(minutes=minutes_later)
+        self.prompt_count += 1
+        self.operation_id = f"prompt-{self.prompt_count}"
         if parent is not None:
             self.leaf = parent
         for section in (STATIC, context):
@@ -112,7 +117,14 @@ class SessionBuilder:
     def compaction(self) -> None:
         assert self.leaf is not None
         record = CompactionRecord(summary="s", replaced_entry_ids=(self.leaf,), provider="fake")
-        self._append(CompactionSessionEntry(session_id="s", parent_id=self.leaf, compaction=record))
+        self._append(
+            CompactionSessionEntry(
+                session_id="s",
+                parent_id=self.leaf,
+                compaction=record,
+                operation_id=self.operation_id,
+            )
+        )
 
     def _message(self, message: Message) -> None:
         self.clock += timedelta(seconds=1)
@@ -123,6 +135,7 @@ class SessionBuilder:
                 parent_id=self.leaf,
                 message=message,
                 created_at=self.clock,
+                operation_id=self.operation_id,
             )
         )
 
@@ -301,6 +314,47 @@ def test_prompt_from_a_mid_run_response_is_compared_with_that_response() -> None
     assert result is not None
     assert result.outcome == "previous-tail"
     assert result.previous_last_input_tokens == 10_000
+
+
+def test_fork_from_a_user_message_keeps_the_projected_and_fresh_system_blocks_apart() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(20_000, 9_900)])
+    projected_block_end = builder.last_system_entry_id()
+    # Fork from "second": the fork's history ends with second's system block
+    # (without its user message), then the edited prompt appends a fresh block.
+    fork = builder.entries[: builder.entries.index(_entry(builder, projected_block_end)) + 1]
+    builder.entries = list(fork)
+    builder.leaf = projected_block_end
+    builder.prompt("second, edited", [(11_000, 9_900)])
+
+    prompts = split_prompts(builder.entries, session="s")
+    result = classify_prompt(prompts[1], idle_minutes=60)
+
+    assert [p.entry_id for p in prompts] == [prompts[0].entry_id, prompts[1].entry_id]
+    assert prompts[1].system_sections == (STATIC, CONTEXT)
+    assert result is not None
+    assert result.causes == ()
+
+
+def test_the_most_complete_copy_of_a_prompt_is_counted(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [])
+    truncated = builder.write(tmp_path / "a-clone.jsonl", session_id="clone")
+    builder.response(11_000, 9_900)
+    builder.response(13_000, 10_900)
+    complete = builder.write(tmp_path / "b-source.jsonl", session_id="source")
+
+    for files in ([truncated, complete], [complete, truncated]):
+        [report] = build_report(files, split_at=None, idle_minutes=60).values()
+
+        assert [(p.session, p.outcome) for p in report.prompts] == [("b-source", "previous-tail")]
+        assert report.within_run == {"reached-previous": 1}
+
+
+def _entry(builder: SessionBuilder, entry_id: str) -> SessionEntry:
+    return next(e for e in builder.entries if e.id == entry_id)
 
 
 def test_reports_a_provider_change_even_when_the_model_name_matches() -> None:
