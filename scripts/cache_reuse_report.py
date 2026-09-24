@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
@@ -97,6 +98,8 @@ class Prompt:
     started_at: datetime
     system_sections: tuple[str, ...]
     previous: Prompt | None
+    # Copied into this file by a clone or fork: written before the file existed.
+    copied: bool = False
     # The previous prompt's run as it stood at the branch point: navigating to a
     # response mid-run and prompting from there abandons the responses after it.
     previous_responses: tuple[Response, ...] = ()
@@ -165,7 +168,12 @@ def read_session_entries(path: Path) -> list[SessionEntry]:
     return entries
 
 
-def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prompt]:
+def split_prompts(
+    entries: Sequence[SessionEntry],
+    *,
+    session: str,
+    file_created_at: datetime | None = None,
+) -> list[Prompt]:
     """Group session entries into prompts linked to the prompt they continue.
 
     Wisp writes a block of system messages before every user prompt. The first
@@ -179,6 +187,8 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
     Args:
         entries (Sequence[SessionEntry]): Entries in append order.
         session (str): Label used in the report.
+        file_created_at (datetime | None): When the session file was created, if
+            known. Prompts written earlier were copied in by a clone or fork.
 
     Returns:
         list[Prompt]: Prompts in append order.
@@ -200,14 +210,20 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
         role = entry.message.role if isinstance(entry, MessageSessionEntry) else None
 
         if isinstance(entry, MessageSessionEntry) and role == "system":
-            # A run writes its system block and user message under one operation ID.
             # A fork from a user message ends with that prompt's copied system block,
-            # and the edited prompt appends a fresh block right after it, so a change
-            # of operation ID starts a new block. Legacy entries have no ID.
+            # and the edited prompt appends a fresh block right after it. A run
+            # writes its block and user message under one operation ID, so a change
+            # of ID starts a new block. Without IDs (legacy entries, or SDK runs
+            # that pass none), a section tag seen again in the block starts one.
             continues_block = (
                 previous_kind == "system"
                 and bool(system_block)
                 and entry.operation_id == system_block[-1].operation_id
+                and (
+                    entry.operation_id is not None
+                    or section_label(entry.message.content)
+                    not in {section_label(item.message.content) for item in system_block}
+                )
             )
             if not continues_block:
                 system_block = []
@@ -230,6 +246,7 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
             prompt = Prompt(
                 session=session,
                 entry_id=entry.id,
+                copied=file_created_at is not None and entry.created_at < file_created_at,
                 started_at=entry.created_at,
                 system_sections=tuple(item.message.content for item in system_block),
                 previous=previous,
@@ -362,6 +379,11 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
         outcome = "partial"
 
     causes: list[str] = []
+    # The first new prompt of a clone or fork continues copied history under a new
+    # session ID, which is also the cache namespace Wisp sends (`prompt_cache_key`
+    # and the `session_id` header).
+    if previous.copied and not prompt.copied:
+        causes.append("session changed")
     changed_section = first_changed_section(previous.system_sections, prompt.system_sections)
     if changed_section is not None:
         causes.append(f"system changed: {changed_section}")
@@ -533,11 +555,31 @@ def _unique_prompts(files: Sequence[Path]) -> list[Prompt]:
             # One unreadable or malformed file should not hide the rest.
             print(f"warning: skipped {path}: {exc}", file=sys.stderr)
             continue
-        for prompt in split_prompts(entries, session=path.stem):
+        prompts = split_prompts(
+            entries, session=path.stem, file_created_at=session_file_created_at(path)
+        )
+        for prompt in prompts:
             kept = best.get(prompt.entry_id)
             if kept is None or len(prompt.responses) > len(kept.responses):
                 best[prompt.entry_id] = prompt
     return list(best.values())
+
+
+def session_file_created_at(path: Path) -> datetime | None:
+    """Return the creation time encoded in a store-named session file, if any.
+
+    ``JsonlSessionStore.create`` names files ``YYYYMMDD-HHMMSS-<id8>.jsonl`` in
+    UTC. The time is floored to the second, so an entry written after creation
+    is never mistaken for a copy; files named otherwise report None.
+    """
+
+    match = _SESSION_FILE_NAME.fullmatch(path.stem)
+    if match is None:
+        return None
+    return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
+
+
+_SESSION_FILE_NAME = re.compile(r"(\d{8}-\d{6})-[0-9a-f]{8}")
 
 
 def _period_name(started_at: datetime, split_at: datetime | None) -> str:

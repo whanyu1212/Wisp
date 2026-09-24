@@ -378,6 +378,46 @@ def test_fork_from_a_user_message_keeps_the_projected_and_fresh_system_blocks_ap
     assert result.causes == ()
 
 
+def test_fork_blocks_stay_apart_without_operation_ids() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(20_000, 9_900)])
+    projected_block_end = builder.last_system_entry_id()
+    fork = builder.entries[: builder.entries.index(_entry(builder, projected_block_end)) + 1]
+    builder.entries = list(fork)
+    builder.leaf = projected_block_end
+    builder.prompt("second, edited", [(11_000, 9_900)])
+    # SDK runs may pass no operation ID, and legacy entries carry none.
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    prompts = split_prompts(builder.entries, session="s")
+    result = classify_prompt(prompts[1], idle_minutes=60)
+
+    assert prompts[1].system_sections == (STATIC, CONTEXT)
+    assert prompts[1].previous is prompts[0]
+    assert result is not None
+    assert result.causes == ()
+
+
+def test_first_prompt_of_a_fork_reports_the_session_change(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(11_000, 10_900)])
+    # The fork file is created after the copied history was written.
+    fork_created = builder.clock + timedelta(minutes=5)
+    builder.clock = fork_created + timedelta(minutes=1)
+    builder.prompt("fork only", [(12_000, 0)], minutes_later=0)
+    name = f"{fork_created:%Y%m%d-%H%M%S}-0123abcd.jsonl"
+    fork = builder.write(tmp_path / name, session_id="fork")
+
+    [report] = build_report([fork], split_at=None, idle_minutes=60).values()
+
+    assert [(p.outcome, p.causes) for p in report.prompts] == [
+        ("previous-tail", ()),
+        ("zero", ("session changed",)),
+    ]
+
+
 def test_the_most_complete_copy_of_a_prompt_is_counted(tmp_path: Path) -> None:
     builder = SessionBuilder()
     builder.prompt("first", [(10_000, 0)])
