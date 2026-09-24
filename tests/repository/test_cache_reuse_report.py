@@ -16,6 +16,7 @@ from scripts.cache_reuse_report import (
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import ContextObservation, TokenUsage
 from wisp.sessions.entries import (
+    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     MessageSessionEntry,
     SessionEntry,
@@ -82,6 +83,25 @@ class SessionBuilder:
             Message(role="assistant", content="ok", usage=usage, context_observation=observation)
         )
 
+    def unmeasured_response(self) -> None:
+        """Append a successful response whose provider reported no usage at all."""
+
+        self._message(Message(role="assistant", content="ok"))
+
+    def navigate(self, entry_id: str) -> None:
+        """Select an older leaf, as tree navigation does, without appending a prompt."""
+
+        self._append(
+            ActiveLeafSessionEntry(
+                session_id="s",
+                previous_leaf_id=self.leaf,
+                active_leaf_id=entry_id,
+                reason="navigation",
+                selected_entry_id=entry_id,
+            ),
+            leaf=entry_id,
+        )
+
     def last_system_entry_id(self) -> str:
         return next(
             e.id
@@ -106,9 +126,9 @@ class SessionBuilder:
             )
         )
 
-    def _append(self, entry: SessionEntry) -> None:
+    def _append(self, entry: SessionEntry, *, leaf: str | None = None) -> None:
         self.entries.append(entry)
-        self.leaf = entry.id
+        self.leaf = leaf or entry.id
 
     def write(self, path: Path, *, session_id: str = "s") -> Path:
         entries = [e.model_copy(update={"session_id": session_id}) for e in self.entries]
@@ -224,6 +244,42 @@ def test_unknown_cache_usage_keeps_response_positions() -> None:
 
     assert outcomes(builder) == [None, None]
     assert classify_within_run(second) == {"reached-previous": 2}
+
+
+def test_responses_without_any_usage_keep_their_positions() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    # A tool-call response with no usage chunk, then a measured post-tool response:
+    # the measured one must not be treated as the run's first response.
+    builder.prompt("second", [])
+    builder.unmeasured_response()
+    builder.response(12_000, 10_900)
+    builder.unmeasured_response()
+    builder.response(20_000, 11_900)
+
+    [_, second] = split_prompts(builder.entries, session="s")
+
+    assert len(second.responses) == 4
+    assert outcomes(builder) == [None, None]
+    assert classify_within_run(second) == {}
+
+
+def test_entries_after_navigating_back_belong_to_the_selected_branch() -> None:
+    builder = SessionBuilder()
+    first_leaf = builder.prompt("first", [(10_000, 0)])
+    builder.prompt("abandoned", [(40_000, 9_900)])
+    # Navigate back to the end of "first", compact there, then prompt again.
+    builder.navigate(first_leaf)
+    builder.compaction()
+    builder.prompt("after navigation", [(3_000, 1_536)])
+
+    prompts = split_prompts(builder.entries, session="s")
+    result = classify_prompt(prompts[2], idle_minutes=60)
+
+    assert prompts[2].previous is prompts[0]
+    assert (prompts[0].compactions, prompts[1].compactions) == (1, 0)
+    assert result is not None
+    assert "compaction" in result.causes
 
 
 def test_reports_a_provider_change_even_when_the_model_name_matches() -> None:

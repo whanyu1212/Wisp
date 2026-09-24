@@ -78,8 +78,8 @@ NO_RECORDED_CAUSE = "no recorded cause"
 class Response:
     """Usage reported for one successful model response."""
 
-    input_tokens: int
-    # None when the provider did not report cache reads ("unknown", not zero).
+    # Both are None when the provider did not report them ("unknown", not zero).
+    input_tokens: int | None
     cached_tokens: int | None
     provider: str | None
     model: str | None
@@ -177,61 +177,64 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
     prompts: list[Prompt] = []
     prompt_by_entry_id: dict[str, Prompt] = {}
     system_block: list[MessageSessionEntry] = []
-    current: Prompt | None = None
     previous_kind: str | None = None
 
     for entry in entries:
-        if isinstance(entry, MessageSessionEntry):
-            message = entry.message
-            if message.role == "system":
-                if previous_kind != "system":
-                    system_block = []
-                system_block.append(entry)
-            elif message.role == "user" and previous_kind == "system":
-                parent_id = system_block[0].parent_id
-                previous = prompt_by_entry_id.get(parent_id) if parent_id else None
-                for item in system_block:
-                    if previous is None:
-                        prompt_by_entry_id.pop(item.id, None)
-                    else:
-                        prompt_by_entry_id[item.id] = previous
-                current = Prompt(
-                    session=session,
-                    entry_id=entry.id,
-                    started_at=entry.created_at,
-                    system_sections=tuple(item.message.content for item in system_block),
-                    previous=previous,
-                )
-                prompts.append(current)
-            elif message.role == "assistant" and current is not None:
-                response = _response(message, entry.created_at, current.compactions)
-                if response is not None:
-                    current.responses.append(response)
-            previous_kind = message.role
-        elif isinstance(entry, CompactionSessionEntry):
-            if current is not None:
-                current.compactions += 1
-            previous_kind = "compaction"
-        is_system = isinstance(entry, MessageSessionEntry) and entry.message.role == "system"
-        if current is not None and is_session_tree_entry(entry) and not is_system:
-            prompt_by_entry_id[entry.id] = current
+        if not is_session_tree_entry(entry):
+            continue
+        role = entry.message.role if isinstance(entry, MessageSessionEntry) else None
+
+        if isinstance(entry, MessageSessionEntry) and role == "system":
+            if previous_kind != "system":
+                system_block = []
+            system_block.append(entry)
+        elif (
+            isinstance(entry, MessageSessionEntry) and role == "user" and previous_kind == "system"
+        ):
+            parent_id = system_block[0].parent_id
+            previous = prompt_by_entry_id.get(parent_id) if parent_id else None
+            for item in system_block:
+                if previous is None:
+                    prompt_by_entry_id.pop(item.id, None)
+                else:
+                    prompt_by_entry_id[item.id] = previous
+            prompt = Prompt(
+                session=session,
+                entry_id=entry.id,
+                started_at=entry.created_at,
+                system_sections=tuple(item.message.content for item in system_block),
+                previous=previous,
+            )
+            prompts.append(prompt)
+            prompt_by_entry_id[entry.id] = prompt
+        else:
+            # Every other entry belongs to the prompt of the branch it was appended
+            # to. That is not always the last prompt in the file: navigating to an
+            # older point and then compacting appends onto an earlier prompt.
+            owner = prompt_by_entry_id.get(entry.parent_id) if entry.parent_id else None
+            if owner is not None:
+                if isinstance(entry, CompactionSessionEntry):
+                    owner.compactions += 1
+                elif isinstance(entry, MessageSessionEntry) and role == "assistant":
+                    owner.responses.append(
+                        _response(entry.message, entry.created_at, owner.compactions)
+                    )
+                prompt_by_entry_id[entry.id] = owner
+        previous_kind = role or entry.kind
     return prompts
 
 
-def _response(message: Message, created_at: datetime, compactions: int) -> Response | None:
-    """Project one assistant message's usage, or None when it has no usable usage.
+def _response(message: Message, created_at: datetime, compactions: int) -> Response:
+    """Project one assistant message's usage.
 
-    A response whose provider did not report cache reads keeps its position with
-    ``cached_tokens=None`` so it is neither counted as a zero-cache miss nor
-    skipped over when finding a run's first response or adjacent pairs.
+    Every assistant message keeps its position in the run. When the provider
+    reported no usage at all, or no cache reads, the unknown values are None, so
+    the response is neither counted as a zero-cache miss nor skipped over when
+    finding a run's first response or adjacent pairs.
     """
 
     usage = message.usage
-    if usage is None:
-        return None
-    input_tokens = request_input_tokens(message)
-    if input_tokens <= 0:
-        return None
+    input_tokens = request_input_tokens(message) if usage is not None else None
     observation = message.context_observation
     cost = message.cost
     model = cost.model if cost is not None else None
@@ -240,8 +243,8 @@ def _response(message: Message, created_at: datetime, compactions: int) -> Respo
         model = model or observation.model
         provider = provider or observation.provider
     return Response(
-        input_tokens=input_tokens,
-        cached_tokens=usage.cache_read_input_tokens,
+        input_tokens=input_tokens if input_tokens and input_tokens > 0 else None,
+        cached_tokens=usage.cache_read_input_tokens if usage is not None else None,
         provider=provider,
         model=model,
         created_at=created_at,
@@ -281,18 +284,23 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
 
     Returns:
         PromptReuse | None: The classification, or None for a session's first
-            prompt, for prompts where either run has no usable response, and when
-            the first response did not report cache reads.
+            prompt, for prompts where either run has no response, and when a
+            request size or cache read needed for the comparison is unknown.
     """
 
     previous = prompt.previous
     if previous is None or not previous.responses or not prompt.responses:
         return None
     first = prompt.responses[0]
-    if first.cached_tokens is None:
-        return None
     previous_first = previous.responses[0]
     previous_last = previous.responses[-1]
+    if (
+        first.cached_tokens is None
+        or first.input_tokens is None
+        or previous_first.input_tokens is None
+        or previous_last.input_tokens is None
+    ):
+        return None
     instruction_tokens = estimate_tokens(prompt.system_sections)
     idle = (prompt.started_at - previous_last.created_at).total_seconds() / 60
 
@@ -341,8 +349,9 @@ def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
     """Count whether each later response in a run reused the previous request.
 
     Pairs separated by a compaction are skipped because the transcript was
-    replaced between them. A response without reported cache reads is skipped,
-    but still separates its neighbours: only adjacent requests are compared.
+    replaced between them. A pair is skipped when the later response's cache
+    reads or the earlier request's size are unknown; unknown responses still
+    separate their neighbours, so only adjacent requests are compared.
 
     Args:
         prompt (Prompt): Prompt whose run is summarized.
@@ -353,7 +362,11 @@ def classify_within_run(prompt: Prompt) -> Counter[WithinRunOutcome]:
 
     counts: Counter[WithinRunOutcome] = Counter()
     for before, after in zip(prompt.responses, prompt.responses[1:], strict=False):
-        if after.compactions_before != before.compactions_before or after.cached_tokens is None:
+        if (
+            after.compactions_before != before.compactions_before
+            or after.cached_tokens is None
+            or before.input_tokens is None
+        ):
             continue
         if after.cached_tokens == 0:
             counts["zero"] += 1
