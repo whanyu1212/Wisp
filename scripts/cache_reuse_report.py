@@ -70,6 +70,9 @@ WITHIN_RUN_OUTCOMES: tuple[WithinRunOutcome, ...] = ("reached-previous", "partia
 # uncached, so "reached N tokens" allows a small shortfall.
 REACHED_MIN_SHORTFALL_TOKENS = 512
 REACHED_SHORTFALL_RATIO = 0.02
+# For short requests the fixed allowance would cover most of the request, so it
+# is capped at this share of the target.
+REACHED_MAX_SHORTFALL_RATIO = 0.1
 # Tool schemas are not persisted, and system-section tokens are estimated from
 # UTF-8 bytes, so the instructions boundary is approximate.
 INSTRUCTIONS_SLACK_TOKENS = 2048
@@ -529,7 +532,11 @@ def stopped_at(cached_tokens: int, target_tokens: int) -> bool:
 
 
 def _shortfall(target_tokens: int) -> float:
-    return max(REACHED_MIN_SHORTFALL_TOKENS, target_tokens * REACHED_SHORTFALL_RATIO)
+    # Never let the allowance cover more than a small part of a short request.
+    return min(
+        max(REACHED_MIN_SHORTFALL_TOKENS, target_tokens * REACHED_SHORTFALL_RATIO),
+        target_tokens * REACHED_MAX_SHORTFALL_RATIO,
+    )
 
 
 def estimate_tokens(sections: Sequence[str]) -> int:
@@ -795,7 +802,7 @@ def render_markdown(periods: dict[str, PeriodReport], *, details: bool) -> str:
                     f"| {name} | {p.session} | {p.started_at:%Y-%m-%d %H:%M} | {p.outcome} | "
                     f"{p.cached_tokens} | {p.input_tokens} | {p.previous_first_input_tokens} | "
                     f"{p.previous_last_input_tokens} | {p.estimated_instruction_tokens} | "
-                    f"{p.idle_minutes:g} | {', '.join(p.causes) or '—'} |"
+                    f"{p.idle_minutes:g} | {_cell(', '.join(p.causes)) or '—'} |"
                 )
     return "\n".join(lines) + "\n"
 
@@ -808,10 +815,18 @@ def _table(
     totals: Sequence[int] | None = None,
 ) -> list[str]:
     lines = [f"| {label} | " + " | ".join(columns) + " |", "| -- |" + " --: |" * len(columns)]
-    lines += [f"| {name} | " + " | ".join(str(v) for v in values) + " |" for name, values in rows]
+    lines += [
+        f"| {_cell(name)} | " + " | ".join(str(v) for v in values) + " |" for name, values in rows
+    ]
     if totals is not None:
         lines.append("| **total** | " + " | ".join(str(v) for v in totals) + " |")
     return lines
+
+
+def _cell(text: str) -> str:
+    """Escape text from session content for one Markdown table cell."""
+
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ").replace("\r", " ")
 
 
 def _count(prompts: Sequence[PromptReuse], outcome: Outcome) -> int:

@@ -14,6 +14,7 @@ from scripts.cache_reuse_report import (
     copied_entry_ids,
     estimate_tokens,
     main,
+    reached,
     read_session_entries,
     split_prompts,
 )
@@ -225,6 +226,31 @@ def test_classifies_where_the_cache_stopped(
     builder.prompt("second", [second_first_response])
 
     assert outcomes(builder) == [None, expected]
+
+
+@pytest.mark.parametrize(
+    ("cached", "target", "expected"),
+    [(1, 100, False), (100, 600, False), (95, 100, True), (51_700, 52_000, True)],
+)
+def test_reached_requires_most_of_a_short_request(cached: int, target: int, expected: bool) -> None:
+    assert reached(cached, target) is expected
+
+
+def test_markdown_escapes_table_delimiters_from_session_content(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)], system_sections=("[A|B] one",))
+    builder.prompt("second", [(11_000, 0)], system_sections=("[A|B] two",))
+    builder.write(tmp_path / "session.jsonl")
+
+    assert main([str(tmp_path), "--details"]) == 0
+    output = capsys.readouterr().out
+
+    # The label's `|` is escaped, so each row keeps its table's column count.
+    assert "| system changed: [A\\|B] | 0 | 0 | 1 |" in output
+    detail = next(line for line in output.splitlines() if line.startswith("| all |"))
+    assert detail.replace("\\|", "").count("|") == 12  # 11 columns
 
 
 def test_reports_changed_system_section_compaction_and_idle_gap() -> None:
