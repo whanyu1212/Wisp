@@ -266,6 +266,9 @@ def test_openai_codex_provider_sends_prompt_cache_key_when_provided(tmp_path: Pa
 
     assert provider.seen_body is not None
     assert provider.seen_body["prompt_cache_key"] == "wisp:session-1"
+    # The backend only reuses cached prefixes for requests carrying this header.
+    assert provider.seen_headers is not None
+    assert provider.seen_headers["session_id"] == "wisp:session-1"
 
 
 def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
@@ -287,6 +290,8 @@ def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
 
     assert provider.seen_body is not None
     assert "prompt_cache_key" not in provider.seen_body
+    assert provider.seen_headers is not None
+    assert "session_id" not in provider.seen_headers
 
 
 def test_openai_codex_provider_appends_user_messages_in_fresh_request(tmp_path: Path) -> None:

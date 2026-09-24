@@ -120,7 +120,11 @@ class OpenAICodexProvider:
                 "openai-codex credentials are required; start Wisp and run `/connect openai-codex`"
             )
         account_id = auth.account_id or account_id_from_access_token(auth.token)
-        headers = _codex_headers(token=auth.token, account_id=account_id)
+        headers = _codex_headers(
+            token=auth.token,
+            account_id=account_id,
+            session_id=prompt_cache_key,
+        )
         continuation_input = (
             *self._get_continuation(previous_response_id),
             *_tool_results_to_codex_input(tool_results),
@@ -551,8 +555,13 @@ def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject,
     return cast(JsonObject, parsed), None
 
 
-def _codex_headers(*, token: str, account_id: str) -> dict[str, str]:
-    return {
+def _codex_headers(
+    *,
+    token: str,
+    account_id: str,
+    session_id: str | None = None,
+) -> dict[str, str]:
+    headers = {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": account_id,
         "originator": "wisp",
@@ -561,6 +570,12 @@ def _codex_headers(*, token: str, account_id: str) -> dict[str, str]:
         "accept": "text/event-stream",
         "content-type": "application/json",
     }
+    if session_id is not None:
+        # The Codex backend reuses cached prefixes only for requests that carry the
+        # conversation's `session_id` header, as the official Codex CLI sends; the
+        # `prompt_cache_key` body field alone left most identical requests uncached.
+        headers["session_id"] = session_id
+    return headers
 
 
 def _resolve_codex_url(base_url: str) -> str:
