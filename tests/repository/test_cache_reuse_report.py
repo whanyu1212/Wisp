@@ -198,6 +198,7 @@ class SessionBuilder:
 
     def write(self, path: Path, *, session_id: str = "s") -> Path:
         entries = [e.model_copy(update={"session_id": session_id}) for e in self.entries]
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(session_entry_to_json(e) + "\n" for e in entries))
         return path
 
@@ -242,7 +243,8 @@ def test_markdown_escapes_table_delimiters_from_session_content(
     builder = SessionBuilder()
     builder.prompt("first", [(10_000, 0)], system_sections=("[A|B] one",))
     builder.prompt("second", [(11_000, 0)], system_sections=("[A|B] two",))
-    builder.write(tmp_path / "session.jsonl")
+    # Explicit PATH inputs can have any stem, including a table delimiter.
+    builder.write(tmp_path / "run|1.jsonl")
 
     assert main([str(tmp_path), "--details"]) == 0
     output = capsys.readouterr().out
@@ -250,6 +252,7 @@ def test_markdown_escapes_table_delimiters_from_session_content(
     # The label's `|` is escaped, so each row keeps its table's column count.
     assert "| system changed: [A\\|B] | 0 | 0 | 1 |" in output
     detail = next(line for line in output.splitlines() if line.startswith("| all |"))
+    assert "| run\\|1 |" in detail
     assert detail.replace("\\|", "").count("|") == 12  # 11 columns
 
 
@@ -553,6 +556,43 @@ def test_same_second_clone_continued_alone_never_marks_the_source_as_copied(
     assert copied_entry_ids(sessions) == [frozenset(), frozenset()]
     [report] = build_report([source, clone], split_at=None, idle_minutes=60).values()
     assert [p.causes for p in report.prompts] == [(), ()]
+
+
+def test_fork_file_alone_keeps_system_blocks_apart_without_operation_ids(
+    tmp_path: Path,
+) -> None:
+    builder, _ = _fork_and_edit_second_prompt(tmp_path)
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+    # Only the fork file is reported: nothing marks its history as copied, so the
+    # pause between the copied block and the edited prompt's block splits them.
+    fork = builder.write(tmp_path / "fork-only" / builder.fork_file_name(), session_id="fork")
+
+    [report] = build_report([fork], split_at=None, idle_minutes=60).values()
+    [edited] = report.prompts
+
+    assert edited.estimated_instruction_tokens == estimate_tokens((STATIC, CONTEXT))
+    assert edited.causes == ()
+
+
+def test_same_second_clone_continued_in_both_files_marks_neither(tmp_path: Path) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [])
+    builder.response(10_000, 0, provider="openai-codex")
+    created = builder.entries[0].created_at.replace(microsecond=0)
+    shared = list(builder.entries)
+    # The clone continues first, then the source is resumed.
+    builder.prompt("clone only", [])
+    builder.response(11_000, 0, provider="openai-codex")
+    clone = builder.write(tmp_path / builder.file_name(created), session_id="clone")
+    builder.entries = shared
+    builder.leaf = shared[-1].id
+    builder.prompt("source only", [])
+    builder.response(12_000, 0, provider="openai-codex")
+    source = builder.write(tmp_path / builder.file_name(created), session_id="source")
+
+    sessions = [(path, read_session_entries(path)) for path in (source, clone)]
+
+    assert copied_entry_ids(sessions) == [frozenset(), frozenset()]
 
 
 def test_system_messages_with_a_repeated_tag_stay_in_one_block() -> None:

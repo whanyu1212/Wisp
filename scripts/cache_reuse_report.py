@@ -37,7 +37,7 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -77,6 +77,10 @@ REACHED_MAX_SHORTFALL_RATIO = 0.1
 # UTF-8 bytes, so the instructions boundary is approximate.
 INSTRUCTIONS_SLACK_TOKENS = 2048
 DEFAULT_IDLE_MINUTES = 60.0
+# A run appends its system messages back to back (at most 10 ms apart in local
+# logs); a fork's edited prompt follows the copied block after a user pause
+# (at least 5 s). A longer gap therefore starts a new block.
+SYSTEM_BLOCK_MAX_GAP = timedelta(seconds=1)
 # Providers whose adapter declares `supports_prompt_cache_key = True`, so the loop
 # sends them the session-derived `prompt_cache_key` (kept in sync by a test).
 CACHE_KEYED_PROVIDERS = frozenset({"openai", "openai-codex"})
@@ -230,13 +234,17 @@ def split_prompts(
         role = entry.message.role if isinstance(entry, MessageSessionEntry) else None
 
         if isinstance(entry, MessageSessionEntry) and role == "system":
-            # A block continues along its parent chain within one operation, and
-            # never across the boundary between copied and fresh entries.
+            # A block continues along its parent chain within one operation, never
+            # across the boundary between copied and fresh entries, and never across
+            # a pause: a run writes its whole block at once, so a fork's copied block
+            # and the edited prompt's fresh block are split even when the source
+            # file is not in the report or no operation IDs were recorded.
             continues_block = (
                 bool(system_block)
                 and entry.parent_id == system_block[-1].id
                 and entry.operation_id == system_block[-1].operation_id
                 and (entry.id in copied_entry_ids) == (system_block[-1].id in copied_entry_ids)
+                and entry.created_at - system_block[-1].created_at <= SYSTEM_BLOCK_MAX_GAP
             )
             if not continues_block:
                 system_block = []
@@ -650,18 +658,15 @@ def copied_entry_ids(
     """Return, per session file, the entry IDs it copied from another file.
 
     A clone or fork copies one root-to-leaf path of its source, with the original
-    entry IDs, into a new file that starts with exactly that path. An entry is a
-    copy when another file holds the same ID and is the original: its creation
-    second is earlier, or, when the seconds tie and both files continued past
-    the shared path, its continuation was written first. Creation times come
-    from store file names, floored to the second.
+    entry IDs, into a new file. An entry is a copy when another file in the
+    report holds the same ID and was created in an earlier second. Creation
+    times come from store file names, floored to the second.
 
-    Only entries shared with another file are considered: a session's own first
-    message can predate its file's name, because the user message is prepared
-    before the session file is created. So a copy whose source is not in the
-    report is not detected, nor are renamed files, nor a same-second copy when
-    only one of the two files continued. These gaps only omit a ``session
-    changed`` cause; the rules never mark an original as a copy.
+    This only feeds the ``session changed`` cause, so it errs toward missing a
+    copy rather than inventing one. It never marks an original as a copy. It
+    misses a copy whose source is not in the report, renamed files, and files
+    created in the same second (the source stays writable after cloning, so the
+    log cannot tell which continued first).
 
     Args:
         sessions (Sequence[tuple[Path, Sequence[SessionEntry]]]): Each session
@@ -672,63 +677,22 @@ def copied_entry_ids(
     """
 
     created = [session_file_created_at(path) for path, _ in sessions]
-    tree_ids = [
-        [entry.id for entry in entries if is_session_tree_entry(entry)] for _, entries in sessions
-    ]
-    holders: dict[str, list[int]] = {}
-    for index, ids in enumerate(tree_ids):
-        for entry_id in ids:
-            holders.setdefault(entry_id, []).append(index)
-    # For each pair of files sharing entries: when the first entry of `a` that `b`
-    # lacks was written.
-    first_unshared: dict[tuple[int, int], datetime] = {}
-    for a, (_, entries) in enumerate(sessions):
-        partners = {b for entry_id in tree_ids[a] for b in holders[entry_id] if b != a}
-        for b in partners:
-            b_ids = set(tree_ids[b])
-            first = next(
-                (e.created_at for e in entries if is_session_tree_entry(e) and e.id not in b_ids),
-                None,
-            )
-            if first is not None:
-                first_unshared[(a, b)] = first
-
-    def is_original_of(other: int, index: int, entry_id: str) -> bool:
-        other_created, own_created = created[other], created[index]
-        if other_created is None or own_created is None:
-            return False
-        if other_created != own_created:
-            return other_created < own_created
-        # Same creation second: both files begin with the shared path, so compare
-        # what follows it. When both continued, the source's own entries were
-        # written before the copy existed and the copy's after, so the earlier
-        # continuation is the original. This covers a continued fork from a user
-        # message, where a missed copy would merge two system blocks. When only
-        # one continued, it may be the source (continued after the copy) or the
-        # copy (continued after cloning); that is ambiguous, so neither is marked.
-        own_first = first_unshared.get((index, other))
-        other_first = first_unshared.get((other, index))
-        if own_first is None or other_first is None:
-            return False
-        return other_first < own_first
-
-    result: list[frozenset[str]] = []
-    for index, (created_at, (_, entries)) in enumerate(zip(created, sessions, strict=True)):
+    earliest: dict[str, datetime] = {}
+    for created_at, (_, entries) in zip(created, sessions, strict=True):
         if created_at is None:
-            result.append(frozenset())
             continue
-        result.append(
-            frozenset(
-                entry.id
-                for entry in entries
-                if any(
-                    is_original_of(other, index, entry.id)
-                    for other in holders.get(entry.id, ())
-                    if other != index
-                )
-            )
+        for entry in entries:
+            if entry.id not in earliest or created_at < earliest[entry.id]:
+                earliest[entry.id] = created_at
+
+    return [
+        frozenset(
+            entry.id
+            for entry in entries
+            if created_at is not None and earliest.get(entry.id, created_at) < created_at
         )
-    return result
+        for created_at, (_, entries) in zip(created, sessions, strict=True)
+    ]
 
 
 def session_file_created_at(path: Path) -> datetime | None:
@@ -799,7 +763,8 @@ def render_markdown(periods: dict[str, PeriodReport], *, details: bool) -> str:
                 if p.outcome == "previous-tail":
                     continue
                 lines.append(
-                    f"| {name} | {p.session} | {p.started_at:%Y-%m-%d %H:%M} | {p.outcome} | "
+                    f"| {name} | {_cell(p.session)} | {p.started_at:%Y-%m-%d %H:%M} | "
+                    f"{p.outcome} | "
                     f"{p.cached_tokens} | {p.input_tokens} | {p.previous_first_input_tokens} | "
                     f"{p.previous_last_input_tokens} | {p.estimated_instruction_tokens} | "
                     f"{p.idle_minutes:g} | {_cell(', '.join(p.causes)) or '—'} |"
