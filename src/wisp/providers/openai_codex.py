@@ -583,13 +583,19 @@ def _header_safe_session_id(session_id: str) -> str:
     """Return a value that is safe to send as the ``session_id`` header.
 
     Wisp's own keys (``wisp:<hex>``) pass through unchanged. A key an SDK caller
-    supplies may contain non-ASCII text, which httpx cannot encode in a header,
-    or CR/LF, which it would forward and so split the header. Such keys are
+    supplies may contain non-ASCII text, which httpx cannot encode in a header;
+    CR/LF, which it would forward and so split the header; or leading/trailing
+    whitespace, which HTTP/1.1 rejects when the request is sent. Such keys are
     replaced by a stable digest, so requests with the same key still share one
     header value.
     """
 
-    if session_id.isascii() and session_id.isprintable():
+    if (
+        session_id
+        and session_id.isascii()
+        and session_id.isprintable()
+        and session_id == session_id.strip()
+    ):
         return session_id
     return f"sha256:{hashlib.sha256(session_id.encode('utf-8', 'surrogatepass')).hexdigest()}"
 

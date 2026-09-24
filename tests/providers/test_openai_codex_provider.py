@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
+import h11
 import httpx
 import pytest
 from pytest import MonkeyPatch
@@ -271,7 +272,10 @@ def test_openai_codex_provider_sends_prompt_cache_key_when_provided(tmp_path: Pa
     assert provider.seen_headers["session_id"] == "wisp:session-1"
 
 
-@pytest.mark.parametrize("prompt_cache_key", ["wisp:sessión-1", "wisp:a\r\nX-Injected: 1"])
+@pytest.mark.parametrize(
+    "prompt_cache_key",
+    ["wisp:sessión-1", "wisp:a\r\nX-Injected: 1", " wisp:key", "wisp:key ", "wisp:a\tb", ""],
+)
 def test_openai_codex_provider_sends_header_safe_session_id_for_any_cache_key(
     tmp_path: Path, prompt_cache_key: str
 ) -> None:
@@ -300,10 +304,36 @@ def test_openai_codex_provider_sends_header_safe_session_id_for_any_cache_key(
     assert provider.seen_headers is not None
     session_id = provider.seen_headers["session_id"]
     assert session_id.startswith("sha256:")
-    # httpx must be able to build the request, with no extra header smuggled in.
-    request = httpx.Request("POST", "https://example.test", headers=provider.seen_headers)
-    assert request.headers["session_id"] == session_id
-    assert "x-injected" not in request.headers
+    # The header must survive HTTP/1.1 serialization, which is stricter than
+    # building an httpx.Request, with no extra header smuggled in.
+    wire = _serialize_http11_request(provider.seen_headers)
+    assert f"session_id: {session_id}\r\n".encode() in wire
+    assert b"X-Injected" not in wire
+
+
+def test_openai_codex_provider_keeps_wisp_cache_keys_as_the_session_id() -> None:
+    key = "wisp:b7e168e544dc40de906662722af8bcd1"
+
+    headers = openai_codex_module._codex_headers(token="t", account_id="a", session_id=key)
+
+    assert headers["session_id"] == key
+    assert f"session_id: {key}\r\n".encode() in _serialize_http11_request(headers)
+
+
+def _serialize_http11_request(headers: Mapping[str, str]) -> bytes:
+    """Serialize headers the way httpx's HTTP/1.1 transport does, via h11."""
+
+    request = httpx.Request("POST", "https://example.test/codex/responses", headers=headers)
+    connection = h11.Connection(h11.CLIENT)
+    data = connection.send(
+        h11.Request(
+            method=request.method,
+            target=request.url.raw_path,
+            headers=[*request.headers.raw, (b"Content-Length", b"0")],
+        )
+    )
+    assert data is not None
+    return data
 
 
 def test_openai_codex_provider_omits_prompt_cache_key_when_not_provided(
