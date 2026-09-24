@@ -79,7 +79,10 @@ INSTRUCTIONS_SLACK_TOKENS = 2048
 DEFAULT_IDLE_MINUTES = 60.0
 # A run appends its system messages back to back (at most 10 ms apart in local
 # logs); a fork's edited prompt follows the copied block after a user pause
-# (at least 5 s). A longer gap therefore starts a new block.
+# (at least 5 s). A longer gap therefore starts a new block. This is a heuristic
+# that only matters when entries carry no operation ID: nothing guarantees the
+# timing (an SDK fork run immediately could merge two blocks). HY-25 makes every
+# run persist an operation ID, after which this applies to legacy logs only.
 SYSTEM_BLOCK_MAX_GAP = timedelta(seconds=1)
 # Providers whose adapter declares `supports_prompt_cache_key = True`, so the loop
 # sends them the session-derived `prompt_cache_key` (kept in sync by a test).
