@@ -97,6 +97,10 @@ class Prompt:
     started_at: datetime
     system_sections: tuple[str, ...]
     previous: Prompt | None
+    # The previous prompt's run as it stood at the branch point: navigating to a
+    # response mid-run and prompting from there abandons the responses after it.
+    previous_responses: tuple[Response, ...] = ()
+    previous_compactions: int = 0
     responses: list[Response] = field(default_factory=list)
     compactions: int = 0
 
@@ -176,6 +180,9 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
 
     prompts: list[Prompt] = []
     prompt_by_entry_id: dict[str, Prompt] = {}
+    # How far each entry's prompt had progressed when the entry was appended:
+    # (responses so far, compactions so far). A branch point resolves through it.
+    progress_by_entry_id: dict[str, tuple[int, int]] = {}
     system_block: list[MessageSessionEntry] = []
     previous_kind: str | None = None
 
@@ -193,20 +200,30 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
         ):
             parent_id = system_block[0].parent_id
             previous = prompt_by_entry_id.get(parent_id) if parent_id else None
+            response_count, compaction_count = (
+                progress_by_entry_id[parent_id] if previous is not None and parent_id else (0, 0)
+            )
             for item in system_block:
                 if previous is None:
                     prompt_by_entry_id.pop(item.id, None)
+                    progress_by_entry_id.pop(item.id, None)
                 else:
                     prompt_by_entry_id[item.id] = previous
+                    progress_by_entry_id[item.id] = (response_count, compaction_count)
             prompt = Prompt(
                 session=session,
                 entry_id=entry.id,
                 started_at=entry.created_at,
                 system_sections=tuple(item.message.content for item in system_block),
                 previous=previous,
+                previous_responses=(
+                    tuple(previous.responses[:response_count]) if previous is not None else ()
+                ),
+                previous_compactions=compaction_count,
             )
             prompts.append(prompt)
             prompt_by_entry_id[entry.id] = prompt
+            progress_by_entry_id[entry.id] = (0, 0)
         else:
             # Every other entry belongs to the prompt of the branch it was appended
             # to. That is not always the last prompt in the file: navigating to an
@@ -220,6 +237,7 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
                         _response(entry.message, entry.created_at, owner.compactions)
                     )
                 prompt_by_entry_id[entry.id] = owner
+                progress_by_entry_id[entry.id] = (len(owner.responses), owner.compactions)
         previous_kind = role or entry.kind
     return prompts
 
@@ -289,11 +307,12 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
     """
 
     previous = prompt.previous
-    if previous is None or not previous.responses or not prompt.responses:
+    previous_responses = prompt.previous_responses
+    if previous is None or not previous_responses or not prompt.responses:
         return None
     first = prompt.responses[0]
-    previous_first = previous.responses[0]
-    previous_last = previous.responses[-1]
+    previous_first = previous_responses[0]
+    previous_last = previous_responses[-1]
     if (
         first.cached_tokens is None
         or first.input_tokens is None
@@ -320,7 +339,7 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
     changed_section = first_changed_section(previous.system_sections, prompt.system_sections)
     if changed_section is not None:
         causes.append(f"system changed: {changed_section}")
-    compacted_during_previous = previous.compactions > previous_first.compactions_before
+    compacted_during_previous = prompt.previous_compactions > previous_first.compactions_before
     if compacted_during_previous or first.compactions_before > 0:
         causes.append("compaction")
     # Providers never share a prompt cache, even when the model name matches.

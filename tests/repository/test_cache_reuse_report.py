@@ -282,6 +282,27 @@ def test_entries_after_navigating_back_belong_to_the_selected_branch() -> None:
     assert "compaction" in result.causes
 
 
+def test_prompt_from_a_mid_run_response_is_compared_with_that_response() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    mid_run = builder.leaf
+    assert mid_run is not None
+    builder.response(40_000, 9_900)
+    # Navigate to the first response and prompt from there: the run's later 40k
+    # request was abandoned, so a 9.9k hit reaches the branch point's tail.
+    builder.navigate(mid_run)
+    builder.prompt("branch", [(12_000, 9_900)])
+
+    [first, branch] = split_prompts(builder.entries, session="s")
+    result = classify_prompt(branch, idle_minutes=60)
+
+    assert branch.previous is first
+    assert [r.input_tokens for r in branch.previous_responses] == [10_000]
+    assert result is not None
+    assert result.outcome == "previous-tail"
+    assert result.previous_last_input_tokens == 10_000
+
+
 def test_reports_a_provider_change_even_when_the_model_name_matches() -> None:
     builder = SessionBuilder()
     builder.prompt("first", [])
