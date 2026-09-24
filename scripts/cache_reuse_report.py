@@ -191,8 +191,8 @@ def split_prompts(
     historical message branches from the entry just before it, so the new
     prompt continues the conversation up to there.
 
-    Legacy entries without operation IDs start a prompt at a user message that
-    follows a system message, which is how every such run was written.
+    Entries without operation IDs start a prompt by the parent's shape instead
+    (see ``_starts_prompt``).
 
     A clone or fork copies entries from another session. A system block never
     spans copied and fresh entries: a fork from a user message ends with that
@@ -299,18 +299,25 @@ def _starts_prompt(entry: MessageSessionEntry, parent: SessionEntry | None) -> b
 
     With operation IDs, a prompt starts at a user message whose parent belongs to
     a different operation, or which has no parent. Steering messages share the
-    running operation's ID. Legacy entries without IDs start a prompt only after
-    a system message, since every such run wrote its system block first.
+    running operation's ID.
+
+    Without IDs (legacy entries, or SDK runs that pass none), the log does not
+    record which run wrote a message, so the parent's shape decides: a prompt
+    starts after nothing, after a system message, or after a final assistant
+    answer (one without tool calls). Steering is injected after tool results, so
+    a user message there stays in the running prompt. A queued follow-up after a
+    final answer is indistinguishable from a new run and is counted as a prompt.
     """
 
     if entry.message.role != "user":
         return False
     if entry.operation_id is None:
-        return (
-            isinstance(parent, MessageSessionEntry)
-            and parent.message.role == "system"
-            and parent.operation_id is None
-        )
+        if parent is None:
+            return True
+        if not isinstance(parent, MessageSessionEntry) or parent.operation_id is not None:
+            return False
+        role = parent.message.role
+        return role == "system" or (role == "assistant" and not parent.message.tool_calls)
     return (
         parent is None
         or parent.operation_id != entry.operation_id

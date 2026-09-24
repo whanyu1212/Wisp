@@ -17,7 +17,7 @@ from scripts.cache_reuse_report import (
     split_prompts,
 )
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.events import ContextObservation, TokenUsage
+from wisp.events import ContextObservation, TokenUsage, ToolCallSnapshot
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -148,6 +148,19 @@ class SessionBuilder:
     def _append(self, entry: SessionEntry, *, leaf: str | None = None) -> None:
         self.entries.append(entry)
         self.leaf = leaf or entry.id
+
+    def tool_round(self, input_tokens: int, cached_tokens: int) -> None:
+        """Append an assistant tool call and its result, as a tool turn does."""
+
+        usage = TokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=10,
+            total_tokens=input_tokens + 10,
+            cache_read_input_tokens=cached_tokens,
+        )
+        call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
+        self._message(Message(role="assistant", content="", usage=usage, tool_calls=(call,)))
+        self._message(Message(role="tool", content="ok", tool_call_id="call-1", tool_name="read"))
 
     def steer(self, text: str) -> None:
         """Append a steering message inside the running prompt's operation."""
@@ -462,6 +475,35 @@ def test_prompt_without_system_messages_is_recognized() -> None:
     assert prompts[1].system_sections == ()
     assert prompts[1].previous is prompts[0]
     assert outcomes(builder) == [None, "previous-tail"]
+
+
+def test_id_less_prompts_without_system_messages_are_recognized() -> None:
+    builder = SessionBuilder()
+    # `CodingSession.run` defaults `operation_id=None`, and `prompt_messages=()`
+    # persists no system block: the first user entry has no parent, the next
+    # follows the previous run's final answer.
+    builder.prompt("first", [(10_000, 0)], system_sections=())
+    builder.prompt("second", [(11_000, 9_900)], system_sections=())
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert len(prompts) == 2
+    assert prompts[1].previous is prompts[0]
+    assert outcomes(builder) == [None, "previous-tail"]
+
+
+def test_id_less_steering_after_tool_results_stays_in_the_run() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [], system_sections=())
+    builder.tool_round(10_000, 0)
+    builder.steer("also check the tests")
+    builder.response(12_000, 9_900)
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    [first] = split_prompts(builder.entries, session="s")
+
+    assert [r.input_tokens for r in first.responses] == [10_000, 12_000]
 
 
 def test_steering_message_inside_a_run_does_not_start_a_prompt() -> None:
