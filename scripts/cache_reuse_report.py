@@ -35,6 +35,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,6 +73,9 @@ REACHED_SHORTFALL_RATIO = 0.02
 # UTF-8 bytes, so the instructions boundary is approximate.
 INSTRUCTIONS_SLACK_TOKENS = 2048
 DEFAULT_IDLE_MINUTES = 60.0
+# Providers whose adapter declares `supports_prompt_cache_key = True`, so the loop
+# sends them the session-derived `prompt_cache_key` (kept in sync by a test).
+CACHE_KEYED_PROVIDERS = frozenset({"openai", "openai-codex"})
 NO_RECORDED_CAUSE = "no recorded cause"
 
 
@@ -172,23 +176,33 @@ def split_prompts(
     entries: Sequence[SessionEntry],
     *,
     session: str,
-    file_created_at: datetime | None = None,
+    copied_entry_ids: AbstractSet[str] = frozenset(),
 ) -> list[Prompt]:
     """Group session entries into prompts linked to the prompt they continue.
 
-    Wisp writes a block of system messages before every user prompt. The first
-    system entry's parent is the last entry of the prompt it continues, which
-    also holds after branching. A system block belongs to the prompt *before* its
-    user message: editing a historical message branches from the entry just
-    before that message, i.e. the edited prompt's system block, and the new
-    prompt continues the conversation up to there. Blocks are split by operation
-    ID, so a fork's copied block and the edited prompt's fresh block stay apart.
+    A run appends its system messages (possibly none, for an SDK prompt
+    replacement) and then the user message, all under one operation ID. A prompt
+    therefore starts at a user message that begins a new operation: steering
+    messages inside a run share its ID and stay part of it. The prompt's system
+    sections are the system entries directly before it with the same ID, and its
+    previous prompt is found through the parent of the first of them (or of the
+    user message itself when there are none), which also holds after branching.
+    System entries belong to the prompt *before* their user message: editing a
+    historical message branches from the entry just before it, so the new
+    prompt continues the conversation up to there.
+
+    Legacy entries without operation IDs start a prompt at a user message that
+    follows a system message, which is how every such run was written.
+
+    A clone or fork copies entries from another session. A system block never
+    spans copied and fresh entries: a fork from a user message ends with that
+    prompt's copied block, and the edited prompt's fresh block follows it.
 
     Args:
         entries (Sequence[SessionEntry]): Entries in append order.
         session (str): Label used in the report.
-        file_created_at (datetime | None): When the session file was created, if
-            known. Prompts written earlier were copied in by a clone or fork.
+        copied_entry_ids (AbstractSet[str]): Entries this file copied from another
+            session (see ``copied_entry_ids``); empty when unknown.
 
     Returns:
         list[Prompt]: Prompts in append order.
@@ -201,29 +215,24 @@ def split_prompts(
     # appended to an entry extends exactly that path, so abandoned siblings from
     # tree navigation never leak into a later branch.
     branch_by_entry_id: dict[str, _Branch] = {}
+    entry_by_id: dict[str, SessionEntry] = {}
     system_block: list[MessageSessionEntry] = []
-    previous_kind: str | None = None
 
     for entry in entries:
         if not is_session_tree_entry(entry):
             continue
+        parent = entry_by_id.get(entry.parent_id) if entry.parent_id else None
+        entry_by_id[entry.id] = entry
         role = entry.message.role if isinstance(entry, MessageSessionEntry) else None
 
         if isinstance(entry, MessageSessionEntry) and role == "system":
-            # A fork from a user message ends with that prompt's copied system block,
-            # and the edited prompt appends a fresh block right after it. A run
-            # writes its block and user message under one operation ID, so a change
-            # of ID starts a new block. Without IDs (legacy entries, or SDK runs
-            # that pass none), a section tag seen again in the block starts one.
+            # A block continues along its parent chain within one operation, and
+            # never across the boundary between copied and fresh entries.
             continues_block = (
-                previous_kind == "system"
-                and bool(system_block)
+                bool(system_block)
+                and entry.parent_id == system_block[-1].id
                 and entry.operation_id == system_block[-1].operation_id
-                and (
-                    entry.operation_id is not None
-                    or section_label(entry.message.content)
-                    not in {section_label(item.message.content) for item in system_block}
-                )
+                and (entry.id in copied_entry_ids) == (system_block[-1].id in copied_entry_ids)
             )
             if not continues_block:
                 system_block = []
@@ -235,10 +244,18 @@ def split_prompts(
             if continued is not None and entry.parent_id is not None:
                 prompt_by_entry_id[entry.id] = continued
                 branch_by_entry_id[entry.id] = branch_by_entry_id[entry.parent_id]
-        elif (
-            isinstance(entry, MessageSessionEntry) and role == "user" and previous_kind == "system"
-        ):
-            parent_id = system_block[0].parent_id
+        elif isinstance(entry, MessageSessionEntry) and _starts_prompt(entry, parent):
+            # The prompt's own sections end right before it, in the same operation.
+            own_block = (
+                system_block
+                if system_block
+                and system_block[-1].id == entry.parent_id
+                and system_block[-1].operation_id == entry.operation_id
+                and (entry.id in copied_entry_ids) == (system_block[-1].id in copied_entry_ids)
+                else []
+            )
+            system_block = []
+            parent_id = own_block[0].parent_id if own_block else entry.parent_id
             previous = prompt_by_entry_id.get(parent_id) if parent_id else None
             branch_point = (
                 branch_by_entry_id[parent_id] if previous is not None and parent_id else _Branch()
@@ -246,9 +263,9 @@ def split_prompts(
             prompt = Prompt(
                 session=session,
                 entry_id=entry.id,
-                copied=file_created_at is not None and entry.created_at < file_created_at,
+                copied=entry.id in copied_entry_ids,
                 started_at=entry.created_at,
-                system_sections=tuple(item.message.content for item in system_block),
+                system_sections=tuple(item.message.content for item in own_block),
                 previous=previous,
                 previous_responses=branch_point.responses,
                 previous_compactions=branch_point.compactions,
@@ -274,8 +291,31 @@ def split_prompts(
                     branch = _Branch((*branch.responses, response), branch.compactions)
                 prompt_by_entry_id[entry.id] = owner
                 branch_by_entry_id[entry.id] = branch
-        previous_kind = role or entry.kind
     return prompts
+
+
+def _starts_prompt(entry: MessageSessionEntry, parent: SessionEntry | None) -> bool:
+    """Return whether a user message starts a new prompt rather than steering one.
+
+    With operation IDs, a prompt starts at a user message whose parent belongs to
+    a different operation, or which has no parent. Steering messages share the
+    running operation's ID. Legacy entries without IDs start a prompt only after
+    a system message, since every such run wrote its system block first.
+    """
+
+    if entry.message.role != "user":
+        return False
+    if entry.operation_id is None:
+        return (
+            isinstance(parent, MessageSessionEntry)
+            and parent.message.role == "system"
+            and parent.operation_id is None
+        )
+    return (
+        parent is None
+        or parent.operation_id != entry.operation_id
+        or (isinstance(parent, MessageSessionEntry) and parent.message.role == "system")
+    )
 
 
 @dataclass(frozen=True)
@@ -380,9 +420,9 @@ def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | Non
 
     causes: list[str] = []
     # The first new prompt of a clone or fork continues copied history under a new
-    # session ID, which is also the cache namespace Wisp sends (`prompt_cache_key`
-    # and the `session_id` header).
-    if previous.copied and not prompt.copied:
+    # session ID. Only providers that receive `prompt_cache_key` get a
+    # session-derived cache namespace, so only they can miss because of it.
+    if previous.copied and not prompt.copied and first.provider in CACHE_KEYED_PROVIDERS:
         causes.append("session changed")
     changed_section = first_changed_section(previous.system_sections, prompt.system_sections)
     if changed_section is not None:
@@ -547,31 +587,76 @@ def _unique_prompts(files: Sequence[Path]) -> list[Prompt]:
     first one read is kept. Copies still serve as ``previous`` within their file.
     """
 
-    best: dict[str, Prompt] = {}
+    sessions: list[tuple[Path, list[SessionEntry]]] = []
     for path in files:
         try:
-            entries = read_session_entries(path)
+            sessions.append((path, read_session_entries(path)))
         except (SessionError, OSError, UnicodeDecodeError) as exc:
             # One unreadable or malformed file should not hide the rest.
             print(f"warning: skipped {path}: {exc}", file=sys.stderr)
-            continue
-        prompts = split_prompts(
-            entries, session=path.stem, file_created_at=session_file_created_at(path)
-        )
-        for prompt in prompts:
+
+    copied = copied_entry_ids([(path, entries) for path, entries in sessions])
+    best: dict[str, Prompt] = {}
+    for (path, entries), copied_here in zip(sessions, copied, strict=True):
+        for prompt in split_prompts(entries, session=path.stem, copied_entry_ids=copied_here):
             kept = best.get(prompt.entry_id)
             if kept is None or len(prompt.responses) > len(kept.responses):
                 best[prompt.entry_id] = prompt
     return list(best.values())
 
 
-def session_file_created_at(path: Path) -> datetime | None:
-    """Return the creation time encoded in a store-named session file, if any.
+def copied_entry_ids(
+    sessions: Sequence[tuple[Path, Sequence[SessionEntry]]],
+) -> list[frozenset[str]]:
+    """Return, per session file, the entry IDs it copied from another file.
 
-    ``JsonlSessionStore.create`` names files ``YYYYMMDD-HHMMSS-<id8>.jsonl`` in
-    UTC. The time is floored to the second, so an entry written after creation
-    is never mistaken for a copy; files named otherwise report None.
+    A clone or fork copies its source's entries with their original IDs into a
+    new file created after they were written. An entry is a copy when either:
+
+    * another file with a strictly earlier creation time holds the same ID, or
+    * it was written before its own file's creation second began.
+
+    Creation times come from store file names, floored to the second, and an
+    entry written after its file was created is never earlier than that second.
+    Both rules can therefore miss a copy (same second, renamed files, or a source
+    outside the report) but never report a false one.
+
+    Args:
+        sessions (Sequence[tuple[Path, Sequence[SessionEntry]]]): Each session
+            file with its entries.
+
+    Returns:
+        list[frozenset[str]]: Copied entry IDs, in the order of ``sessions``.
     """
+
+    created = [session_file_created_at(path) for path, _ in sessions]
+    earliest_holder: dict[str, datetime] = {}
+    for created_at, (_, entries) in zip(created, sessions, strict=True):
+        if created_at is None:
+            continue
+        for entry in entries:
+            known = earliest_holder.get(entry.id)
+            if known is None or created_at < known:
+                earliest_holder[entry.id] = created_at
+
+    result: list[frozenset[str]] = []
+    for created_at, (_, entries) in zip(created, sessions, strict=True):
+        result.append(
+            frozenset(
+                entry.id
+                for entry in entries
+                if created_at is not None
+                and (
+                    earliest_holder.get(entry.id, created_at) < created_at
+                    or entry.created_at < created_at
+                )
+            )
+        )
+    return result
+
+
+def session_file_created_at(path: Path) -> datetime | None:
+    """Return the UTC creation second encoded in a store-named session file."""
 
     match = _SESSION_FILE_NAME.fullmatch(path.stem)
     if match is None:
@@ -579,6 +664,7 @@ def session_file_created_at(path: Path) -> datetime | None:
     return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
 
 
+# `JsonlSessionStore.create` names files `YYYYMMDD-HHMMSS-<first 8 hex of the id>`.
 _SESSION_FILE_NAME = re.compile(r"(\d{8}-\d{6})-[0-9a-f]{8}")
 
 

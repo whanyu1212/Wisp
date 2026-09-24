@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from scripts.cache_reuse_report import (
+    CACHE_KEYED_PROVIDERS,
     build_report,
     classify_prompt,
     classify_within_run,
+    estimate_tokens,
     main,
     read_session_entries,
     split_prompts,
@@ -38,6 +41,8 @@ class SessionBuilder:
         # Each run writes its system block, user message, and responses under one ID.
         self.operation_id = "prompt-0"
         self.prompt_count = 0
+        self.file_count = 0
+        self.fork_created_at: datetime | None = None
 
     def prompt(
         self,
@@ -45,6 +50,7 @@ class SessionBuilder:
         responses: list[tuple[int, int]],
         *,
         context: str = CONTEXT,
+        system_sections: tuple[str, ...] | None = None,
         parent: str | None = None,
         minutes_later: float = 1,
     ) -> str:
@@ -55,7 +61,7 @@ class SessionBuilder:
         self.operation_id = f"prompt-{self.prompt_count}"
         if parent is not None:
             self.leaf = parent
-        for section in (STATIC, context):
+        for section in (STATIC, context) if system_sections is None else system_sections:
             self._message(Message(role="system", content=section))
         self._message(Message(role="user", content=text))
         for input_tokens, cached_tokens in responses:
@@ -142,6 +148,22 @@ class SessionBuilder:
     def _append(self, entry: SessionEntry, *, leaf: str | None = None) -> None:
         self.entries.append(entry)
         self.leaf = leaf or entry.id
+
+    def steer(self, text: str) -> None:
+        """Append a steering message inside the running prompt's operation."""
+
+        self._message(Message(role="user", content=text))
+
+    def file_name(self, created_at: datetime) -> str:
+        """Return a store-style file name; each call gets a distinct id suffix."""
+
+        self.file_count += 1
+        suffix = "abcdef"[self.file_count - 1] * 8
+        return f"{created_at:%Y%m%d-%H%M%S}-{suffix}.jsonl"
+
+    def fork_file_name(self) -> str:
+        assert self.fork_created_at is not None
+        return self.file_name(self.fork_created_at)
 
     def write(self, path: Path, *, session_id: str = "s") -> Path:
         entries = [e.model_copy(update={"session_id": session_id}) for e in self.entries]
@@ -378,44 +400,144 @@ def test_fork_from_a_user_message_keeps_the_projected_and_fresh_system_blocks_ap
     assert result.causes == ()
 
 
-def test_fork_blocks_stay_apart_without_operation_ids() -> None:
+def _fork_and_edit_second_prompt(*, provider: str = "anthropic") -> SessionBuilder:
+    """Build a fork from the second prompt's user message, then its edited prompt.
+
+    The fork's history ends with the second prompt's copied system block (without
+    its user message); the edited prompt appends a fresh block right after it.
+    """
+
     builder = SessionBuilder()
-    builder.prompt("first", [(10_000, 0)])
-    builder.prompt("second", [(20_000, 9_900)])
+    builder.prompt("first", [])
+    builder.response(10_000, 0, provider=provider)
+    builder.prompt("second", [])
+    builder.response(20_000, 9_900, provider=provider)
     projected_block_end = builder.last_system_entry_id()
-    fork = builder.entries[: builder.entries.index(_entry(builder, projected_block_end)) + 1]
-    builder.entries = list(fork)
+    builder.entries = builder.entries[
+        : builder.entries.index(_entry(builder, projected_block_end)) + 1
+    ]
     builder.leaf = projected_block_end
-    builder.prompt("second, edited", [(11_000, 9_900)])
+    builder.fork_created_at = builder.clock + timedelta(minutes=5)
+    builder.clock = builder.fork_created_at + timedelta(seconds=30)
+    builder.prompt("second, edited", [], minutes_later=0)
+    builder.response(11_000, 0, provider=provider)
+    return builder
+
+
+def test_fork_blocks_stay_apart_without_operation_ids(tmp_path: Path) -> None:
+    builder = _fork_and_edit_second_prompt()
     # SDK runs may pass no operation ID, and legacy entries carry none.
     builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
-
-    prompts = split_prompts(builder.entries, session="s")
-    result = classify_prompt(prompts[1], idle_minutes=60)
-
-    assert prompts[1].system_sections == (STATIC, CONTEXT)
-    assert prompts[1].previous is prompts[0]
-    assert result is not None
-    assert result.causes == ()
-
-
-def test_first_prompt_of_a_fork_reports_the_session_change(tmp_path: Path) -> None:
-    builder = SessionBuilder()
-    builder.prompt("first", [(10_000, 0)])
-    builder.prompt("second", [(11_000, 10_900)])
-    # The fork file is created after the copied history was written.
-    fork_created = builder.clock + timedelta(minutes=5)
-    builder.clock = fork_created + timedelta(minutes=1)
-    builder.prompt("fork only", [(12_000, 0)], minutes_later=0)
-    name = f"{fork_created:%Y%m%d-%H%M%S}-0123abcd.jsonl"
-    fork = builder.write(tmp_path / name, session_id="fork")
+    fork = builder.write(tmp_path / builder.fork_file_name(), session_id="fork")
 
     [report] = build_report([fork], split_at=None, idle_minutes=60).values()
+    [edited] = report.prompts
 
-    assert [(p.outcome, p.causes) for p in report.prompts] == [
-        ("previous-tail", ()),
-        ("zero", ("session changed",)),
+    assert edited.estimated_instruction_tokens == estimate_tokens((STATIC, CONTEXT))
+    assert edited.causes == ()
+
+
+def test_system_messages_with_a_repeated_tag_stay_in_one_block() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    # An SDK run without an operation ID may send two sections with the same tag.
+    sections = ("[CUSTOM]\na", "[CUSTOM]\nb")
+    builder.prompt("second", [(11_000, 0)], system_sections=sections)
+    builder.entries = [e.model_copy(update={"operation_id": None}) for e in builder.entries]
+
+    [_, second] = split_prompts(builder.entries, session="s")
+
+    assert second.system_sections == sections
+
+
+def test_prompt_without_system_messages_is_recognized() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    # An SDK prompt replacement (`prompt_messages=()`) persists no system block.
+    builder.prompt("second", [(11_000, 9_900)], system_sections=())
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert len(prompts) == 2
+    assert prompts[1].system_sections == ()
+    assert prompts[1].previous is prompts[0]
+    assert outcomes(builder) == [None, "previous-tail"]
+
+
+def test_steering_message_inside_a_run_does_not_start_a_prompt() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.steer("also check the tests")
+    builder.response(12_000, 9_900)
+
+    [first] = split_prompts(builder.entries, session="s")
+
+    assert [r.input_tokens for r in first.responses] == [10_000, 12_000]
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_causes"),
+    [("openai-codex", ("session changed",)), ("anthropic", ())],
+)
+def test_first_prompt_of_a_fork_reports_a_session_change_for_cache_keyed_providers(
+    tmp_path: Path, provider: str, expected_causes: tuple[str, ...]
+) -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [])
+    builder.response(10_000, 0, provider=provider)
+    builder.clock += timedelta(milliseconds=500)
+    builder.prompt("second", [])
+    builder.response(11_000, 10_900, provider=provider)
+    source = builder.write(tmp_path / builder.file_name(START), session_id="source")
+    # The fork file is created within the same second as the copied user message
+    # (12:02:01.500 copied, file named 12:02:01): comparing against the floored
+    # file time alone would call it fresh. The older source file identifies it.
+    second_user = next(
+        e
+        for e in builder.entries
+        if isinstance(e, MessageSessionEntry) and e.message.content == "second"
+    )
+    fork_created = second_user.created_at.replace(microsecond=0)
+    builder.clock = builder.clock + timedelta(seconds=30)
+    builder.prompt("fork only", [], minutes_later=0)
+    builder.response(12_000, 0, provider=provider)
+    fork = builder.write(tmp_path / builder.file_name(fork_created), session_id="fork")
+
+    [report] = build_report([source, fork], split_at=None, idle_minutes=60).values()
+
+    assert [(p.session[-8:], p.outcome, p.causes) for p in report.prompts] == [
+        ("aaaaaaaa", "previous-tail", ()),
+        ("bbbbbbbb", "zero", expected_causes),
     ]
+
+
+def test_cache_keyed_providers_match_the_adapters() -> None:
+    from wisp.providers import (
+        AnthropicProvider,
+        DeepSeekProvider,
+        GoogleProvider,
+        OpenAICodexProvider,
+        OpenAICompatibleProvider,
+        OpenAIProvider,
+        XAIProvider,
+    )
+
+    adapters = (
+        AnthropicProvider,
+        DeepSeekProvider,
+        GoogleProvider,
+        OpenAICodexProvider,
+        OpenAICompatibleProvider,
+        OpenAIProvider,
+        XAIProvider,
+    )
+    keyed = {
+        cast(str, adapter.name)
+        for adapter in adapters
+        if getattr(adapter, "supports_prompt_cache_key", False) is True
+    }
+
+    assert keyed == CACHE_KEYED_PROVIDERS
 
 
 def test_the_most_complete_copy_of_a_prompt_is_counted(tmp_path: Path) -> None:
