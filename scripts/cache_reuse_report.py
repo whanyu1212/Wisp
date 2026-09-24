@@ -158,7 +158,10 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
 
     Wisp writes a block of system messages before every user prompt. The first
     system entry's parent is the last entry of the prompt it continues, which
-    also holds after branching.
+    also holds after branching. A system block belongs to the prompt *before* its
+    user message: editing a historical message branches from the entry just
+    before that message, i.e. the edited prompt's system block, and the new
+    prompt continues the conversation up to there.
 
     Args:
         entries (Sequence[SessionEntry]): Entries in append order.
@@ -183,16 +186,20 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
                 system_block.append(entry)
             elif message.role == "user" and previous_kind == "system":
                 parent_id = system_block[0].parent_id
+                previous = prompt_by_entry_id.get(parent_id) if parent_id else None
+                for item in system_block:
+                    if previous is None:
+                        prompt_by_entry_id.pop(item.id, None)
+                    else:
+                        prompt_by_entry_id[item.id] = previous
                 current = Prompt(
                     session=session,
                     entry_id=entry.id,
                     started_at=entry.created_at,
                     system_sections=tuple(item.message.content for item in system_block),
-                    previous=prompt_by_entry_id.get(parent_id) if parent_id else None,
+                    previous=previous,
                 )
                 prompts.append(current)
-                for item in system_block:
-                    prompt_by_entry_id[item.id] = current
             elif message.role == "assistant" and current is not None:
                 response = _response(message, entry.created_at, current.compactions)
                 if response is not None:
@@ -202,25 +209,59 @@ def split_prompts(entries: Sequence[SessionEntry], *, session: str) -> list[Prom
             if current is not None:
                 current.compactions += 1
             previous_kind = "compaction"
-        if current is not None and is_session_tree_entry(entry):
-            prompt_by_entry_id.setdefault(entry.id, current)
+        is_system = isinstance(entry, MessageSessionEntry) and entry.message.role == "system"
+        if current is not None and is_session_tree_entry(entry) and not is_system:
+            prompt_by_entry_id[entry.id] = current
     return prompts
 
 
 def _response(message: Message, created_at: datetime, compactions: int) -> Response | None:
+    """Project one assistant message's usage, or None when it cannot be compared.
+
+    Responses whose provider did not report cache reads are dropped rather than
+    counted as zero-cache misses: ``None`` means "not reported", not "nothing cached".
+    """
+
     usage = message.usage
-    if usage is None or usage.input_tokens <= 0:
+    if usage is None or usage.cache_read_input_tokens is None:
+        return None
+    observation = message.context_observation
+    input_tokens = request_input_tokens(message)
+    if input_tokens <= 0:
         return None
     model = message.cost.model if message.cost is not None else None
-    if model is None and message.context_observation is not None:
-        model = message.context_observation.model
+    if model is None and observation is not None:
+        model = observation.model
     return Response(
-        input_tokens=usage.input_tokens,
-        cached_tokens=usage.cache_read_input_tokens or 0,
+        input_tokens=input_tokens,
+        cached_tokens=usage.cache_read_input_tokens,
         model=model,
         created_at=created_at,
         compactions_before=compactions,
     )
+
+
+def request_input_tokens(message: Message) -> int:
+    """Return the full size of the request that produced an assistant message.
+
+    Anthropic reports ``input_tokens`` excluding cache reads and writes. The loop
+    records the full request size in ``context_observation.input_tokens``; older
+    records without an observation fall back to adding the cache counts back for
+    Anthropic. Other providers report cached tokens as part of ``input_tokens``.
+    """
+
+    usage = message.usage
+    assert usage is not None
+    if message.context_observation is not None:
+        return message.context_observation.input_tokens
+    provider = message.cost.provider if message.cost is not None else None
+    if provider == "anthropic":
+        return (
+            usage.input_tokens
+            + (usage.cache_read_input_tokens or 0)
+            + (usage.cache_write_input_tokens or 0)
+        )
+    return usage.input_tokens
 
 
 def classify_prompt(prompt: Prompt, *, idle_minutes: float) -> PromptReuse | None:

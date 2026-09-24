@@ -14,7 +14,7 @@ from scripts.cache_reuse_report import (
     split_prompts,
 )
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.events import TokenUsage
+from wisp.events import ContextObservation, TokenUsage
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     MessageSessionEntry,
@@ -57,14 +57,40 @@ class SessionBuilder:
         assert self.leaf is not None
         return self.leaf
 
-    def response(self, input_tokens: int, cached_tokens: int) -> None:
+    def response(
+        self,
+        input_tokens: int,
+        cached_tokens: int | None,
+        *,
+        observed_input_tokens: int | None = None,
+    ) -> None:
         usage = TokenUsage(
             input_tokens=input_tokens,
             output_tokens=10,
             total_tokens=input_tokens + 10,
             cache_read_input_tokens=cached_tokens,
         )
-        self._message(Message(role="assistant", content="ok", usage=usage))
+        observation = (
+            ContextObservation(
+                provider="anthropic",
+                model="claude-test",
+                input_tokens=observed_input_tokens,
+                message_count=1,
+                context_fingerprint="f",
+            )
+            if observed_input_tokens is not None
+            else None
+        )
+        self._message(
+            Message(role="assistant", content="ok", usage=usage, context_observation=observation)
+        )
+
+    def last_system_entry_id(self) -> str:
+        return next(
+            e.id
+            for e in reversed(self.entries)
+            if isinstance(e, MessageSessionEntry) and e.message.role == "system"
+        )
 
     def compaction(self) -> None:
         assert self.leaf is not None
@@ -160,6 +186,49 @@ def test_branched_prompt_is_compared_with_the_prompt_it_continues() -> None:
 
     assert prompts[2].previous is prompts[0]
     assert outcomes(builder) == [None, "previous-tail", "previous-tail"]
+
+
+def test_edited_prompt_is_compared_with_the_prompt_before_the_edited_one() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, 0)])
+    builder.prompt("second", [(40_000, 9_900)])
+    # Editing "second" branches from the entry just before it: its system block.
+    edit_point = builder.last_system_entry_id()
+    builder.prompt("second, edited", [(11_000, 9_900)], parent=edit_point)
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert prompts[2].previous is prompts[0]
+    assert outcomes(builder) == [None, "previous-tail", "previous-tail"]
+
+
+def test_responses_without_reported_cache_reads_are_not_counted_as_misses() -> None:
+    builder = SessionBuilder()
+    builder.prompt("first", [(10_000, None), (12_000, None)])
+    builder.prompt("second", [(13_000, None)])
+
+    prompts = split_prompts(builder.entries, session="s")
+
+    assert [p.responses for p in prompts] == [[], []]
+    assert outcomes(builder) == [None, None]
+    assert classify_within_run(prompts[0]) == {}
+
+
+def test_uses_the_observed_full_request_size_when_usage_excludes_cached_input() -> None:
+    builder = SessionBuilder()
+    # Anthropic-style usage: input_tokens counts only uncached input.
+    builder.prompt("first", [(2_000, 0)])
+    builder.response(1_000, 48_000, observed_input_tokens=50_000)
+    builder.prompt("second", [])
+    builder.response(30_000, 30_000, observed_input_tokens=60_000)
+
+    [first, second] = split_prompts(builder.entries, session="s")
+    result = classify_prompt(second, idle_minutes=60)
+
+    assert [r.input_tokens for r in first.responses] == [2_000, 50_000]
+    assert result is not None
+    # 30k of a 50k previous request is partial, not previous-tail.
+    assert result.outcome == "partial"
 
 
 def test_prompt_without_usable_responses_is_not_classified() -> None:
