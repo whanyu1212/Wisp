@@ -58,6 +58,7 @@ from wisp.providers.events import (
     ProviderRetrying,
     ProviderTextDelta,
     ProviderToolCallCompleted,
+    ProviderUsage,
 )
 from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
@@ -651,7 +652,13 @@ def _init_git_repo(repo: Path) -> None:
 
 
 def _reply() -> list[ProviderEvent]:
-    return [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]
+    # Real providers report usage; the loop only records a context observation
+    # (and so the request's prompt-cache key) for responses that carry it.
+    usage = ProviderUsage(input_tokens=100, output_tokens=5, total_tokens=105)
+    return [
+        ProviderResponseStarted(model="test"),
+        ProviderResponseCompleted(content="ok", usage=usage),
+    ]
 
 
 def _system_prompt(provider: ScriptedProvider, call_index: int) -> tuple[str, ...]:
@@ -752,6 +759,16 @@ class _OtherProvider(ScriptedProvider):
     name = "other-scripted"
 
 
+class _KeyedProvider(ScriptedProvider):
+    """A scripted adapter that accepts a prompt-cache key, like the OpenAI adapters."""
+
+    supports_prompt_cache_key = True
+
+
+class _OtherKeyedProvider(_KeyedProvider):
+    name = "other-keyed"
+
+
 @pytest.mark.parametrize("change", ["clone", "fork", "provider", "model"])
 def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
     tmp_path: Path,
@@ -760,17 +777,19 @@ def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
     # Reusing an older snapshot only helps while the provider cache still
     # applies. A clone or fork gets a new cache key, and caches are not shared
     # across providers or models, so these read the current status instead.
+    # The clone and fork happen immediately, within the second of the source's
+    # last response: the recorded key tells them apart, not the file's name.
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     store = JsonlSessionStore(tmp_path / "sessions")
     source = store.create()
     after: ScriptedProvider = (
-        _OtherProvider([_reply()]) if change == "provider" else ScriptedProvider([_reply()])
+        _OtherKeyedProvider([_reply()]) if change == "provider" else _KeyedProvider([_reply()])
     )
 
     async def run() -> None:
         first = CodingSession(
-            provider=ScriptedProvider([_reply(), _reply()]),
+            provider=_KeyedProvider([_reply(), _reply()]),
             sessions=store,
             tool_context=ToolContext(cwd=repo),
             trusted=True,
@@ -780,10 +799,8 @@ def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
         (repo / "edit.txt").write_text("changed\n")
         target = source
         if change == "clone":
-            await anyio.sleep(1.1)  # the clone's file is named after a later second
             target = await store.clone(source, expected_active_leaf_id=source.read_active_leaf_id())
         elif change == "fork":
-            await anyio.sleep(1.1)
             second_user = [
                 entry.id
                 for entry in source.read_entries()
@@ -799,6 +816,83 @@ def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
             tool_context=ToolContext(cwd=repo),
             trusted=True,
             model="another-model" if change == "model" else None,
+        )
+        _ = [event async for event in resumed.run("resumed", session=target)]
+
+    anyio.run(run)
+
+    assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
+
+
+def test_responses_record_the_prompt_cache_key_their_request_was_sent_with(
+    tmp_path: Path,
+) -> None:
+    store = JsonlSessionStore(tmp_path / "sessions")
+    keyed, keyless = store.create(), store.create()
+
+    async def run() -> None:
+        for provider, session in (
+            (_KeyedProvider([_reply()]), keyed),
+            (ScriptedProvider([_reply()]), keyless),
+        ):
+            agent = CodingSession(provider=provider, sessions=store, trusted=False)
+            _ = [event async for event in agent.run("hi", session=session)]
+
+    anyio.run(run)
+
+    def recorded_key(session_id: str) -> str | None:
+        session = JsonlSessionStore(tmp_path / "sessions").load(session_id)
+        [response] = [m for m in session.read_messages() if m.role == "assistant"]
+        assert response.context_observation is not None
+        return response.context_observation.prompt_cache_key
+
+    assert recorded_key(keyed.session_id) == _prompt_cache_key(keyed.session_id)
+    # A keyless adapter is opened without the key, so none is recorded.
+    assert recorded_key(keyless.session_id) is None
+
+
+def test_resume_with_a_keyed_provider_recovers_the_snapshot(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    before, after = _KeyedProvider([_reply()]), _KeyedProvider([_reply()])
+
+    async def run() -> None:
+        for provider, prompt in ((before, "first"), (after, "second")):
+            agent = CodingSession(
+                provider=provider, sessions=store, tool_context=ToolContext(cwd=repo), trusted=True
+            )
+            _ = [event async for event in agent.run(prompt, session=session)]
+            (repo / "edit.txt").write_text("changed\n")
+
+    anyio.run(run)
+
+    assert _system_prompt(after, 0) == _system_prompt(before, 0)
+
+
+def test_keyless_clone_in_a_later_second_still_reads_git_again(tmp_path: Path) -> None:
+    # Without keys (a keyless provider, or records written before keys were
+    # stored) the clone check falls back to the file's creation second.
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    source = store.create()
+    after = ScriptedProvider([_reply()])
+
+    async def run() -> None:
+        first = CodingSession(
+            provider=ScriptedProvider([_reply()]),
+            sessions=store,
+            tool_context=ToolContext(cwd=repo),
+            trusted=True,
+        )
+        _ = [event async for event in first.run("first", session=source)]
+        (repo / "edit.txt").write_text("changed\n")
+        await anyio.sleep(1.1)
+        target = await store.clone(source, expected_active_leaf_id=source.read_active_leaf_id())
+        resumed = CodingSession(
+            provider=after, sessions=store, tool_context=ToolContext(cwd=repo), trusted=True
         )
         _ = [event async for event in resumed.run("resumed", session=target)]
 

@@ -1799,6 +1799,13 @@ class CodingSession:
                 cwd,
                 provider=self.provider.name,
                 model=self.model,
+                # The key this run's requests will carry: the loop only sends one to
+                # adapters that declare the capability (as it records it).
+                prompt_cache_key=(
+                    _prompt_cache_key(session.session_id)
+                    if getattr(self.provider, "supports_prompt_cache_key", False) is True
+                    else None
+                ),
             )
             if session is not None
             else None
@@ -2022,6 +2029,7 @@ def _persisted_repository_status(
     *,
     provider: str,
     model: str | None,
+    prompt_cache_key: str | None,
 ) -> str | None:
     """Recover the Git snapshot the session's latest run sent for ``cwd``, if reusable.
 
@@ -2030,8 +2038,8 @@ def _persisted_repository_status(
     same prompt cache as the latest recorded response:
 
     * the same provider and model (caches are not shared across either);
-    * the same session: a clone or fork copies history into a new session, whose
-      new ``prompt_cache_key`` cannot match anything cached for the source;
+    * the same prompt-cache key: a clone or fork copies history into a new
+      session, whose new key cannot match anything cached for the source;
     * a recent response, within `RESUMED_REPOSITORY_STATUS_MAX_AGE`.
 
     Only the newest project context on the active path is considered. In every
@@ -2043,6 +2051,8 @@ def _persisted_repository_status(
         cwd (Path): Working directory the new run describes.
         provider (str): Provider the new run sends to.
         model (str | None): Model the new run requests; None for the provider default.
+        prompt_cache_key (str | None): Key the new run will send; None when the
+            provider takes no key.
 
     Returns:
         str | None: The snapshot text to reuse verbatim, or None to read Git.
@@ -2058,7 +2068,11 @@ def _persisted_repository_status(
             latest_response = entry
         if message.role == "system" and message.content.startswith(_PROJECT_CONTEXT_HEADER):
             if latest_response is None or not _continues_prompt_cache(
-                latest_response, session=session, provider=provider, model=model
+                latest_response,
+                session=session,
+                provider=provider,
+                model=model,
+                prompt_cache_key=prompt_cache_key,
             ):
                 return None
             return recover_repository_status(message.content, cwd)
@@ -2071,6 +2085,7 @@ def _continues_prompt_cache(
     session: JsonlSession,
     provider: str,
     model: str | None,
+    prompt_cache_key: str | None,
 ) -> bool:
     """Return whether a new run can still hit the cache ``response`` was built in."""
 
@@ -2088,8 +2103,17 @@ def _continues_prompt_cache(
         return False
     if utc_now() - response.created_at > RESUMED_REPOSITORY_STATUS_MAX_AGE:
         return False
-    # Clones and forks copy entries into a new session file, so a copied response
-    # predates that file. The store names files after their UTC creation second.
+    recorded_key = observation.prompt_cache_key if observation is not None else None
+    if recorded_key is not None or prompt_cache_key is not None:
+        # The request recorded the key it was sent with. A response copied in by a
+        # clone or fork carries its source's key, so this is exact. A response
+        # without a key (an older record, or a keyless provider) cannot match a
+        # keyed run, which is always correct to refresh.
+        return recorded_key == prompt_cache_key
+    # Neither side has a key: a provider that takes none, or a record written
+    # before keys were persisted (a `None` key is not serialized, so the two look
+    # alike). A copied response predates the clone's file, whose name holds its
+    # UTC creation second; this floors, so a same-second copy can still pass.
     created = _session_file_created_at(session.path)
     return created is None or response.created_at >= created
 

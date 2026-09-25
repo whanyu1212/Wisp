@@ -65,6 +65,7 @@ def observe_context(
     provider: str,
     model: str | None,
     input_tokens: int,
+    prompt_cache_key: str | None = None,
 ) -> ContextObservation:
     """Capture provider-reported input usage for one exact request context."""
 
@@ -74,6 +75,7 @@ def observe_context(
         input_tokens=input_tokens,
         message_count=len(messages),
         context_fingerprint=context_fingerprint(messages, tools),
+        prompt_cache_key=prompt_cache_key,
     )
 
 
