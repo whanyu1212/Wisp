@@ -312,9 +312,6 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         .and_then(|result| result.get("status"))
         .and_then(Value::as_str);
     let persisted_is_error = optional_bool(message, index, "is_error")?.unwrap_or(false);
-    let legacy_interrupted = status.is_none()
-        && persisted_is_error
-        && string(message, index, "content")? == INTERRUPTED_TOOL_RESULT_TEXT;
     let is_error = persisted_is_error || matches!(status, Some("error" | "denied"));
     let (output, output_locally_truncated) = bounded_content(
         string(message, index, "content")?,
@@ -381,8 +378,7 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
             || output_locally_truncated
             || before_text_locally_truncated,
         process_id: None,
-        process_state: (status == Some("cancelled") || legacy_interrupted)
-            .then(|| "cancelled".into()),
+        process_state: (status == Some("cancelled")).then(|| "cancelled".into()),
         process_error: None,
         stdout: None,
         stdout_source_bytes: 0,
@@ -1635,7 +1631,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_interrupted_process_results_project_as_cancelled() {
+    fn interrupted_process_results_project_as_cancelled() {
         let mut assistant = message("assistant", "");
         assistant["tool_calls"] = json!([{
             "call_id": "poll-interrupted",
@@ -1646,6 +1642,7 @@ mod tests {
         result["tool_call_id"] = json!("poll-interrupted");
         result["tool_name"] = json!("bash");
         result["is_error"] = json!(true);
+        result["tool_result"] = json!({"status": "cancelled"});
 
         let transcript = project_rpc_messages(&[assistant, result]).unwrap();
         let card = transcript
