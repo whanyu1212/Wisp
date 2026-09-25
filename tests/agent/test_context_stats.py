@@ -588,62 +588,65 @@ def test_session_stats_sum_cache_usage_only_when_every_record_reports_it() -> No
 
 
 def test_session_stats_use_latest_post_compaction_assistant_observation() -> None:
-    user = MessageSessionEntry(id="user", session_id="s", message=Message(role="user", content="a"))
-    assistant = MessageSessionEntry(
-        id="assistant",
-        session_id="s",
-        message=Message(role="assistant", content="b", finish_reason="stop"),
-    )
+    def assistant(entry_id: str, content: str, observed: int | None = None) -> MessageSessionEntry:
+        observation = (
+            observe_context((), provider="test", model="model", input_tokens=observed)
+            if observed is not None
+            else None
+        )
+        return MessageSessionEntry(
+            id=entry_id,
+            session_id="s",
+            message=Message(
+                role="assistant",
+                content=content,
+                finish_reason="stop",
+                context_observation=observation,
+            ),
+        )
+
+    def user(entry_id: str, content: str) -> MessageSessionEntry:
+        return MessageSessionEntry(
+            id=entry_id, session_id="s", message=Message(role="user", content=content)
+        )
+
     compaction = CompactionSessionEntry(
         id="compact",
         session_id="s",
         compaction=CompactionRecord(
             summary="Earlier work",
-            replaced_entry_ids=("user",),
+            replaced_entry_ids=("user", "assistant"),
             provider="test",
         ),
     )
     # The retained assistant alone is invalid replay, so retain a complete second turn.
-    retained_user = MessageSessionEntry(
-        id="retained-user", session_id="s", message=Message(role="user", content="c")
+    # Its observation predates the compaction and must not describe the active context.
+    entries = linked_entries(
+        (
+            user("user", "a"),
+            assistant("assistant", "b"),
+            user("retained-user", "c"),
+            assistant("retained-assistant", "d", observed=99),
+            compaction,
+            user("post-user", "e"),
+            assistant("post-assistant", "f"),
+        )
     )
-    retained_assistant = MessageSessionEntry(
-        id="retained-assistant",
-        session_id="s",
-        message=Message(role="assistant", content="d", finish_reason="stop"),
-    )
-    compaction = compaction.model_copy(
-        update={
-            "compaction": compaction.compaction.model_copy(
-                update={"replaced_entry_ids": ("user", "assistant")}
-            )
-        }
-    )
-    post_user = MessageSessionEntry(
-        id="post-user", session_id="s", message=Message(role="user", content="e")
-    )
-    post_assistant = MessageSessionEntry(
-        id="post-assistant",
-        session_id="s",
-        message=Message(
-            role="assistant",
-            content="f",
-            finish_reason="stop",
-            usage=_usage(12, 3, 21),
+    request = replay_session_entries(entries).messages[:-1]
+    observed = observe_context(request, provider="test", model="model", input_tokens=21)
+    post_assistant = entries[-1]
+    assert isinstance(post_assistant, MessageSessionEntry)
+    entries = (
+        *entries[:-1],
+        post_assistant.model_copy(
+            update={
+                "message": post_assistant.message.model_copy(
+                    update={"context_observation": observed}
+                )
+            }
         ),
     )
-    entries = (
-        user,
-        assistant,
-        retained_user,
-        retained_assistant,
-        compaction,
-        post_user,
-        post_assistant,
-    )
-    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
-    fingerprint = context_fingerprint(replay.messages)
 
     stats = build_session_stats(
         session_id="s",
@@ -653,29 +656,10 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
         tools=(),
         context_window=None,
         reserve_tokens=16,
-        observed_tokens=21,
-        observed_is_current=True,
-        observed_entry_id="post-assistant",
-        observed_context_fingerprint=fingerprint,
     )
 
     assert stats.context.observed_tokens == 21
     assert stats.context.observed_is_current is True
-
-    changed = build_session_stats(
-        session_id="s",
-        entries=entries,
-        replay=replay,
-        provider_messages=(*replay.messages, Message(role="system", content="changed")),
-        tools=(),
-        context_window=None,
-        reserve_tokens=16,
-        observed_tokens=21,
-        observed_is_current=True,
-        observed_entry_id="post-assistant",
-        observed_context_fingerprint=fingerprint,
-    )
-    assert changed.context.observed_is_current is False
 
 
 def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> None:
@@ -694,6 +678,12 @@ def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> Non
             content="old answer",
             finish_reason="stop",
             usage=_usage(40, 10, 75),
+            context_observation=observe_context(
+                (Message(role="user", content="question"),),
+                provider="test",
+                model="model",
+                input_tokens=40,
+            ),
         ),
     )
     selection = ActiveLeafSessionEntry(
@@ -711,6 +701,12 @@ def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> Non
             content="new answer",
             finish_reason="stop",
             usage=_usage(12, 3, 21),
+            context_observation=observe_context(
+                (Message(role="user", content="question"),),
+                provider="test",
+                model="model",
+                input_tokens=21,
+            ),
         ),
     )
     entries: tuple[SessionEntry, ...] = (root, abandoned, selection, current)
@@ -724,10 +720,6 @@ def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> Non
         tools=(),
         context_window=None,
         reserve_tokens=16,
-        observed_tokens=21,
-        observed_is_current=True,
-        observed_entry_id="current",
-        observed_context_fingerprint=context_fingerprint(replay.messages),
     )
 
     assert stats.usage.total_tokens == 96

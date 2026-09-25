@@ -153,12 +153,6 @@ def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
     )
 
 
-@dataclass(frozen=True, slots=True)
-class _ContextObservation:
-    observation: ContextObservation
-    entry_id: str
-
-
 @dataclass(slots=True)
 class _AutoCompactionStatus:
     skip_final_save: bool = False
@@ -213,7 +207,7 @@ class CodingSession:
         self._pending_flush_lock = anyio.Lock()
         self._operation_lock = anyio.Semaphore(1)
         self._history_refresh_session_ids: set[str] = set()
-        self._context_observations: dict[str, _ContextObservation] = {}
+        self._context_observations: dict[str, ContextObservation] = {}
         # One Git status per session and working directory: a status that changed on
         # every run would change the prompt prefix and miss the provider's cache for
         # the whole conversation after it.
@@ -1115,9 +1109,8 @@ class CodingSession:
                         and completion_entry_id is not None
                     ):
                         if event.context_observation is not None:
-                            self._context_observations[session.session_id] = _ContextObservation(
-                                observation=event.context_observation,
-                                entry_id=completion_entry_id,
+                            self._context_observations[session.session_id] = (
+                                event.context_observation
                             )
 
                     if completion_entry_id is not None:
@@ -1307,7 +1300,7 @@ class CodingSession:
             tools,
             context_window=self._context_window(),
             reserve_tokens=self._effective_context_reserve_tokens(),
-            observation=observation.observation if observation is not None else None,
+            observation=observation,
             provider=self.provider.name,
             model=self.model or self.provider.default_model,
         )
@@ -1650,18 +1643,7 @@ class CodingSession:
             observation = self._context_observations.get(
                 session.session_id if session is not None else ""
             )
-            observed_tokens = None
-            observed_is_current = False
-            observed_entry_id = None
-            observed_context_fingerprint = None
-            if observation is not None:
-                observed_tokens = observation.observation.input_tokens
-                observed_entry_id = observation.entry_id
-                observed_context_fingerprint = observation.observation.context_fingerprint
-                observed_is_current = (
-                    observation.observation.provider == self.provider.name
-                    and observation.observation.model == (self.model or self.provider.default_model)
-                )
+            observed_tokens = observation.input_tokens if observation is not None else None
             return build_session_stats(
                 session_id=session.session_id if session is not None else None,
                 entries=entries,
@@ -1673,9 +1655,6 @@ class CodingSession:
                 provider=self.provider.name,
                 model=self.model or self.provider.default_model,
                 observed_tokens=observed_tokens,
-                observed_is_current=observed_is_current,
-                observed_entry_id=observed_entry_id,
-                observed_context_fingerprint=observed_context_fingerprint,
                 auto_compaction_enabled=self.auto_compaction_enabled,
             )
 
