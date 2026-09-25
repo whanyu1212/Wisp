@@ -91,20 +91,13 @@ def _summarize_find(data: Mapping[str, object], truncated: bool) -> str | None:
 
 
 def _summarize_ls(data: Mapping[str, object], truncated: bool) -> str | None:
-    entry_count = data.get("entry_count")
-    if type(entry_count) is int:
-        count = entry_count
-    else:
-        entries = data.get("entries")
-        if not isinstance(entries, list):
-            return None
-        count = len(entries)
+    count = data.get("entry_count")
+    if type(count) is not int:
+        return None
     path = _path(data)
     if count == 0:
         return f"ls: empty ({path})" if path else "ls: empty"
-    # New results provide the exact directory count separately from the bounded
-    # ``entries`` list. Legacy results fall back to the kept-list length, where the
-    # "+ more" marker communicates that the count is only a floor.
+    # ``entry_count`` is the exact directory count; ``entries`` may be bounded.
     entry_count = _count(count, "entry", "entries")
     body = f"{entry_count} in {path}" if path else entry_count
     return f"ls: {body}{_more(truncated)}"
