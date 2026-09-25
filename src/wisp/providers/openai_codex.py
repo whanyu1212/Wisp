@@ -340,7 +340,9 @@ class OpenAICodexProvider:
         # A later prompt rebuilds this response from its transcript row. Keeping
         # the exact items lets that rebuild match what this run sent, so the
         # cached prefix extends past this run instead of stopping at its first
-        # reasoning item.
+        # reasoning item. The row is found by its response ID, so a completion
+        # that omits one keeps its portable form on later prompts; it still
+        # continues natively within this run through the continuation store.
         if response_id is not None and replay_items:
             self._native_outputs.remember(
                 response_id,
