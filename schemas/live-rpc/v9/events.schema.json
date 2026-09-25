@@ -2078,7 +2078,6 @@
           "type": "string"
         },
         "methods": {
-          "default": [],
           "items": {
             "$ref": "#/$defs/RpcConnectionMethodSnapshot"
           },
