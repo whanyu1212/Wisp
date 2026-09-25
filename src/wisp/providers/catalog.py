@@ -263,7 +263,7 @@ class ModelCatalog(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[2]
     providers: tuple[ModelCatalogProviderEntry, ...]
 
     @model_validator(mode="after")

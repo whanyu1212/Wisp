@@ -25,7 +25,7 @@ from wisp.providers.openai_codex import DEFAULT_OPENAI_CODEX_MODEL
 from wisp.providers.xai import DEFAULT_XAI_MODEL
 
 _MINIMAL_TOML = """
-schema_version = 1
+schema_version = 2
 
 [[providers]]
 name = "acme"
@@ -58,7 +58,7 @@ def test_builtin_catalog_loads_and_validates() -> None:
 def test_minimal_catalog_parses() -> None:
     catalog = ModelCatalog.model_validate(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "providers": [
                 {
                     "name": "acme",
@@ -83,7 +83,7 @@ def test_unknown_top_level_key_is_rejected() -> None:
     with pytest.raises(ValidationError):
         ModelCatalog.model_validate(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "providers": [],
                 "future_field": "nope",
             }
@@ -296,7 +296,7 @@ def test_duplicate_provider_names_are_rejected() -> None:
         "models": ["acme-1"],
     }
     with pytest.raises(ValidationError, match="duplicate provider names"):
-        ModelCatalog.model_validate({"schema_version": 1, "providers": [entry, entry]})
+        ModelCatalog.model_validate({"schema_version": 2, "providers": [entry, entry]})
 
 
 def test_duplicate_model_ids_across_providers_are_allowed() -> None:
@@ -306,7 +306,7 @@ def test_duplicate_model_ids_across_providers_are_allowed() -> None:
     # resulting ambiguity instead (see test_model_registry.py).
     catalog = ModelCatalog.model_validate(
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "providers": [
                 {
                     "name": "acme",
@@ -556,7 +556,7 @@ def test_overlay_replaces_a_matching_provider_wholesale(tmp_path: Path) -> None:
     _write_overlay(
         tmp_path,
         """
-        schema_version = 1
+        schema_version = 2
 
         [[providers]]
         name = "fake"
@@ -592,7 +592,7 @@ def test_invalid_overlay_schema_falls_back_to_builtin(
     _write_overlay(
         tmp_path,
         """
-        schema_version = 1
+        schema_version = 2
 
         [[providers]]
         name = "acme"
@@ -620,3 +620,8 @@ def test_catalog_error_raised_for_malformed_builtin_style_toml() -> None:
 
     with pytest.raises(CatalogError, match="could not parse"):
         _catalog_from_toml("not valid [[[ toml", source="test source")
+
+
+def test_catalog_rejects_schema_v1() -> None:
+    with pytest.raises(ValidationError):
+        ModelCatalog.model_validate({"schema_version": 1, "providers": []})

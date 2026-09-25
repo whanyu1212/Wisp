@@ -441,7 +441,7 @@ def test_context_events_round_trip_on_current_schema() -> None:
 def test_model_registry_resolves_effective_context_window() -> None:
     registry = ModelRegistry(
         ModelCatalog(
-            schema_version=1,
+            schema_version=2,
             providers=(
                 ModelCatalogProviderEntry(
                     name="test",

@@ -250,7 +250,7 @@ async def _runtime_with_provider(
         assert provider.default_model is not None
         models = ModelRegistry(
             ModelCatalog(
-                schema_version=1,
+                schema_version=2,
                 providers=(
                     ModelCatalogProviderEntry(
                         name=provider.name,
