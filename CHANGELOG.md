@@ -22,6 +22,14 @@ behavior, providers, tools, permissions, and saved sessions.
   interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
   `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
   drops RC2's Intel macOS native wheel.
+- **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
+  `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
+  range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the
+  `backend_package_version` check instead. The manifest no longer records `live_protocol_version` or
+  `schema_format_version`.
+- **Breaking:** removed the TUI renderer selector: `--tui-renderer`, `wisp tui --renderer`,
+  `WISP_TUI_RENDERER`, and `wisp.cli.TuiFrontendKind`. The TUI is always the Rust frontend.
+- **Breaking:** `~/.wisp/catalog.toml` overlays must declare `schema_version = 2`.
 - **Breaking:** removed remaining compatibility shims from the public Python API:
   `defer_context_overflow_errors` on `AgentLoopConfig` and the harness `prompt`,
   `prompt_message`, and `continue_` methods (deprecated since #634); the `TuiRendererKind` alias
