@@ -22,6 +22,10 @@ behavior, providers, tools, permissions, and saved sessions.
   interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
   `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
   drops RC2's Intel macOS native wheel.
+- The Codex adapter resends each earlier response's own output items (including encrypted
+  reasoning) when a new prompt rebuilds history, and sessions save those items on the response's
+  row in a new optional `Message.native_output` field. The prompt cache now reaches the end of the
+  previous run, including after a restart or `/resume`. The field is not sent over RPC.
 - **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
   `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
   range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the

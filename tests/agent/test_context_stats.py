@@ -13,7 +13,7 @@ from wisp.agent.context_budget import (
     estimate_context_budget,
     observe_context,
 )
-from wisp.agent.messages import CompactionRecord, Message
+from wisp.agent.messages import CompactionRecord, Message, NativeOutput
 from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
@@ -235,6 +235,23 @@ def test_context_estimate_uses_utf8_size_for_every_payload_category() -> None:
     assert estimate.total_tokens == (
         estimate.system_tokens + estimate.message_tokens + estimate.tool_schema_tokens
     )
+
+
+def test_saved_native_output_does_not_change_the_context_fingerprint() -> None:
+    """Rows reloaded with saved provider items keep the same context identity."""
+
+    plain = Message(role="assistant", content="answer", response_id="response-1")
+    native = plain.model_copy(
+        update={
+            "native_output": NativeOutput(
+                provider="openai-codex",
+                model="gpt-test",
+                items=({"type": "reasoning", "encrypted_content": "e"},),
+            )
+        }
+    )
+
+    assert context_fingerprint([native]) == context_fingerprint([plain])
 
 
 def test_unicode_context_fingerprint_remains_compatible() -> None:
