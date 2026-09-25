@@ -25,8 +25,8 @@ development environment.
 - Prefer a focused function or typed value over a speculative framework.
 - Add deterministic fake/scripted-provider tests for provider-facing behavior.
 - Keep provider behavior behind provider interfaces and tool execution separate.
-- Regenerate the live RPC bundle for additive event changes; bump `LIVE_RPC_PROTOCOL_VERSION` and
-  pin the previous manifest for breaking ones. Events carry no per-event version.
+- Regenerate the live RPC bundle after any event, command, or handshake model change. Events
+  carry no per-event version, and backend and frontend must be the same release.
 - Change authoritative catalogs or schemas first, then run their checked-in generators rather than
   hand-editing generated artifacts.
 - Update the relevant site guide or reference when user-visible behavior changes.

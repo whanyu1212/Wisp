@@ -1,4 +1,4 @@
-"""Versioned session-entry persistence contracts and compatibility decoding."""
+"""Versioned session-entry persistence contracts and decoding."""
 
 from __future__ import annotations
 
@@ -35,14 +35,7 @@ from wisp.sessions.errors import (
 )
 
 SESSION_ENTRY_SCHEMA_VERSION: Literal[6] = 6
-SKILL_INVOCATION_SESSION_SCHEMA_VERSION = 6
 PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION: Literal[1] = 1
-# Events written before live RPC v9 carried a per-event ``schema_version`` in the
-# closed range below. The field no longer exists on ``WispEvent``; a stamp inside
-# that range is dropped so retained history still loads, while anything else is
-# a malformed or unsupported persisted event and fails closed.
-_LEGACY_EVENT_VERSION_FIELD = "schema_version"
-_LEGACY_EVENT_VERSION_RANGE = range(5, 40)
 MAX_SESSION_NAME_BYTES = 256
 _SESSION_NAME_NEWLINES_RE = re.compile(r"[\r\n]+")
 
@@ -207,124 +200,57 @@ def normalize_session_name(name: str) -> str | None:
     return normalized or None
 
 
-def session_entry_from_json(
-    line: str,
-    *,
-    source: str | None = None,
-    legacy_parent_id: str | None = None,
-) -> SessionEntry:
-    """Decode one current or legacy JSONL entry without rewriting its source."""
+def session_entry_from_json(line: str, *, source: str | None = None) -> SessionEntry:
+    """Decode one current-schema JSONL entry without rewriting its source.
+
+    Args:
+        line (str): One JSONL record.
+        source (str | None): Location included in error messages.
+
+    Returns:
+        SessionEntry: The validated entry.
+
+    Raises:
+        MalformedSessionEntryError: The record is not a valid current entry.
+        UnsupportedSessionEntryVersionError: The record uses another entry schema.
+        MalformedPersistedEventError: An event envelope has a non-integer version.
+        UnsupportedPersistedEventVersionError: An event envelope uses another schema.
+    """
 
     location = f" at {source}" if source is not None else ""
     try:
         raw = JsonObjectAdapter.validate_json(line)
     except ValidationError as exc:
         raise MalformedSessionEntryError(f"Malformed session entry JSON{location}") from exc
-    return session_entry_from_dict(
-        raw,
-        source=source,
-        legacy_parent_id=legacy_parent_id,
-    )
+    return session_entry_from_dict(raw, source=source)
 
 
-def session_entry_from_dict(
-    raw: JsonObject,
-    *,
-    source: str | None = None,
-    legacy_parent_id: str | None = None,
-) -> SessionEntry:
-    """Decode one entry dictionary through its explicit compatibility path."""
+def session_entry_from_dict(raw: JsonObject, *, source: str | None = None) -> SessionEntry:
+    """Decode one current-schema entry dictionary.
+
+    Entries written in any other ``schema_version`` are rejected rather than
+    upgraded.
+
+    Args:
+        raw (JsonObject): One decoded JSONL record.
+        source (str | None): Location included in error messages.
+
+    Returns:
+        SessionEntry: The validated entry.
+
+    Raises:
+        MalformedSessionEntryError: The record is not a valid current entry.
+        UnsupportedSessionEntryVersionError: The record uses another entry schema.
+        MalformedPersistedEventError: An event envelope has a non-integer version.
+        UnsupportedPersistedEventVersionError: An event envelope uses another schema.
+    """
 
     location = f" at {source}" if source is not None else ""
-    if "schema_version" not in raw:
-        normalized = _upgrade_legacy_entry(
-            raw,
-            source=source,
-            parent_id=legacy_parent_id,
-        )
-    else:
-        version = raw["schema_version"]
-        if type(version) is not int:
-            raise MalformedSessionEntryError(
-                f"Session entry schema_version must be an integer{location}"
-            )
-        if version in {1, 2, 3, 4}:
-            forbidden = tuple(
-                field
-                for field in ("reason", "selected_entry_id", "source_transition_id")
-                if field in raw
-            )
-            if forbidden:
-                fields = ", ".join(forbidden)
-                raise MalformedSessionEntryError(
-                    f"V{version} session entry contains v5 transition field(s) {fields}{location}"
-                )
-        message_payload = raw.get("message")
-        if (
-            version <= 5
-            and isinstance(message_payload, dict)
-            and "skill_invocation" in message_payload
-        ):
-            raise MalformedSessionEntryError(
-                f"V{version} message session entries cannot include skill_invocation{location}"
-            )
-        if version == 1:
-            normalized = _upgrade_v1_entry(
-                raw,
-                source=source,
-                parent_id=legacy_parent_id,
-            )
-        elif version == 2:
-            if raw.get("kind") == "session_info":
-                raise MalformedSessionEntryError(
-                    f"Unknown v2 session entry kind 'session_info'{location}"
-                )
-            normalized = _normalize_v2_structural_fields(
-                raw,
-                parent_id=legacy_parent_id,
-            )
-            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
-        elif version == 3:
-            if raw.get("kind") == "message" and "tool_result" in raw:
-                raise MalformedSessionEntryError(
-                    f"V3 message session entries cannot include tool_result{location}"
-                )
-            normalized = _normalize_v2_structural_fields(
-                raw,
-                parent_id=legacy_parent_id,
-            )
-            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
-        elif version == 4:
-            normalized = _normalize_v2_structural_fields(
-                raw,
-                parent_id=legacy_parent_id,
-            )
-            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
-        elif version == 5:
-            if raw.get("kind") == "active_leaf" and "reason" not in raw:
-                raise MalformedSessionEntryError(
-                    f"V5 active-leaf session entries require reason{location}"
-                )
-            normalized = _normalize_v2_structural_fields(
-                raw,
-                parent_id=legacy_parent_id,
-            )
-            normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
-        elif version != SESSION_ENTRY_SCHEMA_VERSION:
-            raise UnsupportedSessionEntryVersionError(
-                f"Unsupported session entry schema_version {version}{location}; "
-                f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
-            )
-        else:
-            normalized = _normalize_v2_structural_fields(
-                raw,
-                parent_id=legacy_parent_id,
-            )
-            if normalized.get("kind") == "active_leaf" and "reason" not in normalized:
-                raise MalformedSessionEntryError(
-                    f"V6 active-leaf session entries require reason{location}"
-                )
+    _require_current_entry_version(raw, location=location)
+    normalized = _restore_omitted_null_references(raw)
     _require_persisted_base_fields(normalized, location=location)
+    if normalized.get("kind") == "active_leaf" and "reason" not in normalized:
+        raise MalformedSessionEntryError(f"Active-leaf session entries require reason{location}")
     _require_supported_event_envelope(normalized, location=location)
     try:
         # Validate through Pydantic's JSON path so strict models still accept
@@ -332,6 +258,24 @@ def session_entry_from_dict(
         return SessionEntryAdapter.validate_json(json.dumps(normalized))
     except (TypeError, ValidationError) as exc:
         raise MalformedSessionEntryError(f"Malformed session entry{location}") from exc
+
+
+def _require_current_entry_version(raw: JsonObject, *, location: str) -> None:
+    if "schema_version" not in raw:
+        raise UnsupportedSessionEntryVersionError(
+            f"Session entry has no schema_version{location}; "
+            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
+        )
+    version = raw["schema_version"]
+    if type(version) is not int:
+        raise MalformedSessionEntryError(
+            f"Session entry schema_version must be an integer{location}"
+        )
+    if version != SESSION_ENTRY_SCHEMA_VERSION:
+        raise UnsupportedSessionEntryVersionError(
+            f"Unsupported session entry schema_version {version}{location}; "
+            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
+        )
 
 
 def _require_persisted_base_fields(raw: JsonObject, *, location: str) -> None:
@@ -345,19 +289,15 @@ def _require_persisted_base_fields(raw: JsonObject, *, location: str) -> None:
         )
 
 
-def _normalize_v2_structural_fields(
-    raw: JsonObject,
-    *,
-    parent_id: str | None,
-) -> JsonObject:
+def _restore_omitted_null_references(raw: JsonObject) -> JsonObject:
     """Restore null references omitted by public exclude-none serialization."""
 
     normalized = dict(raw)
     kind = raw.get("kind")
     if kind in {"message", "event", "compaction"}:
-        normalized.setdefault("parent_id", parent_id)
+        normalized.setdefault("parent_id", None)
     elif kind == "active_leaf":
-        normalized.setdefault("previous_leaf_id", parent_id)
+        normalized.setdefault("previous_leaf_id", None)
         normalized.setdefault("active_leaf_id", None)
     return normalized
 
@@ -390,93 +330,7 @@ def typed_event_from_envelope(
     """Validate one retained raw event only when typed access is requested."""
 
     location = f" at {source}" if source is not None else ""
-    payload = envelope.payload
-    if _LEGACY_EVENT_VERSION_FIELD in payload:
-        version = payload[_LEGACY_EVENT_VERSION_FIELD]
-        if type(version) is not int:
-            raise MalformedPersistedEventError(
-                f"Persisted event schema_version must be an integer{location}"
-            )
-        if version not in _LEGACY_EVENT_VERSION_RANGE:
-            raise UnsupportedPersistedEventVersionError(
-                f"Unsupported persisted event schema_version {version}{location}; "
-                f"only pre-v9 events in {_LEGACY_EVENT_VERSION_RANGE.start} through "
-                f"{_LEGACY_EVENT_VERSION_RANGE.stop - 1} carry one"
-            )
-        payload = {
-            key: value for key, value in payload.items() if key != _LEGACY_EVENT_VERSION_FIELD
-        }
     try:
-        return wisp_event_from_dict(payload)
+        return wisp_event_from_dict(envelope.payload)
     except (ValidationError, ValueError) as exc:
         raise MalformedPersistedEventError(f"Malformed persisted event{location}") from exc
-
-
-def _upgrade_v1_entry(
-    raw: JsonObject,
-    *,
-    source: str | None,
-    parent_id: str | None,
-) -> JsonObject:
-    """Upgrade one v1 discriminated entry into an in-memory current tree node."""
-
-    location = f" at {source}" if source is not None else ""
-    kind = raw.get("kind")
-    if kind not in {"message", "event", "compaction"}:
-        raise MalformedSessionEntryError(f"Unknown v1 session entry kind {kind!r}{location}")
-    forbidden = tuple(
-        field for field in ("parent_id", "previous_leaf_id", "active_leaf_id") if field in raw
-    )
-    if forbidden:
-        fields = ", ".join(forbidden)
-        raise MalformedSessionEntryError(
-            f"V1 session entry contains v2 structural field(s) {fields}{location}"
-        )
-    normalized = dict(raw)
-    normalized["schema_version"] = SESSION_ENTRY_SCHEMA_VERSION
-    normalized["parent_id"] = parent_id
-    return normalized
-
-
-def _upgrade_legacy_entry(
-    raw: JsonObject,
-    *,
-    source: str | None,
-    parent_id: str | None,
-) -> JsonObject:
-    """Upgrade the unversioned flat entry shape used before schema v1."""
-
-    location = f" at {source}" if source is not None else ""
-    kind = raw.get("kind", "message")
-    if kind not in {"message", "event", "compaction"}:
-        raise MalformedSessionEntryError(f"Unknown legacy session entry kind {kind!r}{location}")
-    populated = tuple(
-        name for name in ("message", "event", "compaction") if raw.get(name) is not None
-    )
-    if populated != (kind,):
-        raise MalformedSessionEntryError(
-            f"Legacy {kind} session entries require exactly a {kind} payload{location}"
-        )
-
-    normalized: JsonObject = {
-        "schema_version": SESSION_ENTRY_SCHEMA_VERSION,
-        "kind": kind,
-        "parent_id": parent_id,
-    }
-    for field in ("id", "session_id", "operation_id", "created_at"):
-        if field in raw:
-            normalized[field] = raw[field]
-
-    if kind == "event":
-        event = raw.get("event")
-        if not isinstance(event, dict):
-            raise MalformedSessionEntryError(
-                f"Legacy event session entries require an event object{location}"
-            )
-        normalized["event"] = {
-            "schema_version": PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
-            "payload": event,
-        }
-    else:
-        normalized[kind] = raw[kind]
-    return normalized

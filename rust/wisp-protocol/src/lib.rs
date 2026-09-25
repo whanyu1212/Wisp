@@ -17,7 +17,7 @@ use std::fmt;
 use std::sync::LazyLock;
 
 /// The canonical manifest embedded alongside the generated live RPC v9 models.
-pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/v9/manifest.json");
+pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/manifest.json");
 /// The only live RPC protocol version implemented by these models.
 ///
 /// Events carry no separate schema version; the protocol version is the single
@@ -156,23 +156,21 @@ impl SchemaContract {
 
 static HANDSHAKE_REQUEST_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v9/client-handshake.schema.json"
+        "../../../schemas/live-rpc/client-handshake.schema.json"
     ))
 });
 static HANDSHAKE_RESPONSE_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v9/server-handshake.schema.json"
+        "../../../schemas/live-rpc/server-handshake.schema.json"
     ))
 });
 static COMMAND_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
     SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v9/commands.schema.json"
+        "../../../schemas/live-rpc/commands.schema.json"
     ))
 });
 static EVENT_CONTRACT: LazyLock<SchemaContract> = LazyLock::new(|| {
-    SchemaContract::new(include_str!(
-        "../../../schemas/live-rpc/v9/events.schema.json"
-    ))
+    SchemaContract::new(include_str!("../../../schemas/live-rpc/events.schema.json"))
 });
 
 fn validate_cross_field_invariants(
@@ -433,7 +431,7 @@ macro_rules! validated_wire_wrapper {
 
 pub mod handshake_request {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v9/client-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/client-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeRequest, generated::RpcHandshakeRequest);
@@ -466,7 +464,7 @@ pub mod handshake_request {
 
 pub mod handshake_response {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v9/server-handshake.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/server-handshake.schema.json");
     }
 
     validated_wire_wrapper!(RpcHandshakeResponse, generated::RpcHandshakeResponse);
@@ -525,7 +523,7 @@ pub mod handshake_response {
 
 pub mod commands {
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v9/rust-commands.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/rust-commands.schema.json");
     }
 
     validated_wire_wrapper!(
@@ -1166,7 +1164,7 @@ pub mod events {
         SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
-        typify::import_types!(schema = "../../schemas/live-rpc/v9/rust-events.schema.json");
+        typify::import_types!(schema = "../../schemas/live-rpc/rust-events.schema.json");
     }
 
     validated_wire_wrapper!(

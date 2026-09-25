@@ -3,15 +3,12 @@
 Notable changes to Wisp, with an emphasis on the **event contract** that JSON, RPC, and SDK
 consumers integrate against.
 
-Since live RPC protocol v9, `WispEvent` payloads carry no per-event version. The protocol bundle
-under `schemas/live-rpc/` is the single event compatibility contract, negotiated once in the
-handshake; the current typed models live in the `src/wisp/events/` package. Additive event changes regenerate
-the current bundle in place and are recorded under the current protocol heading; breaking changes
-bump the protocol version and open a new `## Live RPC protocol vN` heading.
+`WispEvent` payloads carry no per-event version, and a backend and frontend must be the same Wisp
+release. `schemas/live-rpc/` describes the current release's wire contract; the typed models live in
+the `src/wisp/events/` package. Event changes are recorded under the release that makes them.
 
-The `## Schema vN` history below is retained for sessions and clients written before protocol v9.
-Those events carried an integer `schema_version`; the first versioned event contract was v2, and
-earlier events were unversioned, so there is no schema v1 to infer.
+The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
+this policy.
 
 ## 0.2.0rc3 — release preparation
 
@@ -25,6 +22,12 @@ behavior, providers, tools, permissions, and saved sessions.
   interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
   `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
   drops RC2's Intel macOS native wheel.
+- **Breaking:** session files are read only in the current format (entry schema v6, compaction
+  record v4). Unversioned and v1–v5 session files, and events stamped with a pre-v9
+  `schema_version`, now fail to load instead of being upgraded in memory.
+- Dropped live RPC version history: the historical `schemas/live-rpc/v1`–`v8` bundles, their
+  immutability checks, and the pre-v9 handshake rejection shape. The current bundle now lives
+  directly in `schemas/live-rpc/`, and the release asset is `wisp-live-rpc.tar.gz`.
 - Moved native TUI launch and binary resolution into the Python CLI, retaining the `auto` and `rust`
   selector spellings for compatibility and exact Python/Rust version checks.
 - Added selectable Rust startup logos and native Rust pending-text handling in packaged wheels.

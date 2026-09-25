@@ -33,7 +33,7 @@ fn every_python_command_fixture_round_trips_in_rust() {
     assert_round_trips::<commands::WispTypedClientRpcCommands>(
         fixtures(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../schemas/live-rpc/v9/commands.schema.json"
+            "/../../schemas/live-rpc/commands.schema.json"
         ))),
         commands::deserialize,
     );
@@ -543,7 +543,7 @@ fn approval_builder_serializes_every_approved_scope() {
 fn every_python_event_fixture_round_trips_in_rust() {
     let fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v9/events.schema.json"
+        "/../../schemas/live-rpc/events.schema.json"
     )));
     assert_round_trips::<events::WispCurrentLiveEventOutput>(fixtures, events::deserialize);
 }
@@ -552,7 +552,7 @@ fn every_python_event_fixture_round_trips_in_rust() {
 fn model_catalog_projection_is_correlated_and_bounded() {
     let fixture = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v9/events.schema.json"
+        "/../../schemas/live-rpc/events.schema.json"
     )))
     .remove("rpc.model_catalog")
     .unwrap();
@@ -661,7 +661,7 @@ fn canonical_command_cross_field_constraints_fail_closed() {
 fn canonical_event_cross_field_constraints_fail_closed() {
     let mut event_fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v9/events.schema.json"
+        "/../../schemas/live-rpc/events.schema.json"
     )));
     let mut invalid_events = Vec::new();
 
@@ -925,7 +925,7 @@ fn command_discovery_and_mode_projections_use_existing_live_contract() {
     }
     let mut fixtures = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v9/events.schema.json"
+        "/../../schemas/live-rpc/events.schema.json"
     )));
     let mut command_report = fixtures.remove("rpc.commands").unwrap();
     command_report["commands"] = serde_json::json!([{

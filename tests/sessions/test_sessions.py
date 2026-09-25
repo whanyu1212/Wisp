@@ -289,7 +289,7 @@ def test_session_summaries_expose_names_and_reject_malformed_metadata(tmp_path: 
     assert summaries[0].name == "Named"
 
     broken = {
-        "schema_version": 3,
+        "schema_version": 6,
         "id": "entry",
         "session_id": "session",
         "created_at": "2026-07-11T00:00:00Z",
@@ -310,7 +310,7 @@ def test_session_store_summaries_reject_entries_missing_declared_payload(
     payload: object,
 ) -> None:
     record: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 6,
         "id": "entry",
         "session_id": "session",
         "created_at": "2026-07-11T00:00:00Z",
@@ -334,7 +334,7 @@ def test_session_store_summaries_reject_event_envelopes_missing_payload(
     if payload is not None:
         event["payload"] = payload
     record: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 6,
         "id": "entry",
         "session_id": "session",
         "created_at": "2026-07-11T00:00:00Z",
@@ -1385,56 +1385,6 @@ def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
     assert session.read_messages()[2].tool_calls == ()
 
 
-def test_session_loads_legacy_messages_without_rewriting_them(tmp_path: Path) -> None:
-    path = tmp_path / "legacy.jsonl"
-    legacy_entry = {
-        "id": "legacy-entry",
-        "session_id": "legacy-session",
-        "kind": "message",
-        "message": {
-            "role": "assistant",
-            "content": "done",
-            "created_at": "2026-07-11T00:00:00Z",
-        },
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
-    original = path.read_bytes()
-
-    session = JsonlSessionStore(tmp_path).load(path)
-    message = session.read_messages()[0]
-    page = session.read_message_page()
-
-    assert message.tool_calls is None
-    assert message.response_id is None
-    assert message.finish_reason is None
-    assert message.is_error is None
-    assert message.usage is None
-    assert [snapshot.entry_id for snapshot in page.messages] == ["legacy-entry"]
-    assert [snapshot.content for snapshot in page.messages] == ["done"]
-    assert page.active_leaf_id == "legacy-entry"
-    assert path.read_bytes() == original
-
-
-def test_session_loads_legacy_event_entries_without_rewriting_them(tmp_path: Path) -> None:
-    path = tmp_path / "legacy-event.jsonl"
-    legacy_entry = {
-        "id": "legacy-event",
-        "session_id": "legacy-session",
-        "kind": "event",
-        "event": {"type": "legacy.event", "value": 1},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
-    original = path.read_bytes()
-
-    entry = JsonlSessionStore(tmp_path).load(path).read_entries()[0]
-
-    assert isinstance(entry, EventSessionEntry)
-    assert entry.event.payload == {"type": "legacy.event", "value": 1}
-    assert path.read_bytes() == original
-
-
 def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
@@ -1513,76 +1463,11 @@ def test_concrete_session_entry_variants_preserve_payloads() -> None:
     assert compaction_entry.compaction == compaction
 
 
-def test_session_reads_mixed_legacy_and_v2_entries_without_rewriting(tmp_path: Path) -> None:
-    path = tmp_path / "mixed.jsonl"
-    legacy = {
-        "id": "legacy-entry",
-        "session_id": "mixed-session",
-        "kind": "message",
-        "message": {"role": "user", "content": "old"},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    current = MessageSessionEntry(
-        id="current-entry",
-        session_id="mixed-session",
-        parent_id="legacy-entry",
-        message=Message(role="assistant", content="new"),
-    )
-    path.write_text(
-        f"{json.dumps(legacy)}\n{current.model_dump_json(exclude_none=True)}\n",
-        encoding="utf-8",
-    )
-    original = path.read_bytes()
-
-    entries = JsonlSessionStore(tmp_path).load(path).read_entries()
-
-    assert [entry.id for entry in entries] == ["legacy-entry", "current-entry"]
-    messages = JsonlSessionStore(tmp_path).load(path).read_messages()
-    assert [message.content for message in messages] == [
-        "old",
-        "new",
-    ]
-    assert path.read_bytes() == original
-
-
-def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_path: Path) -> None:
-    path = tmp_path / "v1.jsonl"
-    records = (
-        {
-            "schema_version": 1,
-            "id": "first",
-            "session_id": "session",
-            "kind": "message",
-            "message": {"role": "user", "content": "one"},
-            "created_at": "2026-07-11T00:00:00Z",
-        },
-        {
-            "schema_version": 1,
-            "id": "second",
-            "session_id": "session",
-            "kind": "message",
-            "message": {"role": "assistant", "content": "two"},
-            "created_at": "2026-07-11T00:00:01Z",
-        },
-    )
-    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
-    original = path.read_bytes()
-
-    entries = JsonlSessionStore(tmp_path).load(path).read_entries()
-
-    assert [entry.schema_version for entry in entries] == [6, 6]
-    assert [entry.parent_id for entry in entries if isinstance(entry, MessageSessionEntry)] == [
-        None,
-        "first",
-    ]
-    assert path.read_bytes() == original
-
-
 @pytest.mark.parametrize(
     "entry",
     [
         {
-            "schema_version": 2,
+            "schema_version": 6,
             "id": "message",
             "session_id": "session",
             "kind": "message",
@@ -1590,19 +1475,20 @@ def test_session_upgrades_v1_entries_to_a_parent_chain_without_rewriting(tmp_pat
             "created_at": "2026-07-11T00:00:00Z",
         },
         {
-            "schema_version": 2,
+            "schema_version": 6,
             "id": "leaf",
             "session_id": "session",
             "kind": "active_leaf",
+            "reason": "system",
             "created_at": "2026-07-11T00:00:00Z",
         },
     ],
 )
-def test_session_accepts_v2_entries_with_omitted_null_structural_references(
+def test_session_accepts_entries_with_omitted_null_structural_references(
     tmp_path: Path,
     entry: dict[str, object],
 ) -> None:
-    path = tmp_path / "missing-v2-reference.jsonl"
+    path = tmp_path / "missing-reference.jsonl"
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
     loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[0]
@@ -1613,143 +1499,6 @@ def test_session_accepts_v2_entries_with_omitted_null_structural_references(
         assert isinstance(loaded, ActiveLeafSessionEntry)
         assert loaded.previous_leaf_id is None
         assert loaded.active_leaf_id is None
-
-
-def test_session_upgrades_v3_entries_but_rejects_v4_tool_result_field(
-    tmp_path: Path,
-) -> None:
-    legacy_path = tmp_path / "v3-message.jsonl"
-    legacy_entry = {
-        "schema_version": 3,
-        "id": "message",
-        "session_id": "session",
-        "kind": "message",
-        "message": {"role": "tool", "content": "ok", "tool_call_id": "call-1"},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    legacy_path.write_text(f"{json.dumps(legacy_entry)}\n", encoding="utf-8")
-
-    loaded = JsonlSessionStore(tmp_path).load(legacy_path).read_entries()[0]
-
-    assert isinstance(loaded, MessageSessionEntry)
-    assert loaded.schema_version == 6
-    assert loaded.tool_result is None
-
-    malformed_path = tmp_path / "v3-tool-result.jsonl"
-    malformed_entry = legacy_entry | {
-        "id": "bad-message",
-        "tool_result": {"status": "done"},
-    }
-    malformed_path.write_text(f"{json.dumps(malformed_entry)}\n", encoding="utf-8")
-
-    with pytest.raises(MalformedSessionEntryError, match="cannot include tool_result"):
-        JsonlSessionStore(tmp_path).load(malformed_path).read_entries()
-
-
-def test_session_upgrades_v4_active_leaf_as_system_transition(tmp_path: Path) -> None:
-    path = tmp_path / "v4-active-leaf.jsonl"
-    records = (
-        {
-            "schema_version": 4,
-            "id": "message",
-            "session_id": "session",
-            "kind": "message",
-            "parent_id": None,
-            "message": {"role": "user", "content": "hello"},
-            "created_at": "2026-07-11T00:00:00Z",
-        },
-        {
-            "schema_version": 4,
-            "id": "selection",
-            "session_id": "session",
-            "kind": "active_leaf",
-            "previous_leaf_id": "message",
-            "active_leaf_id": None,
-            "created_at": "2026-07-11T00:00:01Z",
-        },
-    )
-    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
-
-    loaded = JsonlSessionStore(tmp_path).load(path).read_entries()[-1]
-
-    assert isinstance(loaded, ActiveLeafSessionEntry)
-    assert loaded.schema_version == 6
-    assert loaded.reason == "system"
-    assert loaded.selected_entry_id is None
-    assert loaded.source_transition_id is None
-
-
-@pytest.mark.parametrize("schema_version", [2, 3, 4])
-def test_session_rejects_transition_metadata_in_legacy_schemas(
-    tmp_path: Path,
-    schema_version: int,
-) -> None:
-    path = tmp_path / f"v{schema_version}-transition-metadata.jsonl"
-    records = (
-        {
-            "schema_version": schema_version,
-            "id": "message",
-            "session_id": "session",
-            "kind": "message",
-            "parent_id": None,
-            "message": {"role": "user", "content": "hello"},
-            "created_at": "2026-07-11T00:00:00Z",
-        },
-        {
-            "schema_version": schema_version,
-            "id": "selection",
-            "session_id": "session",
-            "kind": "active_leaf",
-            "previous_leaf_id": "message",
-            "active_leaf_id": None,
-            "reason": "navigation",
-            "selected_entry_id": "message",
-            "created_at": "2026-07-11T00:00:01Z",
-        },
-    )
-    path.write_text("".join(f"{json.dumps(record)}\n" for record in records), encoding="utf-8")
-
-    with pytest.raises(MalformedSessionEntryError, match="v5 transition field"):
-        JsonlSessionStore(tmp_path).load(path).read_entries()
-    with pytest.raises(MalformedSessionEntryError, match="v5 transition field"):
-        JsonlSessionStore(tmp_path).summaries()
-
-
-@pytest.mark.parametrize("schema_version", [None, 1])
-def test_session_summaries_validate_navigation_to_legacy_user_messages(
-    tmp_path: Path,
-    schema_version: int | None,
-) -> None:
-    path = tmp_path / f"legacy-v{schema_version or 0}-navigation.jsonl"
-    message = {
-        "id": "message",
-        "session_id": "session",
-        "kind": "message",
-        "message": {"role": "user", "content": "hello"},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    if schema_version is not None:
-        message["schema_version"] = schema_version
-    navigation = {
-        "schema_version": 5,
-        "id": "selection",
-        "session_id": "session",
-        "kind": "active_leaf",
-        "previous_leaf_id": "message",
-        "active_leaf_id": None,
-        "reason": "navigation",
-        "selected_entry_id": "message",
-        "created_at": "2026-07-11T00:00:01Z",
-    }
-    path.write_text(
-        f"{json.dumps(message)}\n{json.dumps(navigation)}\n",
-        encoding="utf-8",
-    )
-
-    loaded = JsonlSessionStore(tmp_path).load(path)
-
-    assert loaded.read_active_leaf_id() is None
-    assert JsonlSessionStore(tmp_path).summaries()[0].active_leaf_id is None
 
 
 @pytest.mark.parametrize(
@@ -1779,15 +1528,15 @@ def test_session_summaries_validate_navigation_to_legacy_user_messages(
         ),
     ],
 )
-def test_session_rejects_incoherent_v5_transition_metadata(
+def test_session_rejects_incoherent_transition_metadata(
     tmp_path: Path,
     updates: dict[str, object],
     message: str,
 ) -> None:
-    path = tmp_path / "v5-incoherent-transition.jsonl"
+    path = tmp_path / "incoherent-transition.jsonl"
     records = (
         {
-            "schema_version": 5,
+            "schema_version": 6,
             "id": "message",
             "session_id": "session",
             "kind": "message",
@@ -1796,7 +1545,7 @@ def test_session_rejects_incoherent_v5_transition_metadata(
             "created_at": "2026-07-11T00:00:00Z",
         },
         {
-            "schema_version": 5,
+            "schema_version": 6,
             "id": "selection",
             "session_id": "session",
             "kind": "active_leaf",
@@ -1823,13 +1572,13 @@ def test_session_rejects_incoherent_v5_transition_metadata(
         {"reason": "system", "source_transition_id": "navigation"},
     ],
 )
-def test_session_rejects_malformed_v5_active_leaf_metadata(
+def test_session_rejects_malformed_active_leaf_metadata(
     tmp_path: Path,
     updates: dict[str, object],
 ) -> None:
-    path = tmp_path / "v5-active-leaf.jsonl"
+    path = tmp_path / "active-leaf.jsonl"
     entry = {
-        "schema_version": 5,
+        "schema_version": 6,
         "id": "selection",
         "session_id": "session",
         "kind": "active_leaf",
@@ -1846,28 +1595,10 @@ def test_session_rejects_malformed_v5_active_leaf_metadata(
         JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_rejects_v2_session_info_entries(tmp_path: Path) -> None:
-    path = tmp_path / "v2-session-info.jsonl"
-    entry = {
-        "schema_version": 2,
-        "id": "name",
-        "session_id": "session",
-        "kind": "session_info",
-        "name": "old-version-name",
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
+def test_session_rejects_entries_that_omit_their_parent_reference(tmp_path: Path) -> None:
+    """An omitted ``parent_id`` means a root, not the previously appended entry."""
 
-    with pytest.raises(MalformedSessionEntryError, match="session entry"):
-        JsonlSessionStore(tmp_path).load(path).read_entries()
-    with pytest.raises(MalformedSessionEntryError, match="session entry"):
-        JsonlSessionStore(tmp_path).summaries()
-
-
-def test_session_reads_public_exclude_none_serialization_as_linear_chain(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "public-serialization.jsonl"
+    path = tmp_path / "omitted-parent.jsonl"
     entries = (
         MessageSessionEntry(
             id="first",
@@ -1884,58 +1615,24 @@ def test_session_reads_public_exclude_none_serialization_as_linear_chain(
         "".join(f"{entry.model_dump_json(exclude_none=True)}\n" for entry in entries),
         encoding="utf-8",
     )
-    original = path.read_bytes()
 
-    session = JsonlSessionStore(tmp_path).load(path)
-    loaded = session.read_entries()
-
-    assert [entry.parent_id for entry in loaded if isinstance(entry, MessageSessionEntry)] == [
-        None,
-        "first",
-    ]
-    assert [message.content for message in session.read_context_messages()] == ["one", "two"]
-    assert path.read_bytes() == original
-
-
-@pytest.mark.parametrize("version", [5, 6, 39])
-def test_session_reads_legacy_versioned_events_only_on_typed_access(
-    tmp_path: Path,
-    version: int,
-) -> None:
-    """Events written before live RPC v9 carried a per-event version; it is ignored on read."""
-
-    path = tmp_path / f"event-v{version}.jsonl"
-    raw_event = ErrorEvent(message="historical").model_dump(mode="json")
-    raw_event["schema_version"] = version
-    legacy = {
-        "id": f"event-{version}",
-        "session_id": "event-session",
-        "kind": "event",
-        "event": raw_event,
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
-    session = JsonlSessionStore(tmp_path).load(path)
-
-    assert session.read_events() == (raw_event,)
-    typed = session.read_typed_events()
-    assert len(typed) == 1
-    assert isinstance(typed[0], ErrorEvent)
-    assert typed[0].message == "historical"
-    assert "schema_version" not in typed[0].model_dump()
+    with pytest.raises(SessionReplayError, match="expected active leaf 'first'"):
+        JsonlSessionStore(tmp_path).load(path).read_entries()
 
 
 def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
     raw_event = {"type": "future.event", "future": True}
-    legacy = {
+    entry = {
+        "schema_version": 6,
         "id": "future-event",
         "session_id": "event-session",
+        "parent_id": None,
         "kind": "event",
-        "event": raw_event,
+        "event": {"schema_version": 1, "payload": raw_event},
         "created_at": "2026-07-11T00:00:00Z",
     }
-    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
@@ -1943,51 +1640,19 @@ def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path
         session.read_typed_events()
 
 
-@pytest.mark.parametrize(
-    ("stamp", "error_type", "match"),
-    [
-        (4, UnsupportedPersistedEventVersionError, "schema_version 4"),
-        (40, UnsupportedPersistedEventVersionError, "schema_version 40"),
-        ("39", MalformedPersistedEventError, "must be an integer"),
-        (39.0, MalformedPersistedEventError, "must be an integer"),
-    ],
-)
-def test_session_fails_closed_on_non_legacy_event_version_stamps(
-    tmp_path: Path,
-    stamp: object,
-    error_type: type[SessionError],
-    match: str,
-) -> None:
-    """Only genuine pre-v9 stamps (v5–v39) are stripped; anything else is not history."""
-
-    path = tmp_path / "stamped-event.jsonl"
-    raw_event = {"type": "error", "message": "x", "schema_version": stamp}
-    legacy = {
-        "id": "stamped-event",
-        "session_id": "event-session",
-        "kind": "event",
-        "event": raw_event,
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
-    session = JsonlSessionStore(tmp_path).load(path)
-
-    assert session.read_events() == (raw_event,)
-    with pytest.raises(error_type, match=match):
-        session.read_typed_events()
-
-
 def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "malformed-event.jsonl"
     raw_event = {"type": "error"}
-    legacy = {
+    entry = {
+        "schema_version": 6,
         "id": "malformed-event",
         "session_id": "event-session",
+        "parent_id": None,
         "kind": "event",
-        "event": raw_event,
+        "event": {"schema_version": 1, "payload": raw_event},
         "created_at": "2026-07-11T00:00:00Z",
     }
-    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
+    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
     session = JsonlSessionStore(tmp_path).load(path)
 
     assert session.read_events() == (raw_event,)
@@ -1999,6 +1664,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
+        (5, UnsupportedSessionEntryVersionError, "schema_version 5"),
         (7, UnsupportedSessionEntryVersionError, "schema_version 7"),
     ],
 )
@@ -2037,14 +1703,14 @@ def test_session_distinguishes_malformed_and_future_event_envelopes(
 ) -> None:
     path = tmp_path / "event-envelope-version.jsonl"
     entry = {
-        "schema_version": 1,
+        "schema_version": 6,
         "id": "event",
         "session_id": "session",
         "kind": "event",
         "created_at": "2026-07-11T00:00:00Z",
         "event": {
             "schema_version": schema_version,
-            "payload": {"type": "error", "schema_version": 12, "message": "boom"},
+            "payload": {"type": "error", "message": "boom"},
         },
     }
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
@@ -2053,7 +1719,7 @@ def test_session_distinguishes_malformed_and_future_event_envelopes(
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_rejects_null_schema_version_instead_of_treating_it_as_legacy(
+def test_session_rejects_null_schema_version(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "null-version.jsonl"
@@ -2072,22 +1738,20 @@ def test_session_rejects_null_schema_version_instead_of_treating_it_as_legacy(
 
 
 @pytest.mark.parametrize("missing", ["id", "session_id", "created_at"])
-@pytest.mark.parametrize("versioned", [False, True])
 def test_session_rejects_records_with_generated_persistence_fields(
     tmp_path: Path,
     missing: str,
-    versioned: bool,
 ) -> None:
-    path = tmp_path / f"missing-{missing}-{versioned}.jsonl"
+    path = tmp_path / f"missing-{missing}.jsonl"
     entry = {
+        "schema_version": 6,
         "id": "entry",
         "session_id": "session",
+        "parent_id": None,
         "kind": "message",
         "message": {"role": "user", "content": "hello"},
         "created_at": "2026-07-11T00:00:00Z",
     }
-    if versioned:
-        entry["schema_version"] = 1
     del entry[missing]
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
@@ -2095,28 +1759,30 @@ def test_session_rejects_records_with_generated_persistence_fields(
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_rejects_legacy_records_with_conflicting_payloads(tmp_path: Path) -> None:
-    path = tmp_path / "conflicting-legacy.jsonl"
+def test_session_rejects_entries_without_schema_version(tmp_path: Path) -> None:
+    path = tmp_path / "unversioned.jsonl"
     entry = {
         "id": "entry",
         "session_id": "session",
         "kind": "message",
         "message": {"role": "user", "content": "hello"},
-        "event": {"type": "error", "schema_version": 5, "message": "extra"},
         "created_at": "2026-07-11T00:00:00Z",
     }
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
-    with pytest.raises(MalformedSessionEntryError, match="exactly a message payload"):
+    with pytest.raises(UnsupportedSessionEntryVersionError, match="no schema_version"):
         JsonlSessionStore(tmp_path).load(path)
+    with pytest.raises(UnsupportedSessionEntryVersionError, match="no schema_version"):
+        JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_rejects_extra_fields_in_v1_entries(tmp_path: Path) -> None:
-    path = tmp_path / "extra-v1.jsonl"
+def test_session_rejects_extra_entry_fields(tmp_path: Path) -> None:
+    path = tmp_path / "extra-field.jsonl"
     entry = {
-        "schema_version": 1,
+        "schema_version": 6,
         "id": "entry",
         "session_id": "session",
+        "parent_id": None,
         "kind": "message",
         "message": {"role": "user", "content": "hello"},
         "created_at": "2026-07-11T00:00:00Z",
@@ -2125,23 +1791,6 @@ def test_session_rejects_extra_fields_in_v1_entries(tmp_path: Path) -> None:
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
     with pytest.raises(MalformedSessionEntryError, match="Malformed session entry"):
-        JsonlSessionStore(tmp_path).load(path)
-
-
-def test_session_rejects_v2_tree_metadata_claimed_by_v1_entry(tmp_path: Path) -> None:
-    path = tmp_path / "v1-with-parent.jsonl"
-    entry = {
-        "schema_version": 1,
-        "id": "entry",
-        "session_id": "session",
-        "kind": "message",
-        "parent_id": None,
-        "message": {"role": "user", "content": "hello"},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
-
-    with pytest.raises(MalformedSessionEntryError, match="v2 structural field"):
         JsonlSessionStore(tmp_path).load(path)
 
 
@@ -2216,26 +1865,6 @@ def test_session_preserves_committed_malformed_final_record(tmp_path: Path) -> N
     assert path.read_bytes() == malformed
 
 
-def test_session_rejects_unknown_supported_version_event_on_typed_access(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "unknown-event.jsonl"
-    raw_event = {"type": "unknown", "schema_version": 12}
-    legacy = {
-        "id": "unknown-event",
-        "session_id": "event-session",
-        "kind": "event",
-        "event": raw_event,
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(legacy)}\n", encoding="utf-8")
-    session = JsonlSessionStore(tmp_path).load(path)
-
-    assert session.read_events() == (raw_event,)
-    with pytest.raises(MalformedPersistedEventError, match="Malformed persisted event"):
-        session.read_typed_events()
-
-
 def test_session_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
     path = tmp_path / "mixed-session-ids.jsonl"
     entries = (
@@ -2293,12 +1922,14 @@ def test_session_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None
 def test_session_wraps_non_integer_compaction_schema_versions(tmp_path: Path) -> None:
     path = tmp_path / "malformed-compaction.jsonl"
     entry = {
+        "schema_version": 6,
         "id": "malformed",
         "session_id": "session",
+        "parent_id": None,
         "kind": "compaction",
         "created_at": "2026-07-11T00:00:00Z",
         "compaction": {
-            "schema_version": "3",
+            "schema_version": "4",
             "summary": "summary",
             "replaced_entry_ids": ["entry-1"],
             "provider": "openai",
@@ -2335,29 +1966,6 @@ def test_compaction_record_is_strict_and_versioned() -> None:
             replaced_entry_ids=(),
             provider="openai",
         )
-    legacy = CompactionRecord.model_validate(
-        {
-            "schema_version": 1,
-            "summary": "summary",
-            "replaced_entry_ids": ("entry-1",),
-            "provider": "openai",
-        }
-    )
-    assert legacy.reason == "manual"
-    assert legacy.trigger_budget is None
-    serialized_legacy = legacy.model_dump(mode="json")
-    assert "reason" not in serialized_legacy
-    assert "trigger_budget" not in serialized_legacy
-    with pytest.raises(ValidationError, match="v1 cannot contain v2 metadata"):
-        CompactionRecord.model_validate(
-            {
-                "schema_version": 1,
-                "summary": "summary",
-                "replaced_entry_ids": ("entry-1",),
-                "provider": "openai",
-                "reason": "manual",
-            }
-        )
     budget = ContextBudget(
         estimate=ContextEstimate(
             system_tokens=1,
@@ -2372,23 +1980,21 @@ def test_compaction_record_is_strict_and_versioned() -> None:
         over_budget=False,
     )
     overflow = CompactionRecord(
-        schema_version=3,
         summary="summary",
         replaced_entry_ids=("entry-1",),
         provider="openai",
         reason="overflow",
         trigger_budget=budget,
     )
-    assert overflow.schema_version == 3
     assert overflow.reason == "overflow"
-    with pytest.raises(ValidationError, match="v2 does not support overflow"):
-        CompactionRecord(
-            schema_version=2,
-            summary="summary",
-            replaced_entry_ids=("entry-1",),
-            provider="openai",
-            reason="overflow",
-            trigger_budget=budget,
+    with pytest.raises(ValidationError):
+        CompactionRecord.model_validate(
+            {
+                "schema_version": 3,
+                "summary": "summary",
+                "replaced_entry_ids": ("entry-1",),
+                "provider": "openai",
+            }
         )
     with pytest.raises(ValidationError):
         CompactionRecord.model_validate(

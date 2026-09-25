@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import stat
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 
@@ -280,42 +278,6 @@ def test_clone_rejects_stale_leaf_without_creating_destination(tmp_path: Path) -
 
     anyio.run(clone)
     assert tuple(tmp_path.glob("*.jsonl")) == (source.path,)
-
-
-def test_clone_upgrades_legacy_source_only_in_new_file(tmp_path: Path) -> None:
-    source_path = tmp_path / "legacy.jsonl"
-    created = datetime(2025, 1, 1, tzinfo=UTC).isoformat()
-    records = [
-        {
-            "id": "legacy-user",
-            "session_id": "legacy-session",
-            "created_at": created,
-            "message": Message(role="user", content="hello").model_dump(mode="json"),
-        },
-        {
-            "id": "legacy-answer",
-            "session_id": "legacy-session",
-            "created_at": created,
-            "message": Message(role="assistant", content="hi").model_dump(mode="json"),
-        },
-    ]
-    source_path.write_text(
-        "".join(f"{json.dumps(record)}\n" for record in records),
-        encoding="utf-8",
-    )
-    original = source_path.read_bytes()
-    store = JsonlSessionStore(tmp_path)
-    source = store.load(source_path)
-
-    async def clone() -> JsonlSession:
-        return await store.clone(source, expected_active_leaf_id="legacy-answer")
-
-    cloned = anyio.run(clone)
-
-    assert source_path.read_bytes() == original
-    assert [entry.schema_version for entry in cloned.read_entries()] == [6, 6]
-    assert [entry.id for entry in cloned.read_entries()] == ["legacy-user", "legacy-answer"]
-    assert all(entry.session_id == cloned.session_id for entry in cloned.read_entries())
 
 
 def test_clone_preserves_compaction_replay_and_metadata(tmp_path: Path) -> None:

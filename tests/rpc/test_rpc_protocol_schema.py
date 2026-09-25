@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import tarfile
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -13,7 +12,6 @@ import pytest
 from jsonschema import Draft202012Validator
 from pydantic import ValidationError
 
-import wisp.rpc.protocol_schema as protocol_schema
 from tests.paths import FIXTURES_DIR, REPO_ROOT
 from wisp.events import (
     BillableTokenUsage,
@@ -55,9 +53,6 @@ from wisp.rpc.protocol import (
 )
 from wisp.rpc.protocol_schema import (
     generate_protocol_artifacts,
-    invalid_protocol_history,
-    modified_committed_protocol_artifacts,
-    protocol_schema_directory,
     stale_protocol_artifacts,
     write_protocol_archive,
     write_protocol_artifacts,
@@ -71,8 +66,7 @@ _SCHEMA_FILES = (
     "rust-commands.schema.json",
     "rust-events.schema.json",
 )
-_REPOSITORY_SCHEMA_ROOT = REPO_ROOT / "schemas" / "live-rpc"
-_REPOSITORY_SCHEMA_DIRECTORY = protocol_schema_directory(_REPOSITORY_SCHEMA_ROOT)
+_REPOSITORY_SCHEMA_DIRECTORY = REPO_ROOT / "schemas" / "live-rpc"
 
 
 def _artifact(name: str) -> dict[str, object]:
@@ -109,141 +103,26 @@ def test_protocol_artifact_generation_is_deterministic_and_hashed() -> None:
         assert manifest["schema_hashes"][filename] == digest
 
 
-def test_committed_protocol_artifacts_match_models_and_history() -> None:
+def test_committed_protocol_artifacts_match_models() -> None:
     assert stale_protocol_artifacts(_REPOSITORY_SCHEMA_DIRECTORY) == ()
-    assert invalid_protocol_history(_REPOSITORY_SCHEMA_ROOT) == ()
 
 
 def test_protocol_artifact_check_reports_missing_changed_and_extra_files(tmp_path: Path) -> None:
-    directory = protocol_schema_directory(tmp_path)
+    directory = tmp_path / "live-rpc"
     assert stale_protocol_artifacts(directory) == (*_SCHEMA_FILES, "manifest.json")
 
     write_protocol_artifacts(directory)
     assert stale_protocol_artifacts(directory) == ()
-    assert invalid_protocol_history(tmp_path) == (
-        "missing protocol schema directory: v1",
-        "missing protocol schema directory: v2",
-        "missing protocol schema directory: v3",
-        "missing protocol schema directory: v4",
-        "missing protocol schema directory: v5",
-        "missing protocol schema directory: v6",
-        "missing protocol schema directory: v7",
-        "missing protocol schema directory: v8",
-    )
 
     (directory / "commands.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("commands.schema.json",)
-    assert invalid_protocol_history(tmp_path) == (
-        "protocol schema hash mismatch: v9/commands.schema.json",
-        "protocol schema dialect mismatch: v9/commands.schema.json",
-        "missing protocol schema directory: v1",
-        "missing protocol schema directory: v2",
-        "missing protocol schema directory: v3",
-        "missing protocol schema directory: v4",
-        "missing protocol schema directory: v5",
-        "missing protocol schema directory: v6",
-        "missing protocol schema directory: v7",
-        "missing protocol schema directory: v8",
-    )
 
     write_protocol_artifacts(directory)
     (directory / "obsolete.schema.json").write_text("{}\n", encoding="utf-8")
     assert stale_protocol_artifacts(directory) == ("obsolete.schema.json",)
-    assert invalid_protocol_history(tmp_path) == (
-        "unexpected protocol artifact set: v9",
-        "missing protocol schema directory: v1",
-        "missing protocol schema directory: v2",
-        "missing protocol schema directory: v3",
-        "missing protocol schema directory: v4",
-        "missing protocol schema directory: v5",
-        "missing protocol schema directory: v6",
-        "missing protocol schema directory: v7",
-        "missing protocol schema directory: v8",
-    )
 
 
-def test_historical_protocol_manifest_is_pinned_outside_its_version_directory(
-    tmp_path: Path,
-) -> None:
-    directory = tmp_path / "v1"
-    shutil.copytree(_REPOSITORY_SCHEMA_ROOT / "v1", directory)
-    manifest_path = directory / "manifest.json"
-    manifest_content = manifest_path.read_text(encoding="utf-8")
-    manifest_hash = hashlib.sha256(manifest_content.encode()).hexdigest()
-
-    assert invalid_protocol_history(
-        tmp_path,
-        current_protocol_version=2,
-        historical_manifest_hashes={1: manifest_hash},
-    ) == ("missing protocol schema directory: v2",)
-
-    manifest = json.loads(manifest_content)
-    manifest["maximum_application_frame_bytes"] += 1
-    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
-    assert invalid_protocol_history(
-        tmp_path,
-        current_protocol_version=2,
-        historical_manifest_hashes={1: manifest_hash},
-    ) == (
-        "historical protocol manifest changed: v1",
-        "missing protocol schema directory: v2",
-    )
-
-
-def test_protocol_history_rejects_noncanonical_directories_and_duplicate_pins(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    directory = protocol_schema_directory(tmp_path)
-    write_protocol_artifacts(directory)
-    directory.rename(tmp_path / "v01")
-
-    assert invalid_protocol_history(tmp_path) == (
-        "unexpected protocol schema directory: v01",
-        "missing protocol schema directory: v1",
-        "missing protocol schema directory: v2",
-        "missing protocol schema directory: v3",
-        "missing protocol schema directory: v4",
-        "missing protocol schema directory: v5",
-        "missing protocol schema directory: v6",
-        "missing protocol schema directory: v7",
-        "missing protocol schema directory: v8",
-        "missing protocol schema directory: v9",
-    )
-
-    monkeypatch.setattr(
-        protocol_schema,
-        "HISTORICAL_PROTOCOL_MANIFEST_SHA256",
-        ((1, "first"), (1, "second")),
-    )
-    assert invalid_protocol_history(tmp_path, current_protocol_version=2) == (
-        "historical protocol manifest hash registry contains duplicate versions",
-    )
-
-
-def test_git_history_check_reports_failed_git_inventory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*args: object, **kwargs: object) -> object:
-        return protocol_schema.subprocess.CompletedProcess(
-            args=args, returncode=128, stdout="", stderr="missing trusted base"
-        )
-
-    monkeypatch.setattr(protocol_schema.subprocess, "run", fake_run)
-
-    assert modified_committed_protocol_artifacts("trusted-base") == (
-        "cannot verify immutable protocol history: missing trusted base",
-    )
-
-
-def test_protocol_version_directories_cannot_be_cross_written(tmp_path: Path) -> None:
-    assert protocol_schema_directory(tmp_path, protocol_version=3) == tmp_path / "v3"
-
-    with pytest.raises(RuntimeError, match="refusing to write protocol v9 into v2"):
-        write_protocol_artifacts(protocol_schema_directory(tmp_path, protocol_version=2))
-
-
-def test_protocol_release_archive_is_deterministic_and_versioned(tmp_path: Path) -> None:
+def test_protocol_release_archive_is_deterministic(tmp_path: Path) -> None:
     first = tmp_path / "first.tar.gz"
     second = tmp_path / "second.tar.gz"
 
@@ -253,8 +132,7 @@ def test_protocol_release_archive_is_deterministic_and_versioned(tmp_path: Path)
     assert first.read_bytes() == second.read_bytes()
     with tarfile.open(first, mode="r:gz") as archive:
         assert archive.getnames() == [
-            f"wisp-live-rpc-v{LIVE_RPC_PROTOCOL_VERSION}/{filename}"
-            for filename in (*_SCHEMA_FILES, "manifest.json")
+            f"wisp-live-rpc/{filename}" for filename in (*_SCHEMA_FILES, "manifest.json")
         ]
 
 

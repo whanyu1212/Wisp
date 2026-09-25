@@ -1,8 +1,8 @@
 # Compatibility & versioning
 
-Wisp has separate version domains for the Python package, the live RPC protocol, and persisted
-session records. They do not reset or advance together. In particular, a future `wisp-ai` 1.0
-release may speak a live RPC protocol much newer than v9.
+Wisp versions the Python package and persisted session records separately. The live RPC protocol
+has no compatibility promise of its own: a backend and a frontend must come from the same Wisp
+release.
 
 ## Python package versions
 
@@ -19,8 +19,8 @@ Package releases use semantic versioning expressed with Python's PEP 440 spellin
   breaking changes require a major release.
 - Alpha, beta, and release-candidate suffixes identify prereleases; changing only the prerelease
   suffix is not, by itself, a compatibility boundary for removing a public API.
-- Event and persistence schemas advance only when their own contracts change. A package release does
-  not reset them.
+- Persistence schemas advance only when their own contracts change. A package release does not
+  reset them.
 
 The supported Python API is the import surface documented in [Python SDK](./sdk). Imports not listed
 there, and modules or names marked internal, are not covered by this compatibility policy. Additive
@@ -35,35 +35,25 @@ Package organization beyond `wisp-ai` remains tracked by
 
 ## Live JSONL-RPC protocol
 
-The proposed external frontend protocol is a separate compatibility domain. Python models remain
-its semantic source of truth, and deterministic current-version artifacts are checked in under
-`schemas/live-rpc/v9/`. Ordinary command and event envelopes inherit the selected connection
-version rather than carrying their own version; there is no per-event `schema_version`.
+The external frontend protocol is generated from the Python models, which remain its source of
+truth. `schemas/live-rpc/` holds one deterministic bundle describing the current release: handshake
+request and response messages, the complete typed-client command output union, the complete live
+event output union, conformance fixtures, and validation-only projections consumed by Rust type
+generation. Command schemas describe payloads produced by `RpcCommandModel.to_json_line()`; the
+backend may continue accepting a documented superset. Event schemas describe the exact serialized
+shape, including required defaulted and nullable fields. Stateful lifecycle invariants remain
+model-level protocol requirements rather than JSON Schema constraints.
 
-The v9 schema bundle contains handshake request and response messages, the complete typed-client
-command output union, the complete current live event output union, deterministic conformance
-fixtures, and validation-only projections consumed by Rust type generation. Command schemas describe payloads
-produced by `RpcCommandModel.to_json_line()`; the backend may continue accepting a documented
-superset. Event schemas describe the exact current serialized shape, including required defaulted and
-nullable fields. Stateful lifecycle invariants remain model-level protocol requirements rather than
-JSON Schema constraints.
-
-Queue management adds optional `expected_token` fields to existing mode/pop/clear commands and
-optional `token`/`command_id` fields to queue snapshots within v9. Existing unguarded callers and
-historical snapshots remain accepted; lifecycle ordering is unchanged. This is an additive current-v9
-bundle regeneration, not a new protocol version or a per-event version counter. The Rust queue manager
-requires a snapshot token for destructive controls; it does not fall back to unguarded mutations.
+**A backend and a frontend must be the same Wisp release.** Both readers reject unknown fields, so
+two releases can disagree about any event. The Rust TUI and the Python SDK transport compare the
+handshake's `backend_package_version` with their own release and refuse to connect on a mismatch.
+The handshake still carries a protocol version, but it is fixed and does not describe compatibility
+between releases. There are no historical bundles.
 
 JSON Schema cannot compare two properties or express that one array is a subset of another. The
 handshake artifacts therefore record ordered ranges, selected-version containment, and the client
 required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce
 those rules during decoding.
-
-The live event artifact describes only the shapes emitted by the current package even though Python
-still loads persisted events written before protocol v9. The handshake negotiates the protocol
-version, advertises a fixed pre-negotiation frame ceiling, and reports directional application-frame
-limits; there is no separate event-version negotiation. The manifest records the protocol version,
-transport ceilings, and SHA-256 hashes for every schema.
 
 Regenerate or verify the artifacts from the repository root with:
 
@@ -72,48 +62,22 @@ uv run python -m wisp.rpc.protocol_schema --write
 uv run python -m wisp.rpc.protocol_schema --check
 ```
 
-Generated schema files must not be edited manually. CI rejects stale, missing, obsolete,
-cross-version, and hash-mismatched artifacts. Additive changes regenerate the current bundle in
-place; breaking changes require the next protocol version. Before a protocol bump, the previous
-manifest's SHA-256 digest must be added to `HISTORICAL_PROTOCOL_MANIFEST_SHA256`; that digest
-transitively pins the old schemas and metadata outside their version directory.
-
-Both history guards compare against the trusted base inventory. They allow additions and
-modifications in its current bundle only while no newer bundle is introduced. Historical bundles
-cannot be modified or extended; removals, renames, and type changes are rejected even in the current
-bundle. GitHub copy metadata is treated as an added destination, not a modification of the source;
-copying into a historical bundle is still rejected. Introducing a new version freezes the previous
-current bundle in that same change. The local `--immutable-base` check accepts relative or absolute
-in-checkout schema paths and includes staged, unstaged, and untracked files, not only committed HEAD.
-These guards protect artifact history; schema conformance and review must still establish that a
-current-version change is additive.
-
-The separate `pull_request_target` guard executes the shared standard-library-only policy from the
-trusted base checkout. It reads paginated PR file metadata as JSON without checking out, installing,
-or executing pull-request code. Changes to that trusted guard must land in the base branch before
-a dependent PR can use the updated policy.
+Generated schema files must not be edited manually. CI rejects stale, missing, obsolete, and
+hash-mismatched artifacts.
 
 The external JSONL adapter requires `rpc.handshake.request` as its first frame and emits
 exactly one `rpc.handshake.accepted` or `rpc.handshake.rejected` response before ordinary events.
-Protocol version, capabilities, and directional frame limits are negotiated before the RPC host is
-constructed. The in-process Python SDK does not negotiate because it has no
-serialization boundary.
+Capabilities and directional frame limits are negotiated before the RPC host is constructed. The
+in-process Python SDK does not negotiate because it has no serialization boundary.
 
 Handshake frames are limited to 64 KiB. Negotiated application frames are limited to the directional
 limits in the accepted response, currently 64 MiB. Frames are UTF-8 JSON objects terminated by LF;
 duplicate object fields, invalid UTF-8, oversized frames, and incomplete final lines are rejected.
 Clean EOF on a frame boundary closes input normally. Unknown commands receive the ordinary typed
-command error lifecycle, while unknown events are fatal to clients for an already-negotiated version.
+command error lifecycle, while unknown events are fatal to clients.
 
-Schema bundles are repository build inputs and versioned GitHub release assets named
-`wisp-live-rpc-v<version>.tar.gz`; they are not part of the Python wheel API. The checked-in handshake
-models and compile-time generated Serde crate define the contract for external frontends. Protocol
-v1 remains immutable historical design input; v2 is the first runtime-enforced negotiated version,
-v3 adds authoritative model-catalog discovery, v4 adds backend-owned connection workflows,
-v5 adds opt-in persistence for model configuration, and v6 adds
-[bounded project file discovery](./project-files). Protocol v7 adds project permission settings
-and the explicit `all_project` approval scope; `all_session` remains temporary. Protocol v8 adds
-assigned message origins to live events for transcript recovery. All earlier bundles remain immutable.
+The schema bundle is a repository build input and a GitHub release asset named
+`wisp-live-rpc.tar.gz`; it is not part of the Python wheel API.
 
 ## Deprecation and removal
 
@@ -142,15 +106,12 @@ migration or containment advice.
 >
 > Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
 > instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.
-> The removal changes Python construction only: existing JSONL session files and supported event
-> schemas remain readable without migration.
+> The removal changes Python construction only.
 
 ## Event schemas
 
-`WispEvent` payloads carry no per-event version. The live RPC protocol bundle under
-`schemas/live-rpc/` is the single compatibility contract for streamed events: the installed package
-emits only the shapes in the current bundle, currently **protocol v9**, and the typed parsers read
-exactly that shape.
+`WispEvent` payloads carry no per-event version. The installed package emits only the shapes in
+`schemas/live-rpc/`, and the typed parsers read exactly that shape.
 
 ```python
 from wisp.events import wisp_event_from_json
@@ -158,59 +119,31 @@ from wisp.events import wisp_event_from_json
 event = wisp_event_from_json(line)
 ```
 
-`wisp_event_from_json()` and `wisp_event_from_dict()` reject unknown event types and unknown fields,
-including the legacy `schema_version` key that events carried before protocol v9. Persisted sessions
-are the exception: the session reader drops that key from stored event payloads before typed
-validation, so history written by earlier releases still loads. Consumers auditing third-party or
-hand-written events should use the
-[event history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#live-rpc-protocol-v9--current)
-as the authoritative introduction record.
-
-A wire-visible event change:
-
-- **regenerates the current bundle in place** when it is additive — a new event type, a new optional
-  field, or a new enum value that existing consumers can ignore; and
-- **bumps `LIVE_RPC_PROTOCOL_VERSION`** when it is breaking — removing or renaming an event type or
-  field, changing a field's type, requiredness, or default-on-the-wire behavior, or changing lifecycle
-  ordering.
-
-Internal refactors, documentation, rendering changes, and behavior that leaves the serialized
-contract unchanged do not touch the bundle. Protocol numbers are never recycled. A protocol bump
-must pin the previous manifest hash in `src/wisp/rpc/protocol_schema.py`, regenerate the new
-`schemas/live-rpc/vN/` directory, add consumer-focused history to the changelog, and include JSON
-round-trip and conformance tests.
+`wisp_event_from_json()` and `wisp_event_from_dict()` reject unknown event types and unknown fields.
 
 Consumers should:
 
 - parse untrusted events with Wisp's parser functions instead of dispatching on `type` manually;
-- handle every known event type they need and deliberately ignore known types they do not use;
-- treat a `protocol_version_mismatch` handshake rejection as a signal to upgrade rather than guessing
-  at the newer contract; and
-- consult the [event history](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#live-rpc-protocol-v9--current)
-  for the action required by each version.
+- handle every known event type they need and deliberately ignore known types they do not use; and
+- upgrade the backend and frontend together, treating a `backend_version_mismatch` handshake error as
+  a signal to do so.
 
 ## Persisted session schemas
 
 A session file contains several independently versioned layers:
 
-| Layer | Current writes | Readable history |
-|---|---:|---:|
-| Session entry | v6 | unversioned and v1–v6 |
-| Persisted event envelope | v1 | v1 |
-| Event payload inside the envelope | unversioned (protocol v9 shape) | pre-v9 payloads with a legacy `schema_version` key |
-| Compaction record | v4 | v1–v4 |
+| Layer | Current version |
+|---|---:|
+| Session entry | v6 |
+| Persisted event envelope | v1 |
+| Event payload inside the envelope | unversioned (current event shape) |
+| Compaction record | v4 |
 
-Historical session entries are normalized to current typed models in memory. Loading a session does
-not rewrite it; later appends use the current entry schema while preserving committed historical
-records. Legacy linear entries receive their parent relationships during decoding, without changing
-the source file.
+The session reader accepts only these versions. Files written in an earlier entry schema, or
+without a `schema_version`, fail to load with `UnsupportedSessionEntryVersionError`; they are not
+upgraded. Loading a session never rewrites it.
 
 Persisted event envelopes retain their payload as raw JSON. `read_events()` can therefore expose a
-future event payload for inspection without claiming to understand it. Typed access through
-`read_typed_events()` drops the legacy per-event `schema_version` stamp written before protocol v9 and
-rejects any other stamp or an unknown payload shape. Malformed committed records remain errors rather
-than being silently discarded.
-
-Any future on-disk migration must preserve append-only history, stable entry IDs, parent links,
-timestamps, active-branch meaning, and provider-visible message order. A migration must be explicit
-and recoverable; merely opening an older session must not destructively upgrade it.
+payload for inspection without claiming to understand it. Typed access through `read_typed_events()`
+rejects unknown event types and fields. Malformed committed records remain errors rather than being
+silently discarded.

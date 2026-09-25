@@ -7,7 +7,6 @@ import gzip
 import hashlib
 import io
 import json
-import subprocess
 import sys
 import tarfile
 from collections.abc import Mapping, Sequence
@@ -18,8 +17,6 @@ from pathlib import Path
 from types import UnionType
 from typing import Annotated, cast, get_args, get_origin
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
 from pydantic import BaseModel, TypeAdapter
 
 from wisp.events import KnownWispEventAdapter
@@ -31,23 +28,10 @@ from wisp.rpc.protocol import (
     RpcHandshakeRequest,
     RpcHandshakeResponseAdapter,
 )
-from wisp.rpc.protocol_history import ArtifactChange, immutable_artifact_changes
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 SCHEMA_FORMAT_VERSION = 1
-DEFAULT_SCHEMA_ROOT = Path("schemas/live-rpc")
-# On a protocol bump, pin every older manifest here before generating the new directory.
-# The manifest transitively pins all schemas and version metadata in that immutable bundle.
-HISTORICAL_PROTOCOL_MANIFEST_SHA256: tuple[tuple[int, str], ...] = (
-    (1, "06581c7cdbed14f6af08e1e67b1e0cdf4c8a1288a64238c342a61d2f8ced5a75"),
-    (2, "e84f38d40d6137fcfc2a57ebd6d9140efcddcf7b2f1535850790aa3af5e55955"),
-    (3, "3421192b01974081b8fc52537aa23a8fd44ece09b11be8ae4c791dc7d1a82c7c"),
-    (4, "fc80ee4beaaad41c6534130bab3c277c0109b3831d34c4ad623d0417d92eed02"),
-    (5, "37dc90b7fe06005444def1710af98be7b6b8fddb4231ff161dc119365fdcafc2"),
-    (6, "98be3f2fac077427b65884fb9be56057909888f5938d39f227c8894fd3ebe562"),
-    (7, "30705ba4f61caaa932b833bb7572d89ab86d1b845e16543fe76f301a5d85e445"),
-    (8, "391bee41378e3702abfe3ec399a642e0a2e15685a01308691be144e8f6faabf4"),
-)
+DEFAULT_SCHEMA_DIRECTORY = Path("schemas/live-rpc")
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
 _SERVER_HANDSHAKE_SCHEMA = "server-handshake.schema.json"
@@ -61,19 +45,6 @@ _DECIMAL_STRING_PATTERN = (
 )
 type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 type JsonObject = dict[str, JsonValue]
-
-
-def protocol_schema_directory(
-    root: Path = DEFAULT_SCHEMA_ROOT,
-    *,
-    protocol_version: int = LIVE_RPC_PROTOCOL_VERSION,
-) -> Path:
-    """Return the directory assigned to one live protocol version."""
-
-    return root / f"v{protocol_version}"
-
-
-DEFAULT_SCHEMA_DIRECTORY = protocol_schema_directory()
 
 
 def generate_protocol_artifacts() -> dict[str, str]:
@@ -156,9 +127,8 @@ def generate_protocol_artifacts() -> dict[str, str]:
 
 
 def write_protocol_artifacts(directory: Path = DEFAULT_SCHEMA_DIRECTORY) -> None:
-    """Write the current generated artifacts without crossing a version boundary."""
+    """Write the current generated artifacts."""
 
-    _require_compatible_target(directory)
     directory.mkdir(parents=True, exist_ok=True)
     for filename, content in generate_protocol_artifacts().items():
         (directory / filename).write_text(content, encoding="utf-8")
@@ -168,7 +138,7 @@ def write_protocol_archive(destination: Path) -> None:
     """Write a deterministic release archive for the current protocol bundle."""
 
     artifacts = generate_protocol_artifacts()
-    prefix = f"wisp-live-rpc-v{LIVE_RPC_PROTOCOL_VERSION}"
+    prefix = "wisp-live-rpc"
     destination.parent.mkdir(parents=True, exist_ok=True)
     with destination.open("wb") as raw_output:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw_output, mtime=0) as compressed:
@@ -202,148 +172,6 @@ def stale_protocol_artifacts(directory: Path = DEFAULT_SCHEMA_DIRECTORY) -> tupl
         actual_names = set()
     stale.extend(sorted(actual_names.difference(expected_artifacts)))
     return tuple(stale)
-
-
-def invalid_protocol_history(
-    root: Path = DEFAULT_SCHEMA_ROOT,
-    *,
-    current_protocol_version: int = LIVE_RPC_PROTOCOL_VERSION,
-    historical_manifest_hashes: Mapping[int, str] | None = None,
-) -> tuple[str, ...]:
-    """Return malformed committed version-directory diagnostics."""
-
-    pinned_entries = (
-        HISTORICAL_PROTOCOL_MANIFEST_SHA256
-        if historical_manifest_hashes is None
-        else tuple(historical_manifest_hashes.items())
-    )
-    pinned_hashes = dict(pinned_entries)
-    if len(pinned_hashes) != len(pinned_entries):
-        return ("historical protocol manifest hash registry contains duplicate versions",)
-    expected_historical_versions = set(range(1, current_protocol_version))
-    if set(pinned_hashes) != expected_historical_versions:
-        return ("historical protocol manifest hash registry is incomplete",)
-    try:
-        directories = sorted(path for path in root.iterdir() if path.is_dir())
-    except OSError:
-        return (f"missing protocol schema root: {root}",)
-    diagnostics: list[str] = []
-    actual_versions: set[int] = set()
-    for directory in directories:
-        if not directory.name.startswith("v") or not directory.name[1:].isdigit():
-            diagnostics.append(f"unexpected protocol schema directory: {directory.name}")
-            continue
-        directory_version = int(directory.name[1:])
-        if directory_version < 1 or directory.name != f"v{directory_version}":
-            diagnostics.append(f"unexpected protocol schema directory: {directory.name}")
-            continue
-        actual_versions.add(directory_version)
-        manifest_path = directory / _MANIFEST
-        try:
-            manifest_content = manifest_path.read_text(encoding="utf-8")
-            manifest = json.loads(manifest_content)
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            diagnostics.append(f"invalid protocol manifest: {directory.name}/{_MANIFEST}")
-            continue
-        if directory_version < current_protocol_version:
-            if _sha256(manifest_content) != pinned_hashes[directory_version]:
-                diagnostics.append(f"historical protocol manifest changed: {directory.name}")
-        elif directory_version > current_protocol_version:
-            diagnostics.append(f"unexpected future protocol schema directory: {directory.name}")
-        if not isinstance(manifest, dict):
-            diagnostics.append(f"invalid protocol manifest object: {directory.name}/{_MANIFEST}")
-            continue
-        declared_version = manifest.get("live_protocol_version")
-        if declared_version != directory_version:
-            diagnostics.append(f"protocol directory/manifest mismatch: {directory.name}")
-        hashes = manifest.get("schema_hashes")
-        if not isinstance(hashes, dict):
-            diagnostics.append(f"missing protocol schema hashes: {directory.name}")
-            continue
-        expected_names = {*hashes, _MANIFEST}
-        actual_names = {entry.name for entry in directory.iterdir()}
-        if actual_names != expected_names:
-            diagnostics.append(f"unexpected protocol artifact set: {directory.name}")
-        for filename in sorted(hashes):
-            expected_hash = hashes.get(filename)
-            try:
-                content = (directory / filename).read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                diagnostics.append(f"missing protocol schema: {directory.name}/{filename}")
-                continue
-            if not isinstance(expected_hash, str) or _sha256(content) != expected_hash:
-                diagnostics.append(f"protocol schema hash mismatch: {directory.name}/{filename}")
-            try:
-                schema = json.loads(content)
-                Draft202012Validator.check_schema(schema)
-            except (json.JSONDecodeError, SchemaError):
-                diagnostics.append(f"invalid protocol JSON Schema: {directory.name}/{filename}")
-                continue
-            if not isinstance(schema, dict) or schema.get("$schema") != JSON_SCHEMA_DIALECT:
-                diagnostics.append(f"protocol schema dialect mismatch: {directory.name}/{filename}")
-    missing_versions = set(range(1, current_protocol_version + 1)).difference(actual_versions)
-    diagnostics.extend(
-        f"missing protocol schema directory: v{version}" for version in sorted(missing_versions)
-    )
-    return tuple(diagnostics)
-
-
-def modified_committed_protocol_artifacts(
-    base_ref: str,
-    *,
-    root: Path = DEFAULT_SCHEMA_ROOT,
-) -> tuple[str, ...]:
-    """Check committed and local artifact changes against trusted history.
-
-    Args:
-        base_ref (str): Trusted Git revision defining existing bundles.
-        root (Path): Relative or absolute schema root inside the checkout.
-
-    Returns:
-        tuple[str, ...]: Violating paths or a Git failure diagnostic. Includes
-        staged, unstaged, and untracked files, not just changes committed to HEAD.
-    """
-
-    def git_fields(*arguments: str) -> list[str]:
-        result = subprocess.run(
-            ("git", "-C", str(repository_root), *arguments, "--", root.as_posix()),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise ValueError(result.stderr.strip() or "git inventory failed")
-        return result.stdout.rstrip("\0").split("\0") if result.stdout else []
-
-    try:
-        repository = subprocess.run(
-            ("git", "rev-parse", "--show-toplevel"),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if repository.returncode != 0:
-            raise ValueError(repository.stderr.strip() or "cannot locate Git checkout")
-        repository_root = Path(repository.stdout.rstrip("\n")).resolve()
-        root = root.resolve().relative_to(repository_root)
-        base_paths = git_fields("ls-tree", "-r", "--name-only", "-z", base_ref)
-        fields = git_fields(
-            "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base_ref
-        )
-        if len(fields) % 2:
-            raise ValueError("incomplete Git change inventory")
-        statuses = {"A": "added", "M": "modified", "D": "removed"}
-        changes = [
-            ArtifactChange(statuses.get(status, status), path)
-            for status, path in zip(fields[::2], fields[1::2], strict=True)
-        ]
-        changes.extend(
-            ArtifactChange("added", path)
-            for path in git_fields("ls-files", "--others", "--exclude-standard", "-z")
-        )
-    except (OSError, ValueError) as exc:
-        return (f"cannot verify immutable protocol history: {exc}",)
-    return immutable_artifact_changes(changes, base_paths, root=root.as_posix())
 
 
 def _shape_command_output_schema(schema: JsonObject) -> None:
@@ -1340,28 +1168,6 @@ def _contains_type(annotation: object, target: type[object]) -> bool:
     return False
 
 
-def _require_compatible_target(directory: Path) -> None:
-    if directory.name.startswith("v") and directory.name[1:].isdigit():
-        directory_version = int(directory.name[1:])
-        if directory_version != LIVE_RPC_PROTOCOL_VERSION:
-            raise RuntimeError(
-                f"refusing to write protocol v{LIVE_RPC_PROTOCOL_VERSION} into {directory.name}"
-            )
-    manifest_path = directory / _MANIFEST
-    if not manifest_path.exists():
-        return
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest_version = manifest["live_protocol_version"]
-    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        raise RuntimeError(f"cannot verify existing protocol manifest: {manifest_path}") from exc
-    if manifest_version != LIVE_RPC_PROTOCOL_VERSION:
-        raise RuntimeError(
-            f"refusing to replace protocol v{manifest_version} with "
-            f"v{LIVE_RPC_PROTOCOL_VERSION} in {directory}"
-        )
-
-
 def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
@@ -1377,10 +1183,6 @@ def _parser() -> argparse.ArgumentParser:
     action.add_argument("--check", action="store_true", help="fail if schema artifacts are stale")
     action.add_argument("--archive", type=Path, help="write a deterministic release archive")
     parser.add_argument(
-        "--immutable-base",
-        help="trusted Git ref defining historical bundles; also checks uncommitted changes",
-    )
-    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_SCHEMA_DIRECTORY,
@@ -1393,9 +1195,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output_directory = cast(Path, args.output_dir)
     archive = cast(Path | None, args.archive)
-    immutable_base = cast(str | None, args.immutable_base)
-    if immutable_base is not None and not args.check:
-        raise SystemExit("--immutable-base requires --check")
     if args.write:
         write_protocol_artifacts(output_directory)
         return 0
@@ -1403,23 +1202,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_protocol_archive(archive)
         return 0
     stale = stale_protocol_artifacts(output_directory)
-    history_errors = invalid_protocol_history(output_directory.parent)
-    immutable_changes = (
-        modified_committed_protocol_artifacts(
-            immutable_base,
-            root=output_directory.parent,
-        )
-        if immutable_base is not None
-        else ()
-    )
-    if not stale and not history_errors and not immutable_changes:
+    if not stale:
         return 0
     for filename in stale:
         print(f"stale generated protocol artifact: {filename}", file=sys.stderr)
-    for error in history_errors:
-        print(error, file=sys.stderr)
-    for path in immutable_changes:
-        print(f"committed protocol artifact is immutable: {path}", file=sys.stderr)
     print(
         "regenerate with: uv run python -m wisp.rpc.protocol_schema --write",
         file=sys.stderr,

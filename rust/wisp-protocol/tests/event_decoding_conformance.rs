@@ -46,7 +46,7 @@ fn computed_default_field(path: &[Value]) -> bool {
 fn canonical_events() -> BTreeMap<String, Value> {
     let schema: Value = serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../schemas/live-rpc/v9/events.schema.json"
+        "/../../schemas/live-rpc/events.schema.json"
     )))
     .unwrap();
     serde_json::from_value(schema["x-wisp-conformance-fixtures"].clone()).unwrap()

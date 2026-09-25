@@ -44,7 +44,6 @@ from typing import Literal
 from wisp.agent.messages import Message
 from wisp.config.runtime import default_session_dir
 from wisp.sessions.entries import (
-    ActiveLeafSessionEntry,
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
@@ -155,31 +154,21 @@ def read_session_entries(path: Path) -> list[SessionEntry]:
         path (Path): Session JSONL file.
 
     Returns:
-        list[SessionEntry]: Entries in append order, decoded through the same
-            compatibility path as the session store.
+        list[SessionEntry]: Entries in append order, decoded the same way as
+            the session store.
 
     Raises:
         SessionError: If a complete record is malformed or unsupported.
     """
 
     entries: list[SessionEntry] = []
-    leaf_id: str | None = None
     with path.open("r", encoding="utf-8") as session_file:
         for line_number, line in enumerate(session_file, start=1):
             if not line.endswith("\n"):
                 break
             if not line.strip():
                 continue
-            entry = session_entry_from_json(
-                line,
-                source=f"{path}:{line_number}",
-                legacy_parent_id=leaf_id,
-            )
-            entries.append(entry)
-            if is_session_tree_entry(entry):
-                leaf_id = entry.id
-            elif isinstance(entry, ActiveLeafSessionEntry):
-                leaf_id = entry.active_leaf_id
+            entries.append(session_entry_from_json(line, source=f"{path}:{line_number}"))
     return entries
 
 

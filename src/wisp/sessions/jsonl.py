@@ -1527,7 +1527,6 @@ def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[Sess
 
     entries: list[SessionEntry] = []
     session_id: str | None = None
-    active_leaf_id: str | None = None
     seen_entry_ids: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as session_file:
@@ -1535,11 +1534,7 @@ def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[Sess
                 if not line.strip():
                     continue
                 source = f"{path}:{line_number}"
-                entry = session_entry_from_json(
-                    line,
-                    source=source,
-                    legacy_parent_id=active_leaf_id,
-                )
+                entry = session_entry_from_json(line, source=source)
                 if session_id is None:
                     session_id = entry.session_id
                 elif entry.session_id != session_id:
@@ -1553,10 +1548,6 @@ def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[Sess
                     )
                 seen_entry_ids.add(entry.id)
                 entries.append(entry)
-                if is_session_tree_entry(entry):
-                    active_leaf_id = entry.id
-                elif isinstance(entry, ActiveLeafSessionEntry):
-                    active_leaf_id = entry.active_leaf_id
                 if limit is not None and len(entries) >= limit:
                     break
     except UnicodeDecodeError as exc:
