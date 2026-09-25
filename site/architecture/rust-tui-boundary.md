@@ -6,7 +6,7 @@
 | Runtime boundary | Rust owns terminal presentation; Python owns agent semantics and durability |
 | Historical decision | RC2 Rust-default trial on 2026-09-16; see [RC2 checklist](../contributing/rc2-release.md) |
 
-`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; `auto` and `rust` are equivalent selectors.
+`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust.
 Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
 retain print, JSON, RPC, and SDK interfaces but report an actionable missing-binary error for
 interactive startup. Source development uses a matching binary selected by an absolute

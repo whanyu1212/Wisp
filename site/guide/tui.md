@@ -9,7 +9,7 @@ The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions,
 > [!NOTE]
 > **TUI availability**
 >
-> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; both `auto` and `rust` selectors choose it.
+> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust.
 > Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
 > retain print, JSON, RPC, and SDK use, but interactive startup reports how to obtain a native wheel
 > or build a matching binary. Source checkouts set the absolute `WISP_RUST_TUI_BINARY` path after

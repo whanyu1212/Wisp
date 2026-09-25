@@ -36,8 +36,7 @@ request-boundary handshake, and source navigation.
 
 ## Terminal frontend boundary
 
-`wisp`, `wisp tui`, and `wisp --mode tui` launch the Rust frontend. The retained `auto` and `rust`
-selectors both choose Rust. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle its
+`wisp`, `wisp tui`, and `wisp --mode tui` launch the Rust frontend. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle its
 binary. A pure-wheel install keeps the Python backend and non-TUI interfaces, but interactive startup
 fails with instructions to obtain a native wheel or build a matching Rust binary. Source checkouts
 use an absolute `WISP_RUST_TUI_BINARY` override.

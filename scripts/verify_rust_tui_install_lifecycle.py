@@ -178,7 +178,8 @@ for arguments in [[], ["tui"], ["--mode", "tui"]]:
     ):
         result = CliRunner().invoke(app, arguments)
     assert result.exit_code == 0, result.output
-    assert selected["renderer"].value == "rust", (arguments, selected)
+    assert selected["config"].provider, (arguments, selected)
+    assert "renderer" not in selected, (arguments, selected)
 """
     environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
     _run(python, "-c", script, env=environment)
