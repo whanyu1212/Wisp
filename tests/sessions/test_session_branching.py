@@ -183,6 +183,46 @@ def test_fork_excludes_selected_user_message_and_returns_its_text(tmp_path: Path
     assert forked.read_active_leaf_id() == source_leaf_id
 
 
+def test_clone_and_fork_succeed_with_a_prompt_cache_boundary_in_the_same_process(
+    tmp_path: Path,
+) -> None:
+    # A run's first system message carries the transient `prompt_cache_boundary`
+    # flag, which is never persisted. Branching right after the run must still
+    # validate its projected copy against what the new file reads back as.
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+
+    async def branch() -> tuple[JsonlSession, JsonlSession, MessageSessionEntry]:
+        marked = await source.append_message(
+            Message(role="system", content="stable", prompt_cache_boundary=True)
+        )
+        await source.append_message(Message(role="user", content="first"))
+        await source.append_message(Message(role="assistant", content="answer"))
+        selected = await source.append_message(Message(role="user", content="edit me"))
+        active = await source.append_message(Message(role="assistant", content="old answer"))
+        cloned = await store.clone(source, expected_active_leaf_id=active.id)
+        forked = await store.fork_from_user_message(
+            source, selected.id, expected_active_leaf_id=active.id
+        )
+        # A retried append of the same entry is still recognized as persisted.
+        assert (await source.append_entry(marked)).id == marked.id
+        assert isinstance(marked, MessageSessionEntry)
+        return cloned, forked.session, marked
+
+    cloned, forked, marked = anyio.run(branch)
+
+    assert marked.message.prompt_cache_boundary is True
+    assert [m.content for m in cloned.read_messages()] == [
+        "stable",
+        "first",
+        "answer",
+        "edit me",
+        "old answer",
+    ]
+    assert [m.content for m in forked.read_messages()] == ["stable", "first", "answer"]
+    assert not any(m.prompt_cache_boundary for m in source.read_messages())
+
+
 def test_forking_first_user_message_defers_empty_file_until_resubmission(
     tmp_path: Path,
 ) -> None:

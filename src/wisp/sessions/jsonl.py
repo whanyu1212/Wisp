@@ -1226,7 +1226,11 @@ class JsonlSession:
             self._invalidate_entry_index()
             raise
         self._file_state.generation += 1
-        self._entry_index[persisted.id] = persisted
+        # Index what a later read of the file returns, not the in-memory object:
+        # fields excluded from serialization (such as a message's transient
+        # `prompt_cache_boundary`) must not survive only in this cache, or
+        # branch projections would no longer match their own re-read copy.
+        self._entry_index[persisted.id] = _as_persisted(persisted)
         self._entry_index_generation = self._file_state.generation
         self._entry_index_signature = session_file_signature(info)
         self._invalidate_message_page_index()
@@ -1237,7 +1241,9 @@ class JsonlSession:
         existing = self._entry_index.get(entry.id)
         if existing is None:
             return None
-        if existing == entry or _matches_detached_entry(existing, entry):
+        # The index holds entries as persisted; compare the retry the same way.
+        candidate = _as_persisted(entry)
+        if existing == candidate or _matches_detached_entry(existing, candidate):
             return existing
         raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
@@ -1488,6 +1494,16 @@ def _matches_reference(path: Path, reference: str) -> bool:
     except SessionError:
         return False
     return session_id.startswith(reference)
+
+
+def _as_persisted(entry: SessionEntry) -> SessionEntry:
+    """Return ``entry`` as it reads back from disk, dropping serialization-excluded fields."""
+
+    if isinstance(entry, MessageSessionEntry) and entry.message.prompt_cache_boundary:
+        return entry.model_copy(
+            update={"message": entry.message.model_copy(update={"prompt_cache_boundary": False})}
+        )
+    return entry
 
 
 def _read_session_id(path: Path) -> str:
