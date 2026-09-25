@@ -8,8 +8,7 @@ published candidate before installing one.
 
 ## What changes for terminal users
 
-`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; the retained `auto` and `rust` selectors both
-choose it. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary and Python
+`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary and Python
 backend. Pure-wheel installs retain print, JSON, RPC, and SDK but interactive commands fail with
 actionable missing-binary guidance. Build a matching Rust binary for a source checkout and set its
 absolute path in `WISP_RUST_TUI_BINARY`; see
@@ -19,8 +18,8 @@ RC2 includes the native-wheel release pipeline, composer selection/undo/clipboar
 and complete saved-history loading. It is a trial of Rust as the default on the packaged platforms,
 not a claim of universal terminal performance.
 
-RC3 keeps `auto` and `rust` as compatibility selector spellings, but removes `textual`, `fullscreen`,
-and `line` and the `--line` flag. It also adds selectable startup logos, improves full-history
+RC3 removes the `textual`, `fullscreen`, and `line` renderers and the `--line` flag; later 0.2
+candidates also remove the `auto`/`rust` renderer selector. It also adds selectable startup logos, improves full-history
 hydration, and reduces RPC streaming and literal-search overhead. Python still controls providers,
 tools, permissions, and saved sessions.
 

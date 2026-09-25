@@ -127,10 +127,7 @@ use wisp_protocol::events::WispCurrentLiveEventOutput;
 
 use wisp_protocol::handshake_request::RpcHandshakeRequest;
 
-use wisp_protocol::{
-    HANDSHAKE_FRAME_BYTES, LIVE_RPC_PROTOCOL_VERSION, MAX_APPLICATION_FRAME_BYTES,
-    ProtocolDecodeError,
-};
+use wisp_protocol::{HANDSHAKE_FRAME_BYTES, MAX_APPLICATION_FRAME_BYTES, ProtocolDecodeError};
 
 const WRITER_CHANNEL_CAPACITY: usize = 1;
 const EVENT_CHANNEL_CAPACITY: usize = 64;
@@ -194,8 +191,6 @@ pub enum Error {
     FrontendVersionMismatch { expected: String, frontend: String },
     #[error("backend package version {actual:?} does not match required version {expected:?}")]
     BackendVersionMismatch { expected: String, actual: String },
-    #[error("backend selected unsupported RPC protocol v{protocol}")]
-    ContractMismatch { protocol: u32 },
     #[error("RPC writer stopped unexpectedly")]
     WriterStopped,
     #[error("RPC writer admission stalled for 5 seconds")]
@@ -4150,12 +4145,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
                     actual: actual_version,
                 });
             }
-            let (protocol, max_client_frame, _max_server_frame) = response
+            let (max_client_frame, _max_server_frame) = response
                 .accepted_contract()
                 .expect("non-rejected validated handshake must be accepted");
-            if protocol != LIVE_RPC_PROTOCOL_VERSION {
-                return Err(Error::ContractMismatch { protocol });
-            }
 
             let theme_preferences = ThemePreferences::from_environment();
             let theme = theme_preferences
@@ -4178,7 +4170,6 @@ async fn run(cli: Cli) -> Result<(), Error> {
             let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled));
             let connection = ConnectionInfo {
                 backend_version: actual_version,
-                protocol_version: protocol,
             };
             let mut live_ui = LiveUi {
                 bindings,
@@ -4733,9 +4724,6 @@ mod tests {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
             "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
         })
@@ -4773,7 +4761,6 @@ mod tests {
             &mut terminal,
             &ConnectionInfo {
                 backend_version: "test".into(),
-                protocol_version: 6,
             },
         )
         .unwrap();
@@ -6360,7 +6347,6 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 3,
                 },
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -7316,7 +7302,6 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 3,
                 },
             )
             .unwrap();
@@ -7350,7 +7335,6 @@ mod tests {
                 &mut terminal,
                 &ConnectionInfo {
                     backend_version: "0.1.0".into(),
-                    protocol_version: 3,
                 },
             )
             .unwrap();
@@ -7402,7 +7386,6 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
-            protocol_version: 3,
         };
         live_ui.draw(&mut terminal, &connection).unwrap();
         live_ui.state.pending_approval.as_mut().unwrap().call_id = "call-2".into();
@@ -8379,7 +8362,6 @@ mod tests {
 
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
-            protocol_version: LIVE_RPC_PROTOCOL_VERSION,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 8)).unwrap();
         live_ui.draw(&mut terminal, &connection).unwrap();

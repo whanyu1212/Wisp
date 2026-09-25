@@ -9,11 +9,10 @@ The `wisp` executable selects an interface from its arguments and terminal state
 |---|---|
 | `wisp` | Launch the automatically selected TUI when stdin and stdout are interactive |
 | `wisp tui` | Launch the Rust TUI from a native wheel or source binary override |
-| `wisp tui --renderer rust` | Explicit Rust selection; `auto` also selects Rust |
 | `wisp -p "PROMPT"` | Run one prompt and print assistant text |
 | `wisp -p "PROMPT" --mode json` | Emit one typed `WispEvent` JSON object per line |
 | `wisp --mode rpc` | Start the long-lived JSONL RPC command host |
-| `wisp --mode tui --tui-renderer auto\|rust` | Compatibility TUI entry point |
+| `wisp --mode tui` | Launch the Rust TUI with the top-level options |
 
 A prompt is invalid with `--mode rpc` or `--mode tui`. A non-interactive invocation with neither a
 prompt nor an explicit RPC/TUI mode prints help and exits.
@@ -32,7 +31,6 @@ the dedicated `wisp tui` command are listed separately below.
 | `--session-dir PATH` | Store and resolve JSONL sessions in this directory | `WISP_SESSION_DIR` |
 | `--auth-file PATH` | Use this private provider credential file | `WISP_AUTH_FILE` |
 | `--mode text\|json\|rpc\|tui` | Select the output/interface mode | `WISP_MODE` (only without `--prompt`) |
-| `--tui-renderer auto\|rust` | Rust TUI selection for `--mode tui` | `WISP_TUI_RENDERER` |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry; TUI modes default on, other modes off | — |
 | `--allow-read-tools`, `--no-allow-read-tools` | Expose sandboxed read-only tools | — |
 | `--allow-tool NAME` | Expose one named tool; repeat for multiple tools | — |
@@ -59,7 +57,6 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 
 | Option | Meaning |
 |---|---|
-| `--renderer auto\|rust` | Select Rust; both values launch the same frontend |
 | `--session-dir PATH` | Override the JSONL session directory |
 | `--auth-file PATH` | Override the provider auth file |
 | `--all-tools`, `--no-all-tools` | Expose or withhold the full tool registry |
@@ -71,7 +68,7 @@ modes. See [Tools & safety](../guide/tools-and-safety).
 | `--max-tool-iterations N` | Cap model/tool rounds |
 
 Provider and model defaults for the dedicated command come from configuration and
-`WISP_PROVIDER`/`WISP_MODEL`. Use the compatibility `--mode tui` form when you need top-level
+`WISP_PROVIDER`/`WISP_MODEL`. Use the `--mode tui` form when you need top-level
 `--provider` or `--model` flags.
 
 Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 include the Rust executable. Pure-wheel
@@ -79,9 +76,6 @@ installs retain print, JSON, RPC, and SDK use, but interactive TUI commands fail
 install on a supported native target or build a matching binary from source. For source development,
 set `WISP_RUST_TUI_BINARY` to the absolute path of that binary. Missing, damaged, incompatible, or
 failed Rust launches report an error rather than starting another interface.
-
-The retained `auto` and `rust` selectors both choose Rust. `WISP_TUI_RENDERER=auto|rust` supplies
-the default for the dedicated and compatibility TUI commands; an explicit option takes precedence.
 
 ## Maintenance and inspection commands
 

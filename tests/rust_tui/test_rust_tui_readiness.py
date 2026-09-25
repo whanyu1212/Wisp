@@ -137,8 +137,6 @@ def _launch(tmp_path: Path, *, home: Path, cwd: Path | None = None) -> tuple[_Tu
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
             ],

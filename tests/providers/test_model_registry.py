@@ -14,7 +14,7 @@ from wisp.providers.catalog import (
 
 
 def _catalog(*providers: dict[str, object]) -> ModelCatalog:
-    return ModelCatalog.model_validate({"schema_version": 1, "providers": list(providers)})
+    return ModelCatalog.model_validate({"schema_version": 2, "providers": list(providers)})
 
 
 def _provider(

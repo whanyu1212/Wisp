@@ -45,7 +45,6 @@ from wisp.rpc.commands import (
     RpcCommandAdapter,
 )
 from wisp.rpc.protocol import (
-    LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
     RpcHandshakeAccepted,
@@ -94,7 +93,7 @@ def test_protocol_artifact_generation_is_deterministic_and_hashed() -> None:
     )
 
     manifest = json.loads(first["manifest.json"])
-    assert manifest["live_protocol_version"] == LIVE_RPC_PROTOCOL_VERSION
+    assert "live_protocol_version" not in manifest
     assert "event_schema_version" not in manifest
     assert manifest["fixed_handshake_frame_bytes"] == MAX_HANDSHAKE_FRAME_BYTES
     assert manifest["maximum_application_frame_bytes"] == MAX_LIVE_RPC_FRAME_BYTES
@@ -153,27 +152,21 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
         "type": "rpc.handshake.request",
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
-        "min_protocol_version": 1,
-        "max_protocol_version": 1,
         "supported_capabilities": ["streaming.text"],
         "required_capabilities": ["streaming.text"],
     }
 
     assert client.is_valid(client_payload)
     assert not client.is_valid(
-        {key: value for key, value in client_payload.items() if key != "max_protocol_version"}
+        {key: value for key, value in client_payload.items() if key != "frontend_version"}
     )
     assert not client.is_valid({**client_payload, "max_event_schema_version": 39})
     assert not client.is_valid({**client_payload, "frontend_name": "wisp-rust-tui\n"})
     assert not client.is_valid({**client_payload, "supported_capabilities": [1]})
     assert not client.is_valid({**client_payload, "supported_capabilities": ["streaming.text\n"]})
     invariants = cast(list[dict[str, str]], client_schema["x-wisp-cross-field-invariants"])
+    assert not client.is_valid({**client_payload, "max_protocol_version": 9})
     assert invariants == [
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        },
         {
             "kind": "array-subset",
             "subset_property": "required_capabilities",
@@ -183,9 +176,6 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
 
     hello = RpcHandshakeAccepted(
         backend_package_version="0.1.0",
-        protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         capabilities=(),
         limits=RpcTransportLimits(
             max_client_frame_bytes=1024,
@@ -193,32 +183,13 @@ def test_handshake_schemas_require_wire_critical_fields_and_safe_identifiers() -
         ),
     ).model_dump(mode="json")
     assert server.is_valid(hello)
-    assert not server.is_valid(
-        {key: value for key, value in hello.items() if key != "protocol_version"}
-    )
+    assert not server.is_valid({key: value for key, value in hello.items() if key != "limits"})
     server_mapping = _mapping(server_schema)
     server_hello = _definition(server_schema, server_mapping["rpc.handshake.accepted"])
-    assert server_hello["x-wisp-cross-field-invariants"] == [
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        },
-        {
-            "kind": "value-in-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-            "value_property": "protocol_version",
-        },
-    ]
+    assert not server.is_valid({**hello, "protocol_version": 9})
+    assert "x-wisp-cross-field-invariants" not in server_hello
     rejection = _definition(server_schema, server_mapping["rpc.handshake.rejected"])
-    assert rejection["x-wisp-cross-field-invariants"] == [
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        }
-    ]
+    assert "x-wisp-cross-field-invariants" not in rejection
 
 
 def test_command_schema_contains_every_discriminator_once() -> None:

@@ -10,7 +10,6 @@ from tests.paths import REPO_ROOT
 from wisp import __version__
 from wisp.agent.messages import CompactionRecord
 from wisp.events import WispEvent
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION
 from wisp.sessions import (
     PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
     SESSION_ENTRY_SCHEMA_VERSION,
@@ -42,9 +41,7 @@ def test_changelog_covers_every_historical_event_schema() -> None:
     assert "schema v1" in _CHANGELOG
     assert "there was no merged schema v1" in _CHANGELOG
     assert not re.findall(r"^## Schema v(\d+) — current$", _CHANGELOG, flags=re.MULTILINE)
-    assert re.findall(
-        r"^## Live RPC protocol v(\d+) — current$", _CHANGELOG, flags=re.MULTILINE
-    ) == [str(LIVE_RPC_PROTOCOL_VERSION)]
+    assert not re.findall(r"— current$", _CHANGELOG, flags=re.MULTILINE)
 
 
 def test_rpc_message_snapshot_history_distinguishes_calls_and_results() -> None:

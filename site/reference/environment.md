@@ -5,8 +5,7 @@
 | `WISP_PROVIDER` | Provider name: `openai-codex`, `openai`, `xai`, `deepseek`, `openai-compatible`, `anthropic`, `google`, or `fake` |
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
-| `WISP_TUI_RENDERER` | Rust TUI selector for bare `wisp`, `wisp tui`, and `--mode tui`: `auto` (default) or `rust` |
-| `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used only when the Rust renderer is selected |
+| `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used when launching the TUI |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
 | `WISP_OPENAI_COMPATIBLE_CONFIG` | JSON object configuring one OpenAI-compatible endpoint; overrides the user-settings `openai_compatible` object |

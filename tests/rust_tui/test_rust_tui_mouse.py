@@ -54,8 +54,6 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
             ],

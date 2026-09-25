@@ -32,7 +32,6 @@ def _consumer_environment(environment: Path) -> dict[str, str]:
         **os.environ,
         "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
     }
-    consumer.pop("WISP_TUI_RENDERER", None)
     consumer.pop("WISP_RUST_TUI_BINARY", None)
     return consumer
 
@@ -171,7 +170,7 @@ from typer.testing import CliRunner
 from wisp.cli import app
 from wisp.cli import application as cli_module
 
-for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "rust"]]:
+for arguments in [[], ["tui"], ["--mode", "tui"]]:
     selected = {}
     with patch.object(cli_module, "_terminal_is_interactive", return_value=True), patch.object(
         cli_module, "_run_tui_from_cli_options",
@@ -179,7 +178,8 @@ for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "rust"]]
     ):
         result = CliRunner().invoke(app, arguments)
     assert result.exit_code == 0, result.output
-    assert selected["renderer"].value == "rust", (arguments, selected)
+    assert selected["config"].provider, (arguments, selected)
+    assert "renderer" not in selected, (arguments, selected)
 """
     environment = {**_consumer_environment(python.parent.parent), "PATH": "/usr/bin:/bin"}
     _run(python, "-c", script, env=environment)
@@ -243,13 +243,11 @@ def _verify_pure_non_tui_interfaces(
 
     handshake_script = """
 from wisp import __version__
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+from wisp.rpc.protocol import RpcHandshakeRequest
 
 print(RpcHandshakeRequest(
     frontend_name="wheel-lifecycle",
     frontend_version=__version__,
-    min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-    max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
     supported_capabilities=(),
     required_capabilities=(),
 ).model_dump_json())

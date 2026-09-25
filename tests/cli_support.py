@@ -37,7 +37,6 @@ from wisp.providers.events import (
 )
 from wisp.rpc import host as rpc_host_module
 from wisp.rpc.protocol import (
-    LIVE_RPC_PROTOCOL_VERSION,
     RpcHandshakeAccepted,
     RpcHandshakeRequest,
     RpcTransportLimits,
@@ -58,8 +57,6 @@ _RPC_TEST_HANDSHAKE = (
     RpcHandshakeRequest(
         frontend_name="wisp-python-tests",
         frontend_version=__version__,
-        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         supported_capabilities=(),
         required_capabilities=(),
     ).model_dump_json()

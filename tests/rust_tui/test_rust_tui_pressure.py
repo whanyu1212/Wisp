@@ -40,7 +40,6 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
 )
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION
 
 
 mode = sys.argv[1]
@@ -66,9 +65,6 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-    "min_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-    "max_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,

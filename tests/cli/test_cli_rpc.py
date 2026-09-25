@@ -30,7 +30,7 @@ from wisp.rpc.commands import ApprovalCommand
 from wisp.rpc.coordinator import _RpcPromptReady
 from wisp.rpc.handlers.control import handle_rpc_control_command
 from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+from wisp.rpc.protocol import RpcHandshakeRequest
 from wisp.rpc.session import run as rpc_session_run_module
 from wisp.rpc.session.run import (
     rpc_has_durable_completion,
@@ -54,8 +54,6 @@ _RPC_TEST_HANDSHAKE = (
     RpcHandshakeRequest(
         frontend_name="wisp-python-tests",
         frontend_version=__version__,
-        min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-        max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
         supported_capabilities=(),
         required_capabilities=(),
     ).model_dump_json()
@@ -250,7 +248,7 @@ async def _runtime_with_provider(
         assert provider.default_model is not None
         models = ModelRegistry(
             ModelCatalog(
-                schema_version=1,
+                schema_version=2,
                 providers=(
                     ModelCatalogProviderEntry(
                         name=provider.name,

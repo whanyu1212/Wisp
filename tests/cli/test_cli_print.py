@@ -73,7 +73,6 @@ def test_bare_interactive_cli_selects_rust_without_native_binary(
     )
 
     assert result.exit_code == 0, result.output
-    assert launched["renderer"] is cli_module.TuiFrontendKind.rust
     assert launched["all_tools"] is True
 
 
@@ -408,7 +407,6 @@ def test_prompt_implies_text_mode_when_env_defaults_to_tui(tmp_path: Path) -> No
         ["-p", "hello", "--session-dir", str(tmp_path)],
         env={
             "WISP_MODE": "tui",
-            "WISP_TUI_RENDERER": "rust",
             "WISP_PROVIDER": "fake",
             "WISP_MODEL": "",
         },

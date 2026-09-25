@@ -9,7 +9,7 @@ The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions,
 > [!NOTE]
 > **TUI availability**
 >
-> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust; both `auto` and `rust` selectors choose it.
+> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust.
 > Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
 > retain print, JSON, RPC, and SDK use, but interactive startup reports how to obtain a native wheel
 > or build a matching binary. Source checkouts set the absolute `WISP_RUST_TUI_BINARY` path after
@@ -34,9 +34,8 @@ end the session with a diagnostic and terminal cleanup. A choice that changed wh
 input was waiting must be selected again; a redraw cannot apply that input to a replacement choice.
 
 ```bash
-wisp tui --renderer rust
-wisp --mode tui --tui-renderer rust
-WISP_TUI_RENDERER=rust wisp
+wisp tui
+wisp --mode tui
 ```
 
 The conversation uses the terminal width with modest side margins. User turns have a subtle
@@ -49,7 +48,7 @@ keeps the cursor's wrapped row visible. The frame
 collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
 mode, model, context, and the selected session on the right, as space permits.
-The live RPC protocol version stays in Ctrl+G help. An empty transcript shows a centered startup
+The backend version stays in Ctrl+G help. An empty transcript shows a centered startup
 logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
 terminals.
@@ -91,7 +90,7 @@ aliases also work. Project trust remains a compact card at the bottom of the pan
 with `y`/`n` choices; the composer stays a short waiting
 strip instead of a five-row args panel.
 
-The Rust TUI negotiates and validates live RPC v9, supports prompts, approvals,
+The Rust TUI validates the live RPC handshake and events, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and complete saved session history.
 `/resume` opens a searchable picker with backend-owned pages of up to 50 persisted sessions;
@@ -219,7 +218,7 @@ Rust mouse navigation is **on by default**, so wheel and trackpad scrolling can 
 turns even though the live view starts at the current prompt. Disable it for a launch with:
 
 ```bash
-WISP_TUI_MOUSE=0 wisp tui --renderer rust
+WISP_TUI_MOUSE=0 wisp tui
 ```
 
 Unset enables capture. `1`, `true`, and `on` also enable it (case-insensitive); `0`, `false`, `off`,
@@ -558,12 +557,11 @@ wisp tui --continue
 wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
-wisp tui --renderer rust                 # explicitly select Rust
-wisp --mode tui --tui-renderer auto       # compatibility entry point; also selects Rust
+wisp --mode tui --provider anthropic     # top-level flags such as --provider also work
 ```
 
 Rust loads the complete saved active path at startup and on `/resume`. Set `NO_COLOR` to request
 grayscale presentation.
 
-The legacy `--mode tui` entrypoint remains for compatibility and honors
-`--tui-renderer auto|rust` plus `WISP_TUI_RENDERER`.
+`wisp --mode tui` launches the same TUI and accepts the top-level options, including `--provider`
+and `--model`.

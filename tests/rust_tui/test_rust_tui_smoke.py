@@ -111,8 +111,6 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     "-m",
                     "wisp",
                     "tui",
-                    "--renderer",
-                    "rust",
                     "--session-dir",
                     str(tmp_path / ("restart" if restart else "initial")),
                 ],
@@ -297,8 +295,6 @@ def test_rust_tui_cross_language_smoke(
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(tmp_path),
             ],
@@ -420,9 +416,6 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -733,9 +726,6 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1098,9 +1088,6 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {
         "max_client_frame_bytes": 67108864,
@@ -1493,8 +1480,6 @@ request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": request["frontend_version"],
-    "protocol_version": 9,
-    "min_protocol_version": 9, "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1878,8 +1863,6 @@ SKILL_EXPANSION_MARKER
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
             ],
@@ -2020,8 +2003,6 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
             ],
@@ -2160,7 +2141,6 @@ from wisp.events import (
     RpcConnectionCatalogReported, RpcConnectionCatalogSnapshot,
     RpcMessagesReported, RpcMessageSnapshot,
 )
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION as PROTOCOL_VERSION
 
 log_path = Path(sys.argv[1])
 def emit(event):
@@ -2170,8 +2150,6 @@ def finish(command):
 request = json.loads(sys.stdin.readline())
 print(json.dumps({
     "type":"rpc.handshake.accepted", "backend_package_version":request["frontend_version"],
-    "protocol_version":PROTOCOL_VERSION,
-    "min_protocol_version":PROTOCOL_VERSION, "max_protocol_version":PROTOCOL_VERSION,
     "capabilities":[],
     "limits":{"max_client_frame_bytes":67108864,"max_server_frame_bytes":67108864},
 }), flush=True)

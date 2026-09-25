@@ -25,18 +25,6 @@
       "title": "Frontend Version",
       "type": "string"
     },
-    "max_protocol_version": {
-      "maximum": 4294967295,
-      "minimum": 1,
-      "title": "Max Protocol Version",
-      "type": "integer"
-    },
-    "min_protocol_version": {
-      "maximum": 4294967295,
-      "minimum": 1,
-      "title": "Min Protocol Version",
-      "type": "integer"
-    },
     "required_capabilities": {
       "items": {
         "$ref": "#/$defs/RpcCapability"
@@ -65,8 +53,6 @@
   "required": [
     "frontend_name",
     "frontend_version",
-    "min_protocol_version",
-    "max_protocol_version",
     "supported_capabilities",
     "required_capabilities",
     "type"
@@ -74,11 +60,6 @@
   "title": "RPC handshake request",
   "type": "object",
   "x-wisp-cross-field-invariants": [
-    {
-      "kind": "ordered-range",
-      "maximum_property": "max_protocol_version",
-      "minimum_property": "min_protocol_version"
-    },
     {
       "kind": "array-subset",
       "subset_property": "required_capabilities",

@@ -159,32 +159,27 @@ def test_find_summary_marks_truncated_results() -> None:
 
 def test_ls_summary_counts_entries_with_path() -> None:
     assert (
-        summarize_tool_result("ls", {"path": "src/", "entries": ["a", "b", "c"]})
+        summarize_tool_result("ls", {"path": "src/", "entries": ["a", "b", "c"], "entry_count": 3})
         == "ls: 3 entries in src/"
     )
 
 
 def test_ls_summary_singular_entry() -> None:
-    assert summarize_tool_result("ls", {"path": "d", "entries": ["only"]}) == "ls: 1 entry in d"
-
-
-def test_ls_summary_empty_directory() -> None:
-    assert summarize_tool_result("ls", {"path": "src/", "entries": []}) == "ls: empty (src/)"
-
-
-def test_ls_summary_marks_truncated_as_a_floor() -> None:
-    # A truncated ls reports the kept entries as a floor, not the true total.
     assert (
-        summarize_tool_result("ls", {"path": "big/", "entries": ["a", "b"]}, truncated=True)
-        == "ls: 2 entries in big/ (+ more)"
+        summarize_tool_result("ls", {"path": "d", "entries": ["only"], "entry_count": 1})
+        == "ls: 1 entry in d"
     )
 
 
-def test_ls_summary_none_when_entries_not_a_list() -> None:
-    assert summarize_tool_result("ls", {"path": "p", "entries": "nope"}) is None
+def test_ls_summary_empty_directory() -> None:
+    assert (
+        summarize_tool_result("ls", {"path": "src/", "entries": [], "entry_count": 0})
+        == "ls: empty (src/)"
+    )
 
 
-# --- gating & bounds ---------------------------------------------------------
+def test_ls_summary_none_without_entry_count() -> None:
+    assert summarize_tool_result("ls", {"path": "p", "entries": ["a"]}) is None
 
 
 def test_summary_none_for_tools_without_one() -> None:

@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from wisp.agent.context_budget import (
     build_context_budget,
-    context_fingerprint,
     estimate_context,
     estimate_context_budget,
 )
@@ -46,19 +45,20 @@ def build_session_stats(
     provider: str | None = None,
     model: str | None = None,
     observed_tokens: int | None = None,
-    observed_is_current: bool = False,
-    observed_entry_id: str | None = None,
-    observed_context_fingerprint: str | None = None,
     auto_compaction_enabled: bool = True,
 ) -> SessionStats:
-    """Derive one consistent statistics snapshot from durable session state."""
+    """Derive one consistent statistics snapshot from durable session state.
+
+    Context accounting starts from the latest provider observation persisted on the
+    active path after the last compaction. Without one, the budget is estimated and
+    ``observed_tokens`` (the session's in-memory observation, if any) is reported as
+    stale because it no longer describes the active context.
+    """
 
     usage_records = tuple(_usage_records(entries))
     entries_by_id = {entry.id: entry for entry in entries}
     active_entries = tuple(entries_by_id[entry_id] for entry_id in replay.path_entry_ids)
-    durable_observation, durable_entry_id, legacy_tokens, legacy_is_latest = _latest_observation(
-        active_entries
-    )
+    durable_observation = _latest_observation(active_entries)
     if durable_observation is not None:
         context = estimate_context_budget(
             provider_messages,
@@ -70,24 +70,12 @@ def build_session_stats(
             model=model if provider is not None else durable_observation.model,
         )
     else:
-        if observed_tokens is None:
-            observed_tokens = legacy_tokens
-        if observed_tokens != legacy_tokens or not legacy_is_latest:
-            observed_is_current = False
-        if observed_entry_id is not None and observed_entry_id != durable_entry_id:
-            observed_is_current = False
-        if (
-            observed_context_fingerprint is not None
-            and observed_context_fingerprint != context_fingerprint(provider_messages, tools)
-        ):
-            observed_is_current = False
-        estimate = estimate_context(provider_messages, tools)
         context = build_context_budget(
-            estimate,
+            estimate_context(provider_messages, tools),
             context_window=context_window,
             reserve_tokens=reserve_tokens,
             observed_tokens=observed_tokens,
-            observed_is_current=observed_is_current,
+            observed_is_current=False,
         )
     return SessionStats(
         session_id=session_id,
@@ -213,40 +201,22 @@ def _sum_complete_optional(records: Sequence[TokenUsage], field: str) -> int | N
     return sum(value for value in values if value is not None)
 
 
-def _latest_observation(
-    entries: Sequence[SessionEntry],
-) -> tuple[ContextObservation | None, str | None, int | None, bool]:
+def _latest_observation(entries: Sequence[SessionEntry]) -> ContextObservation | None:
+    """Return the newest context observation after the last compaction boundary."""
+
     boundary = max(
         (index for index, entry in enumerate(entries) if entry.kind == "compaction"),
         default=-1,
     )
-    context_messages = [
-        (entry.id, entry.message)
-        for entry in entries[boundary + 1 :]
-        if isinstance(entry, MessageSessionEntry) and entry.message.role != "system"
-    ]
-    latest_observation: ContextObservation | None = None
-    latest_usage: int | None = None
-    latest_usage_index: int | None = None
-    latest_entry_id: str | None = None
-    for index, (entry_id, message) in enumerate(context_messages):
-        if message.context_observation is not None:
-            latest_observation = message.context_observation
-            latest_entry_id = entry_id
-        if (
-            message.role == "assistant"
-            and message.finish_reason not in {"error", "cancelled"}
-            and message.usage is not None
-            and message.usage.total_tokens > 0
-        ):
-            latest_usage = message.usage.total_tokens
-            latest_entry_id = entry_id
-            latest_usage_index = index
-    return (
-        latest_observation,
-        latest_entry_id,
-        latest_usage,
-        latest_usage_index == len(context_messages) - 1,
+    return next(
+        (
+            entry.message.context_observation
+            for entry in reversed(entries[boundary + 1 :])
+            if isinstance(entry, MessageSessionEntry)
+            and entry.message.role != "system"
+            and entry.message.context_observation is not None
+        ),
+        None,
     )
 
 

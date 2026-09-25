@@ -8,7 +8,7 @@
     },
     "RpcHandshakeAccepted": {
       "additionalProperties": false,
-      "description": "Successful backend response selecting one compatible live contract.",
+      "description": "Successful backend response selecting capabilities and frame limits.",
       "properties": {
         "backend_package_version": {
           "maxLength": 128,
@@ -29,24 +29,6 @@
         "limits": {
           "$ref": "#/$defs/RpcTransportLimits"
         },
-        "max_protocol_version": {
-          "maximum": 4294967295,
-          "minimum": 1,
-          "title": "Max Protocol Version",
-          "type": "integer"
-        },
-        "min_protocol_version": {
-          "maximum": 4294967295,
-          "minimum": 1,
-          "title": "Min Protocol Version",
-          "type": "integer"
-        },
-        "protocol_version": {
-          "maximum": 4294967295,
-          "minimum": 1,
-          "title": "Protocol Version",
-          "type": "integer"
-        },
         "type": {
           "const": "rpc.handshake.accepted",
           "default": "rpc.handshake.accepted",
@@ -56,28 +38,12 @@
       },
       "required": [
         "backend_package_version",
-        "protocol_version",
-        "min_protocol_version",
-        "max_protocol_version",
         "capabilities",
         "limits",
         "type"
       ],
       "title": "RpcHandshakeAccepted",
-      "type": "object",
-      "x-wisp-cross-field-invariants": [
-        {
-          "kind": "ordered-range",
-          "maximum_property": "max_protocol_version",
-          "minimum_property": "min_protocol_version"
-        },
-        {
-          "kind": "value-in-range",
-          "maximum_property": "max_protocol_version",
-          "minimum_property": "min_protocol_version",
-          "value_property": "protocol_version"
-        }
-      ]
+      "type": "object"
     },
     "RpcHandshakeRejected": {
       "additionalProperties": false,
@@ -93,24 +59,12 @@
         "code": {
           "$ref": "#/$defs/RpcHandshakeRejectionCode"
         },
-        "max_protocol_version": {
-          "maximum": 4294967295,
-          "minimum": 1,
-          "title": "Max Protocol Version",
-          "type": "integer"
-        },
         "message": {
           "maxLength": 1000,
           "minLength": 1,
           "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u202a-\\u202e\\u2066-\\u2069]{1,1000}(?![\\s\\S])",
           "title": "Message",
           "type": "string"
-        },
-        "min_protocol_version": {
-          "maximum": 4294967295,
-          "minimum": 1,
-          "title": "Min Protocol Version",
-          "type": "integer"
         },
         "type": {
           "const": "rpc.handshake.rejected",
@@ -123,24 +77,14 @@
         "code",
         "message",
         "backend_package_version",
-        "min_protocol_version",
-        "max_protocol_version",
         "type"
       ],
       "title": "RpcHandshakeRejected",
-      "type": "object",
-      "x-wisp-cross-field-invariants": [
-        {
-          "kind": "ordered-range",
-          "maximum_property": "max_protocol_version",
-          "minimum_property": "min_protocol_version"
-        }
-      ]
+      "type": "object"
     },
     "RpcHandshakeRejectionCode": {
       "enum": [
         "invalid_handshake",
-        "protocol_version_mismatch",
         "unsupported_capability"
       ],
       "type": "string"

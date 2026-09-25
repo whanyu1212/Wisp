@@ -114,7 +114,7 @@ from wisp.rpc.commands import (
     rpc_command_payload_size,
     take_store_api_key,
 )
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+from wisp.rpc.protocol import RpcHandshakeRequest
 
 
 class RecordingTransport:
@@ -140,7 +140,6 @@ class RecordingTransport:
 def test_changelog_documents_protocol_as_the_single_event_contract() -> None:
     changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert f"## Live RPC protocol v{LIVE_RPC_PROTOCOL_VERSION} — current" in changelog
     assert "Events no longer carry a per-event `schema_version`." in changelog
 
 
@@ -1719,8 +1718,6 @@ def test_jsonl_subprocess_rpc_transport_times_out_while_writing_handshake(
         request = RpcHandshakeRequest(
             frontend_name="fixture",
             frontend_version="0.1.0",
-            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         )
@@ -1747,9 +1744,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1804,9 +1798,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1838,9 +1829,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1864,9 +1852,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1924,19 +1909,17 @@ import sys
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.rejected",
-    "code": "protocol_version_mismatch",
-    "message": "No compatible live RPC protocol version.",
+    "code": "unsupported_capability",
+    "message": "A required frontend capability is unavailable.",
     "backend_package_version": BACKEND_VERSION,
-    "min_protocol_version": 7,
-    "max_protocol_version": 7,
 }), flush=True)
 """
-        with pytest.raises(RpcHandshakeError, match="No compatible") as error:
+        with pytest.raises(RpcHandshakeError, match="capability is unavailable") as error:
             await JsonlSubprocessRpcTransport.start(
                 [sys.executable, "-c", _fake_backend(script)],
                 cwd=tmp_path,
             )
-        assert error.value.code == "protocol_version_mismatch"
+        assert error.value.code == "unsupported_capability"
 
     anyio.run(run)
 
@@ -1958,9 +1941,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)
@@ -1992,9 +1972,6 @@ json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
     "backend_package_version": BACKEND_VERSION,
-    "protocol_version": 9,
-    "min_protocol_version": 9,
-    "max_protocol_version": 9,
     "capabilities": [],
     "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
 }), flush=True)

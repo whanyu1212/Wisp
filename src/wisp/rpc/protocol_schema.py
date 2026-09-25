@@ -22,7 +22,6 @@ from pydantic import BaseModel, TypeAdapter
 from wisp.events import KnownWispEventAdapter
 from wisp.rpc.commands import RpcCommandAdapter
 from wisp.rpc.protocol import (
-    LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
     RpcHandshakeRequest,
@@ -30,7 +29,6 @@ from wisp.rpc.protocol import (
 )
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
-SCHEMA_FORMAT_VERSION = 1
 DEFAULT_SCHEMA_DIRECTORY = Path("schemas/live-rpc")
 
 _CLIENT_HANDSHAKE_SCHEMA = "client-handshake.schema.json"
@@ -58,11 +56,6 @@ def generate_protocol_artifacts() -> dict[str, str]:
     _require_root_property(client_handshake, "type")
     client_handshake["x-wisp-cross-field-invariants"] = [
         {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        },
-        {
             "kind": "array-subset",
             "subset_property": "required_capabilities",
             "superset_property": "supported_capabilities",
@@ -75,7 +68,6 @@ def generate_protocol_artifacts() -> dict[str, str]:
     )
     _harden_capability_schema(server_handshake)
     _require_discriminator_property(server_handshake, "type")
-    _annotate_server_handshake_invariants(server_handshake)
 
     commands = _schema_for_model(RpcCommandAdapter, title="Wisp typed-client RPC commands")
     _shape_command_output_schema(commands)
@@ -109,10 +101,8 @@ def generate_protocol_artifacts() -> dict[str, str]:
     }
     manifest: JsonObject = {
         "fixed_handshake_frame_bytes": MAX_HANDSHAKE_FRAME_BYTES,
-        "live_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
         "maximum_application_frame_bytes": MAX_LIVE_RPC_FRAME_BYTES,
         "schema_dialect": JSON_SCHEMA_DIALECT,
-        "schema_format_version": SCHEMA_FORMAT_VERSION,
         "schema_hashes": schema_hashes,
         "schemas": {
             "client_handshake": _CLIENT_HANDSHAKE_SCHEMA,
@@ -553,32 +543,6 @@ def _harden_capability_schema(schema: JsonObject) -> None:
     capability = definitions.get("RpcCapability")
     if isinstance(capability, dict):
         capability["pattern"] = r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*(?![\s\S])"
-
-
-def _annotate_server_handshake_invariants(schema: JsonObject) -> None:
-    definitions = _object_member(schema, "$defs")
-    accepted = _named_definition(definitions, "RpcHandshakeAccepted")
-    accepted["x-wisp-cross-field-invariants"] = [
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        },
-        {
-            "kind": "value-in-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-            "value_property": "protocol_version",
-        },
-    ]
-    rejection = _named_definition(definitions, "RpcHandshakeRejected")
-    rejection["x-wisp-cross-field-invariants"] = [
-        {
-            "kind": "ordered-range",
-            "maximum_property": "max_protocol_version",
-            "minimum_property": "min_protocol_version",
-        }
-    ]
 
 
 def _shape_current_event_output_schema(schema: JsonObject) -> None:
