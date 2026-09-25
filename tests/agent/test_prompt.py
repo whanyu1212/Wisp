@@ -12,6 +12,7 @@ from wisp.agent.prompt import (
     build_prompt_messages,
     build_untrusted_project_context,
     read_repository_status,
+    recover_repository_status,
     resolve_project_context_root,
 )
 from wisp.agent.prompt import project_context as project_context_module
@@ -593,3 +594,62 @@ def test_repository_status_is_read_once_and_reused_verbatim(
     assert snapshot in context
     # The supplied snapshot replaces the status read; Git is not asked again.
     assert status_reads == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["", " M src/app.py", "\n".join(f" M src/file_{i}.py" for i in range(20))],
+    ids=["clean", "one-change", "more-than-shown"],
+)
+def test_recover_repository_status_round_trips_the_persisted_project_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
+    (repo / "AGENTS.md").write_text("Keep changes small.\n", encoding="utf-8")
+
+    def fake_run_git(_cwd: Path, *args: str) -> str | None:
+        return {
+            ("rev-parse", "--show-toplevel"): str(repo),
+            ("rev-parse", "--is-inside-work-tree"): "true",
+            ("branch", "--show-current"): "main",
+            ("status", "--short"): status,
+        }.get(args)
+
+    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    snapshot = read_repository_status(repo)
+    context = build_project_context(cwd=repo, repository_status=snapshot)
+
+    assert recover_repository_status(context, repo) == snapshot
+    # Reusing the recovered snapshot rebuilds the same context byte for byte.
+    assert build_project_context(cwd=repo, repository_status=snapshot) == context
+
+
+def test_recover_repository_status_rejects_other_directories_and_incomplete_contexts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(
+        project_context_module,
+        "_run_git",
+        lambda _cwd, *args: {
+            ("rev-parse", "--is-inside-work-tree"): "true",
+            ("branch", "--show-current"): "main",
+            ("status", "--short"): " M a.py",
+        }.get(args),
+    )
+    context = build_project_context(cwd=repo)
+    snapshot_start = context.index(_GIT_SNAPSHOT)
+
+    assert recover_repository_status(context, tmp_path / "elsewhere") is None
+    # Truncated right after the status: the snapshot may be incomplete.
+    assert recover_repository_status(context[: context.index("project files")], repo) is None
+    assert recover_repository_status(context[:snapshot_start], repo) is None
+    assert recover_repository_status("[WISP TOOL GUIDANCE]\nno status", repo) is None
+    unavailable = build_untrusted_project_context()
+    assert recover_repository_status(unavailable, repo) is None

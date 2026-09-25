@@ -636,6 +636,151 @@ def test_coding_session_reuses_one_git_status_across_its_runs(tmp_path: Path) ->
     assert any("branch main; 1 changed file(s)" in content for content in system_prompt(2))
 
 
+def _init_git_repo(repo: Path) -> None:
+    repo.mkdir()
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("add", "."),
+        ("commit", "-q", "--allow-empty", "-m", "initial"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repo), "-c", "user.name=Wisp", "-c", "user.email=w@x", *args],
+            check=True,
+            capture_output=True,
+        )
+
+
+def _reply() -> list[ProviderEvent]:
+    return [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]
+
+
+def _system_prompt(provider: ScriptedProvider, call_index: int) -> tuple[str, ...]:
+    return tuple(
+        message.content
+        for message in provider.calls[call_index].messages
+        if message.role == "system"
+    )
+
+
+def test_resumed_session_reuses_the_persisted_git_status_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+
+    def process(provider: ScriptedProvider) -> CodingSession:
+        # A fresh CodingSession stands in for a new process: no in-memory snapshot.
+        return CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path / "sessions"),
+            tool_context=ToolContext(cwd=repo),
+            trusted=True,
+        )
+
+    before, after = ScriptedProvider([_reply()]), ScriptedProvider([_reply()])
+
+    async def run() -> None:
+        _ = [event async for event in process(before).run("first", session=session)]
+        (repo / "edit.txt").write_text("changed while Wisp was closed\n")
+        resumed = JsonlSessionStore(tmp_path / "sessions").load(session.session_id)
+        _ = [event async for event in process(after).run("second", session=resumed)]
+
+    anyio.run(run)
+
+    # The resumed first request sends the same instructions as the last request
+    # before the restart, so the provider's cached prefix still applies.
+    assert _system_prompt(after, 0) == _system_prompt(before, 0)
+    assert any("branch main; status clean" in content for content in _system_prompt(after, 0))
+
+
+def test_resumed_session_reads_git_again_after_the_cache_would_have_expired(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    before, after = ScriptedProvider([_reply()]), ScriptedProvider([_reply()])
+
+    async def run() -> None:
+        first = CodingSession(
+            provider=before, sessions=store, tool_context=ToolContext(cwd=repo), trusted=True
+        )
+        _ = [event async for event in first.run("first", session=session)]
+        (repo / "edit.txt").write_text("changed\n")
+        # Resume after the maximum age: the provider cache has expired anyway.
+        late = session_module.utc_now() + session_module.RESUMED_REPOSITORY_STATUS_MAX_AGE
+        monkeypatch.setattr(
+            session_module, "utc_now", lambda: late + session_module.timedelta(seconds=1)
+        )
+        second = CodingSession(
+            provider=after, sessions=store, tool_context=ToolContext(cwd=repo), trusted=True
+        )
+        _ = [event async for event in second.run("second", session=session)]
+
+    anyio.run(run)
+
+    assert any("branch main; status clean" in content for content in _system_prompt(before, 0))
+    assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
+
+
+def test_resumed_session_in_another_directory_reads_its_own_git_status(tmp_path: Path) -> None:
+    first_repo, second_repo = tmp_path / "first", tmp_path / "second"
+    _init_git_repo(first_repo)
+    _init_git_repo(second_repo)
+    (second_repo / "edit.txt").write_text("changed\n")
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    before, after = ScriptedProvider([_reply()]), ScriptedProvider([_reply()])
+
+    async def run() -> None:
+        for provider, cwd, prompt in ((before, first_repo, "first"), (after, second_repo, "two")):
+            agent = CodingSession(
+                provider=provider, sessions=store, tool_context=ToolContext(cwd=cwd), trusted=True
+            )
+            _ = [event async for event in agent.run(prompt, session=session)]
+
+    anyio.run(run)
+
+    assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
+
+
+def test_untrusted_resumed_session_never_reads_or_recovers_git(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    git_uses: list[str] = []
+    monkeypatch.setattr(
+        session_module, "read_repository_status", lambda _cwd: git_uses.append("read") or ""
+    )
+    monkeypatch.setattr(
+        session_module,
+        "_persisted_repository_status",
+        lambda _session, _cwd: git_uses.append("recover") or None,
+    )
+
+    async def run() -> None:
+        for prompt in ("first", "second"):
+            agent = CodingSession(
+                provider=ScriptedProvider([_reply()]),
+                sessions=store,
+                tool_context=ToolContext(cwd=repo),
+                trusted=False,
+            )
+            _ = [event async for event in agent.run(prompt, session=session)]
+
+    anyio.run(run)
+
+    assert git_uses == []
+
+
 def test_abandoned_repository_status_read_cannot_replace_a_stored_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
