@@ -676,7 +676,6 @@ fn process_cpu_microseconds() -> Result<i64, BenchmarkError> {
 fn benchmark_connection() -> ConnectionInfo {
     ConnectionInfo {
         backend_version: env!("CARGO_PKG_VERSION").into(),
-        protocol_version: wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
     }
 }
 

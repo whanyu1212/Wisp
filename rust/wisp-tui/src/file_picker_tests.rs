@@ -48,7 +48,6 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> String {
         &mut terminal,
         &ConnectionInfo {
             backend_version: "test".into(),
-            protocol_version: 6,
         },
     )
     .unwrap();

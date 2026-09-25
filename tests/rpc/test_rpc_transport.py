@@ -26,7 +26,6 @@ from wisp.rpc.commands import (
 )
 from wisp.rpc.coordinator import _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.protocol import (
-    LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     RpcHandshakeAccepted,
     RpcHandshakeRejected,
@@ -54,8 +53,6 @@ def _handshake_line() -> bytes:
         RpcHandshakeRequest(
             frontend_name="fixture",
             frontend_version="0.1.0",
-            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         ).model_dump_json()

@@ -48,7 +48,7 @@ keeps the cursor's wrapped row visible. The frame
 collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
 mode, model, context, and the selected session on the right, as space permits.
-The live RPC protocol version stays in Ctrl+G help. An empty transcript shows a centered startup
+The backend version stays in Ctrl+G help. An empty transcript shows a centered startup
 logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
 terminals.
@@ -90,7 +90,7 @@ aliases also work. Project trust remains a compact card at the bottom of the pan
 with `y`/`n` choices; the composer stays a short waiting
 strip instead of a five-row args panel.
 
-The Rust TUI negotiates and validates live RPC v9, supports prompts, approvals,
+The Rust TUI validates the live RPC handshake and events, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
 and complete saved session history.
 `/resume` opens a searchable picker with backend-owned pages of up to 50 persisted sessions;

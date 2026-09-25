@@ -1,1 +1,1 @@
-{"backend_package_version": "0.1.0", "code": "protocol_version_mismatch", "max_protocol_version": 8, "message": "No compatible protocol.", "min_protocol_version": 8, "type": "rpc.handshake.rejected"}
+{"backend_package_version": "0.1.0", "code": "unsupported_capability", "message": "A required frontend capability is unavailable.", "type": "rpc.handshake.rejected"}

@@ -201,7 +201,7 @@ pub(crate) async fn stdout_reader_task<R: AsyncRead + Unpin>(
     };
     let server_limit = response
         .accepted_contract()
-        .map_or(HANDSHAKE_FRAME_BYTES, |contract| contract.2);
+        .map_or(HANDSHAKE_FRAME_BYTES, |contract| contract.1);
     if handshake.send(Ok(response)).is_err() {
         return;
     }
@@ -275,15 +275,11 @@ mod tests {
     };
 
     use super::*;
-    use wisp_protocol::LIVE_RPC_PROTOCOL_VERSION;
 
     fn handshake() -> serde_json::Value {
         json!({
             "type": "rpc.handshake.accepted",
             "backend_package_version": "0.1.0",
-            "protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-            "min_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": LIVE_RPC_PROTOCOL_VERSION,
             "capabilities": [],
             "limits": {
                 "max_client_frame_bytes": 1024,

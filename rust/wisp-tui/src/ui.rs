@@ -44,7 +44,6 @@ const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
     pub backend_version: String,
-    pub protocol_version: u32,
 }
 
 pub fn decision_context_visible(area: Rect) -> bool {
@@ -2515,7 +2514,6 @@ mod tests {
     fn connection() -> ConnectionInfo {
         ConnectionInfo {
             backend_version: "0.9.0".into(),
-            protocol_version: 3,
         }
     }
 

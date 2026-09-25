@@ -49,8 +49,7 @@ working directory.
 The Rust frontend is exact-lockstep with the Python runtime. The current package and crate
 versions are `0.2.0rc3` (Python) and `0.2.0-rc.3` (Cargo); only the prerelease spelling differs.
 Rust translates `-alpha.N`, `-beta.N`, and `-rc.N` to Python's `aN`, `bN`, and `rcN` before the
-exact version comparison. The only accepted transport is live RPC v9; events carry no separate
-schema version. Python's models and committed schemas remain authoritative, and `wisp-protocol`
+exact version comparison. Neither the handshake nor events carry a protocol or schema version. Python's models and committed schemas remain authoritative, and `wisp-protocol`
 generates its private Rust projections from those schemas at compile time. Package, protocol, or
 generated-schema drift must fail a check or the startup handshake rather than degrade to another
 contract.

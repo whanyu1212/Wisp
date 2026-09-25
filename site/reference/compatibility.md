@@ -47,13 +47,11 @@ model-level protocol requirements rather than JSON Schema constraints.
 **A backend and a frontend must be the same Wisp release.** Both readers reject unknown fields, so
 two releases can disagree about any event. The Rust TUI and the Python SDK transport compare the
 handshake's `backend_package_version` with their own release and refuse to connect on a mismatch.
-The handshake still carries a protocol version, but it is fixed and does not describe compatibility
-between releases. There are no historical bundles.
+The handshake carries no protocol version, and there are no historical bundles.
 
 JSON Schema cannot compare two properties or express that one array is a subset of another. The
-handshake artifacts therefore record ordered ranges, selected-version containment, and the client
-required-capability subset rule in `x-wisp-cross-field-invariants`; every implementation must enforce
-those rules during decoding.
+client handshake artifact therefore records the required-capability subset rule in
+`x-wisp-cross-field-invariants`; every implementation must enforce it during decoding.
 
 Regenerate or verify the artifacts from the repository root with:
 

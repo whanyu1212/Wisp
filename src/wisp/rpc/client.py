@@ -71,7 +71,6 @@ from wisp.rpc.framing import (
     require_complete_rpc_stream,
 )
 from wisp.rpc.protocol import (
-    LIVE_RPC_PROTOCOL_VERSION,
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
     RpcHandshakeAccepted,
@@ -682,8 +681,6 @@ class JsonlSubprocessRpcTransport:
         request = handshake_request or RpcHandshakeRequest(
             frontend_name="wisp-python",
             frontend_version=__version__,
-            min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-            max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
             supported_capabilities=(),
             required_capabilities=(),
         )

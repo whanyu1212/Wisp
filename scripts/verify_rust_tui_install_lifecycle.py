@@ -242,13 +242,11 @@ def _verify_pure_non_tui_interfaces(
 
     handshake_script = """
 from wisp import __version__
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION, RpcHandshakeRequest
+from wisp.rpc.protocol import RpcHandshakeRequest
 
 print(RpcHandshakeRequest(
     frontend_name="wheel-lifecycle",
     frontend_version=__version__,
-    min_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
-    max_protocol_version=LIVE_RPC_PROTOCOL_VERSION,
     supported_capabilities=(),
     required_capabilities=(),
 ).model_dump_json())

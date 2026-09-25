@@ -16,7 +16,6 @@ fn key(code: KeyCode) -> Input {
 fn connection() -> ConnectionInfo {
     ConnectionInfo {
         backend_version: "test".into(),
-        protocol_version: 6,
     }
 }
 fn active_ui() -> LiveUi {

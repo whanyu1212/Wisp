@@ -1,0 +1,1 @@
+{"type": "rpc.handshake.request", "frontend_name": "wisp-rust-tui", "frontend_version": "0.1.0", "min_protocol_version": 9, "max_protocol_version": 9, "supported_capabilities": [], "required_capabilities": []}

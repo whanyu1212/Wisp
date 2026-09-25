@@ -16,13 +16,8 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::LazyLock;
 
-/// The canonical manifest embedded alongside the generated live RPC v9 models.
+/// The canonical manifest embedded alongside the generated live RPC models.
 pub const LIVE_RPC_MANIFEST_JSON: &str = include_str!("../../../schemas/live-rpc/manifest.json");
-/// The only live RPC protocol version implemented by these models.
-///
-/// Events carry no separate schema version; the protocol version is the single
-/// compatibility contract negotiated during the handshake.
-pub const LIVE_RPC_PROTOCOL_VERSION: u32 = 9;
 /// The fixed maximum payload size for either handshake frame.
 pub const HANDSHAKE_FRAME_BYTES: usize = 64 * 1024;
 /// The schema-level ceiling for negotiated application frames.
@@ -219,32 +214,6 @@ fn validate_invariant_list(schema: &Value, value: &Value) -> Result<(), Protocol
 
     for invariant in invariants {
         let valid = match invariant["kind"].as_str() {
-            Some("ordered-range") => {
-                let minimum = invariant["minimum_property"].as_str();
-                let maximum = invariant["maximum_property"].as_str();
-                match (minimum, maximum) {
-                    (Some(minimum), Some(maximum)) => value[minimum]
-                        .as_u64()
-                        .zip(value[maximum].as_u64())
-                        .is_some_and(|(minimum, maximum)| minimum <= maximum),
-                    _ => false,
-                }
-            }
-            Some("value-in-range") => {
-                let minimum = invariant["minimum_property"].as_str();
-                let maximum = invariant["maximum_property"].as_str();
-                let selected = invariant["value_property"].as_str();
-                match (minimum, maximum, selected) {
-                    (Some(minimum), Some(maximum), Some(selected)) => value[minimum]
-                        .as_u64()
-                        .zip(value[maximum].as_u64())
-                        .zip(value[selected].as_u64())
-                        .is_some_and(|((minimum, maximum), selected)| {
-                            minimum <= selected && selected <= maximum
-                        }),
-                    _ => false,
-                }
-            }
             Some("array-subset") => {
                 let subset = invariant["subset_property"].as_str();
                 let superset = invariant["superset_property"].as_str();
@@ -446,8 +415,6 @@ pub mod handshake_request {
                 "type": "rpc.handshake.request",
                 "frontend_name": frontend_name,
                 "frontend_version": frontend_version,
-                "min_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
-                "max_protocol_version": super::LIVE_RPC_PROTOCOL_VERSION,
                 "supported_capabilities": [],
                 "required_capabilities": []
             }))
@@ -500,12 +467,11 @@ pub mod handshake_response {
             })
         }
 
-        /// Return the selected protocol version and directional limits on acceptance.
-        pub fn accepted_contract(&self) -> Option<(u32, usize, usize)> {
+        /// Return the directional frame limits on acceptance.
+        pub fn accepted_contract(&self) -> Option<(usize, usize)> {
             let value = self.wire_value();
             (value["type"] == "rpc.handshake.accepted").then(|| {
                 (
-                    value["protocol_version"].as_u64().unwrap() as u32,
                     value["limits"]["max_client_frame_bytes"].as_u64().unwrap() as usize,
                     value["limits"]["max_server_frame_bytes"].as_u64().unwrap() as usize,
                 )

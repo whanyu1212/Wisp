@@ -20,8 +20,6 @@ from wisp.rpc.framing import RpcFrameError, decode_rpc_object, pop_rpc_frame
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
-    MAX_LIVE_RPC_PROTOCOL_VERSION,
-    MIN_LIVE_RPC_PROTOCOL_VERSION,
     RpcHandshakeAccepted,
     RpcHandshakeRejected,
     RpcHandshakeRequestAdapter,
@@ -84,8 +82,6 @@ async def read_rpc_stdin_handshake(
             code="invalid_handshake",
             message="The first RPC frame is not a valid handshake request.",
             backend_package_version=backend_package_version,
-            min_protocol_version=MIN_LIVE_RPC_PROTOCOL_VERSION,
-            max_protocol_version=MAX_LIVE_RPC_PROTOCOL_VERSION,
         )
     else:
         response = negotiate_rpc_handshake(

@@ -740,17 +740,12 @@ fn generated_handshake_types_preserve_the_current_contract() {
         "type": "rpc.handshake.request",
         "frontend_name": "wisp-rust-tui",
         "frontend_version": "0.1.0",
-        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
         "supported_capabilities": [],
         "required_capabilities": []
     });
     let accepted_value = serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     });
@@ -765,62 +760,34 @@ fn generated_handshake_types_preserve_the_current_contract() {
 
 #[test]
 fn handshake_cross_field_invariants_fail_closed() {
-    let invalid_requests = [
-        serde_json::json!({
-            "type": "rpc.handshake.request",
-            "frontend_name": "fixture",
-            "frontend_version": "0.1.0",
-            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": 3,
-            "supported_capabilities": [],
-            "required_capabilities": []
-        }),
-        serde_json::json!({
-            "type": "rpc.handshake.request",
-            "frontend_name": "fixture",
-            "frontend_version": "0.1.0",
-            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "supported_capabilities": [],
-            "required_capabilities": ["missing"]
-        }),
-    ];
+    let invalid_requests = [serde_json::json!({
+        "type": "rpc.handshake.request",
+        "frontend_name": "fixture",
+        "frontend_version": "0.1.0",
+        "supported_capabilities": [],
+        "required_capabilities": ["missing"]
+    })];
     for request in invalid_requests {
         assert!(handshake_request::deserialize(request).is_err());
     }
 
-    let invalid_responses = [
-        serde_json::json!({
-            "type": "rpc.handshake.accepted",
-            "backend_package_version": "0.1.0",
-            "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION + 1,
-            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "capabilities": [],
-            "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
-        }),
-        serde_json::json!({
-            "type": "rpc.handshake.rejected",
-            "code": "protocol_version_mismatch",
-            "message": "No compatible protocol.",
-            "backend_package_version": "0.1.0",
-            "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-            "max_protocol_version": 3
-        }),
-    ];
-    for response in invalid_responses {
-        assert!(handshake_response::deserialize(response).is_err());
-    }
+    let removed_version_fields = serde_json::json!({
+        "type": "rpc.handshake.request",
+        "frontend_name": "fixture",
+        "frontend_version": "0.1.0",
+        "min_protocol_version": 9,
+        "max_protocol_version": 9,
+        "supported_capabilities": [],
+        "required_capabilities": []
+    });
+    assert!(handshake_request::deserialize(removed_version_fields).is_err());
 }
 
 #[test]
 fn current_helpers_match_the_embedded_manifest_and_wire_contract() {
     let manifest: Value =
         serde_json::from_str(wisp_protocol::LIVE_RPC_MANIFEST_JSON).expect("manifest is JSON");
-    assert_eq!(
-        manifest["live_protocol_version"],
-        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
-    );
+    assert!(manifest.get("live_protocol_version").is_none());
     assert!(manifest.get("event_schema_version").is_none());
     assert_eq!(
         manifest["fixed_handshake_frame_bytes"],
@@ -835,15 +802,8 @@ fn current_helpers_match_the_embedded_manifest_and_wire_contract() {
         .expect("current request is valid")
         .into_value()
         .unwrap();
-    assert_eq!(
-        request["min_protocol_version"],
-        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
-    );
-    assert_eq!(
-        request["max_protocol_version"],
-        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
-    );
-    assert!(request.get("max_event_schema_version").is_none());
+    assert!(request.get("min_protocol_version").is_none());
+    assert!(request.get("max_protocol_version").is_none());
 
     let shutdown = commands::WispTypedClientRpcCommands::shutdown("shutdown-1")
         .expect("shutdown command is valid")
@@ -860,18 +820,12 @@ fn response_and_event_accessors_use_validated_wire_values() {
     let accepted = handshake_response::deserialize(serde_json::json!({
         "type": "rpc.handshake.accepted",
         "backend_package_version": "0.1.0",
-        "protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-        "min_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
-        "max_protocol_version": wisp_protocol::LIVE_RPC_PROTOCOL_VERSION,
         "capabilities": [],
         "limits": {"max_client_frame_bytes": 1024, "max_server_frame_bytes": 2048}
     }))
     .unwrap();
     assert_eq!(accepted.backend_package_version(), "0.1.0");
-    assert_eq!(
-        accepted.accepted_contract(),
-        Some((wisp_protocol::LIVE_RPC_PROTOCOL_VERSION, 1024, 2048))
-    );
+    assert_eq!(accepted.accepted_contract(), Some((1024, 2048)));
     assert!(accepted.rejection().is_none());
 
     let event = events::deserialize(serde_json::json!({

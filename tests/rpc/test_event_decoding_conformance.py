@@ -26,7 +26,6 @@ from pydantic_core import PydanticUndefined
 
 from tests.paths import FIXTURES_DIR, REPO_ROOT
 from wisp.events import KnownWispEventAdapter, wisp_event_from_dict
-from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION
 from wisp.rpc.protocol_schema import _adapter_models
 
 _FIXTURE_PATH = FIXTURES_DIR / "event_decoding_conformance.json"
@@ -95,7 +94,6 @@ def _expected_fixture() -> dict[str, object]:
     ]
     return {
         "version": 1,
-        "protocol_version": LIVE_RPC_PROTOCOL_VERSION,
         "unknown_field": _UNKNOWN_FIELD,
         "cases": cases,
     }

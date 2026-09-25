@@ -61,7 +61,6 @@ fn draw(ui: &mut LiveUi) {
         &mut terminal,
         &ConnectionInfo {
             backend_version: "test".into(),
-            protocol_version: LIVE_RPC_PROTOCOL_VERSION,
         },
     )
     .unwrap();

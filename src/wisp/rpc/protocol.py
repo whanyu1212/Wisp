@@ -1,4 +1,4 @@
-"""Typed contracts for the negotiated live JSONL-RPC protocol."""
+"""Typed contracts for the live JSONL-RPC handshake."""
 
 from __future__ import annotations
 
@@ -16,10 +16,6 @@ from pydantic import (
     model_validator,
 )
 
-LIVE_RPC_PROTOCOL_VERSION = 9
-MIN_LIVE_RPC_PROTOCOL_VERSION = LIVE_RPC_PROTOCOL_VERSION
-MAX_LIVE_RPC_PROTOCOL_VERSION = LIVE_RPC_PROTOCOL_VERSION
-MAX_WIRE_VERSION = 2**32 - 1
 MAX_HANDSHAKE_FRAME_BYTES = 64 * 1024
 MAX_LIVE_RPC_FRAME_BYTES = 64 * 1024 * 1024
 MAX_HANDSHAKE_MESSAGE_CHARS = 1_000
@@ -45,7 +41,6 @@ type RpcCapability = Annotated[
 ]
 type RpcHandshakeRejectionCode = Literal[
     "invalid_handshake",
-    "protocol_version_mismatch",
     "unsupported_capability",
 ]
 
@@ -80,8 +75,6 @@ class RpcHandshakeRequest(_ProtocolModel):
         max_length=128,
         json_schema_extra={"pattern": _VERSION_PATTERN},
     )
-    min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     supported_capabilities: tuple[RpcCapability, ...] = Field(
         max_length=MAX_HANDSHAKE_CAPABILITIES,
         json_schema_extra={"uniqueItems": True},
@@ -107,16 +100,14 @@ class RpcHandshakeRequest(_ProtocolModel):
         return _canonical_capabilities(capabilities)
 
     @model_validator(mode="after")
-    def _validate_ranges_and_capabilities(self) -> Self:
-        if self.min_protocol_version > self.max_protocol_version:
-            raise ValueError("minimum protocol version cannot exceed maximum protocol version")
+    def _validate_capabilities(self) -> Self:
         if not set(self.required_capabilities).issubset(self.supported_capabilities):
             raise ValueError("required RPC capabilities must also be supported")
         return self
 
 
 class RpcHandshakeAccepted(_ProtocolModel):
-    """Successful backend response selecting one compatible live contract."""
+    """Successful backend response selecting capabilities and frame limits."""
 
     type: Literal["rpc.handshake.accepted"] = "rpc.handshake.accepted"
     backend_package_version: str = Field(
@@ -124,9 +115,6 @@ class RpcHandshakeAccepted(_ProtocolModel):
         max_length=128,
         json_schema_extra={"pattern": _VERSION_PATTERN},
     )
-    protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
     capabilities: tuple[RpcCapability, ...] = Field(
         max_length=MAX_HANDSHAKE_CAPABILITIES,
         json_schema_extra={"uniqueItems": True},
@@ -142,16 +130,6 @@ class RpcHandshakeAccepted(_ProtocolModel):
     @classmethod
     def _canonicalize_capabilities(cls, capabilities: tuple[str, ...]) -> tuple[str, ...]:
         return _canonical_capabilities(capabilities)
-
-    @model_validator(mode="after")
-    def _validate_protocol_contract(self) -> Self:
-        if self.min_protocol_version > self.max_protocol_version:
-            raise ValueError("minimum protocol version cannot exceed maximum protocol version")
-        if not (self.min_protocol_version <= self.protocol_version <= self.max_protocol_version):
-            raise ValueError(
-                "selected protocol version is outside the frontend compatibility range"
-            )
-        return self
 
 
 class RpcHandshakeRejected(_ProtocolModel):
@@ -169,8 +147,6 @@ class RpcHandshakeRejected(_ProtocolModel):
         max_length=128,
         json_schema_extra={"pattern": _VERSION_PATTERN},
     )
-    min_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
-    max_protocol_version: int = Field(ge=1, le=MAX_WIRE_VERSION, strict=True)
 
     @field_validator("backend_package_version")
     @classmethod
@@ -188,12 +164,6 @@ class RpcHandshakeRejected(_ProtocolModel):
             raise ValueError("handshake messages must not contain control characters")
         return value
 
-    @model_validator(mode="after")
-    def _validate_protocol_range(self) -> Self:
-        if self.min_protocol_version > self.max_protocol_version:
-            raise ValueError("minimum protocol version cannot exceed maximum protocol version")
-        return self
-
 
 type RpcHandshakeResponse = Annotated[
     RpcHandshakeAccepted | RpcHandshakeRejected,
@@ -209,33 +179,15 @@ def negotiate_rpc_handshake(
     backend_package_version: str,
     supported_capabilities: tuple[str, ...],
     limits: RpcTransportLimits,
-    min_protocol_version: int = MIN_LIVE_RPC_PROTOCOL_VERSION,
-    max_protocol_version: int = MAX_LIVE_RPC_PROTOCOL_VERSION,
 ) -> RpcHandshakeResponse:
-    """Select a deterministic common contract or return a bounded rejection."""
+    """Select the common capabilities or return a bounded rejection."""
 
     backend_capabilities = _canonical_capabilities(supported_capabilities)
-    common_minimum = max(request.min_protocol_version, min_protocol_version)
-    common_maximum = min(request.max_protocol_version, max_protocol_version)
-
-    def reject(code: RpcHandshakeRejectionCode, message: str) -> RpcHandshakeRejected:
-        return RpcHandshakeRejected(
-            code=code,
-            message=message,
-            backend_package_version=backend_package_version,
-            min_protocol_version=min_protocol_version,
-            max_protocol_version=max_protocol_version,
-        )
-
-    if common_minimum > common_maximum:
-        return reject(
-            "protocol_version_mismatch",
-            "No compatible live RPC protocol version.",
-        )
     if not set(request.required_capabilities).issubset(backend_capabilities):
-        return reject(
-            "unsupported_capability",
-            "A required frontend capability is unavailable.",
+        return RpcHandshakeRejected(
+            code="unsupported_capability",
+            message="A required frontend capability is unavailable.",
+            backend_package_version=backend_package_version,
         )
     selected_capabilities = tuple(
         capability
@@ -244,9 +196,6 @@ def negotiate_rpc_handshake(
     )
     return RpcHandshakeAccepted(
         backend_package_version=backend_package_version,
-        protocol_version=common_maximum,
-        min_protocol_version=min_protocol_version,
-        max_protocol_version=max_protocol_version,
         capabilities=selected_capabilities,
         limits=limits,
     )
@@ -258,12 +207,6 @@ def validate_rpc_handshake_response(
 ) -> None:
     """Reject a successful response that violates the frontend's offered contract."""
 
-    if (
-        not request.min_protocol_version
-        <= response.protocol_version
-        <= request.max_protocol_version
-    ):
-        raise ValueError("backend selected a protocol version outside the requested range")
     if not set(response.capabilities).issubset(request.supported_capabilities):
         raise ValueError("backend selected a capability the frontend did not offer")
     if not set(request.required_capabilities).issubset(response.capabilities):
@@ -291,11 +234,8 @@ def _require_version(value: str, *, field: str) -> str:
 
 
 __all__ = [
-    "LIVE_RPC_PROTOCOL_VERSION",
     "MAX_HANDSHAKE_FRAME_BYTES",
     "MAX_LIVE_RPC_FRAME_BYTES",
-    "MAX_LIVE_RPC_PROTOCOL_VERSION",
-    "MIN_LIVE_RPC_PROTOCOL_VERSION",
     "RpcHandshakeAccepted",
     "RpcHandshakeRequest",
     "RpcHandshakeRequestAdapter",

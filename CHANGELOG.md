@@ -346,7 +346,7 @@ Initial PyPI alpha release of Wisp's shared CLI, JSON, RPC, SDK, and Textual TUI
   protected paths, and explicit unsafe-tool approvals.
 - Publishes provider-neutral lifecycle events at schema v27.
 
-## Live RPC protocol v9 — current
+## Live RPC protocol v9
 
 - Added Rust `/queue` and the configurable `queue.manage` action for FIFO previews, drain modes,
   newest-item restoration, and scoped clear confirmations. Existing Alt+Up uses guarded restoration.
@@ -599,19 +599,14 @@ Replaces the unversioned `token.delta` and `assistant.message` stream with expli
 and agent lifecycle events; adds `tool.call` before execution. Current typed parsers no longer accept
 v2 payloads. Events before this contract had no `schema_version`; there was no merged schema v1.
 
-Events at schema v5 through v39 remain readable.
+Sessions containing these events are no longer readable.
 
 ---
 
 ### Adding an entry
 
-When you change an event contract, decide whether it is additive or breaking. Additive changes
-(new event type, new optional field, new enum value) regenerate the current `schemas/live-rpc/vN/`
-bundle with `uv run python -m wisp.rpc.protocol_schema --write` and are recorded under the current
-`## Live RPC protocol vN — current` heading. Breaking changes bump `LIVE_RPC_PROTOCOL_VERSION` in
-`src/wisp/rpc/protocol.py`, pin the previous manifest hash in `src/wisp/rpc/protocol_schema.py`,
-generate the next bundle, and open a new `## Live RPC protocol vN` heading. Say what a consumer must
-do differently — new fields, changed meanings, dropped compatibility — not the implementation detail.
-
-Changes that do not touch the wire format go under the current release-preparation heading, or under
-`## Unreleased` after that release is published.
+When you change a command, event, or handshake model, regenerate `schemas/live-rpc/` with
+`uv run python -m wisp.rpc.protocol_schema --write`. Record every change under the current
+release-preparation heading, or under `## Unreleased` after that release is published. Say what a
+consumer must do differently — new fields, changed meanings, dropped compatibility — not the
+implementation detail.

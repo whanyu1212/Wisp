@@ -82,9 +82,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   persisted shape changes, and do not add readers for earlier versions.
 - `WispEvent` payloads carry no per-event version. `schemas/live-rpc/` holds the one generated
   bundle describing the current release's wire contract; regenerate it after any command, event, or
-  handshake model change. There are no historical bundles and `LIVE_RPC_PROTOCOL_VERSION` is not
-  bumped: compatibility comes from the same-release rule below, not from protocol numbers. Do not
-  reintroduce a per-event counter.
+  handshake model change. There are no historical bundles and the handshake carries no protocol
+  version: compatibility comes from the same-release rule below. Do not reintroduce a per-event
+  counter or a protocol number.
 - The event schema lists every field the backend emits as required. Readers are more lenient in
   the same way on both sides: Python fills an omitted defaulted field from its model default, and
   the Rust frontend fills schema defaults before validating (`wisp-protocol` `event_defaults.rs`).

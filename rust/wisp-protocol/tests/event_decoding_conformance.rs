@@ -14,7 +14,6 @@ use wisp_protocol::events;
 #[derive(Deserialize)]
 struct Fixture {
     version: u32,
-    protocol_version: u32,
     unknown_field: String,
     cases: Vec<Case>,
 }
@@ -85,10 +84,6 @@ fn every_event_variant_gets_the_python_verdict() {
     )))
     .unwrap();
     assert_eq!(fixture.version, 1);
-    assert_eq!(
-        fixture.protocol_version,
-        wisp_protocol::LIVE_RPC_PROTOCOL_VERSION
-    );
     let canonical = canonical_events();
     assert!(!fixture.cases.is_empty());
 

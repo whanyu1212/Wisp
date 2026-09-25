@@ -184,10 +184,7 @@ impl KeyHelp {
         let mut lines = self.rows(bindings);
         if !self.update_guidance && matches!(self.owner, Owner::Composer) {
             if let Some(info) = connection {
-                lines.push(Line::raw(format!(
-                    "Backend {} · rpc v{}",
-                    info.backend_version, info.protocol_version
-                )));
+                lines.push(Line::raw(format!("Backend {}", info.backend_version)));
             }
         }
         for line in lines {
