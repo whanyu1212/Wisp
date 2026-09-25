@@ -12,6 +12,7 @@ from wisp.agent.messages import Message
 from wisp.events import MessageCompleted, TokenUsage, ToolCallSnapshot, UsageCost
 
 from .provider_lifecycle import CompletedProviderResponse
+from .provider_request import provider_supports_prompt_cache_key
 
 if TYPE_CHECKING:
     from .config import AgentLoopConfig
@@ -194,6 +195,13 @@ def project_completed_response(
                 response.usage.context_input_tokens
                 if response.usage is not None and response.usage.context_input_tokens is not None
                 else usage.input_tokens
+            ),
+            # Record only a key the request actually carried: adapters without the
+            # capability are opened without it (see provider_request).
+            prompt_cache_key=(
+                config.prompt_cache_key
+                if provider_supports_prompt_cache_key(config.provider)
+                else None
             ),
         )
         if usage is not None

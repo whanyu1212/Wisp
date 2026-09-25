@@ -715,6 +715,18 @@
           "default": null,
           "title": "Model"
         },
+        "prompt_cache_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Cache Key"
+        },
         "provider": {
           "title": "Provider",
           "type": "string"
@@ -725,7 +737,8 @@
         "model",
         "input_tokens",
         "message_count",
-        "context_fingerprint"
+        "context_fingerprint",
+        "prompt_cache_key"
       ],
       "title": "ContextObservation",
       "type": "object"

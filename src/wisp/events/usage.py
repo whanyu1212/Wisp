@@ -110,6 +110,10 @@ class ContextObservation(BaseModel):
     input_tokens: int = Field(ge=0)
     message_count: int = Field(ge=0)
     context_fingerprint: str = Field(min_length=1)
+    # The prompt-cache key the request was actually sent with; None when the
+    # adapter takes no key. A clone or fork gets a new key, so this identifies
+    # which provider cache a later request can still reuse.
+    prompt_cache_key: str | None = None
 
 
 ContextAccountingMethod = Literal[
