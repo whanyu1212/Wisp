@@ -29,7 +29,8 @@ behavior, providers, tools, permissions, and saved sessions.
   `SessionReplay.entry_ids` (use `context_entry_ids`); and `ProjectSnapshot.paths` (use
   `entries`). `replay_session_entries` no longer chains tree entries that omit `parent_id`;
   link them explicitly. Runtime factories patched in for `build_runtime` must accept every
-  keyword argument `build_runtime_for_config` passes.
+  keyword argument `build_runtime_for_config` passes. These removals are a documented
+  early-removal exception in the compatibility policy.
 - **Breaking:** session files are read only in the current format (entry schema v6, compaction
   record v4). Unversioned and v1–v5 session files, and events stamped with a pre-v9
   `schema_version`, now fail to load instead of being upgraded in memory.
