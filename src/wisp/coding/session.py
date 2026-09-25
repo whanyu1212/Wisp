@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import anyio
@@ -32,6 +33,7 @@ from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
     build_prompt_messages,
     read_repository_status,
+    recover_repository_status,
 )
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
@@ -91,6 +93,7 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
     WispEvent,
+    utc_now,
 )
 from wisp.providers.base import ContextOverflowError, Provider, ToolSpec, prepare_provider_history
 from wisp.providers.catalog import ModelRegistry
@@ -113,6 +116,12 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+
+# A resumed session reuses its persisted Git snapshot only while the provider may
+# still hold the cached prefix built from it. After a longer pause the cache has
+# expired anyway, so a fresh read costs nothing and avoids a long-stale status.
+RESUMED_REPOSITORY_STATUS_MAX_AGE = timedelta(hours=1)
+_PROJECT_CONTEXT_HEADER = "[WISP PROJECT CONTEXT]\n"
 
 PERSISTED_SESSION_EVENT_TYPES = frozenset(
     {
@@ -602,6 +611,7 @@ class CodingSession:
             registry=operation_registry,
             context=operation_context,
             session_id=session.session_id,
+            session=session,
         )
         if operation_instructions:
             prompt_messages = (
@@ -1632,7 +1642,8 @@ class CodingSession:
             history = self._conversation_history(replay.messages)
             provider_messages = (
                 *await self._prompt_messages_async(
-                    session_id=session.session_id if session is not None else None
+                    session_id=session.session_id if session is not None else None,
+                    session=session,
                 ),
                 *self._normalize_provider_messages(history),
             )
@@ -1710,6 +1721,7 @@ class CodingSession:
         registry: ToolRegistry | None = None,
         context: ToolContext | None = None,
         session_id: str | None = None,
+        session: JsonlSession | None = None,
     ) -> tuple[Message, ...]:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
         operation_context = context or self.tool_context
@@ -1748,18 +1760,30 @@ class CodingSession:
             protected_paths=operation_context.protected_paths,
             trusted_context_root=self.project_context_root,
             repository_status=(
-                self._repository_status_snapshot(session_id, operation_context.cwd)
+                self._repository_status_snapshot(session_id, operation_context.cwd, session=session)
                 if self.trusted and session_id is not None
                 else None
             ),
         )
 
-    def _repository_status_snapshot(self, session_id: str, cwd: Path) -> str:
+    def _repository_status_snapshot(
+        self,
+        session_id: str,
+        cwd: Path,
+        *,
+        session: JsonlSession | None = None,
+    ) -> str:
         """Return the session's Git status snapshot, reading Git on first use.
+
+        A process that has not built a prompt for this session yet (a restart or a
+        one-shot CLI run) first recovers the snapshot its earlier runs persisted, so
+        the resumed prompt keeps the prefix the provider cached. Git is read when
+        that cache cannot apply (see `_persisted_repository_status`).
 
         Args:
             session_id (str): Session whose runs share the snapshot.
             cwd (Path): Working directory the status describes.
+            session (JsonlSession | None): The persisted session to recover from.
 
         Returns:
             str: The status stored first for this session and directory. Concurrent
@@ -1769,10 +1793,22 @@ class CodingSession:
         snapshot = self._repository_status_snapshots.get(key)
         if snapshot is not None:
             return snapshot
+        recovered = (
+            _persisted_repository_status(
+                session,
+                cwd,
+                provider=self.provider.name,
+                model=self.model,
+            )
+            if session is not None
+            else None
+        )
         # Prompts are built on worker threads that a cancelled run abandons, so an
         # abandoned read can finish after a retry already stored its snapshot. The
         # first stored snapshot wins; a later read never replaces what prompts used.
-        return self._repository_status_snapshots.setdefault(key, read_repository_status(cwd))
+        return self._repository_status_snapshots.setdefault(
+            key, recovered if recovered is not None else read_repository_status(cwd)
+        )
 
     async def _prompt_messages_async(
         self,
@@ -1781,12 +1817,17 @@ class CodingSession:
         registry: ToolRegistry | None = None,
         context: ToolContext | None = None,
         session_id: str | None = None,
+        session: JsonlSession | None = None,
     ) -> tuple[Message, ...]:
         """Build the operation prompt without blocking the event-loop thread."""
 
         return await anyio.to_thread.run_sync(
             lambda: self._prompt_messages(
-                tools, registry=registry, context=context, session_id=session_id
+                tools,
+                registry=registry,
+                context=context,
+                session_id=session_id,
+                session=session,
             ),
             abandon_on_cancel=True,
         )
@@ -1973,6 +2014,94 @@ def _prompt_cache_key(session_id: str) -> str:
     """Return the stable prompt-cache namespace for one durable session."""
 
     return f"wisp:{session_id}"
+
+
+def _persisted_repository_status(
+    session: JsonlSession,
+    cwd: Path,
+    *,
+    provider: str,
+    model: str | None,
+) -> str | None:
+    """Recover the Git snapshot the session's latest run sent for ``cwd``, if reusable.
+
+    Reusing an older snapshot only pays off while the provider may still hold the
+    cached prefix built from it, so recovery requires the new run to continue the
+    same prompt cache as the latest recorded response:
+
+    * the same provider and model (caches are not shared across either);
+    * the same session: a clone or fork copies history into a new session, whose
+      new ``prompt_cache_key`` cannot match anything cached for the source;
+    * a recent response, within `RESUMED_REPOSITORY_STATUS_MAX_AGE`.
+
+    Only the newest project context on the active path is considered. In every
+    other case the caller reads Git, so a stale status is never shown without a
+    caching benefit.
+
+    Args:
+        session (JsonlSession): The persisted session a new run continues.
+        cwd (Path): Working directory the new run describes.
+        provider (str): Provider the new run sends to.
+        model (str | None): Model the new run requests; None for the provider default.
+
+    Returns:
+        str | None: The snapshot text to reuse verbatim, or None to read Git.
+    """
+    if not session.path.exists():
+        return None
+    latest_response: MessageSessionEntry | None = None
+    for entry in reversed(session.read_active_path()):
+        if not isinstance(entry, MessageSessionEntry):
+            continue
+        message = entry.message
+        if latest_response is None and message.role == "assistant":
+            latest_response = entry
+        if message.role == "system" and message.content.startswith(_PROJECT_CONTEXT_HEADER):
+            if latest_response is None or not _continues_prompt_cache(
+                latest_response, session=session, provider=provider, model=model
+            ):
+                return None
+            return recover_repository_status(message.content, cwd)
+    return None
+
+
+def _continues_prompt_cache(
+    response: MessageSessionEntry,
+    *,
+    session: JsonlSession,
+    provider: str,
+    model: str | None,
+) -> bool:
+    """Return whether a new run can still hit the cache ``response`` was built in."""
+
+    message = response.message
+    cost, observation = message.cost, message.context_observation
+    recorded_provider = (cost.provider if cost is not None else None) or (
+        observation.provider if observation is not None else None
+    )
+    if recorded_provider != provider:
+        return False
+    # Compare what each run asked for (None: the provider's default model). The
+    # response's own `model` is whatever the provider reported back.
+    recorded_model = cost.requested_model if cost is not None else None
+    if recorded_model != model:
+        return False
+    if utc_now() - response.created_at > RESUMED_REPOSITORY_STATUS_MAX_AGE:
+        return False
+    # Clones and forks copy entries into a new session file, so a copied response
+    # predates that file. The store names files after their UTC creation second.
+    created = _session_file_created_at(session.path)
+    return created is None or response.created_at >= created
+
+
+def _session_file_created_at(path: Path) -> datetime | None:
+    """Return the UTC creation second `JsonlSessionStore.create` encodes in a file name."""
+
+    stamp = path.name[:15]
+    try:
+        return datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:

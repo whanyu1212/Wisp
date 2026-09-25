@@ -19,6 +19,7 @@ from .project_context import (
     build_project_context,
     build_untrusted_project_context,
     read_repository_status,
+    recover_repository_status,
     resolve_project_context_root,
 )
 
@@ -37,5 +38,6 @@ __all__ = [
     "build_project_context",
     "build_untrusted_project_context",
     "read_repository_status",
+    "recover_repository_status",
     "resolve_project_context_root",
 ]
