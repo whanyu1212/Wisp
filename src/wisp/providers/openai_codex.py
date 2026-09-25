@@ -9,14 +9,13 @@ from collections import OrderedDict
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from dataclasses import dataclass
 from json import JSONDecodeError
 from typing import Literal, cast
 
 import anyio
 import httpx
 
-from wisp.agent.messages import Message, Role
+from wisp.agent.messages import Message, NativeOutput, Role
 from wisp.auth.openai_codex import account_id_from_access_token, refresh_openai_codex_token
 from wisp.auth.storage import JsonAuthStore
 from wisp.config.runtime import default_auth_path
@@ -47,20 +46,12 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
-# Responses whose output items are kept for replay on later prompts. Evicting a
-# record for an early row ends the cached prefix there for the rest of the
-# session, so the bound is sized for whole long sessions rather than one run.
+# Responses whose output items are kept in memory for replay on later prompts.
+# Sessions also save each response's items with its row (see native_output_for),
+# so this bound matters only for callers that keep transcripts without a session.
 _NATIVE_OUTPUT_CAPACITY = 2048
 
 type _NativeOutputLookup = Callable[[Message], tuple[dict[str, object], ...] | None]
-
-
-@dataclass(frozen=True, slots=True)
-class _NativeOutput:
-    """One completed response's output items, as its own run replayed them."""
-
-    model: str
-    items: tuple[dict[str, object], ...]
 
 
 class _CodexHTTPError(ProviderError):
@@ -106,7 +97,7 @@ class OpenAICodexProvider:
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
         self._continuations = ContinuationStore[tuple[dict[str, object], ...]]()
-        self._native_outputs = ContinuationStore[_NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
+        self._native_outputs = ContinuationStore[NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
 
     async def stream(
         self,
@@ -353,7 +344,11 @@ class OpenAICodexProvider:
         if response_id is not None and replay_items:
             self._native_outputs.remember(
                 response_id,
-                _NativeOutput(model=selected_model, items=replay_items),
+                NativeOutput(
+                    provider=self.name,
+                    model=selected_model,
+                    items=replay_items,
+                ),
             )
 
         for content_index, tool_call in enumerate(tool_calls):
@@ -367,6 +362,19 @@ class OpenAICodexProvider:
             usage=usage,
         )
 
+    def native_output_for(self, response_id: str) -> NativeOutput | None:
+        """Return the output items recorded for one of this provider's responses.
+
+        Args:
+            response_id (str): Upstream response ID from a completed response.
+
+        Returns:
+            NativeOutput | None: The items as its own run replayed them, or None
+            when the response is unknown or was evicted.
+        """
+
+        return self._native_outputs.get(response_id)
+
     def _native_output(
         self,
         message: Message,
@@ -375,9 +383,11 @@ class OpenAICodexProvider:
     ) -> tuple[dict[str, object], ...] | None:
         """Return the output items that produced an assistant row, if replayable.
 
-        Encrypted reasoning belongs to the model that produced it, so records from
-        another model are not replayed. A record without a message item cannot
-        represent a row that has text, so that row keeps its portable form.
+        Items saved on the row win over the in-memory record, so a new process
+        replays the same items. Encrypted reasoning belongs to the model that
+        produced it, so items from another provider or model are not replayed. A
+        record without a message item cannot represent a row that has text, so
+        that row keeps its portable form.
 
         Args:
             message (Message): Transcript row being rebuilt for a request.
@@ -390,8 +400,10 @@ class OpenAICodexProvider:
 
         if message.role != "assistant" or message.response_id is None:
             return None
-        native = self._native_outputs.get(message.response_id, refresh=True)
-        if native is None or native.model != model:
+        native = message.native_output or self._native_outputs.get(
+            message.response_id, refresh=True
+        )
+        if native is None or native.provider != self.name or native.model != model:
             return None
         if message.content and not any(item.get("type") == "message" for item in native.items):
             return None

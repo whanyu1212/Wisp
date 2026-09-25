@@ -95,7 +95,13 @@ from wisp.events import (
     WispEvent,
     utc_now,
 )
-from wisp.providers.base import ContextOverflowError, Provider, ToolSpec, prepare_provider_history
+from wisp.providers.base import (
+    ContextOverflowError,
+    Provider,
+    ToolSpec,
+    prepare_provider_history,
+    provider_native_output,
+)
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
@@ -1921,9 +1927,17 @@ class CodingSession:
             if isinstance(event, ToolExecutionEnded)
             else None
         )
+        message = message_from_completion_event(event)
+        if isinstance(event, MessageCompleted) and event.response_id is not None:
+            # Save the provider's own output items with the row, so a later run in
+            # any process can replay this response exactly and keep the prompt
+            # cache warm. The public event never carries them.
+            native_output = provider_native_output(self.provider, event.response_id)
+            if native_output is not None:
+                message = message.model_copy(update={"native_output": native_output})
         return self._queue_message(
             session,
-            message_from_completion_event(event),
+            message,
             operation_id=operation_id,
             tool_result=tool_result,
         )

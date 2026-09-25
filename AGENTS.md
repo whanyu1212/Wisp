@@ -78,8 +78,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - Keep CLI, TUI, RPC, and SDK behavior aligned through shared commands and typed `WispEvent` models;
   avoid interface-specific copies of runtime policy.
 - Preserve append-only JSONL session semantics. The session reader accepts only the current entry
-  and event-envelope `schema_version`; it does not upgrade older files. Bump the stamp when a
-  persisted shape changes, and do not add readers for earlier versions.
+  and event-envelope `schema_version`; it does not upgrade older files. Bump the stamp only when
+  files written before a change would be misread or rejected (a new optional field needs no bump),
+  and do not add readers for earlier versions.
 - `WispEvent` payloads carry no per-event version. `schemas/live-rpc/` holds the one generated
   bundle describing the current release's wire contract; regenerate it after any command, event, or
   handshake model change. There are no historical bundles and the handshake carries no protocol

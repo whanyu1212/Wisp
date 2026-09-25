@@ -18,6 +18,7 @@ from wisp.events import (
     ContextBudget,
     ContextObservation,
     FinishReason,
+    JsonObject,
     MessageCompleted,
     TokenUsage,
     ToolCallSnapshot,
@@ -28,6 +29,21 @@ from wisp.events import (
 from wisp.skills.models import SkillInvocationEvidence
 
 Role = Literal["system", "user", "assistant", "tool"]
+
+
+class NativeOutput(BaseModel):
+    """A provider's own output items for one response, kept for exact replay.
+
+    The items are opaque to everything except the provider adapter that
+    produced them. Replaying them lets a later request rebuild the response
+    exactly as its own run sent it, so the provider's prompt cache still matches.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    provider: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+    items: tuple[JsonObject, ...] = Field(min_length=1)
 
 
 class Message(BaseModel):
@@ -48,6 +64,7 @@ class Message(BaseModel):
     cost: UsageCost | None = None
     context_observation: ContextObservation | None = None
     skill_invocation: SkillInvocationEvidence | None = None
+    native_output: NativeOutput | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
     @property
@@ -148,6 +165,7 @@ def message_from_completion_event(
 __all__ = [
     "Message",
     "CompactionRecord",
+    "NativeOutput",
     "Role",
     "completion_event_has_history",
     "message_from_completion_event",

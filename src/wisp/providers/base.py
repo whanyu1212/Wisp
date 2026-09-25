@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from wisp.agent.history import normalize_provider_history
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, NativeOutput
 from wisp.providers.events import JsonObject, ProviderEvent
 from wisp.providers.events import ToolCall as ToolCall
 from wisp.tools.base import Tool
@@ -193,6 +193,37 @@ def structured_tool_replacement_support(provider: Provider, *, effort: str | Non
     if not callable(capability):
         return None
     return capability(effort=effort) is True
+
+
+class NativeOutputProvider(Protocol):
+    """Optional capability to hand out a response's own output items.
+
+    The session stores them with the response's transcript row, so a later
+    request, even from a new process, can replay the response exactly.
+    """
+
+    def native_output_for(self, response_id: str) -> NativeOutput | None:
+        """Return the output items recorded for a completed response, if any."""
+        ...
+
+
+def provider_native_output(provider: Provider, response_id: str) -> NativeOutput | None:
+    """Return a provider's recorded output items without assuming the capability.
+
+    Args:
+        provider (Provider): Provider that produced the response.
+        response_id (str): Response to look up.
+
+    Returns:
+        NativeOutput | None: The recorded items, or None when the provider does not
+        offer the capability or has no record of the response.
+    """
+
+    capability = getattr(provider, "native_output_for", None)
+    if not callable(capability):
+        return None
+    native = capability(response_id)
+    return native if isinstance(native, NativeOutput) else None
 
 
 def prepare_provider_history(

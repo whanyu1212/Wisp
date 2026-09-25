@@ -14,9 +14,10 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, NativeOutput
 from wisp.auth import openai_codex as openai_codex_auth_module
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
+from wisp.coding import CodingSession
 from wisp.events import ToolCallSnapshot, ToolExecutionEnded
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
@@ -37,6 +38,8 @@ from wisp.providers.events import (
 )
 from wisp.providers.openai_codex import OpenAICodexProvider
 from wisp.retry import RetryPolicy
+from wisp.sessions import JsonlSessionStore, MessageSessionEntry
+from wisp.tools.context import ToolContext
 
 
 def test_device_code_login_shields_owned_client_cleanup_from_cancellation(
@@ -1005,6 +1008,101 @@ def test_rows_without_a_recorded_response_keep_their_portable_form(tmp_path: Pat
         {"role": "assistant", "content": "from a restart"},
         {"role": "user", "content": "next"},
     ]
+
+
+def test_a_restarted_session_resends_the_saved_native_output(tmp_path: Path) -> None:
+    """Items saved with the session replay from a new provider instance."""
+
+    auth = StoredProviderAuthResolver(_store_with_oauth(tmp_path))
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+
+    def process(provider: OpenAICodexProvider) -> CodingSession:
+        # A fresh provider and CodingSession stand in for a new process.
+        return CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path / "sessions"),
+            tool_context=ToolContext(cwd=tmp_path),
+        )
+
+    before = _ScriptedCodexProvider(
+        [_text_response("response-1", "first answer")], auth_resolver=auth
+    )
+    after = _ScriptedCodexProvider(
+        [_text_response("response-2", "second answer")], auth_resolver=auth
+    )
+
+    async def run() -> None:
+        _ = [event async for event in process(before).run("first", session=session)]
+        resumed = JsonlSessionStore(tmp_path / "sessions").load(session.session_id)
+        _ = [event async for event in process(after).run("second", session=resumed)]
+
+    anyio.run(run)
+
+    saved = [
+        entry.message
+        for entry in store.load(session.session_id).read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.message.response_id == "response-1"
+    ]
+    assert saved[0].native_output is not None
+    assert saved[0].native_output.provider == "openai-codex"
+    assert after.seen_bodies[0]["input"] == [
+        *cast(list[object], before.seen_bodies[0]["input"]),
+        {"type": "reasoning", "encrypted_content": "e"},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "first answer", "annotations": []}],
+        },
+        {"role": "user", "content": "second"},
+    ]
+
+
+def test_saved_native_output_replays_only_for_its_provider_and_model(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        _text_response("response-2", "ok"),
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    items: tuple[dict[str, object], ...] = (
+        {"type": "reasoning", "encrypted_content": "saved"},
+        _message_item("msg-1", "hello"),
+    )
+
+    def history(native: NativeOutput) -> list[Message]:
+        return [
+            Message(role="user", content="hi"),
+            Message(
+                role="assistant", content="hello", response_id="response-1", native_output=native
+            ),
+            Message(role="user", content="next"),
+        ]
+
+    async def run() -> None:
+        for native in (
+            NativeOutput(provider="openai-codex", model="gpt-test", items=items),
+            NativeOutput(provider="openai-codex", model="other-model", items=items),
+            NativeOutput(provider="other-provider", model="gpt-test", items=items),
+        ):
+            provider.events = _text_response("response-2", "ok")
+            async for _event in provider.stream(history(native)):
+                pass
+
+    anyio.run(run)
+
+    replayed, other_model, other_provider = (body["input"] for body in provider.seen_bodies)
+    assert replayed == [
+        {"role": "user", "content": "hi"},
+        *items,
+        {"role": "user", "content": "next"},
+    ]
+    portable = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "next"},
+    ]
+    assert other_model == portable
+    assert other_provider == portable
 
 
 def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
