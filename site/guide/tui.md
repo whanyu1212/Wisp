@@ -34,9 +34,8 @@ end the session with a diagnostic and terminal cleanup. A choice that changed wh
 input was waiting must be selected again; a redraw cannot apply that input to a replacement choice.
 
 ```bash
-wisp tui --renderer rust
-wisp --mode tui --tui-renderer rust
-WISP_TUI_RENDERER=rust wisp
+wisp tui
+wisp --mode tui
 ```
 
 The conversation uses the terminal width with modest side margins. User turns have a subtle
@@ -219,7 +218,7 @@ Rust mouse navigation is **on by default**, so wheel and trackpad scrolling can 
 turns even though the live view starts at the current prompt. Disable it for a launch with:
 
 ```bash
-WISP_TUI_MOUSE=0 wisp tui --renderer rust
+WISP_TUI_MOUSE=0 wisp tui
 ```
 
 Unset enables capture. `1`, `true`, and `on` also enable it (case-insensitive); `0`, `false`, `off`,
@@ -558,12 +557,11 @@ wisp tui --continue
 wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
 wisp tui --yes                           # auto-approve mutating/command tools
-wisp tui --renderer rust                 # explicitly select Rust
-wisp --mode tui --tui-renderer auto       # compatibility entry point; also selects Rust
+wisp --mode tui --provider anthropic     # top-level flags such as --provider also work
 ```
 
 Rust loads the complete saved active path at startup and on `/resume`. Set `NO_COLOR` to request
 grayscale presentation.
 
-The legacy `--mode tui` entrypoint remains for compatibility and honors
-`--tui-renderer auto|rust` plus `WISP_TUI_RENDERER`.
+`wisp --mode tui` launches the same TUI and accepts the top-level options, including `--provider`
+and `--model`.

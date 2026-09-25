@@ -117,7 +117,9 @@ migration or containment advice.
 > - `defer_context_overflow_errors` on `AgentLoopConfig` and the harness `prompt`,
 >   `prompt_message`, and `continue_` methods. Return `ContextOverflowFailure` from the overflow
 >   hook to supply the error message; the loop publishes overflow terminals itself.
-> - `wisp.cli.TuiRendererKind`; use `TuiFrontendKind`.
+> - `wisp.cli.TuiRendererKind` and `wisp.cli.TuiFrontendKind`, the `--tui-renderer` and
+>   `wisp tui --renderer` options, and `WISP_TUI_RENDERER`. The TUI is always the Rust frontend;
+>   drop the option.
 > - `wisp.config.settings.persist_user_effort`; use `try_persist_user_model_selection`.
 > - `SessionReplay.entry_ids`; use `context_entry_ids`.
 > - `ProjectSnapshot.paths`; use `entries`.

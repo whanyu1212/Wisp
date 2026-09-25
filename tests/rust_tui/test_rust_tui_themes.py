@@ -131,8 +131,6 @@ def _run_theme_session(
                 "-m",
                 "wisp",
                 "tui",
-                "--renderer",
-                "rust",
                 "--session-dir",
                 str(session_dir),
             ],

@@ -34,12 +34,12 @@ def test_architecture_describes_a_frontend_over_the_python_runtime() -> None:
     assert "Python decides what is allowed" in _ARCHITECTURE
 
 
-def test_cli_and_environment_docs_explain_automatic_selection() -> None:
-    for document in (_CLI, _ENVIRONMENT):
+def test_cli_and_environment_docs_have_no_renderer_selector() -> None:
+    for document in (_CLI, _ENVIRONMENT, _TUI_GUIDE):
         assert "transport scaffold" not in document
-        assert "`auto`" in document
-        assert "`WISP_TUI_RENDERER`" in document
-        assert "explicit" in document.lower() and "precedence" in document.lower()
+        assert "WISP_TUI_RENDERER" not in document
+        assert "--renderer" not in document
+        assert "--tui-renderer" not in document
 
 
 def test_docs_explain_pure_install_failure_and_source_override() -> None:

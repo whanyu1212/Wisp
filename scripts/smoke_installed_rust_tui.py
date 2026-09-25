@@ -109,7 +109,6 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
             "WISP_AUTO_COMPACTION": "0",
         }
         environment.pop("WISP_RUST_TUI_BINARY", None)
-        environment.pop("WISP_TUI_RENDERER", None)
         os.execve(
             str(wisp),
             [

@@ -16,12 +16,5 @@ class OutputMode(StrEnum):
     tui = "tui"
 
 
-class TuiFrontendKind(StrEnum):
-    """Terminal frontends selectable from the command line."""
-
-    auto = "auto"
-    rust = "rust"
-
-
 class _RenderedPrintError(ProviderError):
     """Raised after print mode has already rendered the terminal failure."""

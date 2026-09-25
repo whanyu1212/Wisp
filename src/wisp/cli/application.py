@@ -41,9 +41,9 @@ from . import rpc as _cli_rpc
 from . import skills as _cli_skills
 from . import trust as _cli_trust
 from . import update as _cli_update
-from .types import OutputMode, TuiFrontendKind, _RenderedPrintError
+from .types import OutputMode, _RenderedPrintError
 
-__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "app", "main"]
+__all__ = ["ToolApprovalDecision", "app", "main"]
 
 # Module-level bindings for sibling helpers. Tests monkeypatch several of these on this module
 # (for example `_terminal_is_interactive` and `_resolve_cli_trust`), so the command bodies below
@@ -52,7 +52,6 @@ _resolve_cli_trust = _cli_trust.resolve_cli_trust
 _has_callback_cli_args = _cli_options._has_callback_cli_args
 _option_was_provided = _cli_options._option_was_provided
 _resolve_cli_mode = _cli_options._resolve_cli_mode
-_resolve_tui_renderer = _cli_options._resolve_tui_renderer
 _terminal_is_interactive = _cli_options._terminal_is_interactive
 
 _format_usage_cost = _cli_output._format_usage_cost
@@ -131,13 +130,6 @@ def cli_callback(
             show_default=False,
         ),
     ] = OutputMode.text,
-    tui_renderer: Annotated[
-        TuiFrontendKind,
-        typer.Option(
-            "--tui-renderer",
-            help="Terminal frontend for TUI mode: auto and rust both use the native Rust TUI.",
-        ),
-    ] = TuiFrontendKind.auto,
     all_tools: Annotated[
         bool,
         typer.Option(
@@ -203,14 +195,8 @@ def cli_callback(
         mode_was_provided=mode_was_provided,
         console=console,
     )
-    resolved_tui_renderer = tui_renderer
     resolved_all_tools = all_tools
     if resolved_mode is OutputMode.tui:
-        resolved_tui_renderer = _resolve_tui_renderer(
-            resolved_tui_renderer,
-            renderer_was_provided=_option_was_provided(ctx, "tui_renderer"),
-            console=console,
-        )
         # Every interactive TUI path defaults to the full toolset, matching the
         # dedicated `tui` command. An explicit --all-tools/--no-all-tools still wins.
         if not _option_was_provided(ctx, "all_tools"):
@@ -312,7 +298,6 @@ def cli_callback(
                 continue_latest=continue_latest,
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
-                renderer=resolved_tui_renderer,
                 project_trusted=trusted,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so `--mode tui` honors them; the launcher
@@ -355,14 +340,6 @@ def cli_callback(
 
 @app.command("tui")
 def tui_command(
-    ctx: typer.Context,
-    renderer: Annotated[
-        TuiFrontendKind,
-        typer.Option(
-            "--renderer",
-            help="Terminal frontend: auto and rust both use the native Rust TUI.",
-        ),
-    ] = TuiFrontendKind.auto,
     session_dir: Annotated[
         Path | None,
         typer.Option(help="Directory for JSONL session files."),
@@ -430,11 +407,6 @@ def tui_command(
         mode=OutputMode.text,
         console=console,
     )
-    selected_renderer = _resolve_tui_renderer(
-        renderer,
-        renderer_was_provided=_option_was_provided(ctx, "renderer"),
-        console=console,
-    )
     try:
         config = WispConfig.from_env(
             session_dir=session_dir,
@@ -451,7 +423,6 @@ def tui_command(
             continue_latest=continue_latest,
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
-            renderer=selected_renderer,
             project_trusted=trusted,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
@@ -511,7 +482,6 @@ def _run_tui_from_cli_options(
     continue_latest: bool,
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
-    renderer: TuiFrontendKind,
     project_trusted: bool,
     user_provider: str | None = None,
     user_model: str | None = None,
@@ -521,7 +491,6 @@ def _run_tui_from_cli_options(
     from wisp.cli.native_tui.launch import TuiOptions
     from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError, run_rust_tui
 
-    assert renderer is TuiFrontendKind.rust
     try:
         status = run_rust_tui(
             TuiOptions(

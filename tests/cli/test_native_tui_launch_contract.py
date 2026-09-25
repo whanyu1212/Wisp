@@ -14,7 +14,6 @@ import wisp.cli.application as cli_module
 import wisp.cli.native_tui.launch as native_tui_launch
 from wisp.cli import app
 from wisp.cli.native_tui.launch import TuiOptions, _rpc_command
-from wisp.cli.types import TuiFrontendKind
 from wisp.config.runtime import WispConfig
 from wisp.trust.flow import TrustDecision
 
@@ -254,7 +253,6 @@ def test_cli_resolves_trust_before_native_launch(
     def launch(**kwargs: object) -> None:
         order.append("launch")
         assert kwargs["project_trusted"] is trusted
-        assert kwargs["renderer"] is TuiFrontendKind.rust
         assert isinstance(kwargs["config"], WispConfig)
         assert kwargs["config"].provider == "fake"
 

@@ -32,7 +32,6 @@ def _consumer_environment(environment: Path) -> dict[str, str]:
         **os.environ,
         "PATH": f"{environment / 'bin'}:/usr/bin:/bin",
     }
-    consumer.pop("WISP_TUI_RENDERER", None)
     consumer.pop("WISP_RUST_TUI_BINARY", None)
     return consumer
 
@@ -171,7 +170,7 @@ from typer.testing import CliRunner
 from wisp.cli import app
 from wisp.cli import application as cli_module
 
-for arguments in [[], ["tui"], ["--mode", "tui"], ["tui", "--renderer", "rust"]]:
+for arguments in [[], ["tui"], ["--mode", "tui"]]:
     selected = {}
     with patch.object(cli_module, "_terminal_is_interactive", return_value=True), patch.object(
         cli_module, "_run_tui_from_cli_options",
