@@ -44,12 +44,17 @@ fn malformed_statistics_and_contradictory_compaction_fail_validation() {
     let mut stats = fixture("session.stats");
     stats["stats"]["context"]["context_window"] = json!(0);
     assert!(events::deserialize(stats).is_err());
+    // An omitted defaulted field decodes to its default, as in Python.
     let mut stats = fixture("session.stats");
     stats["stats"]["cost"]
         .as_object_mut()
         .unwrap()
         .remove("known_usd");
-    assert!(events::deserialize(stats).is_err());
+    let stats = events::deserialize(stats)
+        .unwrap()
+        .session_stats("stats-1")
+        .unwrap();
+    assert_eq!(stats.cost.known_usd, "0");
     let mut completed = fixture("compaction.completed");
     completed["error"] = Value::Null;
     assert!(events::deserialize(completed).is_err());

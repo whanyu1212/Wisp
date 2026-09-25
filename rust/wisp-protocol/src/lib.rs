@@ -9,6 +9,7 @@
 
 mod context;
 mod discovery;
+mod event_defaults;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -1483,8 +1484,10 @@ pub mod events {
     }
 
     pub fn deserialize(
-        value: serde_json::Value,
+        mut value: serde_json::Value,
     ) -> Result<WispCurrentLiveEventOutput, super::ProtocolDecodeError> {
+        // Decode what Python accepts: an omitted defaulted field takes its default.
+        crate::event_defaults::fill_event_defaults(&super::EVENT_CONTRACT.schema, &mut value);
         super::deserialize_known(&super::EVENT_CONTRACT, value).map(WispCurrentLiveEventOutput)
     }
 }

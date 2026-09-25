@@ -86,6 +86,14 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `LIVE_RPC_PROTOCOL_VERSION`, pins the previous manifest hash in `rpc/protocol_schema.py`, and
   generates the next bundle. Persisted events written before v9 still carry `schema_version`; the
   session reader drops it on typed access. Do not reintroduce a per-event counter.
+- The event schema lists every field the backend emits as required. Readers are more lenient in
+  the same way on both sides: Python fills an omitted defaulted field from its model default, and
+  the Rust frontend fills schema defaults before validating (`wisp-protocol` `event_defaults.rs`).
+  Fields with a computed default (`timestamp`, a `default_factory`, a validator-derived value) stay
+  required in Rust. Both reject unknown fields. `tests/fixtures/event_decoding_conformance.json`
+  records the Python verdict for every one-field variant of each canonical event and the Rust
+  conformance test must reach the same one; regenerate it after an event-model change. A defaulted
+  field must satisfy its own constraints, since defaults are not validated on decode.
 
 ### Finding agent code
 

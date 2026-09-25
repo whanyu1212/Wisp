@@ -1,0 +1,4166 @@
+{
+ "version": 1,
+ "protocol_version": 9,
+ "unknown_field": "x_wisp_unknown_field",
+ "cases": [
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "outcome"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "turns"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "agent.completed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "agent.started",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.started",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "agent.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "compaction_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "cost"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "outcome"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "replaced_entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "retained_entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "usage"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "remove",
+   "path": [
+    "will_retry"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.completed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "compaction.started",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.started",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.started",
+   "operation": "remove",
+   "path": [
+    "source_entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "compaction.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.started",
+   "operation": "remove",
+   "path": [
+    "trigger_budget"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "compaction.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "accounting_method"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "context_window"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "effective_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimated_percent"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "observed_is_current"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "observed_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "over_budget"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "remaining_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "reserve_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "trailing_estimated_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "add_unknown",
+   "path": [
+    "budget"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate",
+    "message_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate",
+    "method"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate",
+    "system_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate",
+    "tool_schema_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "remove",
+   "path": [
+    "budget",
+    "estimate",
+    "total_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.estimated",
+   "operation": "add_unknown",
+   "path": [
+    "budget",
+    "estimate"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "context_window"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "message"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.overflow",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.overflow",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "context_window"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "observed_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "pressure_ratio"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "remaining_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "context.pressure",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "context.pressure",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "error",
+   "operation": "remove",
+   "path": [
+    "message"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "error",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "error",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "content"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "context_observation"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "cost"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "finish_reason"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "response_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "role"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "tool_calls"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.completed",
+   "operation": "remove",
+   "path": [
+    "usage"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.completed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "content_index"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "content_kind"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "delta"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "role"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.delta",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.delta",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "message.started",
+   "operation": "remove",
+   "path": [
+    "role"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "message.started",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "message.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "model.provider_auto_switched",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "model.provider_auto_switched",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "model.provider_auto_switched",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "model.provider_auto_switched",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "model.provider_auto_switched",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "auth_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "auto_compaction_enabled"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "project.config.applied",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "project_files.invalidated",
+   "operation": "remove",
+   "path": [
+    "generation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "project_files.invalidated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "project_files.invalidated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "attempt"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "delay_seconds"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "max_attempts"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "status_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "provider.retrying",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "follow_up"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "kind"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "operation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "steering"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
+    "content"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
+    "kind"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
+    "skill_invocation"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "follow_up"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "follow_up_mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "steering"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "steering_mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "token"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "remove",
+   "path": [
+    "command_type"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "remove",
+   "path": [
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "remove",
+   "path": [
+    "ok"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.command.finished",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.started",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.started",
+   "operation": "remove",
+   "path": [
+    "command_type"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.command.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.command.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.commands",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.commands",
+   "operation": "remove",
+   "path": [
+    "commands"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.commands",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.commands",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "label"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog",
+    "providers",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "environment_variable"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "has_stored_credential"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "kind"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "label"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "oauth_expires_at"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0,
+    "source"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.connection_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "methods",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "remove",
+   "path": [
+    "user_code"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "remove",
+   "path": [
+    "verification_uri"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code.progress",
+   "operation": "remove",
+   "path": [
+    "attempt"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code.progress",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code.progress",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.device_code.progress",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.device_code.progress",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "add_unknown",
+   "path": [
+    "status"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "messages"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "next_after_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "next_before_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.messages",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "available"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "default_model"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "display_name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog",
+    "providers",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models",
+    0,
+    "effort_levels"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models",
+    0,
+    "id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models",
+    0,
+    "lifecycle"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "catalog_model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "effective_model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "add_unknown",
+   "path": [
+    "catalog",
+    "selection"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions",
+    "mode"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions",
+    "project_path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions",
+    "saved_mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "add_unknown",
+   "path": [
+    "permissions"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "entries"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "generation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "source_active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "source_session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "source_session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "source_session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.cloned",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "selected_entry_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "selected_prompt"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "source_active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "source_session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "source_session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "source_session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "previous_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.name_changed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.selected",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "next_after_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "nodes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "total_node_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "changed"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "editor_text"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "previous_active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "selected_entry_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "previous_active_leaf_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "session_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "source_transition_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.unreverted",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "selected_session_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "selected_session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "selected_session_path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "sessions"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.sessions",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "diagnostics"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "entries"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "project_trusted"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.skills",
+   "operation": "add_unknown",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "active_command_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "active_command_type"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "auto_compaction_enabled"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "cancel_requested"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "follow_up_mode"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "pending_follow_up_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "pending_steering_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "session_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "session_name"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "session_path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "steering_mode"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "add_unknown",
+   "path": [
+    "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.saved",
+   "operation": "remove",
+   "path": [
+    "path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.saved",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.saved",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.saved",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "active_message_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "compaction"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "compaction_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "entry_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "session_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage_record_count"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "accounting_method"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "context_window"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "effective_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimated_percent"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "observed_is_current"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "observed_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "over_budget"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "remaining_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "reserve_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "trailing_estimated_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate",
+    "message_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate",
+    "method"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate",
+    "system_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate",
+    "tool_schema_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context",
+    "estimate",
+    "total_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context",
+    "estimate"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost",
+    "complete"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost",
+    "currency"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost",
+    "known_usd"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost",
+    "priced_record_count"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "cost",
+    "unpriced_record_count"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "cost"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "cache_read_input_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "cache_write_input_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "input_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "output_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "reasoning_output_tokens"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "usage",
+    "total_tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "usage"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "remove",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "diagnostics"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "entries"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "project_trusted"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.catalog.updated",
+   "operation": "add_unknown",
+   "path": [
+    "catalog"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "provider_content"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "queue_kind"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation",
+    "content_sha256"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation",
+    "instructions_truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation",
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation",
+    "original_content"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "remove",
+   "path": [
+    "invocation",
+    "request"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "skill.invoked",
+   "operation": "add_unknown",
+   "path": [
+    "invocation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "arguments"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "safety"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "add_unknown",
+   "path": [
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "approved"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.call",
+   "operation": "remove",
+   "path": [
+    "arguments"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.call",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.call",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.call",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.call",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.call",
+   "operation": "add_unknown",
+   "path": [
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "before_text"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "created"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "failure_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "is_error"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "output"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "output_has_exit_status"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "process_error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "process_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "process_state"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "recovery_hint"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "retryable"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stderr"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stderr_dropped_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stderr_truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stdout"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stdout_dropped_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "stdout_truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "summary"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "remove",
+   "path": [
+    "arguments"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "add_unknown",
+   "path": [
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "before_text"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "created"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "failure_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "is_error"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "output"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "output_has_exit_status"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "process_error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "process_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "process_state"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "recovery_hint"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "retryable"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stderr"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stderr_dropped_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stderr_truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stdout"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stdout_dropped_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "stdout_truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "summary"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "trust.requested",
+   "operation": "remove",
+   "path": [
+    "project_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "trust.requested",
+   "operation": "remove",
+   "path": [
+    "request_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "trust.requested",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "trust.requested",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "remove",
+   "path": [
+    "project_path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "remove",
+   "path": [
+    "request_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "remove",
+   "path": [
+    "trusted"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "trust.resolved",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "turn.completed",
+   "operation": "remove",
+   "path": [
+    "finish_reason"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "turn.completed",
+   "operation": "remove",
+   "path": [
+    "outcome"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "turn.completed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "turn.completed",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "turn.completed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "turn.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "turn.started",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "turn.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  }
+ ]
+}

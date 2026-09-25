@@ -265,11 +265,8 @@ class RpcConnectionProviderSnapshot(BaseModel):
 
     id: RpcProviderId
     label: Annotated[str, Field(min_length=1, max_length=MAX_RPC_CONNECTION_LABEL_CHARS)]
-    methods: tuple[RpcConnectionMethodSnapshot, ...] = Field(
-        default=(),
-        min_length=1,
-        max_length=8,
-    )
+    # Required: an unvalidated () default would bypass min_length on decode.
+    methods: tuple[RpcConnectionMethodSnapshot, ...] = Field(min_length=1, max_length=8)
 
 
 class RpcConnectionCatalogSnapshot(BaseModel):
