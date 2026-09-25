@@ -23,6 +23,7 @@ from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
+    RpcHandshakeResponse,
     RpcTransportLimits,
 )
 from wisp.runtime.api import WispRuntime
@@ -209,7 +210,7 @@ def _rpc_binary_stdin() -> _rpc_transport.RpcTextInput:
     return cast(_rpc_transport.RpcTextInput, getattr(sys.stdin, "buffer", sys.stdin))
 
 
-def _write_rpc_handshake(response: _rpc_transport.RpcHandshakeReply) -> None:
+def _write_rpc_handshake(response: RpcHandshakeResponse) -> None:
     frame = encode_rpc_frame(response, max_frame_bytes=MAX_HANDSHAKE_FRAME_BYTES)
     _write_rpc_frame(frame)
 

@@ -30,9 +30,7 @@ from wisp.rpc.protocol import LIVE_RPC_PROTOCOL_VERSION
 from wisp.rpc.protocol_schema import _adapter_models
 
 _FIXTURE_PATH = FIXTURES_DIR / "event_decoding_conformance.json"
-_EVENT_SCHEMA_PATH = (
-    REPO_ROOT / "schemas" / "live-rpc" / f"v{LIVE_RPC_PROTOCOL_VERSION}" / "events.schema.json"
-)
+_EVENT_SCHEMA_PATH = REPO_ROOT / "schemas" / "live-rpc" / "events.schema.json"
 # Not WISP_-prefixed: the test environment fixture clears every WISP_* variable.
 _UPDATE_ENVIRONMENT_VARIABLE = "UPDATE_EVENT_DECODING_FIXTURE"
 _UNKNOWN_FIELD = "x_wisp_unknown_field"

@@ -64,5 +64,5 @@ a subsequent invalidation tells clients to discard it.
 The Rust frontend uses the RPC capability to request bounded snapshots for its file picker.
 Agent grep/find behavior and authorization are unchanged.
 
-The contract uses live protocol v9. Historical v1–v8 protocol bundles stay immutable, and
-persisted sessions written by earlier releases remain readable.
+The contract is part of the current release's live RPC bundle; the backend and frontend must be
+the same Wisp release.

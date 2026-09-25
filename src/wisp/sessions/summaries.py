@@ -2,15 +2,15 @@
 
 Listing sessions must not load or replay full transcripts. This module scans a
 JSONL file once, tracking only the fields needed to report the current leaf,
-entry count, and display name, while accepting every persisted entry version
-the full reader accepts.
+entry count, and display name, while accepting exactly the entries the full
+reader accepts.
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -106,11 +106,7 @@ def _read_session_summary_metadata_unlocked(
                 if not line.strip():
                     continue
                 source = f"{path}:{line_number}"
-                entry = _summary_entry_metadata_from_json(
-                    line,
-                    source=source,
-                    legacy_parent_id=active_leaf_id,
-                )
+                entry = _summary_entry_metadata_from_json(line, source=source)
                 if session_id is None:
                     session_id = entry.session_id
                 elif entry.session_id != session_id:
@@ -148,12 +144,7 @@ def _read_session_summary_metadata_unlocked(
     )
 
 
-def _summary_entry_metadata_from_json(
-    line: str,
-    *,
-    source: str,
-    legacy_parent_id: str | None,
-) -> _SessionSummaryEntryMetadata:
+def _summary_entry_metadata_from_json(line: str, *, source: str) -> _SessionSummaryEntryMetadata:
     location = f" at {source}"
     try:
         raw_value = json.loads(line)
@@ -163,204 +154,92 @@ def _summary_entry_metadata_from_json(
         raise MalformedSessionEntryError(f"Malformed session entry JSON{location}")
     raw = cast(JsonObject, raw_value)
 
-    if "schema_version" not in raw:
-        return _legacy_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-
-    version = raw["schema_version"]
-    if type(version) is not int:
-        raise MalformedSessionEntryError(
-            f"Session entry schema_version must be an integer{location}"
-        )
-    if version in {1, 2, 3, 4}:
-        forbidden = tuple(
-            field
-            for field in ("reason", "selected_entry_id", "source_transition_id")
-            if field in raw
-        )
-        if forbidden:
-            fields = ", ".join(forbidden)
-            raise MalformedSessionEntryError(
-                f"V{version} session entry contains v5 transition field(s) {fields}{location}"
-            )
-    message_payload = raw.get("message")
-    if version <= 5 and isinstance(message_payload, dict) and "skill_invocation" in message_payload:
-        raise MalformedSessionEntryError(
-            f"V{version} message session entries cannot include skill_invocation{location}"
-        )
-    if version == 1:
-        return _v1_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version == 2:
-        return _v2_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version in {3, 4}:
-        return _v3_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version == 5:
-        if raw.get("kind") == "active_leaf" and "reason" not in raw:
-            raise MalformedSessionEntryError(
-                f"V5 active-leaf session entries require reason{location}"
-            )
-        return _v5_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-    if version != SESSION_ENTRY_SCHEMA_VERSION:
-        raise UnsupportedSessionEntryVersionError(
-            f"Unsupported session entry schema_version {version}{location}; "
-            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
-        )
-    return _v5_summary_entry_metadata(raw, location=location, parent_id=legacy_parent_id)
-
-
-def _legacy_summary_entry_metadata(
-    raw: JsonObject,
-    *,
-    location: str,
-    parent_id: str | None,
-) -> _SessionSummaryEntryMetadata:
-    _require_summary_base_fields(raw, location=location)
-    kind = raw.get("kind", "message")
-    if kind not in _SESSION_TREE_ENTRY_KINDS:
-        raise MalformedSessionEntryError(f"Unknown legacy session entry kind {kind!r}{location}")
-    populated = tuple(name for name in _SESSION_TREE_ENTRY_KINDS if raw.get(name) is not None)
-    if populated != (kind,):
-        raise MalformedSessionEntryError(
-            f"Legacy {kind} session entries require exactly a {kind} payload{location}"
-        )
-    return _SessionSummaryEntryMetadata(
-        id=_required_summary_string(raw, "id", location=location),
-        session_id=_required_summary_string(raw, "session_id", location=location),
-        kind=kind,
-        parent_id=parent_id,
-        message_role=_summary_message_role(raw, kind),
-    )
-
-
-def _v1_summary_entry_metadata(
-    raw: JsonObject,
-    *,
-    location: str,
-    parent_id: str | None,
-) -> _SessionSummaryEntryMetadata:
+    _require_summary_entry_version(raw, location=location)
     _require_summary_base_fields(raw, location=location)
     kind = raw.get("kind")
-    if kind not in _SESSION_TREE_ENTRY_KINDS:
-        raise MalformedSessionEntryError(f"Unknown v1 session entry kind {kind!r}{location}")
-    _require_summary_declared_payload(raw, kind, location=location)
-    if kind == "event":
-        _require_summary_event_envelope(raw, location=location)
-    forbidden = tuple(
-        field for field in ("parent_id", "previous_leaf_id", "active_leaf_id") if field in raw
-    )
-    if forbidden:
-        fields = ", ".join(forbidden)
-        raise MalformedSessionEntryError(
-            f"V1 session entry contains v2 structural field(s) {fields}{location}"
-        )
-    return _SessionSummaryEntryMetadata(
-        id=_required_summary_string(raw, "id", location=location),
-        session_id=_required_summary_string(raw, "session_id", location=location),
-        kind=kind,
-        parent_id=parent_id,
-        message_role=_summary_message_role(raw, kind),
-    )
-
-
-def _v2_summary_entry_metadata(
-    raw: JsonObject,
-    *,
-    location: str,
-    parent_id: str | None,
-) -> _SessionSummaryEntryMetadata:
-    _require_summary_base_fields(raw, location=location)
-    kind = raw.get("kind")
+    entry_id = _required_summary_string(raw, "id", location=location)
+    session_id = _required_summary_string(raw, "session_id", location=location)
     if kind in _SESSION_TREE_ENTRY_KINDS:
         _require_summary_declared_payload(raw, kind, location=location)
         if kind == "event":
             _require_summary_event_envelope(raw, location=location)
         return _SessionSummaryEntryMetadata(
-            id=_required_summary_string(raw, "id", location=location),
-            session_id=_required_summary_string(raw, "session_id", location=location),
+            id=entry_id,
+            session_id=session_id,
             kind=kind,
-            parent_id=_optional_summary_string(
-                raw,
-                "parent_id",
-                location=location,
-                default=parent_id,
-            ),
+            parent_id=_optional_summary_string(raw, "parent_id", location=location),
             message_role=_summary_message_role(raw, kind),
         )
     if kind == "active_leaf":
+        return _active_leaf_summary_entry_metadata(
+            raw, entry_id=entry_id, session_id=session_id, location=location
+        )
+    if kind == "session_info":
         return _SessionSummaryEntryMetadata(
-            id=_required_summary_string(raw, "id", location=location),
-            session_id=_required_summary_string(raw, "session_id", location=location),
+            id=entry_id,
+            session_id=session_id,
             kind=kind,
-            previous_leaf_id=_optional_summary_string(
-                raw,
-                "previous_leaf_id",
-                location=location,
-                default=parent_id,
-            ),
-            active_leaf_id=_optional_summary_string(
-                raw,
-                "active_leaf_id",
-                location=location,
-            ),
+            name=_summary_session_name(raw, location=location),
         )
     raise MalformedSessionEntryError(f"Malformed session entry{location}")
 
 
-def _v3_summary_entry_metadata(
-    raw: JsonObject,
-    *,
-    location: str,
-    parent_id: str | None,
-) -> _SessionSummaryEntryMetadata:
-    kind = raw.get("kind")
-    if kind == "session_info":
-        _require_summary_base_fields(raw, location=location)
-        return _SessionSummaryEntryMetadata(
-            id=_required_summary_string(raw, "id", location=location),
-            session_id=_required_summary_string(raw, "session_id", location=location),
-            kind=kind,
-            name=_summary_session_name(raw, location=location),
+def _require_summary_entry_version(raw: JsonObject, *, location: str) -> None:
+    if "schema_version" not in raw:
+        raise UnsupportedSessionEntryVersionError(
+            f"Session entry has no schema_version{location}; "
+            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
         )
-    return _v2_summary_entry_metadata(raw, location=location, parent_id=parent_id)
+    version = raw["schema_version"]
+    if type(version) is not int:
+        raise MalformedSessionEntryError(
+            f"Session entry schema_version must be an integer{location}"
+        )
+    if version != SESSION_ENTRY_SCHEMA_VERSION:
+        raise UnsupportedSessionEntryVersionError(
+            f"Unsupported session entry schema_version {version}{location}; "
+            f"expected {SESSION_ENTRY_SCHEMA_VERSION}"
+        )
 
 
-def _v5_summary_entry_metadata(
+def _active_leaf_summary_entry_metadata(
     raw: JsonObject,
     *,
+    entry_id: str,
+    session_id: str,
     location: str,
-    parent_id: str | None,
 ) -> _SessionSummaryEntryMetadata:
-    base = _v3_summary_entry_metadata(raw, location=location, parent_id=parent_id)
-    if raw.get("kind") == "active_leaf":
-        reason = raw.get("reason")
-        selected_entry_id = raw.get("selected_entry_id")
-        source_transition_id = raw.get("source_transition_id")
-        if reason == "system":
-            valid = selected_entry_id is None and source_transition_id is None
-        elif reason == "navigation":
-            valid = (
-                isinstance(selected_entry_id, str)
-                and bool(selected_entry_id)
-                and source_transition_id is None
-            )
-        elif reason == "unrevert":
-            valid = (
-                isinstance(source_transition_id, str)
-                and bool(source_transition_id)
-                and selected_entry_id is None
-            )
-        else:
-            valid = False
-        if not valid:
-            raise MalformedSessionEntryError(
-                f"Malformed v5 active-leaf transition metadata{location}"
-            )
-        return replace(
-            base,
-            reason=cast(str | None, reason),
-            selected_entry_id=cast(str | None, selected_entry_id),
-            source_transition_id=cast(str | None, source_transition_id),
+    reason = raw.get("reason")
+    selected_entry_id = raw.get("selected_entry_id")
+    source_transition_id = raw.get("source_transition_id")
+    if reason == "system":
+        valid = selected_entry_id is None and source_transition_id is None
+    elif reason == "navigation":
+        valid = (
+            isinstance(selected_entry_id, str)
+            and bool(selected_entry_id)
+            and source_transition_id is None
         )
-    return base
+    elif reason == "unrevert":
+        valid = (
+            isinstance(source_transition_id, str)
+            and bool(source_transition_id)
+            and selected_entry_id is None
+        )
+    else:
+        valid = False
+    if not valid:
+        raise MalformedSessionEntryError(f"Malformed active-leaf transition metadata{location}")
+    return _SessionSummaryEntryMetadata(
+        id=entry_id,
+        session_id=session_id,
+        kind="active_leaf",
+        previous_leaf_id=_optional_summary_string(raw, "previous_leaf_id", location=location),
+        active_leaf_id=_optional_summary_string(raw, "active_leaf_id", location=location),
+        reason=cast(str, reason),
+        selected_entry_id=cast(str | None, selected_entry_id),
+        source_transition_id=cast(str | None, source_transition_id),
+    )
 
 
 def _require_summary_base_fields(raw: JsonObject, *, location: str) -> None:
@@ -418,9 +297,8 @@ def _optional_summary_string(
     field: str,
     *,
     location: str,
-    default: str | None = None,
 ) -> str | None:
-    value = raw.get(field, default)
+    value = raw.get(field)
     if value is None or isinstance(value, str):
         return value
     raise MalformedSessionEntryError(f"Malformed session entry{location}")

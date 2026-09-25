@@ -26,9 +26,8 @@ def utc_now() -> datetime:
 class WispEvent(BaseModel):
     """Base class for the typed events consumed by every Wisp frontend.
 
-    Events carry no per-event version. The live RPC protocol bundle under
-    ``schemas/live-rpc/`` is the single compatibility contract: additive changes
-    regenerate the current bundle and breaking changes bump the protocol version.
+    Events carry no per-event version. ``schemas/live-rpc/`` describes the
+    current release's events; backend and frontend must be the same release.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

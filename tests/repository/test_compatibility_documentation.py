@@ -100,10 +100,8 @@ def test_changelog_records_the_documented_public_deprecation() -> None:
 
 def test_events_carry_no_per_event_version_and_policy_says_so() -> None:
     assert "schema_version" not in WispEvent.model_fields
-    assert f"currently **protocol v{LIVE_RPC_PROTOCOL_VERSION}**" in _POLICY
     assert "carry no per-event version" in _POLICY
-    assert "regenerates the current bundle in place" in _POLICY
-    assert "bumps `LIVE_RPC_PROTOCOL_VERSION`" in _POLICY
+    assert "must be the same Wisp release" in _POLICY
 
 
 def test_policy_documents_current_persistence_versions() -> None:
@@ -111,8 +109,7 @@ def test_policy_documents_current_persistence_versions() -> None:
 
     assert f"| Session entry | v{SESSION_ENTRY_SCHEMA_VERSION} |" in _POLICY
     assert f"| Persisted event envelope | v{PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION} |" in _POLICY
-    payload_row = "| Event payload inside the envelope | unversioned (protocol v"
-    assert f"{payload_row}{LIVE_RPC_PROTOCOL_VERSION} shape) |" in _POLICY
+    assert "| Event payload inside the envelope | unversioned (current event shape) |" in _POLICY
     assert f"| Compaction record | v{max(compaction_versions)} |" in _POLICY
 
 

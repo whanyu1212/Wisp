@@ -12,8 +12,7 @@ Use the relevant sections only. A review does not need to mention every item.
 ## Events And Persistence
 
 - Do event fields survive `model_dump_json()` and `wisp_event_from_json()`?
-- For an event contract change: was the current `schemas/live-rpc/vN/` bundle regenerated (additive)
-  or `LIVE_RPC_PROTOCOL_VERSION` bumped with the previous manifest pinned (breaking)?
+- For an event contract change: was the `schemas/live-rpc/` bundle regenerated?
 - Were both message persistence and raw persisted-event paths considered?
 - Are bounded scalar fields used instead of opaque or unbounded payloads?
 - Do replay and historical rendering consume typed metadata rather than parsed display text?

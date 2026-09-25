@@ -378,7 +378,6 @@ def test_rpc_cancellation_restores_leaf_before_unanswered_overflow_compaction(
                 kind="compaction",
                 operation_id="prompt-1",
                 compaction=CompactionRecord(
-                    schema_version=3,
                     summary="durable overflow summary",
                     replaced_entry_ids=context.context_entry_ids[:2],
                     provider="test",

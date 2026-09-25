@@ -184,20 +184,6 @@ class SessionStats(BaseModel):
     compaction: CompactionPolicyStatus | None = None
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
 
-    @model_validator(mode="before")
-    @classmethod
-    def _mark_legacy_usage_unpriced(cls, data: object) -> object:
-        if isinstance(data, dict) and "cost" not in data:
-            normalized = dict(data)
-            usage_record_count = normalized.get("usage_record_count", 0)
-            if isinstance(usage_record_count, int) and usage_record_count > 0:
-                normalized["cost"] = {
-                    "complete": False,
-                    "unpriced_record_count": usage_record_count,
-                }
-            return normalized
-        return data
-
 
 class ContextPressure(WispEvent):
     """Provider-reported total usage crossed the configured warning threshold."""

@@ -28,9 +28,9 @@ RC2 published an Intel macOS native wheel; RC3 does not. Intel macOS installs re
 so print, JSON, RPC, and SDK continue to work, but interactive TUI startup fails with missing-binary
 guidance. RC3 has no Python TUI fallback on that platform.
 
-Existing supported JSONL sessions remain readable without manual migration. Python continues to
-own persistence. Back up important sessions before testing a candidate; older releases are not
-promised to understand newly written records.
+Only session files written in the current entry schema (v6) load. Older files are rejected rather
+than migrated. Python continues to own persistence. Back up important sessions before testing a
+candidate; older releases are not promised to understand newly written records.
 
 ## Python integrations
 
@@ -53,17 +53,15 @@ This is a minor release with an announced breaking API cleanup, not a patch rele
 Update external clients together with the backend:
 
 1. Send `rpc.handshake.request` as the first frame, before ordinary commands.
-2. Support **live RPC v9**. Events carry no separate schema version; the protocol version is the
-   single event contract. Wait for `rpc.handshake.accepted` before sending
+2. Connect only to a backend from the same Wisp release. Events carry no schema version and there
+   is no cross-release event contract. Wait for `rpc.handshake.accepted` before sending
    commands; handle rejection as a connection failure rather than attempting legacy fallback.
 3. Honor negotiated directional frame limits and strict UTF-8, LF-terminated JSON framing.
 4. Use backend-owned model and connection catalogs. Credential mutations belong to backend RPC;
    frontends must not read or write Wisp credential files themselves.
 
-Use the checked-in `schemas/live-rpc/v9/` bundle and the typed Python transport as implementation
-references. Versioned schema bundles are release assets, not part of the Python wheel API.
-Historical bundles remain immutable. These live-connection requirements do not change the
-backward-readability policy for persisted sessions.
+Use the checked-in `schemas/live-rpc/` bundle and the typed Python transport as implementation
+references. The schema bundle is a release asset, not part of the Python wheel API.
 
 The in-process Python SDK has no serialization boundary and does not perform a wire handshake.
 The Rust TUI requires the exact Python package release. Source builds use the matching

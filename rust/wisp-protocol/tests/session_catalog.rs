@@ -2,11 +2,9 @@ use serde_json::json;
 use wisp_protocol::commands::WispTypedClientRpcCommands;
 
 #[test]
-fn older_v9_catalog_reports_without_discovery_fields_still_decode() {
-    let schema: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../schemas/live-rpc/v9/events.schema.json"
-    ))
-    .unwrap();
+fn catalog_reports_without_optional_discovery_fields_decode() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/live-rpc/events.schema.json")).unwrap();
     let mut report = schema["x-wisp-conformance-fixtures"]["rpc.sessions"].clone();
     for field in ["query", "next_cursor", "previous_cursor"] {
         report.as_object_mut().unwrap().remove(field);

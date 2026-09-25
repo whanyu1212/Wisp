@@ -229,8 +229,8 @@ Results are ordered newest-first by modification time, then filename descending 
 tie-breaker. Search reads session metadata, not full transcript models, but scan cost still grows
 with the catalog and JSONL files; bounded result pages are not a durable index or constant-time search.
 Selected-session metadata is independent of the query. Existing calls without query/cursor retain
-their behavior. The shared `get_sessions` command and `rpc.sessions` event use additive optional
-fields in live RPC v9; historical protocol bundles and persisted records are unchanged.
+their behavior. The shared `get_sessions` command and `rpc.sessions` event use optional
+`query`/cursor fields.
 
 Session tree pages accept 1 through 500 nodes.
 

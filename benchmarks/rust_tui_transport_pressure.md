@@ -101,7 +101,7 @@ RUST_TUI_BINARY_UNDER_TEST="$PWD/target/debug/wisp-tui" uv run pytest \
   tests/rust_tui/test_rust_tui_mouse.py tests/rust_tui/test_rust_tui_readiness.py tests/rust_tui/test_rust_tui_pressure.py
 uv run pytest tests/test_tui_traces.py tests/rpc/test_rpc_protocol.py tests/rpc/test_rpc_protocol_schema.py \
   tests/test_tui_process_lifecycle.py tests/tools/test_process_manager.py
-uv run python -m wisp.rpc.protocol_schema --check --immutable-base d9a13c0
+uv run python -m wisp.rpc.protocol_schema --check
 ```
 
 The handoff suite is configured on both Linux and macOS. Local PTY results alone do not establish

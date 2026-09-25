@@ -77,15 +77,14 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   provider differences.
 - Keep CLI, TUI, RPC, and SDK behavior aligned through shared commands and typed `WispEvent` models;
   avoid interface-specific copies of runtime policy.
-- Preserve append-only JSONL session semantics and backward-compatible event parsing when changing
-  persisted schemas.
-- `WispEvent` payloads carry no per-event version. The live RPC protocol bundle under
-  `schemas/live-rpc/` is the single event compatibility contract: an additive event change (new
-  type, new optional field, new enum value) regenerates the current `vN/` bundle in place; a breaking
-  change (remove/rename/retype a field or type, change requiredness or lifecycle ordering) bumps
-  `LIVE_RPC_PROTOCOL_VERSION`, pins the previous manifest hash in `rpc/protocol_schema.py`, and
-  generates the next bundle. Persisted events written before v9 still carry `schema_version`; the
-  session reader drops it on typed access. Do not reintroduce a per-event counter.
+- Preserve append-only JSONL session semantics. The session reader accepts only the current entry
+  and event-envelope `schema_version`; it does not upgrade older files. Bump the stamp when a
+  persisted shape changes, and do not add readers for earlier versions.
+- `WispEvent` payloads carry no per-event version. `schemas/live-rpc/` holds the one generated
+  bundle describing the current release's wire contract; regenerate it after any command, event, or
+  handshake model change. There are no historical bundles and `LIVE_RPC_PROTOCOL_VERSION` is not
+  bumped: compatibility comes from the same-release rule below, not from protocol numbers. Do not
+  reintroduce a per-event counter.
 - The event schema lists every field the backend emits as required. Readers are more lenient in
   the same way on both sides: Python fills an omitted defaulted field from its model default, and
   the Rust frontend fills schema defaults before validating (`wisp-protocol` `event_defaults.rs`).
@@ -94,12 +93,11 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   records the Python verdict for every one-field variant of each canonical event and the Rust
   conformance test must reach the same one; regenerate it after an event-model change. A defaulted
   field must satisfy its own constraints, since defaults are not validated on decode.
-- Because additive changes land in place and both readers reject unknown fields, the live protocol
-  version alone does not make two releases compatible: a backend and a frontend must be the same
-  Wisp release. Both frontends enforce this at connect time from the handshake's
-  `backend_package_version`: the Rust TUI (`BackendVersionMismatch`) and the Python SDK transport
-  (`RpcHandshakeError` with code `backend_version_mismatch`). Keep that check when adding a frontend.
-  Supporting mixed releases would first require readers that tolerate additive changes.
+- A backend and a frontend must be the same Wisp release; both readers reject unknown fields, so
+  any model change can break a mixed pair. Both frontends enforce this at connect time from the
+  handshake's `backend_package_version`: the Rust TUI (`BackendVersionMismatch`) and the Python SDK
+  transport (`RpcHandshakeError` with code `backend_version_mismatch`). Keep that check when adding
+  a frontend. Supporting mixed releases would first require readers that tolerate unknown fields.
 
 ### Finding agent code
 
@@ -205,8 +203,7 @@ uv run mypy
   `cargo test --workspace --all-features`. For Python/Rust handoff changes, include the TUI build and
   handoff smoke tests configured there; for packaging changes, include installed-package checks.
 - For live protocol or event-model changes, run `uv run python -m wisp.rpc.protocol_schema --check`
-  and the relevant schema/conformance tests. Preserve historical schema bundles and use the CI
-  immutable-base check against the actual delivery base when preparing a PR.
+  and the relevant schema/conformance tests.
 - If a command is blocked by the environment or does not reach a terminal result, report that
   limitation explicitly instead of treating the gate as passed.
 - For GitHub delivery, local checks are not final evidence: wait for terminal CI and inspect
