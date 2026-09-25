@@ -653,7 +653,7 @@ def test_rpc_prompt_compact_prompt_replays_summary_and_retained_history(
 ) -> None:
     provider = ReplayAwareProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -726,7 +726,7 @@ def test_rpc_prompt_contains_automatic_threshold_compaction(
     anyio.run(seed)
     provider = AutoCompactionProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider, context_window=100)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -786,7 +786,7 @@ def test_rpc_prompt_recovers_one_overflow_inside_the_prompt_envelope(
     session = _create_two_turn_session(tmp_path)
     provider = OverflowRecoveryProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider, context_window=100)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -867,7 +867,7 @@ def test_rpc_resume_initial_history_uses_compaction_replay(
     session = _create_compacted_session(tmp_path)
     provider = ReplayAwareProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -898,7 +898,7 @@ def test_rpc_queues_compact_behind_running_prompt(
     session = _create_two_turn_session(tmp_path)
     provider = BlockingOperationProvider(block_prompt=True)
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -931,7 +931,7 @@ def test_rpc_cancels_blocked_compact_then_runs_queued_prompt(
     session = _create_two_turn_session(tmp_path)
     provider = BlockingOperationProvider(block_compaction=True)
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -968,7 +968,7 @@ def test_rpc_queue_commands_wait_for_prompt_readiness_then_bypass(
 ) -> None:
     provider = BlockingOperationProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     original_resolve = RpcTrustGate.resolve
@@ -1126,7 +1126,7 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
 ) -> None:
     provider = BlockingOperationProvider(block_prompt=True)
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -1175,7 +1175,7 @@ def test_rpc_mode_rejects_duplicate_outstanding_command_id(
 ) -> None:
     provider = BlockingOperationProvider(block_prompt=True)
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
@@ -1215,7 +1215,7 @@ def test_rpc_repeat_compaction_failure_leaves_process_usable(
     session = _create_two_turn_session(tmp_path)
     provider = ReplayAwareProvider()
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await _runtime_with_provider(provider)
 
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)

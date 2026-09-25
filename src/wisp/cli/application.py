@@ -25,6 +25,7 @@ from wisp.events import (
 )
 from wisp.providers.base import ProviderError
 from wisp.rpc.configuration import _ConfigOverrides
+from wisp.rpc.errors import RpcOutputAlreadyReportedError
 from wisp.rpc.host import build_runtime_for_config
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
@@ -32,20 +33,17 @@ from wisp.sessions.jsonl import JsonlSessionStore, SessionError
 from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision
 from wisp.tools.result import ToolError
+from wisp.tools.selection import select_session, select_tools, tool_approval_policy
 
 from . import options as _cli_options
 from . import output as _cli_output
 from . import rpc as _cli_rpc
 from . import skills as _cli_skills
-from . import tools as _cli_tools
 from . import trust as _cli_trust
 from . import update as _cli_update
-from .types import OutputMode, TuiFrontendKind, _JsonOutputModeError, _RenderedPrintError
+from .types import OutputMode, TuiFrontendKind, _RenderedPrintError
 
-# Compatibility alias for callers that imported the former CLI option enum name.
-TuiRendererKind = TuiFrontendKind
-
-__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "TuiRendererKind", "app", "main"]
+__all__ = ["ToolApprovalDecision", "TuiFrontendKind", "app", "main"]
 
 # Module-level bindings for sibling helpers. Tests monkeypatch several of these on this module
 # (for example `_terminal_is_interactive` and `_resolve_cli_trust`), so the command bodies below
@@ -63,10 +61,6 @@ _render_json_events = _cli_output._render_json_events
 _render_print_event = _cli_output._render_print_event
 _write_json_event = _cli_output._write_json_event
 _writes_json_events = _cli_output._writes_json_events
-
-_print_mode_tool_approval_policy = _cli_tools._print_mode_tool_approval_policy
-_print_mode_tool_registry = _cli_tools._print_mode_tool_registry
-_session_for_print_run = _cli_tools._session_for_print_run
 
 
 def _exit_with_error(message: str, *, mode: OutputMode, console: Console) -> NoReturn:
@@ -321,8 +315,8 @@ def cli_callback(
                 renderer=resolved_tui_renderer,
                 project_trusted=trusted,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
-                # (each None unless set) so the legacy `--mode tui` path keeps honoring
-                # them; the launcher no longer launders the resolved config into flags.
+                # (each None unless set) so `--mode tui` honors them; the launcher
+                # does not launder the resolved config into flags.
                 user_provider=provider,
                 user_model=model,
                 user_session_dir=session_dir,
@@ -345,7 +339,7 @@ def cli_callback(
                 trusted,
                 project_context_root,
             )
-    except _JsonOutputModeError as exc:
+    except RpcOutputAlreadyReportedError as exc:
         raise typer.Exit(1) from exc
     except (ProviderError, SessionError, ToolError, UnknownProviderError, UnknownToolError) as exc:
         if isinstance(exc, _RenderedPrintError):
@@ -606,7 +600,7 @@ async def _run_print_with_runtime(
     project_context_root: Path | None = None,
 ) -> None:
     sessions = JsonlSessionStore(config.session_dir)
-    session = _session_for_print_run(sessions, resume=resume, continue_latest=continue_latest)
+    session = select_session(sessions, resume=resume, continue_latest=continue_latest)
     history = session.read_context_messages() if session is not None else ()
     skill_catalog = await discover_skill_catalog(
         project_root=project_context_root,
@@ -624,14 +618,14 @@ async def _run_print_with_runtime(
         initial_configuration,
         sessions=sessions,
         events=runtime.events,
-        tool_registry=_print_mode_tool_registry(
+        tool_registry=select_tools(
             runtime.tools,
             all_tools=all_tools,
             allow_read_tools=allow_read_tools,
             allowed_tools=allowed_tools,
             ignored_unknown_prefixes=runtime.unavailable_tool_prefixes,
         ),
-        tool_approval_policy=_print_mode_tool_approval_policy(approve_unsafe_tools),
+        tool_approval_policy=tool_approval_policy(approve_unsafe_tools),
         max_tool_iterations=max_tool_iterations,
         project_context_root=project_context_root,
     )

@@ -108,6 +108,25 @@ migration or containment advice.
 > instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.
 > The removal changes Python construction only.
 
+> [!WARNING]
+> **0.2 compatibility-shim cleanup exception**
+>
+> The 0.2 minor-release boundary also removes these compatibility shims before the normal
+> deprecation window:
+>
+> - `defer_context_overflow_errors` on `AgentLoopConfig` and the harness `prompt`,
+>   `prompt_message`, and `continue_` methods. Return `ContextOverflowFailure` from the overflow
+>   hook to supply the error message; the loop publishes overflow terminals itself.
+> - `wisp.cli.TuiRendererKind`; use `TuiFrontendKind`.
+> - `wisp.config.settings.persist_user_effort`; use `try_persist_user_model_selection`.
+> - `SessionReplay.entry_ids`; use `context_entry_ids`.
+> - `ProjectSnapshot.paths`; use `entries`.
+> - Chaining of tree entries that omit `parent_id` in `replay_session_entries`; set `parent_id`
+>   explicitly.
+>
+> This exception covers only the names listed here; the normal policy continues to apply to other
+> public APIs.
+
 ## Event schemas
 
 `WispEvent` payloads carry no per-event version. The installed package emits only the shapes in

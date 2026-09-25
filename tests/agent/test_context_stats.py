@@ -5,6 +5,7 @@ import math
 
 import pytest
 
+from tests.session_entries import linked_entries
 from wisp.agent.context_budget import (
     build_context_budget,
     context_fingerprint,
@@ -355,6 +356,7 @@ def test_session_stats_reject_persisted_observation_after_provider_change() -> N
             ),
         ),
     )
+    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
 
     stats = build_session_stats(
@@ -392,6 +394,7 @@ def test_session_stats_reports_threshold_policy_eligibility() -> None:
             message=Message(role="assistant", content="two answer", finish_reason="stop"),
         ),
     )
+    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
 
     stats = build_session_stats(
@@ -519,6 +522,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
         ),
     )
     entries = (old_user, old_assistant, retained_user, retained_assistant, compaction)
+    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
 
     stats = build_session_stats(
@@ -566,6 +570,7 @@ def test_session_stats_sum_cache_usage_only_when_every_record_reports_it() -> No
         ),
     )
     entries: tuple[SessionEntry, ...] = (first, second)
+    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
 
     stats = build_session_stats(
@@ -636,6 +641,7 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
         post_user,
         post_assistant,
     )
+    entries = linked_entries(entries)
     replay = replay_session_entries(entries)
     fingerprint = context_fingerprint(replay.messages)
 

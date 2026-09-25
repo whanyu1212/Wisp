@@ -16,6 +16,7 @@ from wisp.project_files import (
     FileIndexConfig,
     ProjectScanCancelled,
     ProjectScanTimedOut,
+    ProjectSnapshot,
     collect_project_snapshot,
 )
 from wisp.tools.context import ToolContext
@@ -24,6 +25,10 @@ from wisp.tools.files import secure_fs
 
 def config(root: Path) -> FileIndexConfig:
     return FileIndexConfig(root=root, context=ToolContext(cwd=root))
+
+
+def _display_paths(snapshot: ProjectSnapshot) -> tuple[str, ...]:
+    return tuple(entry.display_path for entry in snapshot.entries)
 
 
 def test_enumeration_cap_counts_denied_names_and_omits_whole_directory(tmp_path: Path) -> None:
@@ -39,7 +44,7 @@ def test_bounded_enumeration_does_not_depend_on_directory_order(tmp_path: Path) 
     for name in ("z", "a", "n"):
         (tmp_path / name).touch()
     snapshot = collect_project_snapshot(replace(config(tmp_path), max_entries=2))
-    assert snapshot.paths == ("a", "n")
+    assert _display_paths(snapshot) == ("a", "n")
     assert snapshot.truncated
 
 
@@ -70,7 +75,10 @@ def test_unrepresentable_names_and_special_files_are_omitted(tmp_path: Path) -> 
         else:
             os.close(fd)
         assert not project_files.is_display_safe_path("bad\udcffname")
-    assert collect_project_snapshot(config(tmp_path)).paths == ("资料/", '资料/say "hi".py')
+    assert _display_paths(collect_project_snapshot(config(tmp_path))) == (
+        "资料/",
+        '资料/say "hi".py',
+    )
 
 
 def test_root_symlink_is_never_enumerated(tmp_path: Path) -> None:
@@ -107,8 +115,8 @@ def test_ancestor_swap_cannot_enumerate_replacement(
     monkeypatch.setattr(secure_fs, "open_directory", racing_open)
     snapshot = collect_project_snapshot(config(root))
     assert swapped
-    assert not any("outside" in path for path in snapshot.paths)
-    assert "parent/child/safe" not in snapshot.paths
+    assert not any("outside" in path for path in _display_paths(snapshot))
+    assert "parent/child/safe" not in _display_paths(snapshot)
 
 
 @pytest.mark.parametrize("path", ["/absolute", "../secret", "a/../secret", "a/./b", "a//b", "a/"])

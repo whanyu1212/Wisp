@@ -580,7 +580,7 @@ def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
     assert provider.calls[2].messages[2].tool_call_id == "call-1"
 
 
-def test_agent_harness_config_preserves_legacy_positional_field_order() -> None:
+def test_agent_harness_config_preserves_positional_field_order() -> None:
     config = AgentHarnessConfig(
         ScriptedProvider([]),
         RecordingToolExecutor(),

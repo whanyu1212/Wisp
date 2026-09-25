@@ -15,9 +15,9 @@ from wisp.config.runtime import WispConfig
 from wisp.config.settings import (
     DEFAULT_PROTECTED_PATHS,
     WispSettings,
-    persist_user_effort,
     persist_user_model_selection,
     resolve_settings,
+    try_persist_user_model_selection,
     user_settings_path,
 )
 from wisp.trust.permissions import permissions_directory
@@ -775,13 +775,6 @@ def test_persist_user_model_selection_removes_invalid_recognized_settings(
     assert settings.effort == "high"
 
 
-def test_persist_user_effort_writes_a_new_file(tmp_path: Path) -> None:
-    persist_user_effort("high", home_dir=tmp_path)
-
-    path = user_settings_path(home_dir=tmp_path)
-    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
-
-
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permission contract")
 def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
     tmp_path: Path,
@@ -800,7 +793,7 @@ def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
     path.parent.chmod(0o755)
     previous_umask = os.umask(0o022)
     try:
-        persist_user_effort("high", home_dir=tmp_path)
+        try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
     finally:
         os.umask(previous_umask)
 
@@ -810,78 +803,38 @@ def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-def test_persist_user_effort_round_trips_through_resolve_settings(tmp_path: Path) -> None:
-    persist_user_effort("xhigh", home_dir=tmp_path)
-
-    settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path)
-
-    assert settings.effort == "xhigh"
-
-
-def test_persist_user_effort_preserves_other_keys(tmp_path: Path) -> None:
-    _write_settings(tmp_path, provider="user-provider", model="user-model")
-
-    persist_user_effort("medium", home_dir=tmp_path)
-
-    path = user_settings_path(home_dir=tmp_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert data["provider"] == "user-provider"
-    assert data["model"] == "user-model"
-    assert data["effort"] == "medium"
-
-
-def test_persist_user_effort_overwrites_a_previous_value(tmp_path: Path) -> None:
-    persist_user_effort("low", home_dir=tmp_path)
-    persist_user_effort("high", home_dir=tmp_path)
-
-    path = user_settings_path(home_dir=tmp_path)
-    assert json.loads(path.read_text(encoding="utf-8"))["effort"] == "high"
-
-
-def test_persist_user_effort_none_clears_the_key(tmp_path: Path) -> None:
-    _write_settings(tmp_path, provider="user-provider", effort="high")
-
-    persist_user_effort(None, home_dir=tmp_path)
-
-    path = user_settings_path(home_dir=tmp_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    assert "effort" not in data
-    assert data["provider"] == "user-provider"
-
-
-def test_persist_user_effort_tolerates_a_malformed_existing_file(tmp_path: Path) -> None:
+def test_persist_user_settings_tolerates_a_malformed_existing_file(tmp_path: Path) -> None:
     path = user_settings_path(home_dir=tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{not valid json", encoding="utf-8")
 
-    persist_user_effort("high", home_dir=tmp_path)
+    try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+    assert json.loads(path.read_text(encoding="utf-8")) == {"provider": "openai", "effort": "high"}
 
 
-def test_persist_user_effort_tolerates_a_non_object_existing_file(tmp_path: Path) -> None:
+def test_persist_user_settings_tolerates_a_non_object_existing_file(tmp_path: Path) -> None:
     path = user_settings_path(home_dir=tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("[1, 2, 3]", encoding="utf-8")
 
-    persist_user_effort("high", home_dir=tmp_path)
+    try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {"effort": "high"}
+    assert json.loads(path.read_text(encoding="utf-8")) == {"provider": "openai", "effort": "high"}
 
 
 def test_user_settings_path_matches_layout(tmp_path: Path) -> None:
     assert user_settings_path(home_dir=tmp_path) == tmp_path / ".wisp" / "settings.json"
 
 
-def test_persist_user_effort_tolerates_an_unwritable_home_dir(
+def test_persist_user_settings_tolerates_an_unwritable_home_dir(
     tmp_path: Path, capsys: CaptureFixture[str]
 ) -> None:
-    # Regression test (Codex review on #125): persist_user_effort is called
-    # from TuiShell._finish_pending_configure after a /model or /provider
-    # configure has already succeeded -- a best-effort local preference write
-    # failing (unwritable ~/.wisp, read-only home, full disk) must warn, not
-    # raise, or it would crash the whole TUI session over a write it doesn't
-    # actually need to complete.
+    # Regression test (Codex review on #125): persisting settings runs after a
+    # /model or /provider configure has already succeeded -- a best-effort local
+    # preference write failing (unwritable ~/.wisp, read-only home, full disk)
+    # must warn, not raise, or it would crash the whole TUI session over a
+    # write it doesn't actually need to complete.
     #
     # A plain file standing in for "home" (rather than chmod-ing a directory
     # read-only) makes path.parent.mkdir() raise NotADirectoryError
@@ -892,12 +845,12 @@ def test_persist_user_effort_tolerates_an_unwritable_home_dir(
     home = tmp_path / "home"
     home.write_text("not a directory", encoding="utf-8")
 
-    persist_user_effort("high", home_dir=home)
+    try_persist_user_model_selection("openai", None, "high", home_dir=home)
 
     assert "warning" in capsys.readouterr().err.lower()
 
 
-def test_persist_user_effort_does_not_overwrite_settings_it_could_not_read(
+def test_persist_user_settings_does_not_overwrite_settings_it_could_not_read(
     tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
 ) -> None:
     # Regression test (Codex review on #125): a file that *exists* but can't
@@ -905,9 +858,9 @@ def test_persist_user_effort_does_not_overwrite_settings_it_could_not_read(
     # being there) must abort the write entirely rather than proceeding as if
     # the file were empty. This function's whole contract is preserving every
     # other key (provider/model/auth_path/protected_paths/retry); writing a
-    # fresh {"effort": ...} over an unread file would silently destroy all of
+    # fresh selection over an unread file would silently destroy all of
     # them, the opposite of "best-effort." Distinct from
-    # test_persist_user_effort_tolerates_a_malformed_existing_file (a
+    # test_persist_user_settings_tolerates_a_malformed_existing_file (a
     # genuinely unreadable/corrupt document with nothing salvageable) --
     # here the file is fine, just not readable through this path right now.
     #
@@ -931,7 +884,7 @@ def test_persist_user_effort_does_not_overwrite_settings_it_could_not_read(
 
     monkeypatch.setattr(Path, "read_text", failing_read_text)
 
-    persist_user_effort("high", home_dir=tmp_path)
+    try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
 
     assert "warning" in capsys.readouterr().err.lower()
     data = json.loads(real_read_text(path, encoding="utf-8"))

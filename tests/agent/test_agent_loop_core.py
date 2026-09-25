@@ -959,27 +959,25 @@ def test_prepared_tool_batch_with_sequential_call_runs_entire_batch_serially() -
     assert max_active == 1
 
 
-def test_agent_loop_config_preserves_legacy_positional_field_order() -> None:
-    with pytest.warns(DeprecationWarning, match="defer_context_overflow_errors"):
-        config = AgentLoopConfig(
-            ScriptedProvider([]),
-            NeverToolExecutor(),
-            None,
-            (),
-            None,
-            None,
-            None,
-            None,
-            16_384,
-            0.8,
-            0,
-            0,
-            None,
-            True,
-        )
+def test_agent_loop_config_preserves_positional_field_order() -> None:
+    config = AgentLoopConfig(
+        ScriptedProvider([]),
+        NeverToolExecutor(),
+        None,
+        (),
+        None,
+        None,
+        None,
+        None,
+        16_384,
+        0.8,
+        0,
+        0,
+        None,
+        "cache-key",
+    )
 
-    assert config.defer_context_overflow_errors is True
-    assert config.prompt_cache_key is None
+    assert config.prompt_cache_key == "cache-key"
 
 
 @pytest.mark.parametrize(
@@ -4091,11 +4089,9 @@ def test_context_overflow_hook_retries_in_the_same_loop(raised: bool) -> None:
 
 @pytest.mark.parametrize("raised", [False, True])
 @pytest.mark.parametrize("with_hook", [False, True])
-@pytest.mark.parametrize("deferred", [False, True])
 def test_unrecovered_overflow_preserves_events_and_exception_contract(
     raised: bool,
     with_hook: bool,
-    deferred: bool,
 ) -> None:
     events: list[agent_loop_module.AgentLoopEvent] = []
     snapshots: list[ContextOverflowSnapshot] = []
@@ -4129,19 +4125,13 @@ def test_unrecovered_overflow_preserves_events_and_exception_contract(
                 provider=provider,
                 tool_executor=NeverToolExecutor(),
                 context_overflow_hook=DeclineRecovery() if with_hook else None,
-                defer_context_overflow_errors=deferred,
             ),
             messages=(Message(role="user", content="hi"),),
         ):
             events.append(event)
 
-    deprecation = (
-        pytest.warns(DeprecationWarning, match="defer_context_overflow_errors")
-        if deferred
-        else nullcontext()
-    )
     overflow = pytest.raises(ContextOverflowError) if raised and not with_hook else nullcontext()
-    with deprecation, overflow:
+    with overflow:
         anyio.run(run)
 
     expected = [
@@ -4151,9 +4141,9 @@ def test_unrecovered_overflow_preserves_events_and_exception_contract(
         "message.delta",
         "message.completed",
         "context.overflow",
+        "error",
+        "turn.completed",
     ]
-    if not deferred:
-        expected.extend(["error", "turn.completed"])
     assert [event.type for event in events] == expected
     assert len(provider.calls) == 1
     completion = next(event for event in events if isinstance(event, MessageCompleted))
@@ -4166,10 +4156,9 @@ def test_unrecovered_overflow_preserves_events_and_exception_contract(
     if with_hook:
         assert snapshots[0].had_streamed_delta is True
         assert snapshots[0].continuation_messages == ()
-    if not deferred:
-        terminal = events[-1]
-        assert isinstance(terminal, TurnCompleted)
-        assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
+    terminal = events[-1]
+    assert isinstance(terminal, TurnCompleted)
+    assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
 
 
 @pytest.mark.parametrize("had_tool_calls", [False, True])

@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from tests.session_entries import linked_entries
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.costs import CostEstimator, aggregate_session_cost, format_cost_summary, format_usd
 from wisp.coding.stats import build_session_stats
@@ -463,6 +464,7 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
             ),
         ),
     )
+    entries = linked_entries(entries)
 
     stats = build_session_stats(
         session_id="session",
@@ -495,6 +497,7 @@ def test_session_stats_marks_legacy_successful_messages_unpriced() -> None:
             message=Message(role="assistant", content="answer", finish_reason="stop"),
         ),
     )
+    entries = linked_entries(entries)
 
     stats = build_session_stats(
         session_id="session",

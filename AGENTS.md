@@ -147,7 +147,7 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
   callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
   shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,
-  `options.py`, `output.py`, `tools.py`, `rpc.py`).
+  `options.py`, `output.py`, `rpc.py`).
 - For the RPC command host, start with `src/wisp/rpc/host.py` (process lifetime and transport
   bridging), then `coordinator.py` (queuing and session-state synchronization) and `execution.py`
   (dispatch from `commands.py` models to handlers). Session-scoped handlers and transient session

@@ -64,7 +64,6 @@ def _build_loop_config(
     tool_iteration_offset: int,
     request_boundary_hook: RequestBoundaryHook,
     context_overflow_hook: ContextOverflowHook | None,
-    defer_context_overflow_errors: bool,
 ) -> AgentLoopConfig:
     """Combine harness configuration with the state of one invocation.
 
@@ -75,8 +74,6 @@ def _build_loop_config(
         tool_iteration_offset (int): Number of earlier tool iterations.
         request_boundary_hook (RequestBoundaryHook): Coordinator for subsequent requests.
         context_overflow_hook (ContextOverflowHook | None): Optional recovery coordinator.
-        defer_context_overflow_errors (bool): Deprecated. Whether the caller publishes
-            overflow terminal events.
 
     Returns:
         AgentLoopConfig: Validated configuration retaining the supplied dependencies.
@@ -99,7 +96,6 @@ def _build_loop_config(
         turn_offset=turn_offset,
         tool_iteration_offset=tool_iteration_offset,
         cost_estimator=config.cost_estimator,
-        defer_context_overflow_errors=defer_context_overflow_errors,
         request_boundary_hook=request_boundary_hook,
         context_overflow_hook=context_overflow_hook,
     )

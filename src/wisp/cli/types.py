@@ -5,7 +5,6 @@ from __future__ import annotations
 from enum import StrEnum
 
 from wisp.providers.base import ProviderError
-from wisp.rpc.errors import RpcOutputAlreadyReportedError
 
 
 class OutputMode(StrEnum):
@@ -22,11 +21,6 @@ class TuiFrontendKind(StrEnum):
 
     auto = "auto"
     rust = "rust"
-
-
-# Compatibility name retained for CLI renderers.  RPC execution uses the
-# transport-neutral class directly.
-_JsonOutputModeError = RpcOutputAlreadyReportedError
 
 
 class _RenderedPrintError(ProviderError):

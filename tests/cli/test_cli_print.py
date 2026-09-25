@@ -347,7 +347,7 @@ def test_print_mode_drains_failed_agent_lifecycle_before_exit(
 ) -> None:
     emitted_event_types: list[str] = []
 
-    async def build_runtime() -> WispRuntime:
+    async def build_runtime(**_kwargs: object) -> WispRuntime:
         runtime = await build_failing_runtime()
         runtime.events.on("*", lambda event: emitted_event_types.append(event.type))
         return runtime
@@ -764,7 +764,7 @@ def test_print_mode_context_describes_allowed_read_tools(tmp_path: Path) -> None
 
 
 def test_print_mode_requires_approval_for_dangerous_tools_without_yes() -> None:
-    approval = _print_mode_tool_approval_policy(False)
+    approval = tool_approval_policy(False)
 
     assert approval.approves(ReadTool()) is True
     assert approval.approves(WriteTool()) is False
@@ -773,7 +773,7 @@ def test_print_mode_requires_approval_for_dangerous_tools_without_yes() -> None:
 
 
 def test_print_mode_yes_approves_dangerous_tools() -> None:
-    approval = _print_mode_tool_approval_policy(True)
+    approval = tool_approval_policy(True)
 
     assert approval.approves(WriteTool()) is True
     assert approval.approves(EditTool()) is True
@@ -793,7 +793,7 @@ def test_print_mode_exposes_no_tools_by_default() -> None:
     ):
         registry.register(tool)
 
-    filtered = _print_mode_tool_registry(registry)
+    filtered = select_tools(registry)
 
     assert filtered.names() == ()
 
@@ -811,7 +811,7 @@ def test_print_mode_can_expose_sandboxed_read_tools() -> None:
     ):
         registry.register(tool)
 
-    filtered = _print_mode_tool_registry(registry, allow_read_tools=True)
+    filtered = select_tools(registry, allow_read_tools=True)
 
     assert filtered.names() == ("read", "grep", "find", "ls")
 
@@ -821,7 +821,7 @@ def test_print_mode_can_expose_explicit_tools() -> None:
     for tool in (ReadTool(), WriteTool(), BashTool()):
         registry.register(tool)
 
-    filtered = _print_mode_tool_registry(registry, allowed_tools=("bash", "write"))
+    filtered = select_tools(registry, allowed_tools=("bash", "write"))
 
     assert filtered.names() == ("write", "bash")
 
@@ -833,7 +833,7 @@ def test_print_mode_all_tools_exposes_the_full_registry() -> None:
     for tool in (ReadTool(), WriteTool(), EditTool(), BashTool(), GrepTool()):
         registry.register(tool)
 
-    filtered = _print_mode_tool_registry(registry, all_tools=True)
+    filtered = select_tools(registry, all_tools=True)
 
     assert filtered.names() == ("read", "write", "edit", "bash", "grep")
 
