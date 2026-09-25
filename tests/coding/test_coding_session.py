@@ -748,6 +748,65 @@ def test_resumed_session_in_another_directory_reads_its_own_git_status(tmp_path:
     assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
 
 
+class _OtherProvider(ScriptedProvider):
+    name = "other-scripted"
+
+
+@pytest.mark.parametrize("change", ["clone", "fork", "provider", "model"])
+def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
+    tmp_path: Path,
+    change: str,
+) -> None:
+    # Reusing an older snapshot only helps while the provider cache still
+    # applies. A clone or fork gets a new cache key, and caches are not shared
+    # across providers or models, so these read the current status instead.
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    source = store.create()
+    after: ScriptedProvider = (
+        _OtherProvider([_reply()]) if change == "provider" else ScriptedProvider([_reply()])
+    )
+
+    async def run() -> None:
+        first = CodingSession(
+            provider=ScriptedProvider([_reply(), _reply()]),
+            sessions=store,
+            tool_context=ToolContext(cwd=repo),
+            trusted=True,
+        )
+        _ = [event async for event in first.run("first", session=source)]
+        _ = [event async for event in first.run("second", session=source)]
+        (repo / "edit.txt").write_text("changed\n")
+        target = source
+        if change == "clone":
+            await anyio.sleep(1.1)  # the clone's file is named after a later second
+            target = await store.clone(source, expected_active_leaf_id=source.read_active_leaf_id())
+        elif change == "fork":
+            await anyio.sleep(1.1)
+            second_user = [
+                entry.id
+                for entry in source.read_entries()
+                if isinstance(entry, MessageSessionEntry) and entry.message.role == "user"
+            ][-1]
+            forked = await store.fork_from_user_message(
+                source, second_user, expected_active_leaf_id=source.read_active_leaf_id()
+            )
+            target = forked.session
+        resumed = CodingSession(
+            provider=after,
+            sessions=store,
+            tool_context=ToolContext(cwd=repo),
+            trusted=True,
+            model="another-model" if change == "model" else None,
+        )
+        _ = [event async for event in resumed.run("resumed", session=target)]
+
+    anyio.run(run)
+
+    assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
+
+
 def test_untrusted_resumed_session_never_reads_or_recovers_git(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -763,7 +822,7 @@ def test_untrusted_resumed_session_never_reads_or_recovers_git(
     monkeypatch.setattr(
         session_module,
         "_persisted_repository_status",
-        lambda _session, _cwd: git_uses.append("recover") or None,
+        lambda _session, _cwd, **_cache: git_uses.append("recover") or None,
     )
 
     async def run() -> None:

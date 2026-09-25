@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import anyio
@@ -1777,8 +1777,8 @@ class CodingSession:
 
         A process that has not built a prompt for this session yet (a restart or a
         one-shot CLI run) first recovers the snapshot its earlier runs persisted, so
-        the resumed prompt keeps the prefix the provider cached. Git is read only
-        when no recent snapshot for this directory is recorded.
+        the resumed prompt keeps the prefix the provider cached. Git is read when
+        that cache cannot apply (see `_persisted_repository_status`).
 
         Args:
             session_id (str): Session whose runs share the snapshot.
@@ -1793,7 +1793,16 @@ class CodingSession:
         snapshot = self._repository_status_snapshots.get(key)
         if snapshot is not None:
             return snapshot
-        recovered = _persisted_repository_status(session, cwd) if session is not None else None
+        recovered = (
+            _persisted_repository_status(
+                session,
+                cwd,
+                provider=self.provider.name,
+                model=self.model,
+            )
+            if session is not None
+            else None
+        )
         # Prompts are built on worker threads that a cancelled run abandons, so an
         # abandoned read can finish after a retry already stored its snapshot. The
         # first stored snapshot wins; a later read never replaces what prompts used.
@@ -2007,34 +2016,92 @@ def _prompt_cache_key(session_id: str) -> str:
     return f"wisp:{session_id}"
 
 
-def _persisted_repository_status(session: JsonlSession, cwd: Path) -> str | None:
-    """Recover the Git snapshot the session's latest run sent for ``cwd``, if recent.
+def _persisted_repository_status(
+    session: JsonlSession,
+    cwd: Path,
+    *,
+    provider: str,
+    model: str | None,
+) -> str | None:
+    """Recover the Git snapshot the session's latest run sent for ``cwd``, if reusable.
 
-    Walks the active path from its leaf to the newest persisted project context.
-    Only that one is considered: an older run for another directory, or a
-    snapshot written longer ago than the provider keeps a cached prefix, gives
-    no benefit over a fresh read, so the caller reads Git instead.
+    Reusing an older snapshot only pays off while the provider may still hold the
+    cached prefix built from it, so recovery requires the new run to continue the
+    same prompt cache as the latest recorded response:
+
+    * the same provider and model (caches are not shared across either);
+    * the same session: a clone or fork copies history into a new session, whose
+      new ``prompt_cache_key`` cannot match anything cached for the source;
+    * a recent response, within `RESUMED_REPOSITORY_STATUS_MAX_AGE`.
+
+    Only the newest project context on the active path is considered. In every
+    other case the caller reads Git, so a stale status is never shown without a
+    caching benefit.
 
     Args:
         session (JsonlSession): The persisted session a new run continues.
         cwd (Path): Working directory the new run describes.
+        provider (str): Provider the new run sends to.
+        model (str | None): Model the new run requests; None for the provider default.
 
     Returns:
         str | None: The snapshot text to reuse verbatim, or None to read Git.
     """
     if not session.path.exists():
         return None
+    latest_response: MessageSessionEntry | None = None
     for entry in reversed(session.read_active_path()):
-        if not (
-            isinstance(entry, MessageSessionEntry)
-            and entry.message.role == "system"
-            and entry.message.content.startswith(_PROJECT_CONTEXT_HEADER)
-        ):
+        if not isinstance(entry, MessageSessionEntry):
             continue
-        if utc_now() - entry.created_at > RESUMED_REPOSITORY_STATUS_MAX_AGE:
-            return None
-        return recover_repository_status(entry.message.content, cwd)
+        message = entry.message
+        if latest_response is None and message.role == "assistant":
+            latest_response = entry
+        if message.role == "system" and message.content.startswith(_PROJECT_CONTEXT_HEADER):
+            if latest_response is None or not _continues_prompt_cache(
+                latest_response, session=session, provider=provider, model=model
+            ):
+                return None
+            return recover_repository_status(message.content, cwd)
     return None
+
+
+def _continues_prompt_cache(
+    response: MessageSessionEntry,
+    *,
+    session: JsonlSession,
+    provider: str,
+    model: str | None,
+) -> bool:
+    """Return whether a new run can still hit the cache ``response`` was built in."""
+
+    message = response.message
+    cost, observation = message.cost, message.context_observation
+    recorded_provider = (cost.provider if cost is not None else None) or (
+        observation.provider if observation is not None else None
+    )
+    if recorded_provider != provider:
+        return False
+    # Compare what each run asked for (None: the provider's default model). The
+    # response's own `model` is whatever the provider reported back.
+    recorded_model = cost.requested_model if cost is not None else None
+    if recorded_model != model:
+        return False
+    if utc_now() - response.created_at > RESUMED_REPOSITORY_STATUS_MAX_AGE:
+        return False
+    # Clones and forks copy entries into a new session file, so a copied response
+    # predates that file. The store names files after their UTC creation second.
+    created = _session_file_created_at(session.path)
+    return created is None or response.created_at >= created
+
+
+def _session_file_created_at(path: Path) -> datetime | None:
+    """Return the UTC creation second `JsonlSessionStore.create` encodes in a file name."""
+
+    stamp = path.name[:15]
+    try:
+        return datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
+    except ValueError:
+        return None
 
 
 def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:
