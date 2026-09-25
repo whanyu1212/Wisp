@@ -13,10 +13,11 @@ import httpx
 import pytest
 from pytest import MonkeyPatch
 
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.messages import Message
 from wisp.auth import openai_codex as openai_codex_auth_module
 from wisp.auth.storage import JsonAuthStore, OAuthCredential
-from wisp.events import ToolCallSnapshot
+from wisp.events import ToolCallSnapshot, ToolExecutionEnded
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
@@ -810,6 +811,200 @@ def test_openai_codex_provider_replays_multi_round_tool_history(tmp_path: Path) 
         },
     ]
     assert all("previous_response_id" not in body for body in provider.seen_bodies)
+
+
+class _ScriptedCodexProvider(StubOpenAICodexProvider):
+    """Serve one scripted response per request, in request order."""
+
+    def __init__(
+        self,
+        responses: Sequence[Sequence[dict[str, object]]],
+        *,
+        auth_resolver: StoredProviderAuthResolver,
+    ) -> None:
+        super().__init__((), auth_resolver=auth_resolver)
+        self.responses = [list(response) for response in responses]
+
+    @asynccontextmanager
+    async def _create_stream(
+        self,
+        *,
+        body: Mapping[str, object],
+        headers: Mapping[str, str],
+    ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
+        self.events = self.responses.pop(0)
+        async with super()._create_stream(body=body, headers=headers) as stream:
+            yield stream
+
+
+class _EchoToolExecutor:
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEnded]:
+        yield ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output=f"result for {tool_call.call_id}",
+            is_error=False,
+        )
+
+
+def _message_item(item_id: str, text: str) -> dict[str, object]:
+    return {
+        "type": "message",
+        "id": item_id,
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
+
+
+def _text_response(response_id: str, text: str) -> list[dict[str, object]]:
+    return [
+        {"type": "response.created", "response": {"id": response_id}},
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "reasoning", "id": f"rs-{response_id}", "encrypted_content": "e"},
+        },
+        {"type": "response.output_text.delta", "delta": text},
+        {"type": "response.output_item.done", "item": _message_item(f"msg-{response_id}", text)},
+        _completed_event(response_id),
+    ]
+
+
+def test_second_prompt_resends_the_first_prompts_native_output(tmp_path: Path) -> None:
+    """The next prompt's input starts with the previous run's final request input."""
+
+    provider = _ScriptedCodexProvider(
+        [
+            [
+                {"type": "response.created", "response": {"id": "response-1"}},
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "reasoning",
+                        "id": "rs-1",
+                        "summary": [],
+                        "encrypted_content": "encrypted-1",
+                    },
+                },
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call",
+                        "id": "fc-1",
+                        "status": "completed",
+                        "call_id": "call-1",
+                        "name": "lookup",
+                        "arguments": '{"query":"first"}',
+                    },
+                },
+                _completed_event("response-1"),
+            ],
+            _text_response("response-2", "found it"),
+            _text_response("response-3", "again"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    harness = AgentHarness(
+        AgentHarnessConfig(
+            provider=provider,
+            tool_executor=_EchoToolExecutor(),
+            tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
+        )
+    )
+
+    async def run() -> None:
+        async for _event in harness.prompt("first question"):
+            pass
+        async for _event in harness.prompt("second question"):
+            pass
+
+    anyio.run(run)
+
+    first_run_final_input = cast(list[object], provider.seen_bodies[1]["input"])
+    second_run_input = cast(list[object], provider.seen_bodies[2]["input"])
+    final_response_items = [
+        {"type": "reasoning", "encrypted_content": "e"},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "found it", "annotations": []}],
+        },
+    ]
+    assert second_run_input == [
+        *first_run_final_input,
+        *final_response_items,
+        {"role": "user", "content": "second question"},
+    ]
+    assert {"type": "reasoning", "summary": [], "encrypted_content": "encrypted-1"} in (
+        second_run_input
+    )
+
+
+def test_native_output_is_replayed_only_for_the_model_that_produced_it(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        _text_response("response-1", "hello"),
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    history = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="hello", response_id="response-1"),
+        Message(role="user", content="next"),
+    ]
+
+    async def run() -> None:
+        async for _event in provider.stream(history[:1], model="gpt-a"):
+            pass
+        provider.events = _text_response("response-2", "ok")
+        async for _event in provider.stream(history, model="gpt-a"):
+            pass
+        provider.events = _text_response("response-3", "ok")
+        async for _event in provider.stream(history, model="gpt-b"):
+            pass
+
+    anyio.run(run)
+
+    same_model, other_model = (body["input"] for body in provider.seen_bodies[1:])
+    assert same_model == [
+        {"role": "user", "content": "hi"},
+        {"type": "reasoning", "encrypted_content": "e"},
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "hello", "annotations": []}],
+        },
+        {"role": "user", "content": "next"},
+    ]
+    assert other_model == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_rows_without_a_recorded_response_keep_their_portable_form(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        _text_response("response-2", "ok"),
+        auth_resolver=StoredProviderAuthResolver(_store_with_oauth(tmp_path)),
+    )
+    history = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="from a restart", response_id="response-unknown"),
+        Message(role="user", content="next"),
+    ]
+
+    async def run() -> None:
+        async for _event in provider.stream(history):
+            pass
+
+    anyio.run(run)
+
+    assert provider.seen_bodies[0]["input"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "from a restart"},
+        {"role": "user", "content": "next"},
+    ]
 
 
 def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:

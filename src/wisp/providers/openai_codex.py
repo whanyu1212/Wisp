@@ -6,9 +6,10 @@ import hashlib
 import json
 import os
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from json import JSONDecodeError
 from typing import Literal, cast
 
@@ -46,6 +47,20 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+# Responses whose output items are kept for replay on later prompts. Evicting a
+# record for an early row ends the cached prefix there for the rest of the
+# session, so the bound is sized for whole long sessions rather than one run.
+_NATIVE_OUTPUT_CAPACITY = 2048
+
+type _NativeOutputLookup = Callable[[Message], tuple[dict[str, object], ...] | None]
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeOutput:
+    """One completed response's output items, as its own run replayed them."""
+
+    model: str
+    items: tuple[dict[str, object], ...]
 
 
 class _CodexHTTPError(ProviderError):
@@ -91,6 +106,7 @@ class OpenAICodexProvider:
         self._client = client
         self._retry_policy = retry_policy or RetryPolicy()
         self._continuations = ContinuationStore[tuple[dict[str, object], ...]]()
+        self._native_outputs = ContinuationStore[_NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
 
     async def stream(
         self,
@@ -138,6 +154,7 @@ class OpenAICodexProvider:
             continuation_input=continuation_input,
             effort=effort,
             prompt_cache_key=prompt_cache_key,
+            native_output=lambda message: self._native_output(message, model=selected_model),
         )
         response_id: str | None = None
         pending_tool_calls: dict[str, dict[str, object]] = {}
@@ -321,13 +338,22 @@ class OpenAICodexProvider:
         # the upstream response ID in public events; if a clean continuation
         # omits a new ID, advance the existing local replay key instead.
         continuation_id = response_id or previous_response_id
+        replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
         if continuation_id is not None:
-            replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._continuations.consume(previous_response_id)
             self._continuations.remember(
                 continuation_id,
                 (*continuation_input, *replay_items),
+            )
+        # A later prompt rebuilds this response from its transcript row. Keeping
+        # the exact items lets that rebuild match what this run sent, so the
+        # cached prefix extends past this run instead of stopping at its first
+        # reasoning item.
+        if response_id is not None and replay_items:
+            self._native_outputs.remember(
+                response_id,
+                _NativeOutput(model=selected_model, items=replay_items),
             )
 
         for content_index, tool_call in enumerate(tool_calls):
@@ -340,6 +366,36 @@ class OpenAICodexProvider:
             finish_reason="tool_calls" if tool_calls else "stop",
             usage=usage,
         )
+
+    def _native_output(
+        self,
+        message: Message,
+        *,
+        model: str,
+    ) -> tuple[dict[str, object], ...] | None:
+        """Return the output items that produced an assistant row, if replayable.
+
+        Encrypted reasoning belongs to the model that produced it, so records from
+        another model are not replayed. A record without a message item cannot
+        represent a row that has text, so that row keeps its portable form.
+
+        Args:
+            message (Message): Transcript row being rebuilt for a request.
+            model (str): Model the request is sent to.
+
+        Returns:
+            tuple[dict[str, object], ...] | None: The response's items in their
+            original order, or None to render the row in portable form.
+        """
+
+        if message.role != "assistant" or message.response_id is None:
+            return None
+        native = self._native_outputs.get(message.response_id, refresh=True)
+        if native is None or native.model != model:
+            return None
+        if message.content and not any(item.get("type") == "message" for item in native.items):
+            return None
+        return native.items
 
     def _get_continuation(
         self,
@@ -406,12 +462,16 @@ def _codex_request_body(
     continuation_input: Sequence[Mapping[str, object]],
     effort: str | None = None,
     prompt_cache_key: str | None = None,
+    native_output: _NativeOutputLookup | None = None,
 ) -> dict[str, object]:
     body: dict[str, object] = {
         "model": model,
         "store": False,
         "stream": True,
-        "input": [*_messages_to_codex_input(messages), *continuation_input],
+        "input": [
+            *_messages_to_codex_input(messages, native_output=native_output),
+            *continuation_input,
+        ],
         "text": {"verbosity": "low"},
         "include": ["reasoning.encrypted_content"],
         "tool_choice": "auto",
@@ -436,10 +496,18 @@ def _instructions_from_messages(messages: Sequence[Message]) -> str | None:
     return "\n\n".join(instructions) or None
 
 
-def _messages_to_codex_input(messages: Sequence[Message]) -> list[dict[str, object]]:
+def _messages_to_codex_input(
+    messages: Sequence[Message],
+    *,
+    native_output: _NativeOutputLookup | None = None,
+) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     for message in messages:
         if message.role in {"system", "developer"}:
+            continue
+        native_items = native_output(message) if native_output is not None else None
+        if native_items is not None:
+            result.extend(native_items)
             continue
         if message.role == "tool" and message.tool_call_id:
             result.append(
