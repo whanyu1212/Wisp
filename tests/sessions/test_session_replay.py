@@ -8,6 +8,7 @@ from typing import Any
 import anyio
 import pytest
 
+from tests.session_entries import linked_entries
 from wisp.agent.messages import CompactionRecord, Message
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
 from wisp.events import ToolCallSnapshot
@@ -19,7 +20,6 @@ from wisp.sessions.entries import (
     PersistedEventEnvelope,
     SessionEntry,
     SessionEntryAdapter,
-    SessionInfoSessionEntry,
     is_session_tree_entry,
 )
 from wisp.sessions.jsonl import JsonlSessionStore, SessionError
@@ -239,6 +239,7 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
         ),
         _message_entry("user-4", "user", "fourth"),
     )
+    entries = linked_entries(entries)
 
     replay = replay_session_entries(entries)
 
@@ -256,31 +257,14 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
     ]
 
 
-def test_replay_preserves_public_flat_entry_compatibility() -> None:
+def test_replay_does_not_link_detached_entries() -> None:
     entries = (
         _message_entry("user", "user", "question"),
         _message_entry("assistant", "assistant", "answer"),
     )
 
-    replay = replay_session_entries(entries)
-
-    assert replay.path_entry_ids == ("user", "assistant")
-    assert replay.active_leaf_id == "assistant"
-    assert [message.content for message in replay.messages] == ["question", "answer"]
-
-
-def test_replay_preserves_public_flat_entry_compatibility_with_metadata() -> None:
-    entries = (
-        _message_entry("user", "user", "question"),
-        SessionInfoSessionEntry(id="name", session_id=SESSION_ID, name="Named session"),
-        _message_entry("assistant", "assistant", "answer"),
-    )
-
-    replay = replay_session_entries(entries)
-
-    assert replay.path_entry_ids == ("user", "assistant")
-    assert replay.active_leaf_id == "assistant"
-    assert [message.content for message in replay.messages] == ["question", "answer"]
+    with pytest.raises(SessionReplayError, match="expected active leaf 'user'"):
+        replay_session_entries(entries)
 
 
 def test_replay_does_not_normalize_partially_linked_tree() -> None:
@@ -335,7 +319,7 @@ def test_replay_rejects_invalid_compaction_targets(
     error: str,
 ) -> None:
     with pytest.raises(SessionReplayError, match=error):
-        replay_session_entries(entries)
+        replay_session_entries(linked_entries(entries))
 
 
 def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
@@ -593,6 +577,7 @@ def test_replay_preserves_tool_result_order_and_nearest_call_entry_ids() -> None
         tool_name="read",
     )
     entries = (first_call, retry, second_call, later, result)
+    entries = linked_entries(entries)
 
     replay = replay_session_entries(entries)
     repair = plan_interrupted_tool_repairs(
@@ -619,6 +604,7 @@ def test_replay_rejects_compaction_that_splits_a_turn() -> None:
         _message_entry("assistant-2", "assistant", "answer two"),
         _compaction_entry("compact", "user-1", "assistant-1", "user-2"),
     )
+    entries = linked_entries(entries)
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
         replay_session_entries(entries)
@@ -632,6 +618,7 @@ def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
         _message_entry("assistant-2", "assistant", "partial", finish_reason="length"),
         _compaction_entry("compact", "user-1", "assistant-1"),
     )
+    entries = linked_entries(entries)
 
     with pytest.raises(SessionReplayError, match="retain a complete user turn"):
         replay_session_entries(entries)
@@ -660,6 +647,7 @@ def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
         _message_entry("assistant-2", "assistant", "answer two"),
         _compaction_entry("compact", "user-1", "call"),
     )
+    entries = linked_entries(entries)
 
     with pytest.raises(SessionReplayError, match="splits a conversation turn"):
         replay_session_entries(entries)
@@ -683,6 +671,7 @@ def test_replay_cost_grows_linearly_with_session_length() -> None:
             )
             for index in range(message_count)
         )
+        entries = linked_entries(entries)
         # Take the best of several runs so an unlucky scheduling slice on a busy
         # CI machine cannot inflate the ratio.
         samples = []

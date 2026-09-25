@@ -24,9 +24,10 @@ from wisp.events import (
     UsageCost,
     WispEvent,
 )
+from wisp.rpc.errors import RpcOutputAlreadyReportedError
 from wisp.tool_presentation import tool_result_status
 
-from .types import OutputMode, _JsonOutputModeError
+from .types import OutputMode
 
 _PRINT_TOOL_GLYPHS = {
     "done": "✓",
@@ -67,9 +68,11 @@ async def _render_json_events(
         if rendered_error is None:
             rendered_error = str(exc)
             selected_write_event(ErrorEvent(message=rendered_error))
-        raise _JsonOutputModeError(rendered_error) from exc
+        raise RpcOutputAlreadyReportedError(rendered_error) from exc
     if terminal_failure is not None:
-        raise _JsonOutputModeError(rendered_error or f"Agent run {terminal_failure.outcome}")
+        raise RpcOutputAlreadyReportedError(
+            rendered_error or f"Agent run {terminal_failure.outcome}"
+        )
 
 
 def _write_json_event(event: WispEvent) -> None:

@@ -325,7 +325,8 @@ def test_candidate_credentials_are_reserved_before_interrupted_adoption(
             snapshot = collect_project_snapshot(
                 FileIndexConfig(root=tmp_path, context=files._context)
             )
-            assert "old-auth" not in snapshot.paths and "new-auth" not in snapshot.paths
+            display_paths = {entry.display_path for entry in snapshot.entries}
+            assert "old-auth" not in display_paths and "new-auth" not in display_paths
         finally:
             await runtime.aclose()
 

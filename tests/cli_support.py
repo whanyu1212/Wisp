@@ -19,7 +19,6 @@ from wisp.agent.messages import Message
 from wisp.cli import app
 from wisp.cli import application as cli_module
 from wisp.cli import rpc as cli_rpc_module
-from wisp.cli.tools import _print_mode_tool_approval_policy, _print_mode_tool_registry
 from wisp.coding import CodingSession
 from wisp.events import (
     ToolApprovalRequested,
@@ -53,6 +52,7 @@ from wisp.tools.base import ToolArguments, ToolInputSchema
 from wisp.tools.builtin import BashTool, EditTool, FindTool, GrepTool, LsTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
+from wisp.tools.selection import select_tools, tool_approval_policy
 
 _RPC_TEST_HANDSHAKE = (
     RpcHandshakeRequest(
@@ -281,7 +281,7 @@ def _test_model_registry() -> ModelRegistry:
     return ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home")))
 
 
-async def build_tool_runtime() -> WispRuntime:
+async def build_tool_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -293,7 +293,7 @@ async def build_tool_runtime() -> WispRuntime:
     )
 
 
-async def build_cancellable_runtime() -> WispRuntime:
+async def build_cancellable_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -304,7 +304,7 @@ async def build_cancellable_runtime() -> WispRuntime:
     )
 
 
-async def build_completion_only_runtime() -> WispRuntime:
+async def build_completion_only_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -315,7 +315,7 @@ async def build_completion_only_runtime() -> WispRuntime:
     )
 
 
-async def build_in_band_failing_runtime() -> WispRuntime:
+async def build_in_band_failing_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -326,7 +326,7 @@ async def build_in_band_failing_runtime() -> WispRuntime:
     )
 
 
-async def build_failing_runtime() -> WispRuntime:
+async def build_failing_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -337,7 +337,7 @@ async def build_failing_runtime() -> WispRuntime:
     )
 
 
-async def build_mixed_tool_runtime() -> WispRuntime:
+async def build_mixed_tool_runtime(**_kwargs: object) -> WispRuntime:
     providers = ProviderRegistry()
     tools = ToolRegistry()
     events = EventBus()
@@ -371,6 +371,8 @@ def _user_prompts(messages: Sequence[object]) -> list[str]:
 
 
 __all__ = [
+    "select_tools",
+    "tool_approval_policy",
     "AsyncIterator",
     "BashTool",
     "CancellableProvider",
@@ -414,8 +416,6 @@ __all__ = [
     "WriteTool",
     "_jsonl_records",
     "_last_user_prompt",
-    "_print_mode_tool_approval_policy",
-    "_print_mode_tool_registry",
     "_read_rpc_test_handshake",
     "_user_prompts",
     "anyio",

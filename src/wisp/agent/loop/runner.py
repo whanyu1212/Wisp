@@ -381,9 +381,6 @@ async def run_agent_loop(
                     if recovery.retry:
                         yield lifecycle.complete("failed", "error")
                         continue
-                    if config.defer_context_overflow_errors:
-                        # Deprecated: the caller publishes the error and closes the turn.
-                        return
                     if recovery.failure_message is not None:
                         failure_message = recovery.failure_message
                 for event in lifecycle.terminal_events(
@@ -463,8 +460,6 @@ async def run_agent_loop(
             raise
         if isinstance(exc, ContextOverflowError):
             yield _context_overflow_event(config, turn=turn, message=str(exc))
-            if config.defer_context_overflow_errors:
-                raise
         for event in lifecycle.terminal_events(str(exc), outcome="failed"):
             yield event
         raise

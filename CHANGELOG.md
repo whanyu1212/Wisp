@@ -22,6 +22,14 @@ behavior, providers, tools, permissions, and saved sessions.
   interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
   `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
   drops RC2's Intel macOS native wheel.
+- **Breaking:** removed remaining compatibility shims from the public Python API:
+  `defer_context_overflow_errors` on `AgentLoopConfig` and the harness `prompt`,
+  `prompt_message`, and `continue_` methods (deprecated since #634); the `TuiRendererKind` alias
+  (use `TuiFrontendKind`); `persist_user_effort` (use `try_persist_user_model_selection`);
+  `SessionReplay.entry_ids` (use `context_entry_ids`); and `ProjectSnapshot.paths` (use
+  `entries`). `replay_session_entries` no longer chains tree entries that omit `parent_id`;
+  link them explicitly. Runtime factories patched in for `build_runtime` must accept every
+  keyword argument `build_runtime_for_config` passes.
 - **Breaking:** session files are read only in the current format (entry schema v6, compaction
   record v4). Unversioned and v1–v5 session files, and events stamped with a pre-v9
   `schema_version`, now fail to load instead of being upgraded in memory.

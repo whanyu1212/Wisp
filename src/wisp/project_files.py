@@ -120,12 +120,6 @@ class ProjectSnapshot:
     truncation: SnapshotTruncation = SnapshotTruncation()
 
     @property
-    def paths(self) -> tuple[str, ...]:
-        """The legacy fuzzy corpus projected from typed entries."""
-
-        return tuple(entry.display_path for entry in self.entries)
-
-    @property
     def truncated(self) -> bool:
         return self.truncation.truncated
 

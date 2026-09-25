@@ -53,12 +53,6 @@ class SessionReplay:
         return tuple(row.entry_id for row in self.rows)
 
     @property
-    def entry_ids(self) -> tuple[str, ...]:
-        """Alias for callers that already operate specifically on context rows."""
-
-        return self.context_entry_ids
-
-    @property
     def messages(self) -> tuple[Message, ...]:
         return tuple(row.message for row in self.rows)
 
@@ -180,10 +174,9 @@ def replay_session_entries(
     *,
     leaf_id: str | None = None,
 ) -> SessionReplay:
-    """Replay one selected path, preserving compatibility for detached flat entries."""
+    """Replay one selected path through the parent-linked session tree."""
 
-    normalized_entries = _normalize_detached_linear_entries(entries)
-    tree = resolve_session_tree(normalized_entries)
+    tree = resolve_session_tree(entries)
     path = tree.path_to(leaf_id) if leaf_id is not None else tree.active_path
     replay = _replay_session_path(path)
     return SessionReplay(
@@ -191,35 +184,6 @@ def replay_session_entries(
         active_leaf_id=leaf_id if leaf_id is not None else tree.active_leaf_id,
         path_entry_ids=tuple(entry.id for entry in path),
     )
-
-
-def _normalize_detached_linear_entries(
-    entries: Sequence[SessionEntry],
-) -> tuple[SessionEntry, ...]:
-    """Treat a wholly detached in-memory sequence as the legacy public flat form."""
-
-    normalized = tuple(entries)
-    tree_entries = tuple(entry for entry in normalized if is_session_tree_entry(entry))
-    if (
-        len(tree_entries) < 2
-        or any(
-            not is_session_tree_entry(entry) and not isinstance(entry, SessionInfoSessionEntry)
-            for entry in normalized
-        )
-        or any(entry.parent_id is not None for entry in tree_entries)
-    ):
-        return normalized
-
-    parent_id: str | None = None
-    attached: list[SessionEntry] = []
-    for entry in normalized:
-        if is_session_tree_entry(entry):
-            attached_entry = entry.model_copy(update={"parent_id": parent_id})
-            attached.append(attached_entry)
-            parent_id = attached_entry.id
-            continue
-        attached.append(entry)
-    return tuple(attached)
 
 
 def _path_to_leaf(

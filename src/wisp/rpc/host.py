@@ -795,35 +795,14 @@ class RpcHost:
 
 
 async def build_runtime_for_config(config: WispConfig) -> WispRuntime:
-    """Build a runtime from configuration while retaining factory compatibility."""
+    """Build a runtime from the configuration's auth, retry, MCP, and endpoint settings."""
 
-    for kwargs in (
-        {
-            "auth_path": config.auth_path,
-            "retry_policy": config.retry_policy,
-            "mcp_servers": config.mcp_servers,
-            "openai_compatible": config.openai_compatible,
-        },
-        {
-            "auth_path": config.auth_path,
-            "retry_policy": config.retry_policy,
-            "openai_compatible": config.openai_compatible,
-        },
-        {
-            "auth_path": config.auth_path,
-            "retry_policy": config.retry_policy,
-            "mcp_servers": config.mcp_servers,
-        },
-        {"auth_path": config.auth_path, "retry_policy": config.retry_policy},
-        {"auth_path": config.auth_path},
-        {},
-    ):
-        try:
-            return await build_runtime(**kwargs)
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc) or not kwargs:
-                raise
-    raise AssertionError("runtime factory compatibility loop exhausted")
+    return await build_runtime(
+        auth_path=config.auth_path,
+        retry_policy=config.retry_policy,
+        mcp_servers=config.mcp_servers,
+        openai_compatible=config.openai_compatible,
+    )
 
 
 __all__ = ["InProcessOptions", "RpcHost", "build_runtime_for_config"]

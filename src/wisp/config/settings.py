@@ -360,16 +360,6 @@ def try_persist_user_model_selection(
     )
 
 
-def persist_user_effort(effort: str | None, *, home_dir: Path | None = None) -> None:
-    """Persist only ``effort`` while preserving the compatibility API."""
-
-    _persist_user_settings(
-        {"effort": effort},
-        home_dir=home_dir,
-        preference="effort",
-    )
-
-
 def _persist_user_settings(
     updates: Mapping[str, str | None],
     *,

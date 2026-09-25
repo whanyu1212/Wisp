@@ -276,7 +276,6 @@ class AgentHarness:
         *,
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
-        defer_context_overflow_errors: bool = False,
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
@@ -286,8 +285,6 @@ class AgentHarness:
             content (str): User text to append when the stream is consumed.
             turn_offset (int): Number of turns preceding this run.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Deprecated. Whether overflow
-                terminal events are delegated to the enclosing session.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked between completed turns and new provider requests.
             context_overflow_hook (ContextOverflowHook | None): Recovery hook for
@@ -301,7 +298,6 @@ class AgentHarness:
             Message(role="user", content=content),
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
-            defer_context_overflow_errors=defer_context_overflow_errors,
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
@@ -312,7 +308,6 @@ class AgentHarness:
         *,
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
-        defer_context_overflow_errors: bool = False,
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
@@ -323,8 +318,6 @@ class AgentHarness:
                 iteration begins. Later caller mutations do not affect the run.
             turn_offset (int): Number of turns preceding this run.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Deprecated. Whether to defer
-                overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked before subsequent requests.
             context_overflow_hook (ContextOverflowHook | None): Provider-overflow
@@ -343,7 +336,6 @@ class AgentHarness:
             prompt_message=message.model_copy(deep=True),
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
-            defer_context_overflow_errors=defer_context_overflow_errors,
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
@@ -353,7 +345,6 @@ class AgentHarness:
         *,
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
-        defer_context_overflow_errors: bool = False,
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
@@ -362,8 +353,6 @@ class AgentHarness:
         Args:
             turn_offset (int): Number of turns preceding this continuation.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Deprecated. Whether to defer
-                overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session policy
                 invoked before subsequent requests.
             context_overflow_hook (ContextOverflowHook | None): Provider-overflow
@@ -376,7 +365,6 @@ class AgentHarness:
         return self._run(
             turn_offset=turn_offset,
             tool_iteration_offset=tool_iteration_offset,
-            defer_context_overflow_errors=defer_context_overflow_errors,
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
@@ -387,7 +375,6 @@ class AgentHarness:
         prompt_message: Message | None = None,
         turn_offset: int = 0,
         tool_iteration_offset: int = 0,
-        defer_context_overflow_errors: bool = False,
         boundary_preparer: HarnessBoundaryPreparer | None = None,
         context_overflow_hook: ContextOverflowHook | None = None,
     ) -> AsyncGenerator[AgentHarnessEvent, None]:
@@ -403,8 +390,6 @@ class AgentHarness:
             prompt_message (Message | None): Detached prompt to append when consumed.
             turn_offset (int): Number of turns preceding this invocation.
             tool_iteration_offset (int): Number of earlier tool iterations.
-            defer_context_overflow_errors (bool): Deprecated. Whether the caller
-                publishes overflow terminal events.
             boundary_preparer (HarnessBoundaryPreparer | None): Session-owned boundary policy.
             context_overflow_hook (ContextOverflowHook | None): Optional overflow recovery.
 
@@ -446,7 +431,6 @@ class AgentHarness:
                 cancellation_token=token,
                 turn_offset=turn_offset,
                 tool_iteration_offset=tool_iteration_offset,
-                defer_context_overflow_errors=defer_context_overflow_errors,
                 request_boundary_hook=boundary,
                 context_overflow_hook=boundary if context_overflow_hook is not None else None,
             )
