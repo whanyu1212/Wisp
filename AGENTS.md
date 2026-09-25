@@ -94,6 +94,12 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   records the Python verdict for every one-field variant of each canonical event and the Rust
   conformance test must reach the same one; regenerate it after an event-model change. A defaulted
   field must satisfy its own constraints, since defaults are not validated on decode.
+- Because additive changes land in place and both readers reject unknown fields, the live protocol
+  version alone does not make two releases compatible: a backend and a frontend must be the same
+  Wisp release. Both frontends enforce this at connect time from the handshake's
+  `backend_package_version`: the Rust TUI (`BackendVersionMismatch`) and the Python SDK transport
+  (`RpcHandshakeError` with code `backend_version_mismatch`). Keep that check when adding a frontend.
+  Supporting mixed releases would first require readers that tolerate additive changes.
 
 ### Finding agent code
 
