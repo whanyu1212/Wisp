@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from tests.paths import REPO_ROOT
+from wisp import __version__
 from wisp.events import (
     ProjectConfigApplied,
     ProviderRetrying,
@@ -1697,6 +1698,12 @@ def test_rpc_controller_exposes_transport_events() -> None:
     anyio.run(run)
 
 
+def _fake_backend(script: str, *, backend_version: str = __version__) -> str:
+    """Prefix a scripted RPC backend with the package version it reports."""
+
+    return f"BACKEND_VERSION = {backend_version!r}\n{script}"
+
+
 def test_jsonl_subprocess_rpc_transport_times_out_while_writing_handshake(
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -1739,7 +1746,7 @@ import sys
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "protocol_version": 9,
     "min_protocol_version": 9,
     "max_protocol_version": 9,
@@ -1762,7 +1769,7 @@ print(json.dumps(started), flush=True)
 print(json.dumps(finished), flush=True)
 """
         transport = await JsonlSubprocessRpcTransport.start(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", _fake_backend(script)],
             cwd=tmp_path,
         )
         controller = RpcController(transport, command_id_factory=lambda _prefix: "shutdown-1")
@@ -1796,7 +1803,7 @@ import sys
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "protocol_version": 9,
     "min_protocol_version": 9,
     "max_protocol_version": 9,
@@ -1811,7 +1818,7 @@ print(json.dumps({
 }), flush=True)
 """
         transport = await JsonlSubprocessRpcTransport.start(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", _fake_backend(script)],
             cwd=tmp_path,
         )
         with pytest.raises(RpcProtocolError, match="invalid RPC event"):
@@ -1830,7 +1837,7 @@ import sys
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "protocol_version": 9,
     "min_protocol_version": 9,
     "max_protocol_version": 9,
@@ -1840,12 +1847,70 @@ print(json.dumps({
 print("", flush=True)
 """
         transport = await JsonlSubprocessRpcTransport.start(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", _fake_backend(script)],
             cwd=tmp_path,
         )
         with pytest.raises(RpcProtocolError, match="empty RPC event frame"):
             await anext(transport.events())
         await transport.close()
+
+    anyio.run(run)
+
+
+_ACCEPTING_BACKEND = """
+import json
+import sys
+json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "rpc.handshake.accepted",
+    "backend_package_version": BACKEND_VERSION,
+    "protocol_version": 9,
+    "min_protocol_version": 9,
+    "max_protocol_version": 9,
+    "capabilities": [],
+    "limits": {"max_client_frame_bytes": 67108864, "max_server_frame_bytes": 67108864},
+}), flush=True)
+sys.stdin.read()
+"""
+
+
+@pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_rejects_a_different_backend_release(
+    tmp_path: Path,
+) -> None:
+    """Another release negotiates v9 but may decode events differently.
+
+    Additive event changes are made in place within a protocol version, so the
+    SDK fails at connect time rather than on the first event it cannot decode.
+    """
+
+    async def run() -> None:
+        marker = tmp_path / "exited"
+        script = _fake_backend(
+            _ACCEPTING_BACKEND + f"open({str(marker)!r}, 'w').close()\n",
+            backend_version="0.0.1",
+        )
+        with anyio.fail_after(10):
+            with pytest.raises(RpcHandshakeError, match="'0.0.1' does not match") as error:
+                await JsonlSubprocessRpcTransport.start([sys.executable, "-c", script])
+        assert error.value.code == "backend_version_mismatch"
+        assert __version__ in str(error.value)
+        # The rejected backend is shut down, not left running: its stdin closes.
+        assert marker.exists()
+
+    anyio.run(run)
+
+
+@pytest.mark.process
+def test_jsonl_subprocess_rpc_transport_can_opt_out_of_the_backend_release_check() -> None:
+    async def run() -> None:
+        script = _fake_backend(_ACCEPTING_BACKEND, backend_version="0.0.1")
+        with anyio.fail_after(10):
+            transport = await JsonlSubprocessRpcTransport.start(
+                [sys.executable, "-c", script],
+                expected_backend_version=None,
+            )
+            await transport.close()
 
     anyio.run(run)
 
@@ -1861,14 +1926,14 @@ print(json.dumps({
     "type": "rpc.handshake.rejected",
     "code": "protocol_version_mismatch",
     "message": "No compatible live RPC protocol version.",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "min_protocol_version": 7,
     "max_protocol_version": 7,
 }), flush=True)
 """
         with pytest.raises(RpcHandshakeError, match="No compatible") as error:
             await JsonlSubprocessRpcTransport.start(
-                [sys.executable, "-c", script],
+                [sys.executable, "-c", _fake_backend(script)],
                 cwd=tmp_path,
             )
         assert error.value.code == "protocol_version_mismatch"
@@ -1892,7 +1957,7 @@ signal.signal(signal.SIGTERM, signal.SIG_IGN)
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "protocol_version": 9,
     "min_protocol_version": 9,
     "max_protocol_version": 9,
@@ -1904,7 +1969,7 @@ time.sleep(60)
 """
         monkeypatch.setattr(rpc_client_module, "_SUBPROCESS_CLOSE_TIMEOUT_SECONDS", 0.05)
         transport = await JsonlSubprocessRpcTransport.start(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", _fake_backend(script)],
             cwd=tmp_path,
         )
         with anyio.fail_after(1):
@@ -1926,7 +1991,7 @@ sys.stderr.flush()
 json.loads(sys.stdin.readline())
 print(json.dumps({
     "type": "rpc.handshake.accepted",
-    "backend_package_version": "0.1.0",
+    "backend_package_version": BACKEND_VERSION,
     "protocol_version": 9,
     "min_protocol_version": 9,
     "max_protocol_version": 9,
@@ -1942,7 +2007,7 @@ print(json.dumps({
 }), flush=True)
 """
         transport = await JsonlSubprocessRpcTransport.start(
-            [sys.executable, "-c", script],
+            [sys.executable, "-c", _fake_backend(script)],
             cwd=tmp_path,
         )
         controller = RpcController(transport, command_id_factory=lambda _prefix: "shutdown-1")

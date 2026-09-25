@@ -606,7 +606,11 @@ _SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS = 5
 
 
 class RpcHandshakeError(RuntimeError):
-    """The external backend rejected or violated RPC negotiation."""
+    """The external backend rejected or violated RPC negotiation.
+
+    ``code`` is the backend's rejection code, ``"backend_version_mismatch"`` when
+    the backend is a different Wisp release, or None for other contract violations.
+    """
 
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
@@ -620,9 +624,16 @@ class RpcProtocolError(RuntimeError):
 class JsonlSubprocessRpcTransport:
     """Subprocess transport for `wisp --mode rpc` JSONL stdin/stdout."""
 
-    def __init__(self, process: Process, request: RpcHandshakeRequest) -> None:
+    def __init__(
+        self,
+        process: Process,
+        request: RpcHandshakeRequest,
+        *,
+        expected_backend_version: str | None = __version__,
+    ) -> None:
         self._process = process
         self._request = request
+        self._expected_backend_version = expected_backend_version
         self._limits = RpcTransportLimits(
             max_client_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
             max_server_frame_bytes=MAX_LIVE_RPC_FRAME_BYTES,
@@ -641,12 +652,24 @@ class JsonlSubprocessRpcTransport:
         env: Mapping[str, str] | None = None,
         stderr: int | None = subprocess.DEVNULL,
         handshake_request: RpcHandshakeRequest | None = None,
+        expected_backend_version: str | None = __version__,
     ) -> JsonlSubprocessRpcTransport:
         """Start a subprocess running Wisp RPC mode.
 
         Stderr defaults to ``DEVNULL`` so an undrained stderr pipe cannot block
         the RPC event stream. Pass ``stderr=subprocess.PIPE`` only if another
         task will drain it.
+
+        The live protocol takes additive changes in place within a protocol
+        version, so only the same Wisp release is guaranteed to agree on every
+        event. The backend must therefore report ``expected_backend_version``,
+        which defaults to this SDK's own version; pass None to accept any
+        release that negotiates the protocol.
+
+        Raises:
+            RpcHandshakeError: The backend rejected negotiation, violated the
+                offered contract, or reported a different package version
+                (``code`` is ``"backend_version_mismatch"``).
         """
 
         selected_command = tuple(command) if command is not None else _default_rpc_command()
@@ -664,7 +687,7 @@ class JsonlSubprocessRpcTransport:
             supported_capabilities=(),
             required_capabilities=(),
         )
-        transport = cls(process, request)
+        transport = cls(process, request, expected_backend_version=expected_backend_version)
         try:
             await transport._perform_handshake()
         except BaseException:
@@ -808,6 +831,18 @@ class JsonlSubprocessRpcTransport:
         if isinstance(response, RpcHandshakeRejected):
             raise RpcHandshakeError(response.message, code=response.code)
         assert isinstance(response, RpcHandshakeAccepted)
+        if (
+            self._expected_backend_version is not None
+            and response.backend_package_version != self._expected_backend_version
+        ):
+            # Fail at connect time, not on the first event the other release
+            # decodes differently. Mirrors the Rust TUI's backend version check.
+            raise RpcHandshakeError(
+                f"RPC backend package version {response.backend_package_version!r} does not "
+                f"match the required version {self._expected_backend_version!r}; use the "
+                "same Wisp release for the backend and this client",
+                code="backend_version_mismatch",
+            )
         try:
             validate_rpc_handshake_response(self._request, response)
         except ValueError as exc:
