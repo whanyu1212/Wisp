@@ -653,6 +653,8 @@ def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
         replay_session_entries(entries)
 
 
+# Timing assertion: run it with the serial benchmarks, not beside parallel workers.
+@pytest.mark.benchmark
 def test_replay_cost_grows_linearly_with_session_length() -> None:
     """Replay must stay linear in the session length.
 
