@@ -196,7 +196,7 @@ Two distinctions will matter later:
   start at `run_agent_loop` for the normal turn lifecycle.
 - [`harness/runner.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/harness/runner.py):
   start at `AgentHarness._run` for retaining the conversation across runs.
-- [`test_agent_runtime_invariants.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/agent/test_agent_runtime_invariants.py):
+- [`test_runtime_invariants.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/agent/test_runtime_invariants.py):
   see how observable runtime contracts are tested.
 
 ## 6. Checkpoint

@@ -218,8 +218,8 @@ bytes, at most two lines, and marked truncated. Check an input below both limits
 as well: it must be returned unchanged with `truncated=False`.
 
 The regression tests for these teaching contracts live in
-[`tests/repository/test_crafting_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/repository/test_crafting_agents.py).
-From a development checkout, run `uv run pytest tests/repository/test_crafting_agents.py`.
+[`tests/docs/crafting/test_agents.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/docs/crafting/test_agents.py).
+From a development checkout, run `uv run pytest tests/docs/crafting/test_agents.py`.
 
 Next: [Giving the model useful context](03-context.md). The loop can now execute
 a repair; the next problem is choosing the

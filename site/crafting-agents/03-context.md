@@ -338,7 +338,7 @@ body, but the attempted edit must still be denied and the source unchanged.
 Run the teaching regressions with:
 
 ```bash
-uv run pytest tests/repository/test_crafting_agents.py tests/repository/test_crafting_context.py
+uv run pytest tests/docs/crafting/test_agents.py tests/docs/crafting/test_context.py
 ```
 
 Next: [Talking to models reliably](04-providers.md). We

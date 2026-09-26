@@ -29,7 +29,7 @@ persistence paths, bump the relevant schema version, and test serialization thro
 Agent-loop and harness lifecycle rules that later refactors must preserve — one terminal per started
 turn, Ended/Ready pairing, request-boundary decisions, queue FIFO — are listed in
 `references/runtime-invariants.md`. Sequential execute cancellation is not a synthetic tool-result
-contract; named assertions live in `tests/agent_runtime.py`.
+contract; named assertions live in `tests/support/agent_runtime.py`.
 
 Sessions persist messages and selected raw event types through independent paths. Check
 `PERSISTED_SESSION_EVENT_TYPES` before deciding whether a session schema also changes.

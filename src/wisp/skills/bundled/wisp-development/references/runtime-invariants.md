@@ -2,8 +2,8 @@
 
 Later extracts of `run_agent_loop` and `AgentHarness` must preserve the
 compatibility contracts below. They may change incidental internals. Named
-assertions live in `tests/agent_runtime.py`; focused coverage is
-`tests/agent/test_agent_runtime_invariants.py`.
+assertions live in `tests/support/agent_runtime.py`; focused coverage is
+`tests/agent/test_runtime_invariants.py`.
 
 ## Compatibility contracts
 

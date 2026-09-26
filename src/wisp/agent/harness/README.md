@@ -131,12 +131,12 @@ The focused harness checks are:
 
 ```bash
 uv run pytest \
-  tests/agent/test_agent_harness.py \
-  tests/agent/test_agent_harness_interruptions.py \
-  tests/agent/test_agent_runtime_invariants.py
+  tests/agent/harness/test_runner.py \
+  tests/agent/harness/test_interruptions.py \
+  tests/agent/test_runtime_invariants.py
 ```
 
-`test_agent_harness_interruptions.py` records a successful baseline for six small workflows:
+`tests/agent/harness/test_interruptions.py` records a successful baseline for six small workflows:
 streaming, sequential tools, parallel prepared tools, queues, transcript replacement, and context
 rebase. It then runs each workflow afresh, cancelling or closing after every emitted event. Failure
 notes identify the workflow, action, event type, and occurrence.
@@ -149,7 +149,7 @@ failures plus a rejected stale rebase. The parallel fixture requires overlap and
 using event barriers, not sleeps.
 
 This is a bounded event-boundary matrix, not exhaustive coverage of task scheduling or real provider
-implementations. Keep targeted in-flight cancellation tests in `test_agent_harness.py` alongside it.
+implementations. Keep targeted in-flight cancellation tests in `tests/agent/harness/test_runner.py` alongside it.
 
 Changes to boundary preparation or transcript persistence should also run
-`tests/coding/test_coding_session.py` and `tests/agent/test_compaction.py`.
+`tests/coding/test_session.py` and `tests/coding/test_compaction.py`.
