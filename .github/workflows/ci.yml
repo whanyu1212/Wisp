@@ -117,7 +117,6 @@ jobs:
           uv run pytest tests/rust_tui/test_rust_tui_smoke.py tests/rust_tui/test_rust_tui_themes.py tests/rust_tui/test_rust_tui_mouse.py tests/rust_tui/test_rust_tui_readiness.py tests/rust_tui/test_rust_tui_queue_management.py tests/rust_tui/test_rust_tui_session_catalog.py tests/rust_tui/test_rust_tui_pressure.py --durations=20
           --timeout=90 --timeout-method=signal
           --junitxml=test-results/rust-smoke/junit.xml
-          --ci-node-manifest=test-results/rust-smoke/nodes.json
 
       - name: Upload Rust handoff test results
         if: always()
@@ -170,30 +169,20 @@ jobs:
             python -m examples.sdk.minimal
           popd
 
-  test:
-    name: Test (${{ matrix.suite }})
+  python-tests:
+    name: Python tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         include:
-          - suite: core
-            target: tests
-            marker: not (slow or tui or process or benchmark or production_fault)
-            extra_args: ""
-          - suite: tui-components
-            target: tests
-            marker: tui and not production_fault
-            extra_args: ""
-          - suite: system-and-slow
-            target: tests
-            marker: (slow or process or benchmark) and not (tui or production_fault)
-            extra_args: ""
-          - suite: production-fault
-            target: tests
-            marker: production_fault
-            extra_args: ""
+          - suite: parallel
+            args: -m 'not (slow or process or benchmark)' -n auto
+          # Process, slow, and benchmark tests assert timing and resource
+          # bounds that flake when they compete with parallel workers.
+          - suite: serial
+            args: -m 'slow or process or benchmark'
 
     steps:
       - name: Check out repository
@@ -212,19 +201,11 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Test ${{ matrix.suite }} suite
-        env:
-          WISP_TRUST: "1"
-          WISP_EFFORT: xhigh
-          WISP_CONTEXT_RESERVE_TOKENS: "4096"
-          WISP_AUTO_COMPACTION: "0"
+      - name: Test
         run: >-
-          uv run pytest ${{ matrix.target }}
-          -m '${{ matrix.marker }}'
-          ${{ matrix.extra_args }}
+          uv run pytest tests ${{ matrix.args }}
           --durations=20
           --junitxml=test-results/${{ matrix.suite }}/junit.xml
-          --ci-node-manifest=test-results/${{ matrix.suite }}/nodes.json
 
       - name: Upload test results
         if: always()
@@ -234,32 +215,6 @@ jobs:
           overwrite: true
           path: test-results/${{ matrix.suite }}/
           if-no-files-found: error
-
-  tui-integration-status:
-    name: Test (tui-integration)
-    if: ${{ always() }}
-    needs: test
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require successful TUI tests
-        env:
-          TEST_RESULT: ${{ needs.test.result }}
-        run: test "$TEST_RESULT" = success
-
-  tui-status:
-    name: Test (tui)
-    if: ${{ always() }}
-    needs: [test, tui-integration-status]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-
-    steps:
-      - name: Require the split test matrix to pass
-        env:
-          TEST_RESULT: ${{ needs.test.result }}
-          INTEGRATION_RESULT: ${{ needs.tui-integration-status.result }}
-        run: test "$TEST_RESULT" = success && test "$INTEGRATION_RESULT" = success
 
   macos-smoke:
     name: Platform smoke (macOS)
@@ -284,8 +239,6 @@ jobs:
         run: uv sync --locked
 
       - name: Test platform-sensitive paths
-        env:
-          WISP_TRUST: "1"
         run: >-
           uv run pytest
           tests/runtime/test_auth_storage.py
@@ -296,7 +249,6 @@ jobs:
           tests/sessions/test_sessions.py
           --durations=20
           --junitxml=test-results/macos-smoke/junit.xml
-          --ci-node-manifest=test-results/macos-smoke/nodes.json
 
       - name: Upload platform test results
         if: always()
@@ -311,3 +263,22 @@ jobs:
         env:
           WISP_TRUST: "1"
         run: uv run wisp -p "hello" --provider fake
+
+  # The one required status check: it passes only when every job above
+  # succeeds, so adding or renaming a job never needs a ruleset change.
+  ci-passed:
+    name: CI passed
+    if: ${{ always() }}
+    needs: [quality, rust-workspace, package, python-tests, macos-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require every job to succeed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            test "$result" = success
+          done

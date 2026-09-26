@@ -63,11 +63,6 @@ jobs:
         run: cargo test --workspace --all-features
 
       - name: Test
-        env:
-          WISP_TRUST: "1"
-          WISP_EFFORT: xhigh
-          WISP_CONTEXT_RESERVE_TOKENS: "4096"
-          WISP_AUTO_COMPACTION: "0"
         run: uv run pytest tests
 
   verify-macos:
@@ -93,8 +88,6 @@ jobs:
         run: uv sync --locked
 
       - name: Test platform-sensitive paths
-        env:
-          WISP_TRUST: "1"
         run: >-
           uv run pytest
           tests/mcp/test_mcp_runtime_process.py

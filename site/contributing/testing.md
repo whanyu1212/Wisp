@@ -2,7 +2,7 @@
 
 ```bash
 uv run pytest tests                                                  # complete suite
-uv run pytest tests -m 'not (slow or tui or process or benchmark or production_fault)'  # core
+uv run pytest tests -m 'not (slow or process or benchmark)' -n auto  # quick subset
 ```
 
 The complete suite runs against deterministic fake or scripted providers, so the agent core, CLI, and
@@ -11,15 +11,15 @@ complete command before considering a change verified.
 
 ## Test selection
 
-CI splits the suite into four marker-based jobs; mirror the matrix predicates exactly when
-triaging:
+CI splits the suite into two jobs that run side by side; use the same commands when triaging:
 
 ```bash
-uv run pytest tests -m 'not (slow or tui or process or benchmark or production_fault)'
-uv run pytest tests -m 'tui and not production_fault'
-uv run pytest tests -m '(slow or process or benchmark) and not (tui or production_fault)'
-uv run pytest tests -m 'production_fault'
+uv run pytest tests -m 'not (slow or process or benchmark)' -n auto
+uv run pytest tests -m 'slow or process or benchmark'
 ```
+
+Process, slow, and benchmark tests assert timing and resource bounds that flake when they compete
+with parallel workers, so they run one at a time.
 
 Markers are declared in `pyproject.toml`: `tui`, `process`, `benchmark`, `slow`, and
 `production_fault`. TUI, process, benchmark, and production-fault files declare their relevant
@@ -89,7 +89,10 @@ CI runs for pull requests targeting `main` or `develop`, for direct updates to `
 dispatch.
 
 Linux is authoritative for the complete locked-environment quality and test suite: Ruff formatting
-and lint, configured `uv run mypy`, and `tests/`-only pytest partitions.
+and lint, configured `uv run mypy`, and the `tests/` suite.
+
+The `CI passed` job is the only required status check. It succeeds only when every other job in the
+CI workflow succeeds, so adding or renaming a job never needs a repository settings change.
 
 A separate Rust workspace job runs the schema check, Rust formatting, check, Clippy, workspace tests,
 build, and cross-language handoff smoke test on both Linux and macOS.
@@ -105,7 +108,8 @@ Pull requests and manual workflow runs only upload candidates. The tag-gated rel
 the same reusable builder, verifies the complete downloaded distribution set, and requires
 provenance attestation before trusted publication.
 
-The `production_fault` partition is a required deterministic regression contract:
+The `production_fault` tests are a deterministic regression contract that runs with the rest of
+the suite; to run them alone:
 
 ```bash
 uv run pytest tests -m production_fault --durations=20
@@ -119,6 +123,3 @@ A focused macOS job covers auth/session locking and durability, subprocess and M
 transport, secure filesystem operations, and a fake-provider CLI smoke test. The complete suite is
 not duplicated on macOS because the remaining tests exercise platform-neutral contracts. Windows
 remains best-effort until it has dedicated CI coverage.
-
-CI additionally sets `WISP_TRUST=1`, `WISP_EFFORT=xhigh`, `WISP_CONTEXT_RESERVE_TOKENS=4096`, and
-`WISP_AUTO_COMPACTION=0`. Match these if a test passes locally but fails in CI.
