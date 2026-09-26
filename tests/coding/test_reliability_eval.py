@@ -117,7 +117,7 @@ def _completion_stream() -> tuple[ProviderEvent, ...]:
     )
 
 
-def test_coding_agent_reliability_workflow_handles_branch_timeout_and_completion(
+def test_workflow_handles_branch_timeout_and_completion(
     tmp_path: Path,
 ) -> None:
     fetch = _bash_call("fetch", "git fetch origin --prune")

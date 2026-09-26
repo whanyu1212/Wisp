@@ -23,7 +23,7 @@ from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.context import ToolContext
 
 
-def test_coding_session_reuses_one_git_status_across_its_runs(tmp_path: Path) -> None:
+def test_reuses_one_git_status_across_its_runs(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
 
@@ -115,7 +115,7 @@ def _system_prompt(provider: ScriptedProvider, call_index: int) -> tuple[str, ..
     )
 
 
-def test_resumed_session_reuses_the_persisted_git_status_after_a_restart(
+def test_resumed_session_reuses_saved_git_status(
     tmp_path: Path,
 ) -> None:
     repo = tmp_path / "repo"
@@ -148,7 +148,7 @@ def test_resumed_session_reuses_the_persisted_git_status_after_a_restart(
     assert any("branch main; status clean" in content for content in _system_prompt(after, 0))
 
 
-def test_resumed_session_reads_git_again_after_the_cache_would_have_expired(
+def test_resumed_session_rereads_git_after_cache_expiry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,7 +180,7 @@ def test_resumed_session_reads_git_again_after_the_cache_would_have_expired(
     assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
 
 
-def test_resumed_session_in_another_directory_reads_its_own_git_status(tmp_path: Path) -> None:
+def test_resumed_session_elsewhere_reads_its_own_git_status(tmp_path: Path) -> None:
     first_repo, second_repo = tmp_path / "first", tmp_path / "second"
     _init_git_repo(first_repo)
     _init_git_repo(second_repo)
@@ -212,7 +212,7 @@ class _OtherKeyedProvider(_KeyedProvider):
 
 
 @pytest.mark.parametrize("change", ["clone", "fork", "provider", "model"])
-def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
+def test_resumed_session_rereads_git_when_cache_cannot_continue(
     tmp_path: Path,
     change: str,
 ) -> None:
@@ -266,7 +266,7 @@ def test_resumed_session_reads_git_again_when_the_prompt_cache_cannot_continue(
     assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
 
 
-def test_responses_record_the_prompt_cache_key_their_request_was_sent_with(
+def test_responses_record_their_request_cache_key(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path / "sessions")
@@ -376,7 +376,7 @@ def test_untrusted_resumed_session_never_reads_or_recovers_git(
     assert git_uses == []
 
 
-def test_abandoned_repository_status_read_cannot_replace_a_stored_snapshot(
+def test_abandoned_git_read_cannot_replace_stored_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

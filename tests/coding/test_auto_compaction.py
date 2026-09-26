@@ -108,7 +108,7 @@ class BlockingOverflowRecoveryProvider:
         await anyio.sleep_forever()
 
 
-def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> None:
+def test_auto_compacts_after_completed_turn(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -187,7 +187,7 @@ def test_coding_session_auto_compacts_after_completed_turn(tmp_path: Path) -> No
     ]
 
 
-def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) -> None:
+def test_does_not_auto_compact_at_provider_limit(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -224,7 +224,7 @@ def test_coding_session_does_not_auto_compact_at_provider_limit(tmp_path: Path) 
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_auto_compaction_failure_preserves_prompt_success(
+def test_failure_preserves_prompt_success(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -290,7 +290,7 @@ def test_coding_session_auto_compaction_failure_preserves_prompt_success(
     ]
 
 
-def test_coding_session_auto_compaction_failure_ignores_listener_failure(
+def test_failure_ignores_listener_failure(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -337,7 +337,7 @@ def test_coding_session_auto_compaction_failure_ignores_listener_failure(
     assert events[-1].outcome == "completed"
 
 
-def test_coding_session_auto_compaction_failure_ignores_accounting_write_failure(
+def test_failure_ignores_accounting_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -409,7 +409,7 @@ def test_coding_session_auto_compaction_failure_ignores_accounting_write_failure
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_auto_compaction_prepare_failure_preserves_prompt_success(
+def test_prepare_failure_preserves_prompt_success(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -468,7 +468,7 @@ def test_coding_session_auto_compaction_prepare_failure_preserves_prompt_success
     assert events[-1].outcome == "completed"
 
 
-def test_coding_session_auto_compaction_read_failure_keeps_final_save(
+def test_read_failure_keeps_final_save(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -517,7 +517,7 @@ def test_coding_session_auto_compaction_read_failure_keeps_final_save(
     assert events[-1].outcome == "completed"
 
 
-def test_coding_session_auto_compaction_reports_post_commit_publication_failure(
+def test_reports_post_commit_publication_failure(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -580,7 +580,7 @@ def test_coding_session_auto_compaction_reports_post_commit_publication_failure(
     ("enabled", "context_window", "reserve_tokens"),
     [(False, 100, 20), (True, None, 20), (True, 1_000, 16_384)],
 )
-def test_coding_session_auto_compaction_skips_unusable_policy(
+def test_skips_unusable_policy(
     tmp_path: Path,
     enabled: bool,
     context_window: int | None,
@@ -620,7 +620,7 @@ def test_coding_session_auto_compaction_skips_unusable_policy(
     assert len(provider.calls) == 1
 
 
-def test_coding_session_auto_compaction_skips_without_compactable_prefix(
+def test_skips_without_compactable_prefix(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -654,7 +654,7 @@ def test_coding_session_auto_compaction_skips_without_compactable_prefix(
     assert len(provider.calls) == 1
 
 
-def test_coding_session_auto_compaction_falls_back_to_estimate(tmp_path: Path) -> None:
+def test_falls_back_to_estimate(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -694,7 +694,7 @@ def test_coding_session_auto_compaction_falls_back_to_estimate(tmp_path: Path) -
     assert started.trigger_budget.estimate.total_tokens > 80
 
 
-def test_coding_session_auto_compaction_uses_estimate_after_tool_round(
+def test_uses_estimate_after_tool_round(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "input.txt"
@@ -748,7 +748,7 @@ def test_coding_session_auto_compaction_uses_estimate_after_tool_round(
     assert len(provider.calls) == 2
 
 
-def test_coding_session_auto_compaction_cancellation_preserves_completed_turn(
+def test_cancellation_preserves_completed_turn(
     tmp_path: Path,
 ) -> None:
     summary_started = anyio.Event()
@@ -799,7 +799,7 @@ def test_coding_session_auto_compaction_cancellation_preserves_completed_turn(
     ]
 
 
-def test_coding_session_overflow_recovery_cancellation_does_not_retry(tmp_path: Path) -> None:
+def test_overflow_recovery_cancellation_does_not_retry(tmp_path: Path) -> None:
     summary_started = anyio.Event()
     provider = BlockingOverflowRecoveryProvider(summary_started)
     store = JsonlSessionStore(tmp_path)

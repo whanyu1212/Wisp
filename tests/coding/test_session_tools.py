@@ -112,7 +112,7 @@ class MutatingTool:
         return ToolResult(text="mutated")
 
 
-def test_coding_session_operation_tool_context_overrides_tool_root(tmp_path: Path) -> None:
+def test_operation_tool_context_overrides_tool_root(tmp_path: Path) -> None:
     class CwdTool:
         name = "cwd"
         safety = "read"
@@ -159,7 +159,7 @@ def test_coding_session_operation_tool_context_overrides_tool_root(tmp_path: Pat
     assert agent.tool_context.cwd == launch_directory
 
 
-def test_coding_session_operation_tool_names_block_other_registry_tools(tmp_path: Path) -> None:
+def test_operation_tool_names_block_other_registry_tools(tmp_path: Path) -> None:
     class HiddenTool:
         name = "hidden"
         safety = "read"
@@ -204,7 +204,7 @@ def test_coding_session_operation_tool_names_block_other_registry_tools(tmp_path
     )
 
 
-def test_coding_session_keeps_operation_instructions_out_of_user_prompt(
+def test_keeps_operation_instructions_out_of_user_prompt(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -235,7 +235,7 @@ def test_coding_session_keeps_operation_instructions_out_of_user_prompt(
     assert [message.content for message in persisted if message.role == "user"] == ["/init"]
 
 
-def test_coding_session_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:
+def test_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -380,7 +380,7 @@ def test_tool_result_status_uses_managed_process_state(
     assert _tool_result_status(event) == expected
 
 
-def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
+def test_returns_error_result_when_tool_result_text_raises(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="malformed", arguments={})],
@@ -414,7 +414,7 @@ def test_coding_session_returns_error_result_when_tool_result_text_raises(tmp_pa
     assert tool_message.is_error is True
 
 
-def test_coding_session_does_not_turn_internal_result_failure_into_tool_output(
+def test_internal_result_failure_does_not_become_tool_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -465,7 +465,7 @@ def test_coding_session_does_not_turn_internal_result_failure_into_tool_output(
     assert all(secret not in message.content for message in messages)
 
 
-def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
+def test_filters_provider_tool_specs_by_policy(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tools = ToolRegistry()
     tools.register(EchoTool())
@@ -486,7 +486,7 @@ def test_coding_session_filters_provider_tool_specs_by_policy(tmp_path: Path) ->
     assert [tool.name for tool in provider.seen_tools] == ["echo"]
 
 
-def test_coding_session_persists_concurrent_batch_results_in_source_order(
+def test_persists_concurrent_batch_results_in_source_order(
     tmp_path: Path,
 ) -> None:
     calls = (
@@ -521,7 +521,7 @@ def test_coding_session_persists_concurrent_batch_results_in_source_order(
     ]
 
 
-def test_coding_session_operation_registry_preserves_execution_metadata(tmp_path: Path) -> None:
+def test_operation_registry_preserves_execution_metadata(tmp_path: Path) -> None:
     tools = ToolRegistry()
     execution = ToolExecutionMetadata(parallel_safe=True)
     tools.register(EchoTool(), execution=execution)
@@ -537,7 +537,7 @@ def test_coding_session_operation_registry_preserves_execution_metadata(tmp_path
     assert operation_registry.execution_metadata_for("echo") is execution
 
 
-def test_coding_session_filters_tool_prompt_metadata_by_policy(tmp_path: Path) -> None:
+def test_filters_tool_prompt_metadata_by_policy(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tools = ToolRegistry()
     tools.register(
@@ -566,7 +566,7 @@ def test_coding_session_filters_tool_prompt_metadata_by_policy(tmp_path: Path) -
     assert "Blocked mutation guidance." not in prompt
 
 
-def test_coding_session_plan_mode_exposes_only_read_tools_and_restores_build_tools(
+def test_plan_mode_limits_to_read_tools_then_restores_all(
     tmp_path: Path,
 ) -> None:
     provider = CapturingProvider()
@@ -596,7 +596,7 @@ def test_coding_session_plan_mode_exposes_only_read_tools_and_restores_build_too
     assert build_tools == ["echo", "mutate"]
 
 
-def test_coding_session_plan_mode_blocks_fabricated_mutating_tool_call(tmp_path: Path) -> None:
+def test_plan_mode_blocks_fabricated_mutating_tool_call(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -622,7 +622,7 @@ def test_coding_session_plan_mode_blocks_fabricated_mutating_tool_call(tmp_path:
     )
 
 
-def test_coding_session_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:
+def test_returns_error_result_for_policy_blocked_tool(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -651,7 +651,7 @@ def test_coding_session_returns_error_result_for_policy_blocked_tool(tmp_path: P
     )
 
 
-def test_coding_session_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
+def test_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -717,7 +717,7 @@ def test_coding_session_blocks_approval_required_tool_without_override(tmp_path:
     assert tool_entry.tool_result.status == "denied"
 
 
-def test_coding_session_approves_required_tool_with_override(tmp_path: Path) -> None:
+def test_approves_required_tool_with_override(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="mutate", arguments={}, response_id="response-1")],
@@ -745,7 +745,7 @@ def test_coding_session_approves_required_tool_with_override(tmp_path: Path) -> 
     )
 
 
-def test_coding_session_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
+def test_updates_previous_response_id_for_chained_tool_calls(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -787,7 +787,7 @@ def test_coding_session_updates_previous_response_id_for_chained_tool_calls(tmp_
     ]
 
 
-def test_coding_session_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
+def test_falls_back_to_tool_call_response_id(tmp_path: Path) -> None:
     tool_call = ToolCall(
         call_id="call-1",
         name="echo",
@@ -830,7 +830,7 @@ def test_coding_session_falls_back_to_tool_call_response_id(tmp_path: Path) -> N
     assert first_completion.response_id == "response-1"
 
 
-def test_coding_session_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
+def test_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="blocking", arguments={}, response_id="response-1")],
@@ -871,7 +871,7 @@ def test_coding_session_yields_tool_lifecycle_before_tool_runs(tmp_path: Path) -
     anyio.run(run_agent)
 
 
-def test_coding_session_cancellation_during_tool_keeps_completed_assistant(
+def test_cancellation_during_tool_keeps_completed_assistant(
     tmp_path: Path,
 ) -> None:
     provider = ToolLoopProvider(
@@ -968,7 +968,7 @@ def test_coding_session_cancellation_during_tool_keeps_completed_assistant(
     )
 
 
-def test_coding_session_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
+def test_returns_error_result_for_unknown_tool(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="missing", arguments={}, response_id="response-1")],
@@ -994,7 +994,7 @@ def test_coding_session_returns_error_result_for_unknown_tool(tmp_path: Path) ->
     )
 
 
-def test_coding_session_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
+def test_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [
@@ -1026,7 +1026,7 @@ def test_coding_session_defaults_to_uncapped_tool_iterations(tmp_path: Path) -> 
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
-def test_coding_session_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
+def test_enforces_configured_max_tool_iterations(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [ToolCall(call_id="call-1", name="echo", arguments={"text": "hello"})],
@@ -1057,7 +1057,7 @@ def test_coding_session_enforces_configured_max_tool_iterations(tmp_path: Path) 
     assert error_events[-1]["message"] == "Maximum tool iterations exceeded: 1"
 
 
-def test_coding_session_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:
+def test_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None:
     provider = ToolLoopProvider(
         [
             [

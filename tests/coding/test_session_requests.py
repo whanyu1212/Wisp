@@ -22,7 +22,7 @@ from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.context import ToolContext
 
 
-def test_coding_session_continues_with_history_and_labeled_tool_observations(
+def test_continues_with_history_and_labeled_tool_observations(
     tmp_path: Path,
 ) -> None:
     provider = CapturingProvider()
@@ -100,7 +100,7 @@ def test_coding_session_continues_with_history_and_labeled_tool_observations(
     assert records[4]["message"]["content"] == "done"
 
 
-def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
+def test_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     provider = CapturingProvider()
     tool = ToolSpec(
         name="lookup",
@@ -133,7 +133,7 @@ def test_coding_session_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
-def test_coding_session_custom_prompt_messages_remain_full_replacement(tmp_path: Path) -> None:
+def test_custom_prompt_messages_remain_full_replacement(tmp_path: Path) -> None:
     provider = CapturingProvider()
     custom_prompt = Message(role="system", content="Custom application policy.")
 
@@ -154,7 +154,7 @@ def test_coding_session_custom_prompt_messages_remain_full_replacement(tmp_path:
     ]
 
 
-def test_coding_session_passes_effort_to_provider(tmp_path: Path) -> None:
+def test_passes_effort_to_provider(tmp_path: Path) -> None:
     provider = CapturingProvider()
 
     async def run_agent() -> list[object]:
@@ -170,7 +170,7 @@ def test_coding_session_passes_effort_to_provider(tmp_path: Path) -> None:
     assert provider.seen_effort == "high"
 
 
-def test_coding_session_defaults_effort_to_none(tmp_path: Path) -> None:
+def test_defaults_effort_to_none(tmp_path: Path) -> None:
     provider = CapturingProvider()
 
     async def run_agent() -> list[object]:
@@ -185,7 +185,7 @@ def test_coding_session_defaults_effort_to_none(tmp_path: Path) -> None:
     assert provider.seen_effort is None
 
 
-def test_coding_session_reuses_cache_key_for_session_and_isolates_sessions(
+def test_reuses_cache_key_for_session_and_isolates_sessions(
     tmp_path: Path,
 ) -> None:
     provider = CapturingProvider()
@@ -216,7 +216,7 @@ def test_coding_session_reuses_cache_key_for_session_and_isolates_sessions(
     assert provider.seen_prompt_cache_keys[0] != provider.seen_prompt_cache_keys[2]
 
 
-def test_coding_session_skips_project_context_when_untrusted(tmp_path: Path) -> None:
+def test_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     provider = CapturingProvider()
     project = tmp_path / "project"
     project.mkdir()
@@ -253,7 +253,7 @@ def test_coding_session_skips_project_context_when_untrusted(tmp_path: Path) -> 
     assert "allowed tools:\n  - lookup: Look something up." in context
 
 
-def test_coding_session_includes_project_context_when_trusted(tmp_path: Path) -> None:
+def test_includes_project_context_when_trusted(tmp_path: Path) -> None:
     provider = CapturingProvider()
     project = tmp_path / "project"
     project.mkdir()

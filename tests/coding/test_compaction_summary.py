@@ -46,7 +46,7 @@ from wisp.sessions.replay import (
 )
 
 
-def test_compaction_transcript_is_labelled_and_truncates_tool_results() -> None:
+def test_transcript_is_labelled_and_truncates_tool_results() -> None:
     # Distinguishable head/tail content: a truncation that only kept the start
     # would show "HEAD-START" without "TAIL-END", and vice versa.
     long_result = "HEAD-START:" + "x" * MAX_COMPACTION_TOOL_RESULT_CHARS + ":TAIL-END"
@@ -91,7 +91,7 @@ def test_compaction_transcript_is_labelled_and_truncates_tool_results() -> None:
     assert "Emphasize the failing test" in prompt
 
 
-def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> None:
+def test_summary_request_has_no_tools_and_captures_usage() -> None:
     usage = ProviderUsage(input_tokens=40, output_tokens=10, total_tokens=50)
     provider = CacheAwareScriptedProvider(
         [
@@ -136,7 +136,7 @@ def test_provider_summary_uses_no_tools_no_continuation_and_captures_usage() -> 
     assert "<historical_transcript>" in request.messages[2].content
 
 
-def test_compaction_usage_marks_partially_reported_cache_totals_incomplete() -> None:
+def test_usage_marks_partial_cache_totals_incomplete() -> None:
     usage = _sum_token_usage(
         (
             TokenUsage(
@@ -160,7 +160,7 @@ def test_compaction_usage_marks_partially_reported_cache_totals_incomplete() -> 
     )
 
 
-def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
+def test_summary_hierarchically_bounds_oversized_transcript() -> None:
     class RecordingSummaryProvider:
         name = "recording-summary"
         default_model: str | None = "summary-model"
@@ -256,7 +256,7 @@ def test_provider_summary_hierarchically_bounds_oversized_transcript() -> None:
     assert summary.cost.billable.input_tokens == 10 * len(provider.calls)
 
 
-def test_provider_summary_recursively_bounds_oversized_aggregate() -> None:
+def test_summary_recursively_bounds_oversized_aggregate() -> None:
     """When enough partial summaries are produced that their own aggregate
     transcript exceeds the bound, the aggregate step must itself be chunked and
     recursively summarized rather than sent as one unbounded request.
@@ -331,7 +331,7 @@ def test_provider_summary_recursively_bounds_oversized_aggregate() -> None:
         ),
     ],
 )
-def test_provider_summary_rejects_blank_and_length_responses(
+def test_summary_rejects_blank_and_length_responses(
     terminal: ProviderResponseCompleted,
     match: str,
 ) -> None:
@@ -347,7 +347,7 @@ def test_provider_summary_rejects_blank_and_length_responses(
     anyio.run(run)
 
 
-def test_provider_summary_rejects_tool_calls() -> None:
+def test_summary_rejects_tool_calls() -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
         [
@@ -373,7 +373,7 @@ def test_provider_summary_rejects_tool_calls() -> None:
     anyio.run(run)
 
 
-def test_provider_summary_rejects_missing_checkpoint_sections() -> None:
+def test_summary_rejects_missing_checkpoint_sections() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="Too short")]]
     )
@@ -388,7 +388,7 @@ def test_provider_summary_rejects_missing_checkpoint_sections() -> None:
     anyio.run(run)
 
 
-def test_provider_summary_rejects_heading_tokens_without_real_sections() -> None:
+def test_summary_rejects_heading_tokens_without_real_sections() -> None:
     provider = ScriptedProvider(
         [
             [

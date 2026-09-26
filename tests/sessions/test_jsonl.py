@@ -40,14 +40,14 @@ from wisp.sessions.jsonl import (
 )
 
 
-def test_session_tree_facades_are_publicly_exported() -> None:
+def test_tree_facades_are_publicly_exported() -> None:
     assert SessionTreePage.__module__ == "wisp.sessions.pagination"
     assert SessionTreeNodeSummary.__module__ == "wisp.sessions.pagination"
     assert SessionTreeNavigation.__module__ == "wisp.sessions.jsonl"
     assert SessionNameChange.__module__ == "wisp.sessions.jsonl"
 
 
-def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
+def test_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -62,11 +62,11 @@ def test_session_store_loads_by_path_filename_and_id_prefix(tmp_path: Path) -> N
     assert store.load(session.session_id[:12]).read_messages()[0].content == "hello"
 
 
-def test_session_store_summaries_return_empty_for_empty_store(tmp_path: Path) -> None:
+def test_store_summaries_return_empty_for_empty_store(tmp_path: Path) -> None:
     assert JsonlSessionStore(tmp_path).summaries() == ()
 
 
-def test_session_store_summaries_are_newest_first_and_bounded(tmp_path: Path) -> None:
+def test_store_summaries_are_newest_first_and_bounded(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     first = store.create()
     second = store.create()
@@ -97,19 +97,19 @@ def test_session_store_summaries_are_newest_first_and_bounded(tmp_path: Path) ->
     assert store.summaries(limit=0) == ()
 
 
-def test_session_store_summaries_reject_negative_limit(tmp_path: Path) -> None:
+def test_store_summaries_reject_negative_limit(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="limit must be non-negative"):
         JsonlSessionStore(tmp_path).summaries(limit=-1)
 
 
-def test_session_store_summaries_propagate_malformed_session_files(tmp_path: Path) -> None:
+def test_store_summaries_propagate_malformed_session_files(tmp_path: Path) -> None:
     (tmp_path / "broken.jsonl").write_text("not-json\n", encoding="utf-8")
 
     with pytest.raises(SessionError):
         JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_store_summaries_use_lightweight_metadata_scan(
+def test_store_summaries_use_lightweight_metadata_scan(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -135,7 +135,7 @@ def test_session_store_summaries_use_lightweight_metadata_scan(
     assert summaries[0].active_leaf_id == leaf_id
 
 
-def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) -> None:
+def test_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -167,7 +167,7 @@ def test_session_names_are_normalized_cleared_and_latest_wins(tmp_path: Path) ->
     ]
 
 
-def test_session_name_limit_is_enforced_by_utf8_bytes(tmp_path: Path) -> None:
+def test_name_limit_is_enforced_by_utf8_bytes(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write_ok() -> None:
@@ -183,7 +183,7 @@ def test_session_name_limit_is_enforced_by_utf8_bytes(tmp_path: Path) -> None:
         anyio.run(write_oversized)
 
 
-def test_session_name_metadata_does_not_affect_replay_messages_or_tree(tmp_path: Path) -> None:
+def test_name_metadata_does_not_affect_replay_messages_or_tree(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> str:
@@ -207,7 +207,7 @@ def test_session_name_metadata_does_not_affect_replay_messages_or_tree(tmp_path:
     assert tree_page.nodes[0].entry_id == first_id
 
 
-def test_metadata_only_session_is_valid_and_accepts_later_first_prompt(tmp_path: Path) -> None:
+def test_metadata_only_session_accepts_a_later_first_prompt(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> None:
@@ -224,7 +224,7 @@ def test_metadata_only_session_is_valid_and_accepts_later_first_prompt(tmp_path:
     assert session.read_context_messages()[0].content == "first"
 
 
-def test_session_summaries_expose_names_and_reject_malformed_metadata(tmp_path: Path) -> None:
+def test_summaries_expose_names_and_reject_malformed_metadata(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -253,7 +253,7 @@ def test_session_summaries_expose_names_and_reject_malformed_metadata(tmp_path: 
 
 @pytest.mark.parametrize("kind", ["message", "compaction"])
 @pytest.mark.parametrize("payload", [None, "not-object"])
-def test_session_store_summaries_reject_entries_missing_declared_payload(
+def test_store_summaries_reject_entries_missing_declared_payload(
     tmp_path: Path,
     kind: str,
     payload: object,
@@ -275,7 +275,7 @@ def test_session_store_summaries_reject_entries_missing_declared_payload(
 
 
 @pytest.mark.parametrize("payload", [None, "not-object"])
-def test_session_store_summaries_reject_event_envelopes_missing_payload(
+def test_store_summaries_reject_event_envelopes_missing_payload(
     tmp_path: Path,
     payload: object,
 ) -> None:
@@ -297,7 +297,7 @@ def test_session_store_summaries_reject_event_envelopes_missing_payload(
         JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
+def test_persists_event_entries_without_polluting_messages(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> None:
@@ -321,7 +321,7 @@ def test_session_persists_event_entries_without_polluting_messages(tmp_path: Pat
     assert events[1]["message"] == "boom"
 
 
-def test_session_store_opens_latest_session(tmp_path: Path) -> None:
+def test_store_opens_latest_session(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     older = store.create()
     newer = store.create()
@@ -338,7 +338,7 @@ def test_session_store_opens_latest_session(tmp_path: Path) -> None:
     assert store.latest().read_messages()[0].content == "new"
 
 
-def test_session_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
+def test_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     older = store.create()
     newer = store.create()
@@ -359,7 +359,7 @@ def test_session_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
     assert older.path.stat().st_mtime_ns == 1_000_000_000
 
 
-def test_session_store_reports_missing_and_ambiguous_refs(tmp_path: Path) -> None:
+def test_store_reports_missing_and_ambiguous_refs(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session_one = store.create()
     session_two = store.create()

@@ -37,7 +37,7 @@ from wisp.sessions.jsonl import (
 from wisp.sessions.replay import SessionReplayError
 
 
-def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
+def test_round_trips_completed_message_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     assistant = Message(
         role="assistant",
@@ -85,7 +85,7 @@ def test_session_round_trips_completed_message_metadata(tmp_path: Path) -> None:
     assert session.read_messages()[2].tool_calls == ()
 
 
-def test_session_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
+def test_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> None:
@@ -184,7 +184,7 @@ def test_concrete_session_entry_variants_preserve_payloads() -> None:
         },
     ],
 )
-def test_session_accepts_entries_with_omitted_null_structural_references(
+def test_accepts_entries_with_omitted_null_structural_references(
     tmp_path: Path,
     entry: dict[str, object],
 ) -> None:
@@ -228,7 +228,7 @@ def test_session_accepts_entries_with_omitted_null_structural_references(
         ),
     ],
 )
-def test_session_rejects_incoherent_transition_metadata(
+def test_rejects_incoherent_transition_metadata(
     tmp_path: Path,
     updates: dict[str, object],
     message: str,
@@ -272,7 +272,7 @@ def test_session_rejects_incoherent_transition_metadata(
         {"reason": "system", "source_transition_id": "navigation"},
     ],
 )
-def test_session_rejects_malformed_active_leaf_metadata(
+def test_rejects_malformed_active_leaf_metadata(
     tmp_path: Path,
     updates: dict[str, object],
 ) -> None:
@@ -295,7 +295,7 @@ def test_session_rejects_malformed_active_leaf_metadata(
         JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_rejects_entries_that_omit_their_parent_reference(tmp_path: Path) -> None:
+def test_rejects_entries_that_omit_their_parent_reference(tmp_path: Path) -> None:
     """An omitted ``parent_id`` means a root, not the previously appended entry."""
 
     path = tmp_path / "omitted-parent.jsonl"
@@ -320,7 +320,7 @@ def test_session_rejects_entries_that_omit_their_parent_reference(tmp_path: Path
         JsonlSessionStore(tmp_path).load(path).read_entries()
 
 
-def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path) -> None:
+def test_retains_unknown_event_payload_until_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "future-event.jsonl"
     raw_event = {"type": "future.event", "future": True}
     entry = {
@@ -340,7 +340,7 @@ def test_session_retains_unknown_event_payload_until_typed_access(tmp_path: Path
         session.read_typed_events()
 
 
-def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
+def test_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
     path = tmp_path / "malformed-event.jsonl"
     raw_event = {"type": "error"}
     entry = {
@@ -368,7 +368,7 @@ def test_session_rejects_malformed_event_only_on_typed_access(tmp_path: Path) ->
         (7, UnsupportedSessionEntryVersionError, "schema_version 7"),
     ],
 )
-def test_session_distinguishes_malformed_and_future_entry_versions(
+def test_distinguishes_malformed_and_future_entry_versions(
     tmp_path: Path,
     schema_version: object,
     error_type: type[SessionError],
@@ -395,7 +395,7 @@ def test_session_distinguishes_malformed_and_future_entry_versions(
         (2, UnsupportedPersistedEventVersionError, "envelope schema_version 2"),
     ],
 )
-def test_session_distinguishes_malformed_and_future_event_envelopes(
+def test_distinguishes_malformed_and_future_event_envelopes(
     tmp_path: Path,
     schema_version: object,
     error_type: type[SessionError],
@@ -419,7 +419,7 @@ def test_session_distinguishes_malformed_and_future_event_envelopes(
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_rejects_null_schema_version(
+def test_rejects_null_schema_version(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "null-version.jsonl"
@@ -438,7 +438,7 @@ def test_session_rejects_null_schema_version(
 
 
 @pytest.mark.parametrize("missing", ["id", "session_id", "created_at"])
-def test_session_rejects_records_with_generated_persistence_fields(
+def test_rejects_records_with_generated_persistence_fields(
     tmp_path: Path,
     missing: str,
 ) -> None:
@@ -459,7 +459,7 @@ def test_session_rejects_records_with_generated_persistence_fields(
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_rejects_entries_without_schema_version(tmp_path: Path) -> None:
+def test_rejects_entries_without_schema_version(tmp_path: Path) -> None:
     path = tmp_path / "unversioned.jsonl"
     entry = {
         "id": "entry",
@@ -476,7 +476,7 @@ def test_session_rejects_entries_without_schema_version(tmp_path: Path) -> None:
         JsonlSessionStore(tmp_path).summaries()
 
 
-def test_session_rejects_extra_entry_fields(tmp_path: Path) -> None:
+def test_rejects_extra_entry_fields(tmp_path: Path) -> None:
     path = tmp_path / "extra-field.jsonl"
     entry = {
         "schema_version": 6,
@@ -494,7 +494,7 @@ def test_session_rejects_extra_entry_fields(tmp_path: Path) -> None:
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_session_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
+def test_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
     path = tmp_path / "mixed-session-ids.jsonl"
     entries = (
         MessageSessionEntry(
@@ -521,7 +521,7 @@ def test_session_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
         session.read_entries()
 
 
-def test_session_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None:
+def test_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None:
     path = tmp_path / "duplicate-entry-ids.jsonl"
     entries = (
         MessageSessionEntry(
@@ -548,7 +548,7 @@ def test_session_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None
         session.read_entries()
 
 
-def test_session_wraps_non_integer_compaction_schema_versions(tmp_path: Path) -> None:
+def test_wraps_non_integer_compaction_schema_versions(tmp_path: Path) -> None:
     path = tmp_path / "malformed-compaction.jsonl"
     entry = {
         "schema_version": 6,
@@ -648,7 +648,7 @@ def test_compaction_record_is_strict_and_versioned() -> None:
         ),
     ],
 )
-def test_session_entry_requires_exactly_its_matching_payload(
+def test_entry_requires_exactly_its_matching_payload(
     kind: str,
     payloads: dict[str, object],
 ) -> None:

@@ -28,7 +28,7 @@ from wisp.sessions.entries import (
 from wisp.sessions.jsonl import JsonlSessionStore
 
 
-def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
+def test_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
     async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
         provider = ScriptedProvider(
             [
@@ -76,7 +76,7 @@ def test_coding_session_accepts_and_persists_steering_from_agent_start(tmp_path:
     )
 
 
-def test_coding_session_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
+def test_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
     agent = CodingSession(provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path))
 
     state = agent.queue_state()
@@ -93,7 +93,7 @@ def test_coding_session_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
         agent.clear_queue()
 
 
-def test_coding_session_state_snapshot_uses_effective_configuration_without_io(
+def test_state_snapshot_uses_effective_config_without_io(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -174,7 +174,7 @@ def test_cancelled_session_stats_releases_operation_lock(
     anyio.run(scenario)
 
 
-def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path) -> None:
+def test_queue_facade_delegates_to_active_harness(tmp_path: Path) -> None:
     async def run_agent() -> None:
         provider = ScriptedProvider(
             [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
@@ -220,7 +220,7 @@ def test_coding_session_queue_facade_delegates_to_active_harness(tmp_path: Path)
     anyio.run(run_agent)
 
 
-def test_coding_session_queue_facade_rejects_invalid_kind_and_mode(
+def test_queue_facade_rejects_invalid_kind_and_mode(
     tmp_path: Path,
 ) -> None:
     async def run_agent() -> None:
@@ -252,7 +252,7 @@ def test_coding_session_queue_facade_rejects_invalid_kind_and_mode(
     anyio.run(run_agent)
 
 
-def test_coding_session_retains_unconsumed_queues_for_same_session_retry(
+def test_retains_unconsumed_queues_for_same_session_retry(
     tmp_path: Path,
 ) -> None:
     async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...]]:

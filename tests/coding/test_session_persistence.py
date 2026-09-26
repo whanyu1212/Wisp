@@ -66,7 +66,7 @@ from wisp.tools.result import ToolResult
 
 
 @pytest.mark.parametrize("phase", ["startup", "cleanup"])
-def test_coding_session_harness_failure_releases_state_and_retains_follow_up(
+def test_harness_failure_releases_state_and_retains_follow_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str
 ) -> None:
     def fail_preparation(
@@ -153,7 +153,7 @@ def test_coding_session_harness_failure_releases_state_and_retains_follow_up(
     anyio.run(run)
 
 
-def test_coding_session_persists_completion_before_exposing_it(
+def test_persists_completion_before_exposing_it(
     tmp_path: Path,
 ) -> None:
     tool_call = ToolCall(
@@ -233,7 +233,7 @@ def test_coding_session_persists_completion_before_exposing_it(
     assert repair_entry.tool_result == ToolResultPresentationSnapshot(status="cancelled")
 
 
-def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
+def test_does_not_persist_partial_assistant_on_generator_close(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -261,7 +261,7 @@ def test_coding_session_does_not_persist_partial_assistant_on_generator_close(
     assert not any(message.role == "assistant" for message in session.read_messages())
 
 
-def test_coding_session_persists_tool_output_before_exposing_execution_end(
+def test_persists_tool_output_before_exposing_execution_end(
     tmp_path: Path,
 ) -> None:
     provider = ToolLoopProvider(
@@ -317,7 +317,7 @@ def test_coding_session_persists_tool_output_before_exposing_execution_end(
     assert tool_messages[0].content != INTERRUPTED_TOOL_RESULT_TEXT
 
 
-def test_coding_session_persists_truncated_tool_errors_without_running_tools(
+def test_persists_truncated_tool_errors_without_running_tools(
     tmp_path: Path,
 ) -> None:
     calls = (
@@ -402,7 +402,7 @@ def test_coding_session_persists_truncated_tool_errors_without_running_tools(
     )
 
 
-def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) -> None:
+def test_preserves_provider_text_content_index(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -423,7 +423,7 @@ def test_coding_session_preserves_provider_text_content_index(tmp_path: Path) ->
     assert delta.content_index == 1
 
 
-def test_coding_session_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
+def test_maps_pre_start_provider_retry_progress(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -518,7 +518,7 @@ def test_coding_session_maps_pre_start_provider_retry_progress(tmp_path: Path) -
         ),
     ],
 )
-def test_coding_session_rejects_malformed_provider_lifecycle(
+def test_rejects_malformed_provider_lifecycle(
     tmp_path: Path,
     provider_events: list[ProviderEvent],
     error_message: str,
@@ -547,7 +547,7 @@ def test_coding_session_rejects_malformed_provider_lifecycle(
     assert events[-1].outcome == "failed"
 
 
-def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> None:
+def test_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -586,7 +586,7 @@ def test_coding_session_maps_provider_failed_terminal_to_failed_lifecycle(tmp_pa
     assert assistant_messages[0].finish_reason == "error"
 
 
-def test_coding_session_does_not_persist_empty_failed_completion(tmp_path: Path) -> None:
+def test_does_not_persist_empty_failed_completion(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -610,7 +610,7 @@ def test_coding_session_does_not_persist_empty_failed_completion(tmp_path: Path)
     assert [(message.role, message.content) for message in replayed] == [("user", "hello")]
 
 
-def test_coding_session_retries_uncertain_completion_write_without_duplicate(
+def test_retries_uncertain_completion_write_without_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -673,7 +673,7 @@ def test_coding_session_retries_uncertain_completion_write_without_duplicate(
     ]
 
 
-def test_coding_session_flushes_prior_completion_before_next_provider_request(
+def test_flushes_prior_completion_before_next_provider_request(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -735,7 +735,7 @@ def test_coding_session_flushes_prior_completion_before_next_provider_request(
     assert assistant_messages == ["first answer", "second answer"]
 
 
-def test_coding_session_repairs_loaded_tool_call_before_provider_request(
+def test_repairs_loaded_tool_call_before_provider_request(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -825,7 +825,7 @@ def test_coding_session_repairs_loaded_tool_call_before_provider_request(
     )
 
 
-def test_coding_session_retries_uncertain_repair_write_without_duplicate(
+def test_retries_uncertain_repair_write_without_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -903,7 +903,7 @@ def test_coding_session_retries_uncertain_repair_write_without_duplicate(
     assert json.loads(repaired_history.content)["calls"][0]["result"]["is_error"] is True
 
 
-def test_coding_session_retries_uncertain_finalizer_repair_without_duplicate(
+def test_retries_uncertain_finalizer_repair_without_duplicate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

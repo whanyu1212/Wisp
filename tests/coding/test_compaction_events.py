@@ -43,7 +43,7 @@ def test_compaction_events_round_trip_without_summary() -> None:
         )
 
 
-def test_event_parser_rejects_legacy_per_event_schema_version() -> None:
+def test_parser_rejects_old_per_event_schema_version() -> None:
     """Live parsing fails closed on the pre-v9 ``schema_version`` key."""
 
     payload = {

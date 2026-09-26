@@ -47,7 +47,7 @@ from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.context import ToolContext
 
 
-def test_coding_session_builds_trusted_prompt_off_event_loop(
+def test_builds_trusted_prompt_off_event_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -93,7 +93,7 @@ def test_coding_session_builds_trusted_prompt_off_event_loop(
     assert all(thread_id != event_loop_thread for thread_id in worker_threads)
 
 
-def test_coding_session_prompt_construction_is_abandoned_on_cancel(
+def test_prompt_construction_is_abandoned_on_cancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -152,7 +152,7 @@ class BlockingCapturingProvider(CapturingProvider):
         yield ProviderResponseCompleted(content="stale answer")
 
 
-def test_concurrent_coding_session_rejects_stale_provider_result(tmp_path: Path) -> None:
+def test_concurrent_session_rejects_stale_provider_result(tmp_path: Path) -> None:
     async def scenario() -> None:
         store = JsonlSessionStore(tmp_path)
         session = store.create()
@@ -215,7 +215,7 @@ def test_concurrent_coding_session_rejects_stale_provider_result(tmp_path: Path)
     anyio.run(scenario)
 
 
-def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
+def test_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     emitted_event_types: list[str] = []
 
     async def run_agent() -> list[object]:
@@ -269,7 +269,7 @@ def test_coding_session_streams_fake_response_and_saves_session(tmp_path: Path) 
     ]
 
 
-def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path) -> None:
+def test_persists_follow_up_at_injection_boundary(tmp_path: Path) -> None:
     async def run_agent() -> tuple[list[WispEvent], tuple[Message, ...], CodingSession]:
         provider = ScriptedProvider(
             [
@@ -350,7 +350,7 @@ def test_coding_session_persists_follow_up_at_injection_boundary(tmp_path: Path)
     assert messages[-2].created_at == injected.timestamp
 
 
-def test_coding_session_failure_after_completed_turn_does_not_complete_it_again(
+def test_failure_after_completed_turn_does_not_complete_it_twice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -56,7 +56,7 @@ def _message_page_text_bytes(page: SessionMessagePage) -> int:
     return total
 
 
-def test_session_message_page_reads_active_path_messages_and_pages(
+def test_reads_active_path_messages_and_pages(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -102,7 +102,7 @@ def test_session_message_page_reads_active_path_messages_and_pages(
     assert older.next_before_entry_id is None
 
 
-def test_session_message_page_reads_forward_after_cursor(tmp_path: Path) -> None:
+def test_reads_forward_after_cursor(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> list[str]:
@@ -135,7 +135,7 @@ def test_session_message_page_reads_forward_after_cursor(tmp_path: Path) -> None
         )
 
 
-def test_session_message_pages_reuse_validated_entry_index(
+def test_pages_reuse_validated_entry_index(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -166,7 +166,7 @@ def test_session_message_pages_reuse_validated_entry_index(
     assert read_count == 1
 
 
-def test_session_message_pages_reuse_active_path_index(
+def test_pages_reuse_active_path_index(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -201,7 +201,7 @@ def test_session_message_pages_reuse_active_path_index(
     assert resolve_count == 2
 
 
-def test_session_message_page_cache_reloads_after_external_append(
+def test_cache_reloads_after_external_append(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -241,7 +241,7 @@ def test_session_message_page_cache_reloads_after_external_append(
     assert read_count == 2
 
 
-def test_session_message_page_rejects_invalid_limits_and_unknown_cursor(
+def test_rejects_invalid_limits_and_unknown_cursor(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -259,7 +259,7 @@ def test_session_message_page_rejects_invalid_limits_and_unknown_cursor(
         session.read_message_page(before_entry_id="missing")
 
 
-def test_session_message_page_clips_large_content_and_tool_arguments(
+def test_clips_large_content_and_tool_arguments(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -302,7 +302,7 @@ def test_session_message_page_clips_large_content_and_tool_arguments(
     assert len(str(tool_call.arguments["truncated_json_preview"]).encode("utf-8")) <= 64 * 1024
 
 
-def test_session_message_page_complete_structure_preserves_every_tool_call(
+def test_complete_structure_preserves_every_tool_call(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -337,7 +337,7 @@ def test_session_message_page_complete_structure_preserves_every_tool_call(
     )
 
 
-def test_session_message_page_complete_structure_preserves_process_arguments(
+def test_complete_structure_preserves_process_arguments(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -385,7 +385,7 @@ def test_session_message_page_complete_structure_preserves_process_arguments(
     assert _message_page_text_bytes(page) > pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
-def test_session_message_page_exact_full_content_bypasses_preview_limits(
+def test_exact_full_content_bypasses_preview_limits(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -439,7 +439,7 @@ def test_session_message_page_exact_full_content_bypasses_preview_limits(
 
 
 @pytest.mark.parametrize("complete_structure", [False, True])
-def test_session_message_page_applies_aggregate_budget_only_to_previews(
+def test_applies_aggregate_budget_only_to_previews(
     tmp_path: Path,
     complete_structure: bool,
 ) -> None:
@@ -471,7 +471,7 @@ def test_session_message_page_applies_aggregate_budget_only_to_previews(
         assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
-def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
+def test_budgets_serialized_truncated_argument_wrapper(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -510,7 +510,7 @@ def test_session_message_page_budgets_serialized_truncated_argument_wrapper(
     assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
-def test_session_message_page_projects_tool_result_presentation_metadata(
+def test_projects_tool_result_presentation_metadata(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -554,7 +554,7 @@ def test_session_message_page_projects_tool_result_presentation_metadata(
     )
 
 
-def test_session_message_entry_rejects_tool_result_metadata_on_non_tool_message() -> None:
+def test_rejects_tool_result_metadata_on_non_tool_message() -> None:
     with pytest.raises(ValidationError, match="valid only on tool messages"):
         MessageSessionEntry(
             session_id="session-1",
@@ -563,7 +563,7 @@ def test_session_message_entry_rejects_tool_result_metadata_on_non_tool_message(
         )
 
 
-def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path) -> None:
+def test_drops_partial_before_text_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     oversized_before_text = "x" * (pagination.MESSAGE_CONTENT_BYTE_LIMIT + 1)
 
@@ -604,7 +604,7 @@ def test_session_message_page_drops_partial_before_text_metadata(tmp_path: Path)
     assert exact.messages[0].tool_result.truncated is False
 
 
-def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
+def test_bounds_tool_result_summary_metadata(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     oversized_summary = "🙂" * (pagination.MESSAGE_CONTENT_BYTE_LIMIT + 1)
 
@@ -637,7 +637,7 @@ def test_session_message_page_bounds_tool_result_summary_metadata(tmp_path: Path
     assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
 
 
-def test_session_message_page_enforces_aggregate_text_budget(tmp_path: Path) -> None:
+def test_enforces_aggregate_text_budget(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     content = "🙂" * 20_000
     tool_argument = "x" * 70_000

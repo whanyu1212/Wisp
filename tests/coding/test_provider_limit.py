@@ -58,7 +58,7 @@ from wisp.tools.result import ToolResult
         pytest.param(1_500, 300, False, id="prompt-inclusive-history"),
     ],
 )
-def test_coding_session_compacts_before_provider_limit_request(
+def test_compacts_before_provider_limit_request(
     tmp_path: Path,
     history_chars: int,
     prompt_chars: int,
@@ -160,7 +160,7 @@ def test_coding_session_compacts_before_provider_limit_request(
     assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
-def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) -> None:
+def test_preflight_compacts_one_completed_turn(tmp_path: Path) -> None:
     context_window = 4_000
     compaction_limit = 1_600
     first_user = Message(role="user", content="question one " + "a" * 3_500)
@@ -220,7 +220,7 @@ def test_coding_session_preflight_compacts_one_completed_turn(tmp_path: Path) ->
     assert provider.calls[1].messages[-1].content == "question two"
 
 
-def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
+def test_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
     summary_started = anyio.Event()
     release_summary = anyio.Event()
     provider = GatedPreflightSummaryProvider(summary_started, release_summary)
@@ -289,7 +289,7 @@ def test_coding_session_rechecks_limit_after_preflight_steering(tmp_path: Path) 
     assert provider.calls[0][0].content.startswith("Create a concise")
 
 
-def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
+def test_rejects_oversized_fresh_prompt_before_provider(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider([], default_model="model")
@@ -315,7 +315,7 @@ def test_coding_session_rejects_oversized_fresh_prompt_before_provider(
     assert store.latest().read_context_messages() == ()
 
 
-def test_coding_session_rejects_provider_reserve_that_consumes_window(
+def test_rejects_provider_reserve_that_consumes_window(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider([], default_model="model")
@@ -341,7 +341,7 @@ def test_coding_session_rejects_provider_reserve_that_consumes_window(
     assert store.latest().read_context_messages() == ()
 
 
-def test_coding_session_stops_when_prompt_remains_over_provider_limit(
+def test_stops_when_prompt_remains_over_provider_limit(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -389,7 +389,7 @@ def test_coding_session_stops_when_prompt_remains_over_provider_limit(
     assert session.read_context_messages() == history
 
 
-def test_coding_session_recovers_a_session_resumed_after_a_crashed_oversized_tool_turn(
+def test_recovers_resumed_session_with_crashed_oversized_turn(
     tmp_path: Path,
 ) -> None:
     """A crash mid-turn persists the full, untruncated tool result to disk before
@@ -459,7 +459,7 @@ def test_coding_session_recovers_a_session_resumed_after_a_crashed_oversized_too
     )
 
 
-def test_matches_provider_suffix_ignores_persistence_only_metadata() -> None:
+def test_suffix_match_ignores_persistence_only_metadata() -> None:
     call = ToolCallSnapshot(call_id="call-1", name="read", arguments={"path": "a.py"})
     persisted = (
         Message(role="user", content="hello"),
@@ -483,7 +483,7 @@ def test_matches_provider_suffix_ignores_persistence_only_metadata() -> None:
     )
 
 
-def test_provider_auto_compaction_limit_helpers_distinguish_unfixable_reserve() -> None:
+def test_limit_helpers_detect_unfixable_reserve() -> None:
     estimate = estimate_context((Message(role="user", content="x" * 4_000),))
     tokens = estimate.total_tokens
     over = build_context_budget(estimate, context_window=tokens + 100, reserve_tokens=200)
@@ -503,7 +503,7 @@ def test_provider_auto_compaction_limit_helpers_distinguish_unfixable_reserve() 
     assert provider_auto_compaction_excess_tokens(unknown) is None
 
 
-def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
+def test_rechecks_provider_limit_after_tool_round(tmp_path: Path) -> None:
     class LargeReadTool:
         name = "large_read"
         safety = "read"
@@ -589,7 +589,7 @@ def test_coding_session_rechecks_provider_limit_after_tool_round(tmp_path: Path)
     assert not any(isinstance(event, ErrorEvent) for event in events)
 
 
-def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disabled(
+def test_tool_round_not_segmented_when_auto_compaction_is_off(
     tmp_path: Path,
 ) -> None:
     class ReadTool:
@@ -642,7 +642,7 @@ def test_coding_session_does_not_segment_tool_round_when_auto_compaction_disable
 
 
 @pytest.mark.parametrize("operation_id", [None, "prompt-1"])
-def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
+def test_stops_when_truncation_cannot_shrink_active_turn(
     tmp_path: Path,
     operation_id: str | None,
 ) -> None:
@@ -651,11 +651,11 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     progress and the terminal ``ContextOverflowError`` is the only remaining option.
 
     This exercises the same shape as
-    ``test_coding_session_recovers_when_active_tool_turn_remains_over_provider_limit``
+    ``test_recovers_when_active_tool_turn_stays_over_limit``
     but with a reserve so tight that no single tool result carries enough
     reclaimable content — a config genuinely irreducible by truncation, distinct
     from the ``reserve_tokens >= context_window`` case covered by
-    ``test_coding_session_rejects_provider_reserve_that_consumes_window``.
+    ``test_rejects_provider_reserve_that_consumes_window``.
     """
 
     class TinyReadTool:
@@ -742,7 +742,7 @@ def test_coding_session_stops_when_truncation_cannot_shrink_active_turn_further(
     assert not any(isinstance(event, ErrorEvent) for event in retry_events)
 
 
-def test_threshold_compaction_rebases_tool_state_with_injected_steering(
+def test_threshold_compaction_rebases_tools_with_steering(
     tmp_path: Path,
 ) -> None:
     """Opaque replay providers retain tool state and append steering once."""
@@ -839,7 +839,7 @@ def test_threshold_compaction_rebases_tool_state_with_injected_steering(
     assert [message.content for message in provider.calls[2].extra_messages] == ["change direction"]
 
 
-def test_coding_session_recovers_when_active_tool_turn_remains_over_provider_limit(
+def test_recovers_when_active_tool_turn_stays_over_limit(
     tmp_path: Path,
 ) -> None:
     """Once history is fully compacted, an active-turn tool result that still exceeds

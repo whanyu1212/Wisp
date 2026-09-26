@@ -32,7 +32,7 @@ from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplayError
 
 
-def test_clone_copies_only_active_path_and_preserves_entry_identity(tmp_path: Path) -> None:
+def test_clone_copies_only_active_path_with_entry_ids(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     source = store.create()
 
@@ -156,7 +156,7 @@ def test_clone_to_leaf_copies_an_inactive_user_or_assistant_path(tmp_path: Path)
     assert [message.content for message in assistant_clone.read_messages()] == ["one", "two"]
 
 
-def test_fork_excludes_selected_user_message_and_returns_its_text(tmp_path: Path) -> None:
+def test_fork_drops_selected_user_message_and_returns_it(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     source = store.create()
 
@@ -181,7 +181,7 @@ def test_fork_excludes_selected_user_message_and_returns_its_text(tmp_path: Path
     assert forked.read_active_leaf_id() == source_leaf_id
 
 
-def test_clone_and_fork_succeed_with_a_prompt_cache_boundary_in_the_same_process(
+def test_clone_and_fork_work_with_cache_boundary_in_process(
     tmp_path: Path,
 ) -> None:
     # A run's first system message carries the transient `prompt_cache_boundary`
@@ -221,7 +221,7 @@ def test_clone_and_fork_succeed_with_a_prompt_cache_boundary_in_the_same_process
     assert not any(m.prompt_cache_boundary for m in source.read_messages())
 
 
-def test_forking_first_user_message_defers_empty_file_until_resubmission(
+def test_forking_first_message_waits_to_create_file(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -317,7 +317,7 @@ def test_clone_preserves_compaction_replay_and_metadata(tmp_path: Path) -> None:
     assert copied_compaction.compaction.model == "model"
 
 
-def test_clone_rejects_invalid_selected_compaction_before_creating_target(
+def test_clone_rejects_invalid_compaction_before_writing(
     tmp_path: Path,
 ) -> None:
     source = JsonlSessionStore(tmp_path).create()
@@ -421,7 +421,7 @@ def test_clone_publishes_only_a_complete_validated_file(
     assert not tuple(tmp_path.glob(".*.tmp"))
 
 
-def test_clone_blocks_destination_append_until_cache_initialization(
+def test_clone_blocks_appends_until_cache_is_ready(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -507,7 +507,7 @@ def test_clone_never_overwrites_an_existing_destination(
     assert not tuple(tmp_path.glob(".*.tmp"))
 
 
-def test_clone_snapshot_remains_coherent_when_source_appends_after_snapshot(
+def test_clone_snapshot_ignores_later_source_appends(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:

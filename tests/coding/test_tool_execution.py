@@ -246,7 +246,7 @@ def test_closing_preparation_cancels_pending_approval() -> None:
     assert tool.calls == 0
 
 
-def test_executor_prepares_parallel_safe_tool_without_starting_it() -> None:
+def test_executor_prepares_parallel_tool_without_starting_it() -> None:
     tool = _ResultTool(name="parallel", result=ToolResult(text="done"))
     registry = ToolRegistry()
     registry.register(tool, execution=ToolExecutionMetadata(parallel_safe=True))  # type: ignore[arg-type]
@@ -294,7 +294,7 @@ def test_promote_truncated_coerces_non_bool_to_false() -> None:
     assert _promote_truncated([1]) is False
 
 
-def test_executor_degrades_non_bool_truncated_instead_of_crashing() -> None:
+def test_executor_tolerates_non_bool_truncated_flag() -> None:
     # A malformed extension tool handing back a non-bool truncated must not raise a
     # Pydantic ValidationError when ToolExecutionEnded is built (outside _run_tool's
     # try/except) — that would abort the tool stream. It degrades to truncated=False,
@@ -305,7 +305,7 @@ def test_executor_degrades_non_bool_truncated_instead_of_crashing() -> None:
         assert ended.is_error is False
 
 
-def test_executor_keeps_explicit_tool_errors_model_visible_and_bounded() -> None:
+def test_executor_shows_tool_errors_to_model_within_bounds() -> None:
     detail = "x" * 2_100
 
     ended = _run_executor(_RaisingTool(ToolError(detail)))
@@ -374,7 +374,7 @@ def test_executor_degrades_inconsistent_tool_error_metadata() -> None:
     assert ended.output == "Tool execution failed"
 
 
-def test_executor_hides_unexpected_tool_exception_detail_from_model() -> None:
+def test_executor_hides_unexpected_exception_detail() -> None:
     ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
 
     assert ended.is_error is True
@@ -405,7 +405,7 @@ def test_executor_treats_unencodable_result_text_as_malformed() -> None:
         ("read", {"line_count": 1, "path": "\ud800"}),
     ],
 )
-def test_executor_treats_unencodable_result_metadata_as_malformed(
+def test_executor_treats_unencodable_metadata_as_malformed(
     name: str, data: Mapping[str, object]
 ) -> None:
     ended = _run_executor(_ResultTool(name=name, result=ToolResult(text="result", data=data)))
@@ -455,7 +455,7 @@ def test_executor_preserves_exact_ls_entry_count_for_summary() -> None:
     assert ended.summary == "ls: 100 entries in big/ (+ more)"
 
 
-def test_executor_rejects_hostile_metadata_subclasses_inside_extension_boundary() -> None:
+def test_executor_rejects_hostile_metadata_subclasses() -> None:
     ended = _run_executor(
         _ResultTool(
             name="ls",
@@ -573,7 +573,7 @@ def test_executor_bounds_bash_process_output_metadata() -> None:
     assert ended.stderr_dropped_bytes == 11
 
 
-def test_executor_promotes_one_shot_bash_stream_truncation_metadata() -> None:
+def test_executor_promotes_one_shot_bash_truncation() -> None:
     ended = _run_executor(
         _ResultTool(
             name="bash",
@@ -627,7 +627,7 @@ def test_executor_ignores_malformed_bash_process_metadata() -> None:
     assert ended.stderr_dropped_bytes == 0
 
 
-def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> None:
+def test_executor_keeps_bash_exit_line_beyond_tiny_budget() -> None:
     ended = _run_executor(
         _ResultTool(
             name="bash",
@@ -652,7 +652,7 @@ def test_executor_preserves_bash_exit_envelope_outside_tiny_body_budget() -> Non
     assert ended.output_has_exit_status is True
 
 
-def test_executor_preserves_bash_managed_header_outside_tiny_body_budget() -> None:
+def test_executor_keeps_managed_header_beyond_tiny_budget() -> None:
     ended = _run_executor(
         _ResultTool(
             name="bash",
@@ -711,7 +711,7 @@ def test_executor_preserves_bash_managed_output_after_labels() -> None:
     assert ended.truncated is False
 
 
-def test_executor_preserves_bash_managed_failure_detail_outside_tiny_body_budget() -> None:
+def test_executor_keeps_managed_failure_beyond_tiny_budget() -> None:
     process_error = "Failed to terminate process tree"
     ended = _run_executor(
         _ResultTool(

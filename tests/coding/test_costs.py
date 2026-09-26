@@ -108,7 +108,7 @@ def test_estimator_prices_openai_cache_once_and_resolves_alias() -> None:
     assert estimate.estimated_usd == Decimal("0.00555")
 
 
-def test_estimator_rejects_openai_cache_buckets_larger_than_input() -> None:
+def test_estimator_rejects_openai_cache_above_input() -> None:
     estimate = CostEstimator(_models())(
         "openai",
         "model",
@@ -126,7 +126,7 @@ def test_estimator_rejects_openai_cache_buckets_larger_than_input() -> None:
     assert estimate.unavailable_reason == "usage_incomplete"
 
 
-def test_estimator_normalizes_codex_cache_buckets_before_pricing_lookup() -> None:
+def test_estimator_normalizes_codex_cache_before_pricing() -> None:
     estimate = CostEstimator(_models())(
         "openai-codex",
         "model",
@@ -147,7 +147,7 @@ def test_estimator_normalizes_codex_cache_buckets_before_pricing_lookup() -> Non
     assert estimate.unavailable_reason == "pricing_unavailable"
 
 
-def test_estimator_normalizes_deepseek_cache_hits_before_pricing_lookup() -> None:
+def test_estimator_normalizes_deepseek_cache_before_pricing() -> None:
     estimate = CostEstimator(ModelRegistry(builtin_catalog()))(
         "deepseek",
         "deepseek-v4-pro",
@@ -189,7 +189,7 @@ def test_estimator_prices_xai_like_openai_responses_usage() -> None:
     assert estimate.estimated_usd == Decimal("0.0044")
 
 
-def test_estimator_rejects_xai_cache_buckets_larger_than_input() -> None:
+def test_estimator_rejects_xai_cache_above_input() -> None:
     estimate = CostEstimator(ModelRegistry(builtin_catalog()))(
         "xai",
         "grok-4.6",
@@ -207,7 +207,7 @@ def test_estimator_rejects_xai_cache_buckets_larger_than_input() -> None:
     assert estimate.unavailable_reason == "usage_incomplete"
 
 
-def test_estimator_uses_long_context_band_and_never_prices_unknown_models() -> None:
+def test_estimator_uses_long_context_band_skips_unknown_models() -> None:
     estimator = CostEstimator(_models())
     long_context = estimator(
         "openai",
@@ -351,7 +351,7 @@ def test_builtin_gemini_prices_change_after_introductory_period(
         ("claude-sonnet-5", ("2", "0.2", "2.5", "10")),
     ],
 )
-def test_builtin_anthropic_current_prices_include_discounted_cache_reads(
+def test_builtin_anthropic_prices_discount_cache_reads(
     model: str, rates: tuple[str, str, str, str]
 ) -> None:
     selected = ModelRegistry(builtin_catalog()).pricing(
@@ -368,7 +368,7 @@ def test_builtin_anthropic_current_prices_include_discounted_cache_reads(
     ) == tuple(Decimal(rate) for rate in rates)
 
 
-def test_catalog_rejects_overlapping_bands_and_cost_display_preserves_tiny_amounts() -> None:
+def test_catalog_rejects_overlapping_bands_and_shows_tiny_costs() -> None:
     with pytest.raises(ValidationError, match="overlapping price bands"):
         ModelCatalogProviderEntry(
             name="provider",
@@ -398,7 +398,7 @@ def test_catalog_rejects_overlapping_bands_and_cost_display_preserves_tiny_amoun
     assert format_usd(Decimal("0.00005")) == "<$0.0001"
 
 
-def test_session_cost_summary_marks_legacy_usage_as_partial_without_repricing() -> None:
+def test_cost_summary_marks_old_usage_partial_without_repricing() -> None:
     priced = CostEstimator(_models())(
         "openai",
         "model",
@@ -414,7 +414,7 @@ def test_session_cost_summary_marks_legacy_usage_as_partial_without_repricing() 
     assert format_cost_summary(summary) == "cost ≥$0.0010"
 
 
-def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compactions() -> None:
+def test_stats_use_saved_costs_for_messages_and_compactions() -> None:
     cost = CostEstimator(_models())(
         "openai",
         "model",
@@ -484,7 +484,7 @@ def test_session_stats_uses_persisted_cost_snapshots_for_messages_and_compaction
     assert reloaded.compaction.cost == cost
 
 
-def test_session_stats_marks_legacy_successful_messages_unpriced() -> None:
+def test_stats_mark_old_successful_messages_unpriced() -> None:
     entries = (
         MessageSessionEntry(
             id="user",

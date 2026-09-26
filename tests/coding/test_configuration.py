@@ -31,7 +31,7 @@ def _models() -> ModelRegistry:
     return ModelRegistry(effective_catalog(home_dir=Path("/nonexistent-test-home")))
 
 
-def test_resolver_filters_known_effort_but_preserves_unknown_model_effort(tmp_path: Path) -> None:
+def test_resolver_filters_known_effort_but_keeps_unknown(tmp_path: Path) -> None:
     providers = ProviderRegistry()
     providers.register(_OpenAIProvider())
     config = WispConfig(
@@ -92,7 +92,7 @@ def test_resolver_uses_explicit_tool_working_directory(tmp_path: Path) -> None:
     assert configuration.tool_context.cwd == workspace
 
 
-def test_reconfigure_updates_dynamic_settings_and_preserves_live_resources(tmp_path: Path) -> None:
+def test_reconfigure_updates_settings_and_keeps_live_resources(tmp_path: Path) -> None:
     initial_provider = FakeProvider()
     replacement_provider = _OpenAIProvider()
     events = EventBus()
@@ -166,7 +166,7 @@ def test_from_configuration_preserves_resolved_tool_context(tmp_path: Path) -> N
     assert agent.tool_context is tool_context
 
 
-def test_reconfigure_rejects_changes_while_an_operation_is_active(tmp_path: Path) -> None:
+def test_reconfigure_rejects_changes_during_an_operation(tmp_path: Path) -> None:
     provider = FakeProvider()
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
     replacement = CodingSessionConfiguration(
@@ -219,9 +219,7 @@ def test_effort_reconfigure_preserves_valid_context_observation(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("invalid_limit", [-1, True])
-def test_coding_session_rejects_invalid_tool_iteration_limit(
-    tmp_path: Path, invalid_limit: object
-) -> None:
+def test_rejects_invalid_tool_iteration_limit(tmp_path: Path, invalid_limit: object) -> None:
     with pytest.raises(ValueError, match="max_tool_iterations"):
         CodingSession(
             provider=FakeProvider(),
@@ -230,7 +228,7 @@ def test_coding_session_rejects_invalid_tool_iteration_limit(
         )
 
 
-def test_coding_session_accepts_zero_tool_iteration_limit(tmp_path: Path) -> None:
+def test_accepts_zero_tool_iteration_limit(tmp_path: Path) -> None:
     agent = CodingSession(
         provider=FakeProvider(),
         sessions=JsonlSessionStore(tmp_path),
@@ -240,7 +238,7 @@ def test_coding_session_accepts_zero_tool_iteration_limit(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("invalid_reserve", [-1, True])
-def test_reconfigure_rejects_invalid_reserve_without_partial_mutation(
+def test_reconfigure_rejects_invalid_reserve_without_changes(
     tmp_path: Path, invalid_reserve: object
 ) -> None:
     initial_provider = FakeProvider()

@@ -75,7 +75,7 @@ class BlockingSummaryProvider:
         await anyio.sleep_forever()
 
 
-def test_coding_session_rejects_stale_compaction_without_writing_failure_event(
+def test_rejects_stale_compaction_without_writing_failure_event(
     tmp_path: Path,
 ) -> None:
     async def run() -> tuple[JsonlSession, BaseException | None]:
@@ -112,7 +112,7 @@ def test_coding_session_rejects_stale_compaction_without_writing_failure_event(
     assert session.read_context_messages()[-1].content == "competing prompt"
 
 
-def test_manual_compaction_snapshots_cursor_after_pending_entry_flush(
+def test_manual_snapshots_cursor_after_flushing_pending_entries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,7 +169,7 @@ def test_manual_compaction_snapshots_cursor_after_pending_entry_flush(
     assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
 
 
-def test_coding_session_reconciles_append_that_commits_then_raises(
+def test_reconciles_append_that_commits_then_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -218,7 +218,7 @@ def test_coding_session_reconciles_append_that_commits_then_raises(
     assert sum(entry.kind == "compaction" for entry in session.read_entries()) == 1
 
 
-def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(
+def test_compaction_is_durable_and_next_run_uses_active_context(
     tmp_path: Path,
 ) -> None:
     usage = ProviderUsage(input_tokens=20, output_tokens=5, total_tokens=25)
@@ -302,7 +302,7 @@ def test_coding_session_compaction_is_durable_and_next_run_uses_active_context(
     assert compaction_entry.compaction.usage == completed.usage
 
 
-def test_coding_session_repairs_interrupted_tools_before_compaction(tmp_path: Path) -> None:
+def test_repairs_interrupted_tools_before_compaction(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -350,7 +350,7 @@ def test_coding_session_repairs_interrupted_tools_before_compaction(tmp_path: Pa
     ]
 
 
-def test_coding_session_summary_failure_emits_failure_and_appends_no_compaction(
+def test_summary_failure_emits_failure_and_appends_no_compaction(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(
@@ -385,7 +385,7 @@ def test_coding_session_summary_failure_emits_failure_and_appends_no_compaction(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_summary_tool_call_failure_persists_accounting(tmp_path: Path) -> None:
+def test_summary_tool_call_failure_persists_accounting(tmp_path: Path) -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
         [
@@ -434,7 +434,7 @@ def test_coding_session_summary_tool_call_failure_persists_accounting(tmp_path: 
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_summary_commit_failure_persists_accounting(
+def test_summary_commit_failure_persists_accounting(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -486,7 +486,7 @@ def test_coding_session_summary_commit_failure_persists_accounting(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_summary_cancellation_appends_no_compaction(tmp_path: Path) -> None:
+def test_summary_cancellation_appends_no_compaction(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -527,7 +527,7 @@ def test_coding_session_summary_cancellation_appends_no_compaction(tmp_path: Pat
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_cancellation_after_started_emits_cancelled_terminal(
+def test_cancellation_after_started_emits_cancelled_terminal(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -572,7 +572,7 @@ def test_coding_session_cancellation_after_started_emits_cancelled_terminal(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_cancellation_after_append_starts_finishes_commit(
+def test_cancellation_after_append_starts_finishes_commit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -637,7 +637,7 @@ def test_coding_session_cancellation_after_append_starts_finishes_commit(
     assert any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_post_commit_event_failure_reports_warning_not_failed_compaction(
+def test_event_failure_after_commit_is_a_warning_not_a_failure(
     tmp_path: Path,
 ) -> None:
     provider = ScriptedProvider(

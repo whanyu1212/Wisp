@@ -63,7 +63,7 @@ class MutatingRecoveryTool:
         return ToolResult(text="mutated")
 
 
-def test_coding_session_recovers_one_overflow_with_compaction_retry(
+def test_recovers_one_overflow_with_compaction_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,7 +168,7 @@ def test_coding_session_recovers_one_overflow_with_compaction_retry(
     assert all(entry.operation_id == "prompt-1" for entry in entries[-3:])
 
 
-def test_coding_session_does_not_retry_a_second_overflow(tmp_path: Path) -> None:
+def test_does_not_retry_a_second_overflow(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -228,7 +228,7 @@ def test_coding_session_does_not_retry_a_second_overflow(tmp_path: Path) -> None
     assert emitted[-1].outcome == "failed"
 
 
-def test_coding_session_overflow_without_compactable_prefix_is_terminal(tmp_path: Path) -> None:
+def test_overflow_without_compactable_prefix_is_terminal(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -264,7 +264,7 @@ def test_coding_session_overflow_without_compactable_prefix_is_terminal(tmp_path
     assert emitted[-1].type == "agent.completed"
 
 
-def test_coding_session_overflow_summary_failure_is_terminal(tmp_path: Path) -> None:
+def test_overflow_summary_failure_is_terminal(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -323,7 +323,7 @@ def test_coding_session_overflow_summary_failure_is_terminal(tmp_path: Path) -> 
     assert [event.type for event in emitted][-3:] == ["error", "turn.completed", "agent.completed"]
 
 
-def test_coding_session_overflow_retry_setup_failure_does_not_claim_retry(
+def test_retry_setup_failure_does_not_claim_retry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -381,7 +381,7 @@ def test_coding_session_overflow_retry_setup_failure_does_not_claim_retry(
     assert any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_overflow_recovery_allows_unknown_context_window(tmp_path: Path) -> None:
+def test_overflow_recovery_allows_unknown_context_window(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -426,7 +426,7 @@ def test_coding_session_overflow_recovery_allows_unknown_context_window(tmp_path
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_coding_session_skips_overflow_retry_when_ineligible(
+def test_skips_overflow_retry_when_ineligible(
     tmp_path: Path,
     enabled: bool,
 ) -> None:
@@ -462,7 +462,7 @@ def test_coding_session_skips_overflow_retry_when_ineligible(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_coding_session_overflow_retry_reuses_completed_tool_round(
+def test_retry_reuses_completed_tool_round(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "input.txt"
@@ -535,7 +535,7 @@ def test_coding_session_overflow_retry_reuses_completed_tool_round(
     ] == ["tool output"]
 
 
-def test_overflow_retry_preserves_the_prompt_tool_iteration_limit(tmp_path: Path) -> None:
+def test_retry_keeps_the_prompt_tool_iteration_limit(tmp_path: Path) -> None:
     source = tmp_path / "input.txt"
     source.write_text("tool output", encoding="utf-8")
     read_call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
@@ -602,7 +602,7 @@ def test_overflow_retry_preserves_the_prompt_tool_iteration_limit(tmp_path: Path
     assert mutating_tool.calls == 0
 
 
-def test_coding_session_retries_overflow_after_rejected_truncated_mutating_call(
+def test_retries_after_rejected_truncated_mutating_call(
     tmp_path: Path,
 ) -> None:
     call = ToolCall(call_id="call-1", name="mutate", arguments={})
@@ -671,7 +671,7 @@ def test_coding_session_retries_overflow_after_rejected_truncated_mutating_call(
     )
 
 
-def test_coding_session_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
+def test_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
     call = ToolCall(call_id="call-1", name="mutate", arguments={})
     provider = ScriptedProvider(
         [

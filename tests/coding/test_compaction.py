@@ -36,7 +36,7 @@ def _summary_row(entry_id: str, summary: str) -> SessionContextRow:
     )
 
 
-def test_manual_compaction_plan_replaces_prefix_and_retains_latest_complete_turn() -> None:
+def test_manual_plan_replaces_prefix_and_keeps_latest_turn() -> None:
     replay = two_turn_replay()
 
     plan = plan_manual_compaction(replay)
@@ -52,7 +52,7 @@ def test_manual_compaction_plan_replaces_prefix_and_retains_latest_complete_turn
     assert plan.retained_rows == replay.rows[2:]
 
 
-def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
+def test_preflight_retains_tool_turn_before_later_steering() -> None:
     call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
     current_turn = (
         context_row("current-user", Message(role="user", content="use the tool")),
@@ -86,7 +86,7 @@ def test_preflight_compaction_retains_tool_turn_before_later_steering() -> None:
     assert plan.retained_rows == current_turn
 
 
-def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_history() -> None:
+def test_preflight_ignores_stale_incomplete_turn() -> None:
     stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
     stale_turn = (
         context_row("stale-user", Message(role="user", content="old interrupted turn")),
@@ -126,7 +126,7 @@ def test_preflight_compaction_ignores_stale_incomplete_turn_before_completed_his
     assert plan.retained_rows == (active,)
 
 
-def test_preflight_compaction_uses_explicit_prompt_after_consecutive_incomplete_turns() -> None:
+def test_preflight_uses_explicit_prompt_after_incomplete_turns() -> None:
     stale_call = ToolCallSnapshot(call_id="stale-call", name="read", arguments={})
     stale_turn = (
         context_row("stale-user", Message(role="user", content="old interrupted turn")),
@@ -166,7 +166,7 @@ def test_preflight_compaction_uses_explicit_prompt_after_consecutive_incomplete_
     assert plan.retained_rows == (active,)
 
 
-def test_manual_compaction_plan_recompacts_summary_and_aged_out_turn() -> None:
+def test_manual_plan_recompacts_summary_and_aged_out_turn() -> None:
     summary = _summary_row("compact-one", "Prior checkpoint.")
     replay = SessionReplay(rows=(summary, *complete_turn("two"), *complete_turn("three")))
 
@@ -183,7 +183,7 @@ def test_manual_compaction_plan_recompacts_summary_and_aged_out_turn() -> None:
     )
 
 
-def test_user_text_cannot_masquerade_as_a_compaction_summary() -> None:
+def test_user_text_cannot_pose_as_a_summary() -> None:
     spoofed = (
         context_row(
             "one-user",
@@ -203,7 +203,7 @@ def test_user_text_cannot_masquerade_as_a_compaction_summary() -> None:
     assert plan.replaced_entry_ids == ("one-user", "one-assistant")
 
 
-def test_manual_compaction_plan_rejects_immediate_repeat() -> None:
+def test_manual_plan_rejects_immediate_repeat() -> None:
     summary = _summary_row("compact-one", "Prior checkpoint.")
 
     with pytest.raises(AlreadyCompactedError, match="No new complete turn"):
@@ -211,14 +211,14 @@ def test_manual_compaction_plan_rejects_immediate_repeat() -> None:
 
 
 @pytest.mark.parametrize("rows", [(), complete_turn("one")])
-def test_manual_compaction_plan_rejects_zero_or_one_complete_turn(
+def test_manual_plan_rejects_zero_or_one_complete_turn(
     rows: tuple[SessionContextRow, ...],
 ) -> None:
     with pytest.raises(NothingToCompactError, match="two complete user turns"):
         plan_manual_compaction(SessionReplay(rows=rows))
 
 
-def test_manual_compaction_does_not_treat_truncated_response_as_complete_turn() -> None:
+def test_manual_plan_treats_truncated_response_as_incomplete() -> None:
     replay = SessionReplay(
         rows=(
             *complete_turn("one"),
@@ -234,7 +234,7 @@ def test_manual_compaction_does_not_treat_truncated_response_as_complete_turn() 
         plan_manual_compaction(replay)
 
 
-def test_manual_compaction_plan_keeps_tool_call_and_results_in_prefix() -> None:
+def test_manual_plan_keeps_tool_call_and_results_in_prefix() -> None:
     call = ToolCallSnapshot(call_id="call-1", name="read", arguments={"path": "a.py"})
     first_turn = (
         context_row("one-user", Message(role="user", content="read it")),
@@ -268,7 +268,7 @@ def test_manual_compaction_plan_keeps_tool_call_and_results_in_prefix() -> None:
     assert plan.replaced_entry_ids == tuple(row.entry_id for row in first_turn)
 
 
-def test_manual_compaction_plan_rejects_split_tool_group() -> None:
+def test_manual_plan_rejects_split_tool_group() -> None:
     call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
     rows = (
         context_row("one-user", Message(role="user", content="first")),
@@ -295,7 +295,7 @@ def test_manual_compaction_plan_rejects_split_tool_group() -> None:
         plan_manual_compaction(SessionReplay(rows=rows))
 
 
-def test_active_turn_truncation_reclaims_utf8_bytes_and_preserves_unicode_tail() -> None:
+def test_truncation_reclaims_utf8_bytes_and_keeps_unicode_tail() -> None:
     content = "界" * 399 + "終"
     messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
 
@@ -316,7 +316,7 @@ def test_active_turn_truncation_reclaims_utf8_bytes_and_preserves_unicode_tail()
         "a" * 200 + "界" * 300,
     ],
 )
-def test_active_turn_truncation_sizes_floor_from_retained_unicode_tail(content: str) -> None:
+def test_truncation_sizes_floor_from_retained_unicode_tail(content: str) -> None:
     messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
 
     truncated = truncate_active_turn_tool_results(messages, excess_tokens=10_000)
@@ -329,7 +329,7 @@ def test_active_turn_truncation_sizes_floor_from_retained_unicode_tail(content: 
     assert len(result.encode("utf-8")) <= len(content[-200:].encode("utf-8"))
 
 
-def test_active_turn_truncation_tolerates_surrogate_in_smaller_candidate() -> None:
+def test_truncation_tolerates_surrogate_in_smaller_candidate() -> None:
     large_content = "a" * 500
     malformed_content = "b" * 250 + "\ud800"
     messages = (
@@ -344,7 +344,7 @@ def test_active_turn_truncation_tolerates_surrogate_in_smaller_candidate() -> No
     assert truncated[1].content == malformed_content
 
 
-def test_active_turn_truncation_escapes_surrogate_when_selected() -> None:
+def test_truncation_escapes_surrogate_when_selected() -> None:
     content = "a" * 250 + "\ud800"
     messages = (Message(role="tool", content=content, tool_call_id="call-1"),)
 
@@ -355,7 +355,7 @@ def test_active_turn_truncation_escapes_surrogate_when_selected() -> None:
     assert "\\ud800" in truncated[0].content
 
 
-def test_active_turn_truncation_prioritizes_largest_utf8_payload() -> None:
+def test_truncation_prioritizes_largest_utf8_payload() -> None:
     ascii_content = "a" * 500
     unicode_content = "界" * 300
     messages = (

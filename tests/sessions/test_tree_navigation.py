@@ -30,7 +30,7 @@ from wisp.sessions.jsonl import (
 )
 
 
-def test_session_tree_page_returns_empty_identified_reserved_session(tmp_path: Path) -> None:
+def test_tree_page_returns_empty_identified_reserved_session(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     page = session.read_tree_page()
@@ -47,7 +47,7 @@ def test_session_tree_page_returns_empty_identified_reserved_session(tmp_path: P
     assert not session.path.exists()
 
 
-def test_session_tree_page_includes_inactive_nodes_and_pages_in_append_order(
+def test_tree_page_includes_inactive_nodes_in_append_order(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -113,7 +113,7 @@ def test_session_tree_page_includes_inactive_nodes_and_pages_in_append_order(
     assert "hidden event payload" not in second.nodes[1].preview
 
 
-def test_session_tree_compaction_preview_is_utf8_bounded() -> None:
+def test_tree_compaction_preview_is_utf8_bounded() -> None:
     entry = CompactionSessionEntry(
         session_id="session-1",
         compaction=CompactionRecord(
@@ -132,7 +132,7 @@ def test_session_tree_compaction_preview_is_utf8_bounded() -> None:
     assert node.preview.encode("utf-8").decode("utf-8") == node.preview
 
 
-def test_session_tree_page_rejects_invalid_limits_and_unknown_cursor(
+def test_tree_page_rejects_invalid_limits_and_unknown_cursor(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -152,7 +152,7 @@ def test_session_tree_page_rejects_invalid_limits_and_unknown_cursor(
         session.read_tree_page(after_entry_id="missing")
 
 
-def test_session_tree_navigation_restores_user_prompt_and_selects_other_nodes(
+def test_navigation_restores_user_prompt_and_selects_other_nodes(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -215,7 +215,7 @@ def test_session_tree_navigation_restores_user_prompt_and_selects_other_nodes(
     assert root_id != answer_id
 
 
-def test_session_tree_navigation_rejects_missing_and_stale_entries(tmp_path: Path) -> None:
+def test_navigation_rejects_missing_and_stale_entries(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def navigate() -> None:
@@ -238,7 +238,7 @@ def test_session_tree_navigation_rejects_missing_and_stale_entries(tmp_path: Pat
     assert len(session.read_entries()) == 1
 
 
-def test_session_tree_navigation_honors_cancellation_at_commit_boundary(
+def test_navigation_honors_cancellation_at_commit_boundary(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -262,7 +262,7 @@ def test_session_tree_navigation_honors_cancellation_at_commit_boundary(
     assert len(session.read_entries()) == 2
 
 
-def test_session_tree_unrevert_survives_restart_and_ignores_name_metadata(
+def test_unrevert_survives_restart_and_ignores_name_metadata(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -306,7 +306,7 @@ def test_session_tree_unrevert_survives_restart_and_ignores_name_metadata(
     assert transitions[1].source_transition_id == transitions[0].id
 
 
-def test_session_tree_unrevert_is_invalidated_by_new_history(tmp_path: Path) -> None:
+def test_unrevert_is_invalidated_by_new_history(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def mutate() -> None:
@@ -327,7 +327,7 @@ def test_session_tree_unrevert_is_invalidated_by_new_history(tmp_path: Path) -> 
     anyio.run(mutate)
 
 
-def test_session_tree_unrevert_rejects_system_transition_and_cancellation(
+def test_unrevert_rejects_system_transition_and_cancellation(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()

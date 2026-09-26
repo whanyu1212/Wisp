@@ -45,7 +45,7 @@ from wisp.sessions.jsonl import (
     ],
     ids=["partial-json", "valid-json-without-newline", "partial-utf8"],
 )
-def test_session_recovers_unterminated_final_bytes(
+def test_recovers_unterminated_final_bytes(
     tmp_path: Path,
     incomplete_tail: bytes,
 ) -> None:
@@ -62,7 +62,7 @@ def test_session_recovers_unterminated_final_bytes(
     assert session.path.read_bytes() == committed_bytes
 
 
-def test_session_recovery_fills_short_reads_before_scanning_earlier_bytes(
+def test_recovery_fills_short_reads_before_scanning_back(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -85,7 +85,7 @@ def test_session_recovery_fills_short_reads_before_scanning_earlier_bytes(
     assert session.path.read_bytes() == committed_bytes
 
 
-def test_session_removes_file_with_only_uncommitted_bytes(tmp_path: Path) -> None:
+def test_removes_file_with_only_uncommitted_bytes(tmp_path: Path) -> None:
     path = tmp_path / "incomplete-only.jsonl"
     path.write_bytes(b'{"valid":"json"}')
     store = JsonlSessionStore(tmp_path)
@@ -96,7 +96,7 @@ def test_session_removes_file_with_only_uncommitted_bytes(tmp_path: Path) -> Non
         store.load(path)
 
 
-def test_session_preserves_committed_malformed_final_record(tmp_path: Path) -> None:
+def test_preserves_committed_malformed_final_record(tmp_path: Path) -> None:
     path = tmp_path / "invalid.jsonl"
     malformed = b'{"kind":"message"\n'
     path.write_bytes(malformed)
@@ -125,7 +125,7 @@ def test_append_entry_is_idempotent(tmp_path: Path) -> None:
     assert len(session.path.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_append_entry_rechecks_identity_after_another_handle_appends(tmp_path: Path) -> None:
+def test_append_rechecks_identity_after_another_handle_writes(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
     seed = MessageSessionEntry(
@@ -376,7 +376,7 @@ def test_repeated_reads_parse_a_resumed_session_file_once(
     assert parses == 1
 
 
-def test_append_entry_reloads_identity_after_uncertain_write_failure(
+def test_append_reloads_identity_after_uncertain_write(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -779,7 +779,7 @@ def test_truncate_invalidates_append_identity_index(tmp_path: Path) -> None:
     )
 
 
-def test_session_recovery_uses_process_local_and_sidecar_locks(
+def test_recovery_uses_process_local_and_sidecar_locks(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -819,7 +819,7 @@ def test_session_recovery_uses_process_local_and_sidecar_locks(
     assert session.read_entries() == (committed,)
 
 
-def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> None:
+def test_store_creates_private_directories_and_files(tmp_path: Path) -> None:
     root = tmp_path / "missing" / "sessions"
     session = JsonlSessionStore(root).create()
 
@@ -833,7 +833,7 @@ def test_session_store_creates_private_directories_and_files(tmp_path: Path) -> 
         assert stat.S_IMODE(session.path.stat().st_mode) == 0o600
 
 
-def test_session_store_secures_existing_session_directory(tmp_path: Path) -> None:
+def test_store_secures_existing_session_directory(tmp_path: Path) -> None:
     root = tmp_path / "sessions"
     root.mkdir()
     if os.name == "posix":
@@ -850,7 +850,7 @@ def test_session_store_secures_existing_session_directory(tmp_path: Path) -> Non
         assert stat.S_IMODE(session.path.stat().st_mode) == 0o600
 
 
-def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None:
+def test_store_rejects_symlink_session_directory(tmp_path: Path) -> None:
     if not hasattr(os, "symlink"):
         pytest.skip("symlinks are not supported")
     target = tmp_path / "target"
@@ -866,7 +866,7 @@ def test_session_store_rejects_symlink_session_directory(tmp_path: Path) -> None
         anyio.run(write)
 
 
-def test_session_read_preserves_existing_parent_permissions(tmp_path: Path) -> None:
+def test_read_preserves_existing_parent_permissions(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX permissions are required")
     root = tmp_path / "shared-sessions"
