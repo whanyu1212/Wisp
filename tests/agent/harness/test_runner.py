@@ -1,59 +1,36 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Sequence
-from typing import Literal, cast
+from collections.abc import AsyncGenerator, Sequence
 
 import anyio
 import pytest
 
-import wisp.agent.harness.boundaries as agent_boundary_module
 import wisp.agent.harness.runner as agent_harness_module
+from tests.agent.harness.support import (
+    RecordingToolExecutor,
+    append_nested_path,
+    build_harness,
+    message_with_nested_arguments,
+)
 from tests.support.agent_runtime import (
-    assert_cancellation_settled,
-    assert_settled_tool_calls,
-    assert_tool_result_pairing,
     assert_turn_terminals,
 )
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent
 from wisp.agent.messages import Message
-from wisp.agent.request_boundary import (
-    ContextOverflowSnapshot,
-    RequestBoundaryDecision,
-    RequestBoundarySnapshot,
-    RequestBoundaryUnsupportedError,
-    RequestContextRebase,
-)
-from wisp.agent.tool_contracts import (
-    PreparedToolExecution,
-    ToolExecutionEvent,
-    ToolExecutor,
-    ToolPreparationEvent,
-)
 from wisp.events import (
-    ErrorEvent,
     MessageCompleted,
-    MessageDelta,
     QueueMessageInjected,
-    QueueMode,
     QueueUpdated,
     ToolCallSnapshot,
-    ToolExecutionEnded,
-    ToolResultReady,
     TurnCompleted,
     TurnStarted,
-    wisp_event_from_json,
 )
 from wisp.providers.base import (
-    ContextOverflowError,
-    Provider,
-    ToolCallResult,
     ToolSpec,
-    prepare_provider_history,
 )
 from wisp.providers.events import (
-    ProviderEvent,
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
@@ -62,160 +39,6 @@ from wisp.providers.events import (
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
-
-
-class RecordingToolExecutor:
-    def __init__(self, output: str = "tool output", *, is_error: bool = False) -> None:
-        self.output = output
-        self.is_error = is_error
-        self.calls: list[ToolCall] = []
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        self.calls.append(tool_call)
-        yield ToolExecutionEnded(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            output=self.output,
-            is_error=self.is_error,
-        )
-
-
-class BlockingPreparedExecutor:
-    def __init__(self, all_started: anyio.Event) -> None:
-        self._all_started = all_started
-        self.started_call_ids: set[str] = set()
-
-    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
-        async def run() -> ToolExecutionEnded:
-            self.started_call_ids.add(tool_call.call_id)
-            if len(self.started_call_ids) == 2:
-                self._all_started.set()
-            await anyio.sleep_forever()
-            raise AssertionError("unreachable")
-
-        yield PreparedToolExecution(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            parallel_safe=True,
-            runner=run,
-        )
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        async for event in self.prepare(tool_call):
-            if isinstance(event, PreparedToolExecution):
-                yield await event.run()
-            else:
-                yield event
-
-
-class FailingAndBlockingPreparedExecutor:
-    def __init__(self, failed: anyio.Event) -> None:
-        self._failed = failed
-        self._second_started = anyio.Event()
-
-    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
-        async def run() -> ToolExecutionEnded:
-            if tool_call.call_id == "call-1":
-                await self._second_started.wait()
-                self._failed.set()
-                raise RuntimeError("executor failed during cancellation")
-            self._second_started.set()
-            await anyio.sleep_forever()
-            raise AssertionError("unreachable")
-
-        yield PreparedToolExecution(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            parallel_safe=True,
-            runner=run,
-        )
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        async for event in self.prepare(tool_call):
-            if isinstance(event, PreparedToolExecution):
-                yield await event.run()
-            else:
-                yield event
-
-
-class ImmediatePreparedExecutor:
-    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
-        async def run() -> ToolExecutionEnded:
-            return ToolExecutionEnded(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                output=f"output-{tool_call.call_id}",
-                is_error=False,
-            )
-
-        yield PreparedToolExecution(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            parallel_safe=True,
-            runner=run,
-        )
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        async for event in self.prepare(tool_call):
-            if isinstance(event, PreparedToolExecution):
-                yield await event.run()
-            else:
-                yield event
-
-
-class BlockingProvider:
-    name = "blocking"
-    default_model: str | None = "blocking"
-
-    def __init__(
-        self,
-        *,
-        waiting: anyio.Event,
-        release: anyio.Event,
-        delta_before_wait: str | None = None,
-    ) -> None:
-        self.waiting = waiting
-        self.release = release
-        self.delta_before_wait = delta_before_wait
-        self.closed = False
-
-    async def stream(
-        self,
-        messages: Sequence[Message],
-        *,
-        model: str | None = None,
-        tools: Sequence[ToolSpec] = (),
-        tool_results: Sequence[ToolCallResult] = (),
-        previous_response_id: str | None = None,
-        effort: str | None = None,
-    ) -> AsyncIterator[ProviderEvent]:
-        del messages, tools, tool_results, previous_response_id, effort
-        try:
-            yield ProviderResponseStarted(model=model or self.default_model or self.name)
-            if self.delta_before_wait is not None:
-                yield ProviderTextDelta(delta=self.delta_before_wait)
-            self.waiting.set()
-            await self.release.wait()
-        finally:
-            self.closed = True
-        yield ProviderResponseCompleted(content="too late")
-
-
-def _harness(
-    provider: Provider,
-    *,
-    executor: ToolExecutor | None = None,
-    messages: Sequence[Message] = (),
-    tools: tuple[ToolSpec, ...] = (),
-) -> AgentHarness:
-    return AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=executor or RecordingToolExecutor(),
-            tools=tools,
-        ),
-        messages=messages,
-    )
 
 
 @pytest.mark.parametrize(
@@ -290,7 +113,7 @@ def test_harness_continue_treats_completed_tool_turn_as_history() -> None:
     provider = OpaqueProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="continued")]]
     )
-    harness = _harness(
+    harness = build_harness(
         provider,
         messages=(
             Message(role="user", content="search"),
@@ -330,490 +153,36 @@ def test_harness_continue_treats_completed_tool_turn_as_history() -> None:
     assert replayed[2].content == "done"
 
 
-def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> None:
-    harness = _harness(ScriptedProvider([]))
-    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
-        get_messages=lambda: harness.messages,
-        provider=harness.config.provider,
-        effort=harness.config.effort,
-        active_from=0,
-        boundary_preparer=None,
-        context_overflow_hook=None,
-    )
-    snapshot = RequestBoundarySnapshot(
-        turn=1,
-        tool_iterations=0,
-        had_tool_calls=False,
-        can_append_user_messages=False,
-        continuation_messages=(),
-    )
-
-    async def run() -> None:
-        with pytest.raises(RuntimeError, match="unarmed request boundary"):
-            await coordinator.before_next_request(snapshot=snapshot)
-        coordinator.arm(
-            turn=2,
-            had_tool_calls=False,
-            injected_messages=(),
-            stop_by_default=True,
-        )
-        with pytest.raises(RuntimeError, match="did not match its completed turn"):
-            await coordinator.before_next_request(snapshot=snapshot)
-
-    anyio.run(run)
-
-
-def test_boundary_coordinator_returns_replacement_without_mutating_transcript() -> None:
-    original = Message(role="user", content="old")
-    replacement = Message(role="user", content="compressed")
-    extra = Message(role="user", content="steered")
-    harness = _harness(ScriptedProvider([]), messages=(original,))
-
-    class Preparer:
-        async def prepare_boundary(
-            self, *, context: agent_boundary_module.HarnessBoundaryContext
-        ) -> RequestBoundaryDecision:
-            assert context.active_from == 1
-            return RequestBoundaryDecision(
-                messages=(replacement,),
-                extra_messages=(extra,),
-            )
-
-    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
-        get_messages=lambda: harness.messages,
-        provider=harness.config.provider,
-        effort=harness.config.effort,
-        active_from=1,
-        boundary_preparer=Preparer(),
-        context_overflow_hook=None,
-    )
-    coordinator.arm(
-        turn=1,
-        had_tool_calls=False,
-        injected_messages=(extra,),
-        stop_by_default=False,
-    )
-    snapshot = RequestBoundarySnapshot(
-        turn=1,
-        tool_iterations=0,
-        had_tool_calls=False,
-        can_append_user_messages=False,
-        continuation_messages=(Message(role="assistant", content="answer"),),
-    )
-
-    async def run() -> None:
-        decision = await coordinator.before_next_request(snapshot=snapshot)
-        assert decision.messages == (replacement,)
-
-    anyio.run(run)
-    assert harness.messages == (original,)
-
-    assert coordinator.take_transcript_replacement() == (replacement, extra)
-    assert coordinator.take_transcript_replacement() is None
-    assert harness.messages == (original,)
-    assert coordinator.active_from == 1
-    assert coordinator.pending_transcript_replacement is None
-
-
-def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition() -> None:
-    user = Message(role="user", content="initial")
-    injected = Message(role="user", content="steered")
-    harness = _harness(ScriptedProvider([]), messages=(user, injected))
-    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
-        get_messages=lambda: harness.messages,
-        provider=harness.config.provider,
-        effort=harness.config.effort,
-        active_from=1,
-        boundary_preparer=None,
-        context_overflow_hook=None,
-    )
-    coordinator.arm(
-        turn=1,
-        had_tool_calls=True,
-        injected_messages=(injected,),
-        stop_by_default=False,
-    )
-    snapshot = RequestBoundarySnapshot(
-        turn=1,
-        tool_iterations=1,
-        had_tool_calls=True,
-        can_append_user_messages=False,
-        continuation_messages=(),
-    )
-
-    async def run() -> RequestBoundaryDecision:
-        return await coordinator.before_next_request(snapshot=snapshot)
-
-    decision = anyio.run(run)
-
-    assert decision.messages is not None
-    assert coordinator.pending_transcript_replacement is None
-    assert coordinator.take_transcript_replacement() is None
-    assert harness.messages == (user, injected)
-
-
-@pytest.mark.parametrize("raised", [False, True])
-@pytest.mark.parametrize("empty_replacement", [False, True])
-def test_harness_applies_overflow_replacement_only_when_retry_starts(
-    raised: bool, empty_replacement: bool
-) -> None:
-    original = Message(role="user", content="long prompt")
-    replacement = () if empty_replacement else (Message(role="user", content="summary"),)
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="rejected"),
-                ProviderTextDelta(delta="partial answer"),
-                ContextOverflowError("context window exceeded")
-                if raised
-                else ProviderResponseFailed(
-                    message="context window exceeded", failure_kind="context_overflow"
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test", response_id="recovered"),
-                ProviderResponseCompleted(content="done"),
-            ],
-        ]
-    )
-    harness = _harness(provider, messages=(original,))
-
-    class RecoverOverflow:
-        async def recover_context_overflow(
-            self, *, snapshot: ContextOverflowSnapshot
-        ) -> RequestBoundaryDecision:
-            assert snapshot.had_streamed_delta
-            assert harness.messages[0] == original
-            assert harness.messages[-1].content == "partial answer"
-            return RequestBoundaryDecision(messages=replacement)
-
-    async def run() -> None:
-        started_turns = []
-        async for event in harness.continue_(context_overflow_hook=RecoverOverflow()):
-            if isinstance(event, TurnCompleted) and event.turn == 1:
-                assert harness.messages[0] == original
-                assert harness.messages[-1].content == "partial answer"
-            if isinstance(event, TurnStarted):
-                started_turns.append(event.turn)
-                if event.turn == 2:
-                    assert harness.messages == replacement
-        assert started_turns == [1, 2]
-
-    anyio.run(run)
-
-    assert provider.calls[1].messages == replacement
-    assert harness.messages[:-1] == replacement
-    assert harness.messages[-1].content == "done"
-
-
-def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
-    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="done"),
-            ],
-        ]
-    )
-
-    class ReplacingPreparer:
-        def __init__(self) -> None:
-            self.boundaries: list[int] = []
-
-        async def prepare_boundary(
-            self, *, context: agent_boundary_module.HarnessBoundaryContext
-        ) -> RequestBoundaryDecision | None:
-            self.boundaries.append(context.active_from)
-            if len(self.boundaries) == 1:
-                return RequestBoundaryDecision(
-                    messages=(Message(role="user", content="compressed history"),)
-                )
-            if len(self.boundaries) == 2:
-                return RequestBoundaryDecision(
-                    messages=prepare_provider_history(
-                        context.messages,
-                        provider=provider,
-                        effort=None,
-                        active_from=context.active_from,
-                    )
-                )
-            return None
-
-    preparer = ReplacingPreparer()
-    harness = _harness(
-        provider,
-        messages=(
-            Message(role="user", content="old question one"),
-            Message(role="assistant", content="old answer one"),
-            Message(role="user", content="old question two"),
-            Message(role="assistant", content="old answer two"),
-        ),
-        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
-    )
-
-    async def run() -> None:
-        _events = [event async for event in harness.continue_(boundary_preparer=preparer)]
-
-    anyio.run(run)
-
-    assert preparer.boundaries[:2] == [4, 1]
-    assert [message.role for message in provider.calls[2].messages] == [
-        "user",
-        "assistant",
-        "tool",
-    ]
-    assert provider.calls[2].messages[1].tool_calls is not None
-    assert provider.calls[2].messages[2].tool_call_id == "call-1"
-
-
-def test_agent_harness_config_preserves_positional_field_order() -> None:
-    config = AgentHarnessConfig(
-        ScriptedProvider([]),
-        RecordingToolExecutor(),
-        None,
-        (),
-        None,
-        None,
-        None,
-        16_384,
-        0.8,
-        None,
-        "all",
-        "all",
-        0,
-    )
-
-    assert config.max_pending_queue_messages == 0
-    assert config.prompt_cache_key is None
-
-
-def _message_with_nested_arguments(*, role: Literal["user", "assistant"]) -> Message:
-    return Message(
-        role=role,
-        content="original",
-        tool_calls=(
-            ToolCallSnapshot(
-                call_id="nested",
-                name="read",
-                arguments={"paths": ["original.txt"]},
-                provider_call_id="native-call",
-            ),
-        ),
-    )
-
-
-def _append_nested_path(message: Message) -> None:
-    assert message.tool_calls is not None
-    paths = message.tool_calls[0].arguments["paths"]
-    assert isinstance(paths, list)
-    paths.append("changed.txt")
-
-
-@pytest.mark.parametrize("transition", ["replacement", "rebase", "overflow"])
-def test_harness_boundary_adoption_detaches_callback_and_provider_messages(transition: str) -> None:
-    class NativeProvider(ScriptedProvider):
-        def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
-            return True
-
-    provider = NativeProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id=f"response-{index}"),
-                ProviderResponseFailed(message="too large", failure_kind="context_overflow")
-                if transition == "overflow" and index == 0
-                else ProviderResponseCompleted(content=str(index), response_id=f"response-{index}"),
-            ]
-            for index in range(2)
-        ]
-    )
-    original = _message_with_nested_arguments(role="assistant")
-    base = [
-        original,
-        Message(role="tool", content="read output", tool_call_id="nested", tool_name="read"),
-        Message(role="user", content="continue"),
-    ]
-    expected_base = tuple(message.model_copy(deep=True) for message in base)
-    expected_transcript: tuple[Message, ...] = ()
-    harness = _harness(provider)
-
-    class Preparer:
-        async def prepare_boundary(
-            self, *, context: agent_boundary_module.HarnessBoundaryContext
-        ) -> RequestBoundaryDecision | None:
-            nonlocal expected_transcript
-            if context.snapshot.turn != 1:
-                return None
-            if transition == "replacement":
-                expected_transcript = expected_base
-                return RequestBoundaryDecision(messages=base)
-            expected_transcript = (*expected_base, *context.snapshot.continuation_messages)
-            return RequestBoundaryDecision(
-                context_rebase=RequestContextRebase(
-                    base_messages=base,
-                    expected_continuation_messages=context.snapshot.continuation_messages,
-                )
-            )
-
-    class RecoverOverflow:
-        async def recover_context_overflow(
-            self, *, snapshot: ContextOverflowSnapshot
-        ) -> RequestBoundaryDecision:
-            nonlocal expected_transcript
-            expected_transcript = expected_base
-            return RequestBoundaryDecision(messages=base)
-
-    async def run() -> None:
-        async for event in harness.prompt(
-            "initial", boundary_preparer=Preparer(), context_overflow_hook=RecoverOverflow()
-        ):
-            if isinstance(event, TurnStarted) and event.turn == 2:
-                assert harness.messages == expected_transcript
-                _append_nested_path(original)
-                base.clear()
-                assert harness.messages == expected_transcript
-        assert len(provider.calls) == 2
-        assert provider.calls[1].messages[: len(expected_base)] == expected_base
-        _append_nested_path(provider.calls[1].messages[0])
-        assert harness.messages[: len(expected_base)] == expected_base
-
-    anyio.run(run)
-
-
-def test_boundary_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
-    original = _message_with_nested_arguments(role="user")
-    expected = original.model_copy(deep=True)
-    harness = _harness(ScriptedProvider([]), messages=(original,))
-    continuation = _message_with_nested_arguments(role="assistant")
-    expected_continuation = continuation.model_copy(deep=True)
-
-    class Preparer:
-        async def prepare_boundary(
-            self, *, context: agent_boundary_module.HarnessBoundaryContext
-        ) -> None:
-            _append_nested_path(context.messages[0])
-            _append_nested_path(context.injected_messages[0])
-            _append_nested_path(context.snapshot.continuation_messages[0])
-
-    coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
-        get_messages=lambda: harness.messages,
-        provider=harness.config.provider,
-        effort=None,
-        active_from=0,
-        boundary_preparer=Preparer(),
-        context_overflow_hook=None,
-    )
-    coordinator.arm(
-        turn=1, had_tool_calls=True, injected_messages=(original,), stop_by_default=False
-    )
-    snapshot = RequestBoundarySnapshot(
-        turn=1,
-        tool_iterations=1,
-        had_tool_calls=True,
-        can_append_user_messages=True,
-        continuation_messages=(continuation,),
-    )
-
-    async def run() -> None:
-        decision = await coordinator.before_next_request(snapshot=snapshot)
-        assert harness.messages == (expected,)
-        assert original == expected
-        assert snapshot.continuation_messages == (expected_continuation,)
-        assert decision.extra_messages == (expected,)
-        _append_nested_path(decision.extra_messages[0])
-        assert original == expected
-
-    anyio.run(run)
-
-
 @pytest.mark.parametrize("entry_point", ["constructor", "append", "replace"])
 def test_harness_transcript_inputs_and_snapshots_are_detached(entry_point: str) -> None:
-    original = _message_with_nested_arguments(role="assistant")
+    original = message_with_nested_arguments(role="assistant")
     expected = original.model_copy(deep=True)
     if entry_point == "constructor":
-        harness = _harness(ScriptedProvider([]), messages=(original,))
+        harness = build_harness(ScriptedProvider([]), messages=(original,))
     else:
-        harness = _harness(ScriptedProvider([]))
+        harness = build_harness(ScriptedProvider([]))
         if entry_point == "append":
             harness.append_message(original)
         else:
             harness.replace_messages((original,))
-    _append_nested_path(original)
+    append_nested_path(original)
     assert harness.messages == (expected,)
     snapshot = harness.messages
-    _append_nested_path(snapshot[0])
+    append_nested_path(snapshot[0])
     assert harness.messages == (expected,)
     assert harness.messages[0].tool_calls is not None
     assert harness.messages[0].tool_calls[0].provider_call_id == "native-call"
-
-
-@pytest.mark.parametrize("kind", ["steering", "follow_up"])
-def test_harness_queue_inputs_and_snapshots_are_detached(kind: QueueKind) -> None:
-    original = _message_with_nested_arguments(role="user")
-    expected = original.model_copy(deep=True)
-    size = len(expected.model_dump_json().encode("utf-8"))
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            max_pending_queue_bytes=size,
-        )
-    )
-    enqueue = harness.steer_message if kind == "steering" else harness.follow_up_message
-    enqueue(original)
-    _append_nested_path(original)
-    snapshot = harness.queued_messages
-    messages = snapshot.steering if kind == "steering" else snapshot.follow_up
-    assert messages == (expected,)
-    _append_nested_path(messages[0])
-    assert harness.pending_message_bytes == size
-    assert harness.pending_message_count == 1
-    with pytest.raises(RuntimeError, match="byte limit exceeded"):
-        enqueue(expected)
-    assert harness.clear_queue(kind) == (expected,)
-    assert harness.pending_message_count == 0
-    enqueue(expected)
-    assert harness.pending_message_bytes == size
-
-
-def test_harness_queue_accounting_does_not_construct_message_snapshots(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    harness = _harness(ScriptedProvider([]))
-    harness.steer("pending")
-    size = harness.pending_message_bytes
-
-    def unexpected_snapshot(self: AgentHarness) -> QueuedMessages:
-        raise AssertionError("queue accounting must not copy messages")
-
-    monkeypatch.setattr(AgentHarness, "queued_messages", property(unexpected_snapshot))
-    assert harness.pending_message_count == 1
-    assert harness.pending_message_bytes == size
-    assert harness.has_queued_messages()
 
 
 def test_harness_prompt_message_snapshots_input_without_starting_the_run() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
     )
-    harness = _harness(provider)
-    original = _message_with_nested_arguments(role="user")
+    harness = build_harness(provider)
+    original = message_with_nested_arguments(role="user")
     expected = original.model_copy(deep=True)
     events = harness.prompt_message(original)
-    _append_nested_path(original)
+    append_nested_path(original)
     assert harness.messages == ()
     assert not harness.is_running
 
@@ -824,7 +193,7 @@ def test_harness_prompt_message_snapshots_input_without_starting_the_run() -> No
     anyio.run(run)
     assert provider.calls[0].messages == (expected,)
     assert harness.messages[0] == expected
-    _append_nested_path(provider.calls[0].messages[0])
+    append_nested_path(provider.calls[0].messages[0])
     assert harness.messages[0] == expected
 
 
@@ -843,7 +212,7 @@ def test_harness_retains_detached_completion_before_exposing_it(close_at_complet
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
         ]
     )
-    harness = _harness(
+    harness = build_harness(
         provider,
         tools=(ToolSpec(name="read", description="Read", input_schema={"type": "object"}),),
     )
@@ -875,7 +244,7 @@ def test_harness_requeued_message_is_not_part_of_the_old_drain_snapshot() -> Non
             for index in range(3)
         ]
     )
-    harness = _harness(provider)
+    harness = build_harness(provider)
     harness.set_steering_mode("all")
     harness.steer("first")
     harness.steer("second")
@@ -909,7 +278,7 @@ def test_harness_prompt_owns_transcript_and_returns_immutable_snapshots() -> Non
             ]
         ]
     )
-    harness = _harness(provider, messages=(initial,))
+    harness = build_harness(provider, messages=(initial,))
     before = harness.messages
 
     async def run() -> list[object]:
@@ -948,7 +317,7 @@ def test_harness_continue_uses_existing_transcript_without_new_user_message() ->
             ]
         ]
     )
-    harness = _harness(provider, messages=(existing,))
+    harness = build_harness(provider, messages=(existing,))
 
     async def run() -> None:
         _events = [event async for event in harness.continue_()]
@@ -995,7 +364,7 @@ def test_harness_preserves_assistant_tool_result_order_across_runs() -> None:
         ]
     )
     executor = RecordingToolExecutor("found it")
-    harness = _harness(
+    harness = build_harness(
         provider,
         executor=executor,
         tools=(
@@ -1080,7 +449,7 @@ def test_harness_omits_empty_tool_call_assistant_from_follow_up_history() -> Non
             ],
         ]
     )
-    harness = _harness(
+    harness = build_harness(
         provider,
         executor=RecordingToolExecutor("found it"),
         tools=(
@@ -1117,7 +486,7 @@ def test_harness_repairs_interrupted_tool_call_before_next_provider_request() ->
             ]
         ]
     )
-    harness = _harness(
+    harness = build_harness(
         provider,
         messages=(
             Message(role="user", content="read the file"),
@@ -1157,77 +526,6 @@ def test_harness_repairs_interrupted_tool_call_before_next_provider_request() ->
     )
 
 
-def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
-    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
-        provider = BlockingProvider(
-            waiting=anyio.Event(),
-            release=anyio.Event(),
-            delta_before_wait="first",
-        )
-        harness = _harness(provider)
-        events: list[object] = []
-
-        with anyio.fail_after(1):
-            async for event in harness.prompt("stop"):
-                events.append(event)
-                if isinstance(event, MessageDelta):
-                    assert harness.cancel()
-        return harness, provider, events
-
-    harness, provider, events = anyio.run(run)
-
-    assert [event.type for event in events] == [
-        "turn.started",
-        "context.estimated",
-        "message.started",
-        "message.delta",
-        "error",
-        "turn.completed",
-    ]
-    completed = events[-1]
-    assert isinstance(completed, TurnCompleted)
-    assert completed.outcome == "cancelled"
-    assert [(message.role, message.content) for message in harness.messages] == [("user", "stop")]
-    assert not provider.waiting.is_set()
-    assert provider.closed
-    assert harness.is_running is False
-    assert harness.cancel() is False
-    assert_turn_terminals(events)
-    assert_tool_result_pairing(events)
-
-
-def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
-    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
-        provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
-        harness = _harness(provider)
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("stop now")])
-
-        with anyio.fail_after(1):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await provider.waiting.wait()
-                assert harness.cancel()
-        return harness, provider, events
-
-    harness, provider, events = anyio.run(run)
-
-    assert [event.type for event in events] == [
-        "turn.started",
-        "context.estimated",
-        "message.started",
-        "error",
-        "turn.completed",
-    ]
-    assert provider.closed
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "stop now")
-    ]
-    assert harness.is_running is False
-
-
 @pytest.mark.parametrize("field", ["turn_offset", "tool_iteration_offset"])
 @pytest.mark.parametrize("value", [-1, True, 1.5])
 def test_harness_invalid_offsets_leave_transcript_unchanged_and_allow_retry(
@@ -1241,7 +539,7 @@ def test_harness_invalid_offsets_leave_transcript_unchanged_and_allow_retry(
         content="",
         tool_calls=(ToolCallSnapshot(call_id="pending", name="read", arguments={}),),
     )
-    harness = _harness(provider, messages=(interrupted,))
+    harness = build_harness(provider, messages=(interrupted,))
     harness.steer("queued")
     before = harness.messages
     queued = harness.queued_messages
@@ -1275,7 +573,7 @@ def test_harness_history_preparation_failure_releases_run_state() -> None:
     provider = FailingReplayProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
     )
-    harness = _harness(provider)
+    harness = build_harness(provider)
     harness.follow_up("queued")
     queued = harness.queued_messages
 
@@ -1312,7 +610,7 @@ def test_harness_cleanup_failure_releases_run_state(
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
     )
-    harness = _harness(provider)
+    harness = build_harness(provider)
 
     async def run() -> None:
         with monkeypatch.context() as patch:
@@ -1344,7 +642,7 @@ def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> Non
             ]
         ]
     )
-    harness = _harness(provider)
+    harness = build_harness(provider)
 
     async def run() -> None:
         first = harness.prompt("first")
@@ -1384,729 +682,6 @@ def test_harness_rejects_overlapping_runs_and_resets_when_stream_closes() -> Non
     ]
 
 
-def test_harness_queue_contract_preserves_fifo_snapshots_and_transcript_boundary() -> None:
-    harness = _harness(ScriptedProvider([]))
-
-    first_update = harness.steer("first steering")
-    second_update = harness.steer("second steering")
-    follow_up_update = harness.follow_up("follow up")
-    snapshot = harness.queued_messages
-
-    assert first_update.steering == ("first steering",)
-    assert second_update.steering == ("first steering", "second steering")
-    assert follow_up_update.follow_up == ("follow up",)
-    assert [message.content for message in snapshot.steering] == [
-        "first steering",
-        "second steering",
-    ]
-    assert [message.content for message in snapshot.follow_up] == ["follow up"]
-    assert snapshot.count == 3
-    assert harness.pending_message_count == 3
-    assert harness.has_queued_messages()
-    assert harness.messages == ()
-
-    assert harness.pop_latest_steering() == snapshot.steering[-1]
-    assert [message.content for message in harness.clear_queue("follow_up")] == ["follow up"]
-    assert harness.queue_updated_event().steering == ("first steering",)
-
-    cleared = harness.clear_queues()
-    assert [message.content for message in cleared.steering] == ["first steering"]
-    assert cleared.follow_up == ()
-    assert harness.queued_messages.count == 0
-    assert harness.pop_latest_steering() is None
-    assert harness.pop_latest_follow_up() is None
-    assert not harness.has_queued_messages()
-    assert harness.messages == ()
-
-
-def test_harness_queue_contract_rejects_non_user_messages_without_partial_mutation() -> None:
-    harness = _harness(ScriptedProvider([]))
-    assistant = Message(role="assistant", content="not user input")
-
-    with pytest.raises(ValueError, match="queues require a user message"):
-        harness.steer_message(assistant)
-    with pytest.raises(ValueError, match="queues require a user message"):
-        harness.follow_up_message(assistant)
-    with pytest.raises(ValueError, match="Unsupported queue kind"):
-        harness.clear_queue(cast(QueueKind, "unknown"))
-
-    assert harness.pending_message_count == 0
-    assert harness.messages == ()
-
-
-def test_harness_queue_capacity_is_shared_and_recovers_after_removal() -> None:
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            max_pending_queue_messages=2,
-        )
-    )
-
-    harness.steer("first")
-    harness.follow_up("second")
-
-    with pytest.raises(RuntimeError, match="maximum 2 pending messages"):
-        harness.steer("overflow")
-
-    assert harness.queue_updated_event().steering == ("first",)
-    assert harness.queue_updated_event().follow_up == ("second",)
-    assert harness.pop_latest_follow_up() is not None
-
-    recovered = harness.steer("replacement")
-
-    assert recovered.steering == ("first", "replacement")
-    assert recovered.follow_up == ()
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("max_tool_iterations", -1),
-        ("context_window", 0),
-        ("context_reserve_tokens", True),
-        ("context_pressure_threshold", float("inf")),
-    ],
-)
-def test_agent_harness_config_rejects_invalid_shared_runtime_limits(
-    field: str, value: object
-) -> None:
-    with pytest.raises(ValueError, match=field):
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            **cast(dict[str, object], {field: value}),
-        )
-
-
-def test_agent_harness_config_accepts_runtime_limit_boundaries() -> None:
-    config = AgentHarnessConfig(
-        provider=ScriptedProvider([]),
-        tool_executor=RecordingToolExecutor(),
-        max_tool_iterations=0,
-        context_window=1,
-        context_reserve_tokens=1,
-        context_pressure_threshold=1,
-    )
-
-    assert config.max_tool_iterations == 0
-
-
-def test_harness_queue_modes_are_independent_and_reported_in_updates() -> None:
-    harness = _harness(ScriptedProvider([]))
-
-    steering_update = harness.set_steering_mode("all")
-    follow_up_update = harness.set_follow_up_mode("all")
-
-    assert steering_update.steering_mode == "all"
-    assert steering_update.follow_up_mode == "one_at_a_time"
-    assert follow_up_update.steering_mode == "all"
-    assert follow_up_update.follow_up_mode == "all"
-    assert harness.config.steering_mode == "all"
-    assert harness.config.follow_up_mode == "all"
-
-    with pytest.raises(ValueError, match="Unsupported queue mode"):
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            steering_mode=cast(QueueMode, "invalid"),
-        )
-    with pytest.raises(ValueError, match="Unsupported queue mode"):
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            steering_mode=cast(QueueMode, ["all"]),
-        )
-    for field in ("max_pending_queue_messages", "max_pending_queue_bytes"):
-        for invalid_limit in (-1, True):
-            with pytest.raises(ValueError, match="non-negative integer"):
-                AgentHarnessConfig(
-                    provider=ScriptedProvider([]),
-                    tool_executor=RecordingToolExecutor(),
-                    **cast(dict[str, object], {field: invalid_limit}),
-                )
-
-    with pytest.raises(ValueError, match="Unsupported queue mode"):
-        harness.set_steering_mode(cast(QueueMode, "invalid"))
-    with pytest.raises(ValueError, match="Unsupported queue mode"):
-        harness.set_follow_up_mode(cast(QueueMode, "invalid"))
-
-    assert harness.config.steering_mode == "all"
-    assert harness.config.follow_up_mode == "all"
-
-
-def test_harness_queue_byte_limit_rejects_before_mutation() -> None:
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=ScriptedProvider([]),
-            tool_executor=RecordingToolExecutor(),
-            max_pending_queue_bytes=1,
-        )
-    )
-
-    with pytest.raises(RuntimeError, match="queue byte limit exceeded"):
-        harness.steer("oversized")
-
-    assert harness.queued_messages == QueuedMessages()
-    assert harness.pending_message_bytes == 0
-
-
-def test_queue_updated_event_round_trips() -> None:
-    event = QueueUpdated(
-        steering=("adjust",),
-        follow_up=("summarize",),
-        steering_mode="all",
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_harness_drains_follow_ups_one_at_a_time_across_completed_turns() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="second answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="third answer"),
-            ],
-        ]
-    )
-    harness = _harness(provider)
-    harness.follow_up("first follow-up")
-    harness.follow_up("second follow-up")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial"),
-        ("assistant", "first answer"),
-        ("user", "first follow-up"),
-        ("assistant", "second answer"),
-        ("user", "second follow-up"),
-        ("assistant", "third answer"),
-    ]
-    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "first follow-up",
-        "second follow-up",
-    ]
-    assert [event.follow_up for event in events if isinstance(event, QueueUpdated)] == [
-        ("second follow-up",),
-        (),
-    ]
-    assert [call.messages[-1].content for call in provider.calls] == [
-        "initial",
-        "first follow-up",
-        "second follow-up",
-    ]
-    assert [event.turn for event in events if event.type == "turn.started"] == [1, 2, 3]
-
-
-def test_harness_all_mode_drains_one_follow_up_batch() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="second answer"),
-            ],
-        ]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            follow_up_mode="all",
-        )
-    )
-    harness.follow_up("one")
-    harness.follow_up("two")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "one",
-        "two",
-    ]
-    assert [event.follow_up for event in events if isinstance(event, QueueUpdated)] == [()]
-    assert [(message.role, message.content) for message in provider.calls[1].messages[-2:]] == [
-        ("user", "one"),
-        ("user", "two"),
-    ]
-
-
-@pytest.mark.parametrize("kind", ["steering", "follow_up"])
-@pytest.mark.parametrize("mutation", ["pop", "clear"])
-def test_harness_all_mode_tolerates_queue_edits_during_drain(
-    kind: QueueKind,
-    mutation: str,
-) -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="second answer"),
-            ],
-        ]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            steering_mode="all" if kind == "steering" else "one_at_a_time",
-            follow_up_mode="all" if kind == "follow_up" else "one_at_a_time",
-        )
-    )
-    enqueue = harness.steer if kind == "steering" else harness.follow_up
-    for content in ("one", "two", "three"):
-        enqueue(content)
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        mutated = False
-        async for event in harness.prompt("initial"):
-            events.append(event)
-            if isinstance(event, QueueMessageInjected) and not mutated:
-                mutated = True
-                if mutation == "pop":
-                    removed = (
-                        harness.pop_latest_steering()
-                        if kind == "steering"
-                        else harness.pop_latest_follow_up()
-                    )
-                    assert removed is not None
-                    assert removed.content == "three"
-                else:
-                    assert [message.content for message in harness.clear_queue(kind)] == [
-                        "two",
-                        "three",
-                    ]
-        return events
-
-    events = anyio.run(run)
-
-    expected = ["one", "two"] if mutation == "pop" else ["one"]
-    assert [
-        event.content for event in events if isinstance(event, QueueMessageInjected)
-    ] == expected
-    assert harness.queued_messages.steering == ()
-    assert harness.queued_messages.follow_up == ()
-    queue_updates = [event for event in events if isinstance(event, QueueUpdated)]
-    assert queue_updates[-1].steering == ()
-    assert queue_updates[-1].follow_up == ()
-
-
-def test_harness_closing_before_completion_preserves_follow_up_queue() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="answer"),
-            ]
-        ]
-    )
-    harness = _harness(provider)
-    harness.follow_up("later")
-
-    async def run() -> None:
-        events = harness.prompt("initial")
-        assert (await anext(events)).type == "turn.started"
-        await events.aclose()
-
-    anyio.run(run)
-
-    assert [message.content for message in harness.queued_messages.follow_up] == ["later"]
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial")
-    ]
-
-
-def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> None:
-    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
-    harness = _harness(
-        provider,
-        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
-    )
-
-    async def run() -> None:
-        events = harness.prompt("initial")
-        async for event in events:
-            if isinstance(event, ToolExecutionEnded):
-                await events.aclose()
-                return
-        raise AssertionError("missing tool execution end")
-
-    anyio.run(run)
-
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial"),
-        ("assistant", "checking"),
-        ("tool", "tool output"),
-    ]
-
-
-def test_harness_cancellation_drains_prepared_batch_results_in_source_order() -> None:
-    calls = (
-        ToolCall(call_id="call-1", name="read", arguments={}),
-        ToolCall(call_id="call-2", name="read", arguments={}),
-    )
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=calls,
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
-    )
-
-    async def run() -> tuple[AgentHarness, list[object]]:
-        all_started = anyio.Event()
-        harness = _harness(
-            provider,
-            executor=BlockingPreparedExecutor(all_started),
-        )
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("initial")])
-
-        with anyio.fail_after(2):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await all_started.wait()
-                assert harness.cancel()
-        return harness, events
-
-    harness, events = anyio.run(run)
-
-    terminals = [event for event in events if isinstance(event, ToolExecutionEnded)]
-    results = [event for event in events if isinstance(event, ToolResultReady)]
-    assert [event.call_id for event in terminals] == ["call-1", "call-2"]
-    assert [event.call_id for event in results] == ["call-1", "call-2"]
-    assert all(event.is_error and event.retryable for event in results)
-    assert all(event.process_state == "cancelled" for event in results)
-    completed = [event for event in events if isinstance(event, TurnCompleted)]
-    assert len(completed) == 1
-    assert completed[0].outcome == "cancelled"
-    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
-        ("user", None),
-        ("assistant", None),
-        ("tool", "call-1"),
-        ("tool", "call-2"),
-    ]
-    assert_turn_terminals(events)
-    assert_settled_tool_calls(events, ("call-1", "call-2"))
-
-
-def test_harness_cancellation_settles_a_blocked_sequential_batch() -> None:
-    calls = (
-        ToolCall(call_id="call-1", name="read", arguments={}),
-        ToolCall(call_id="call-2", name="read", arguments={}),
-    )
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=calls,
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
-    )
-
-    class BlockingExecutor:
-        def __init__(self) -> None:
-            self.blocked = anyio.Event()
-            self.closed = False
-
-        async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-            try:
-                self.blocked.set()
-                await anyio.sleep_forever()
-            finally:
-                self.closed = True
-            yield  # pragma: no cover - makes this an async generator
-
-    async def run() -> tuple[AgentHarness, BlockingExecutor, list[object]]:
-        executor = BlockingExecutor()
-        harness = _harness(provider, executor=executor)
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("initial")])
-
-        with anyio.fail_after(2):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await executor.blocked.wait()
-                assert harness.cancel()
-        return harness, executor, events
-
-    harness, executor, events = anyio.run(run)
-
-    assert executor.closed
-    results = [event for event in events if isinstance(event, ToolResultReady)]
-    assert [(event.call_id, event.process_state) for event in results] == [
-        ("call-1", "cancelled"),
-        ("call-2", "cancelled"),
-    ]
-    completed = [event for event in events if isinstance(event, TurnCompleted)]
-    assert [(event.outcome, event.finish_reason) for event in completed] == [
-        ("cancelled", "cancelled")
-    ]
-    # Settlement is retained live, so the next run has nothing left to repair.
-    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
-        ("user", None),
-        ("assistant", None),
-        ("tool", "call-1"),
-        ("tool", "call-2"),
-    ]
-    assert harness.repair_interrupted_tool_calls() == ()
-    assert_turn_terminals(events)
-    assert_settled_tool_calls(events, ("call-1", "call-2"))
-
-
-def test_harness_cancellation_publishes_a_result_returned_before_executor_cleanup() -> None:
-    tool_call = ToolCall(call_id="call-1", name="read", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
-    )
-
-    class SlowCleanupExecutor:
-        def __init__(self) -> None:
-            self.cleaning_up = anyio.Event()
-
-        async def execute(self, call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-            yield ToolExecutionEnded(
-                call_id=call.call_id, name=call.name, output="real output", is_error=False
-            )
-            # The result is already returned; cancellation arrives while cleaning up.
-            self.cleaning_up.set()
-            await anyio.sleep_forever()
-
-    async def run() -> list[object]:
-        executor = SlowCleanupExecutor()
-        harness = _harness(provider, executor=executor)
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("initial")])
-
-        with anyio.fail_after(2):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await executor.cleaning_up.wait()
-                assert harness.cancel()
-        return events
-
-    events = anyio.run(run)
-
-    results = [event for event in events if isinstance(event, ToolResultReady)]
-    assert [(event.call_id, event.output, event.process_state) for event in results] == [
-        ("call-1", "real output", None)
-    ]
-    assert [
-        (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
-    ] == [("cancelled", "cancelled")]
-    assert_settled_tool_calls(events, ("call-1",))
-
-
-def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> None:
-    calls = (
-        ToolCall(call_id="call-1", name="read", arguments={}),
-        ToolCall(call_id="call-2", name="read", arguments={}),
-    )
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=calls,
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
-    )
-
-    async def run() -> list[object]:
-        failed = anyio.Event()
-        harness = _harness(
-            provider,
-            executor=FailingAndBlockingPreparedExecutor(failed),
-        )
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("initial")])
-
-        with anyio.fail_after(2):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await failed.wait()
-                assert harness.cancel()
-        return events
-
-    events = anyio.run(run)
-
-    results = [event for event in events if isinstance(event, ToolResultReady)]
-    assert [event.call_id for event in results] == ["call-1", "call-2"]
-    assert all(event.process_state == "cancelled" for event in results)
-    assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
-        "Agent run cancelled"
-    ]
-    completed = [event for event in events if isinstance(event, TurnCompleted)]
-    assert len(completed) == 1
-    assert completed[0].outcome == "cancelled"
-
-
-def test_harness_cancel_after_prepared_terminal_finishes_batch_then_cancels_turn() -> None:
-    calls = (
-        ToolCall(call_id="call-1", name="read", arguments={}),
-        ToolCall(call_id="call-2", name="read", arguments={}),
-    )
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=calls,
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
-    )
-    harness = _harness(provider, executor=ImmediatePreparedExecutor())
-
-    async def run() -> list[object]:
-        emitted: list[object] = []
-        async for event in harness.prompt("initial"):
-            emitted.append(event)
-            if isinstance(event, ToolExecutionEnded) and event.call_id == "call-1":
-                assert harness.cancel()
-        return emitted
-
-    events = anyio.run(run)
-
-    assert [event.call_id for event in events if isinstance(event, ToolExecutionEnded)] == [
-        "call-1",
-        "call-2",
-    ]
-    assert [event.call_id for event in events if isinstance(event, ToolResultReady)] == [
-        "call-1",
-        "call-2",
-    ]
-    completed = [event for event in events if isinstance(event, TurnCompleted)]
-    assert len(completed) == 1
-    assert completed[0].outcome == "cancelled"
-    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
-        ("user", None),
-        ("assistant", None),
-        ("tool", "call-1"),
-        ("tool", "call-2"),
-    ]
-
-
-def test_harness_cancel_after_tool_execution_end_preserves_tool_output() -> None:
-    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
-    harness = _harness(
-        provider,
-        tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
-    )
-
-    async def run() -> list[object]:
-        emitted: list[object] = []
-        async for event in harness.prompt("initial"):
-            emitted.append(event)
-            if isinstance(event, ToolExecutionEnded):
-                assert harness.cancel()
-        return emitted
-
-    events = anyio.run(run)
-
-    assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial"),
-        ("assistant", "checking"),
-        ("tool", "tool output"),
-    ]
-    tool_message = harness.messages[-1]
-    assert tool_message.tool_call_id == "call-1"
-    assert tool_message.tool_name == "lookup"
-    assert tool_message.is_error is False
-
-
 def test_harness_does_not_retain_empty_failed_completion() -> None:
     provider = ScriptedProvider(
         [
@@ -2116,7 +691,7 @@ def test_harness_does_not_retain_empty_failed_completion() -> None:
             ]
         ]
     )
-    harness = _harness(provider)
+    harness = build_harness(provider)
 
     async def run() -> list[object]:
         return [event async for event in harness.prompt("initial")]
@@ -2124,29 +699,6 @@ def test_harness_does_not_retain_empty_failed_completion() -> None:
     events = anyio.run(run)
 
     assert any(event.type == "message.completed" and event.content == "" for event in events)
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial")
-    ]
-
-
-def test_harness_failure_preserves_follow_up_queue_without_injection() -> None:
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]
-    )
-    harness = _harness(provider)
-    harness.follow_up("retry later")
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(RuntimeError, match="provider failed"):
-            async for event in harness.prompt("initial"):
-                events.append(event)
-        return events
-
-    events = anyio.run(run)
-
-    assert not any(isinstance(event, QueueMessageInjected) for event in events)
-    assert [message.content for message in harness.queued_messages.follow_up] == ["retry later"]
     assert [(message.role, message.content) for message in harness.messages] == [
         ("user", "initial")
     ]
@@ -2214,479 +766,8 @@ def test_harness_invocation_offsets_preserve_turn_numbers_and_tool_limit(
     assert_turn_terminals(events)
 
 
-def test_harness_follow_up_preserves_tool_iteration_limit_across_segments() -> None:
-    first_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    second_call = ToolCall(call_id="call-2", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=first_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(first_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=second_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(second_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-        ]
-    )
-    executor = RecordingToolExecutor()
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=executor,
-            tools=(
-                ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),
-            ),
-            max_tool_iterations=1,
-        )
-    )
-    harness.follow_up("use another tool")
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(RuntimeError, match="Maximum tool iterations exceeded: 1"):
-            async for event in harness.prompt("initial"):
-                events.append(event)
-        return events
-
-    events = anyio.run(run)
-
-    assert executor.calls == [first_call]
-    assert isinstance(events[-1], TurnCompleted)
-    assert events[-1].outcome == "failed"
-
-
-def test_harness_uses_one_primary_loop_for_tool_steering_and_follow_up(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Queue boundaries continue the same loop rather than reconstructing offsets."""
-
-    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test", response_id="steered-response"),
-                ProviderResponseCompleted(content="steered", response_id="steered-response"),
-            ],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="followed")],
-        ]
-    )
-    harness = _harness(
-        provider,
-        tools=(ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),),
-    )
-    harness.steer("change direction")
-    harness.follow_up("finish this")
-    real_run_agent_loop = agent_harness_module.run_agent_loop
-    loop_calls = 0
-
-    def recording_run_agent_loop(*args: object, **kwargs: object) -> object:
-        nonlocal loop_calls
-        loop_calls += 1
-        return real_run_agent_loop(*args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(agent_harness_module, "run_agent_loop", recording_run_agent_loop)
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert loop_calls == 1
-    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "change direction",
-        "finish this",
-    ]
-    assert provider.calls[1].messages[-1].content == "change direction"
-    assert [message.content for message in provider.calls[2].extra_messages] == ["finish this"]
-
-
-def test_harness_rejects_a_stale_rebase_without_mutating_its_transcript() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderResponseCompleted(content="answer", response_id="response-1"),
-            ]
-        ]
-    )
-    harness = _harness(provider)
-
-    class StalePreparer:
-        async def prepare_boundary(self, *, context: object) -> RequestBoundaryDecision | None:
-            del context
-            return RequestBoundaryDecision(
-                context_rebase=RequestContextRebase(
-                    base_messages=(Message(role="user", content="bad summary"),),
-                    expected_continuation_messages=(),
-                )
-            )
-
-    async def run() -> None:
-        with pytest.raises(
-            RequestBoundaryUnsupportedError,
-            match="expected continuation does not match",
-        ):
-            async for _event in harness.prompt("initial", boundary_preparer=StalePreparer()):
-                pass
-
-    anyio.run(run)
-
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial"),
-        ("assistant", "answer"),
-    ]
-
-
-def test_harness_drains_steering_before_first_provider_request() -> None:
-    harness = _harness(ScriptedProvider([]))
-    harness.append_message(Message(role="user", content="initial"))
-    harness.steer("preflight steering")
-
-    events = harness.drain_steering()
-
-    assert isinstance(events[0], QueueMessageInjected)
-    assert events[0].content == "preflight steering"
-    assert isinstance(events[-1], QueueUpdated)
-    assert harness.messages[-1].content == "preflight steering"
-    assert harness.queued_messages.steering == ()
-
-
-def test_queue_message_injected_event_round_trips() -> None:
-    event = QueueMessageInjected(kind="follow_up", content="continue")
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_harness_injects_steering_after_complete_tool_batch() -> None:
-    tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="adjusted answer"),
-            ],
-        ]
-    )
-    harness = _harness(
-        provider,
-        tools=(ToolSpec(name="lookup", description="Look up", input_schema={"type": "object"}),),
-    )
-    harness.steer("change direction")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [(message.role, message.content) for message in harness.messages] == [
-        ("user", "initial"),
-        ("assistant", "checking"),
-        ("tool", "tool output"),
-        ("user", "change direction"),
-        ("assistant", "adjusted answer"),
-    ]
-    injected_index = next(
-        index for index, event in enumerate(events) if isinstance(event, QueueMessageInjected)
-    )
-    completed_indices = [
-        index for index, event in enumerate(events) if isinstance(event, TurnCompleted)
-    ]
-    assert completed_indices[0] < injected_index < completed_indices[1]
-    replayed = provider.calls[1].messages[-3:]
-    assert [message.role for message in replayed] == ["assistant", "tool", "user"]
-    assert replayed[0].tool_calls is not None
-    assert replayed[0].tool_calls[0].call_id == "call-1"
-    assert replayed[1].content == "tool output"
-    assert replayed[2].content == "change direction"
-
-
-def test_harness_all_mode_injects_steering_batch_before_follow_up() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="first answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="steered answer"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="follow-up answer"),
-            ],
-        ]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            steering_mode="all",
-        )
-    )
-    harness.steer("one")
-    harness.steer("two")
-    harness.follow_up("after steering")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [
-        (event.kind, event.content) for event in events if isinstance(event, QueueMessageInjected)
-    ] == [
-        ("steering", "one"),
-        ("steering", "two"),
-        ("follow_up", "after steering"),
-    ]
-    assert [event.steering for event in events if isinstance(event, QueueUpdated)] == [(), ()]
-    assert [(message.role, message.content) for message in provider.calls[1].messages[-2:]] == [
-        ("user", "one"),
-        ("user", "two"),
-    ]
-
-
-def test_harness_drains_steering_one_at_a_time_across_turn_boundaries() -> None:
-    provider = ScriptedProvider(
-        [
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="first")],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="second")],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="third")],
-        ]
-    )
-    harness = _harness(provider)
-    harness.steer("steer one")
-    harness.steer("steer two")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "steer one",
-        "steer two",
-    ]
-    assert [event.steering for event in events if isinstance(event, QueueUpdated)] == [
-        ("steer two",),
-        (),
-    ]
-    assert [call.messages[-1].content for call in provider.calls] == [
-        "initial",
-        "steer one",
-        "steer two",
-    ]
-
-
-@pytest.mark.parametrize("prepared", [False, True])
-def test_harness_cancellation_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None:
-    call = ToolCall(call_id="call-1", name="read", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="", tool_calls=(call,), finish_reason="tool_calls"
-                ),
-            ],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="unused")],
-        ]
-    )
-    harness = _harness(
-        provider,
-        executor=ImmediatePreparedExecutor() if prepared else RecordingToolExecutor(),
-        tools=(ToolSpec(name="read", description="Read", input_schema={"type": "object"}),),
-    )
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        async for event in harness.prompt("initial"):
-            events.append(event)
-            if isinstance(event, TurnCompleted):
-                assert harness.cancel()
-        return events
-
-    events = anyio.run(run)
-    assert_cancellation_settled(events)
-    assert len(provider.calls) == 1
-    assert len([event for event in events if isinstance(event, TurnCompleted)]) == 1
-    assert not harness.is_running
-    assert not harness.cancel()
-
-
-def test_harness_cancellation_at_turn_boundary_preserves_steering() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="answer"),
-            ]
-        ]
-    )
-    harness = _harness(provider)
-    harness.steer("do not inject")
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        async for event in harness.prompt("initial"):
-            events.append(event)
-            if isinstance(event, TurnCompleted):
-                assert harness.cancel()
-        return events
-
-    events = anyio.run(run)
-
-    assert not any(isinstance(event, QueueMessageInjected) for event in events)
-    assert [message.content for message in harness.queued_messages.steering] == ["do not inject"]
-    assert events[-1].type == "error"
-
-
-def test_harness_close_mid_all_batch_preserves_unexposed_steering() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="answer"),
-            ]
-        ]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            steering_mode="all",
-        )
-    )
-    harness.steer("visible")
-    harness.steer("still queued")
-
-    async def run() -> QueueMessageInjected:
-        events = harness.prompt("initial")
-        async for event in events:
-            if isinstance(event, QueueMessageInjected):
-                await events.aclose()
-                return event
-        raise AssertionError("missing steering injection")
-
-    injected = anyio.run(run)
-
-    assert injected.content == "visible"
-    assert [message.content for message in harness.queued_messages.steering] == ["still queued"]
-    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
-        ("assistant", "answer"),
-        ("user", "visible"),
-    ]
-
-
-def test_harness_close_mid_all_follow_up_batch_preserves_unexposed_messages() -> None:
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")]]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            follow_up_mode="all",
-        )
-    )
-    harness.follow_up("visible")
-    harness.follow_up("still queued")
-
-    async def run() -> QueueMessageInjected:
-        events = harness.prompt("initial")
-        async for event in events:
-            if isinstance(event, QueueMessageInjected):
-                await events.aclose()
-                return event
-        raise AssertionError("missing follow-up injection")
-
-    injected = anyio.run(run)
-
-    assert injected.kind == "follow_up"
-    assert injected.content == "visible"
-    assert [message.content for message in harness.queued_messages.follow_up] == ["still queued"]
-    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
-        ("assistant", "answer"),
-        ("user", "visible"),
-    ]
-
-
-def test_harness_injects_steering_after_denied_tool_result() -> None:
-    tool_call = ToolCall(call_id="call-1", name="mutate", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="respected denial"),
-            ],
-        ]
-    )
-    harness = _harness(
-        provider,
-        executor=RecordingToolExecutor("denied", is_error=True),
-        tools=(ToolSpec(name="mutate", description="Mutate", input_schema={"type": "object"}),),
-    )
-    harness.steer("continue without mutation")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    result = next(event for event in events if isinstance(event, ToolExecutionEnded))
-    assert result.is_error is True
-    assert any(
-        isinstance(event, QueueMessageInjected) and event.kind == "steering" for event in events
-    )
-    assert harness.messages[-1].content == "respected denial"
-
-
 def test_harness_rejects_non_user_prompt_messages() -> None:
-    harness = _harness(ScriptedProvider([]))
+    harness = build_harness(ScriptedProvider([]))
 
     with pytest.raises(ValueError, match="require a user message"):
         harness.prompt_message(Message(role="assistant", content="not a prompt"))
