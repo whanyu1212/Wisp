@@ -31,7 +31,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_param import ResponseInputItemParam, ResponseInputParam
 
-from wisp.agent.messages import Message, Role
+from wisp.agent.messages import Message, NativeOutput, Role
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -39,6 +39,7 @@ from wisp.providers.base import (
     ToolSpec,
     is_context_overflow_message,
 )
+from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
     JsonObject,
     ProviderEvent,
@@ -56,6 +57,11 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 OpenAIRole = Literal["user", "assistant", "system", "developer"]
+# Responses whose output items are kept in memory for replay on later prompts.
+# Sessions also save each response's items with its row (see native_output_for).
+_NATIVE_OUTPUT_CAPACITY = 2048
+
+type _NativeOutputLookup = Callable[[Message], tuple[dict[str, object], ...] | None]
 
 
 @runtime_checkable
@@ -73,6 +79,11 @@ class OpenAIProvider:
     _base_url: str | None = None
     supports_prompt_cache_key = True
     supports_continuation_messages: Literal[True] = True
+    # Whether a fresh request replays each earlier response's own output items
+    # (including encrypted reasoning) instead of a portable rebuild, so the
+    # prompt cache reaches the previous run's tail. Enabled per provider once
+    # its backend has been checked to accept the replayed items.
+    _replays_native_output: bool = False
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Declare that portable call/result pairs can be reconstructed natively."""
@@ -96,6 +107,7 @@ class OpenAIProvider:
         self._client_api_key: str | None = None
         self._auth_resolver = auth_resolver
         self._retry_policy = retry_policy or RetryPolicy()
+        self._native_outputs = ContinuationStore[NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
 
     async def stream(
         self,
@@ -202,6 +214,7 @@ class OpenAIProvider:
         chunks: list[str] = []
         tool_calls: list[ToolCall] = []
         usage: ProviderUsage | None = None
+        completed_response: Response | None = None
         failure: ProviderResponseFailed | None = None
         stream_completed = False
 
@@ -214,6 +227,7 @@ class OpenAIProvider:
                 elif isinstance(event, ResponseCompletedEvent):
                     response_id = event.response.id
                     usage = _usage_from_openai(event.response)
+                    completed_response = event.response
                     stream_completed = True
                     break
                 elif isinstance(event, ResponseTextDeltaEvent | ResponseRefusalDeltaEvent):
@@ -323,6 +337,20 @@ class OpenAIProvider:
             )
             return
 
+        if (
+            self._replays_native_output
+            and response_id is not None
+            and completed_response is not None
+        ):
+            # A later prompt rebuilds this response from its transcript row;
+            # replaying these exact items keeps that rebuild cacheable.
+            replay_items = _replay_items(completed_response)
+            if replay_items:
+                self._native_outputs.remember(
+                    response_id,
+                    NativeOutput(provider=self.name, model=selected_model, items=replay_items),
+                )
+
         for content_index, tool_call in enumerate(tool_calls):
             yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
 
@@ -360,6 +388,11 @@ class OpenAIProvider:
             _messages_to_response_input(
                 (*messages, *extra_messages),
                 explicit_prompt_cache=explicit_prompt_cache,
+                native_output=(
+                    (lambda message: self._native_output(message, model=model))
+                    if self._replays_native_output
+                    else None
+                ),
             )
             if previous_response_id is None
             else [
@@ -391,6 +424,8 @@ class OpenAIProvider:
             kwargs["reasoning"] = {"effort": effort}
         if prompt_cache_key is not None:
             kwargs["prompt_cache_key"] = prompt_cache_key
+        if self._replays_native_output:
+            kwargs["include"] = ["reasoning.encrypted_content"]
         if explicit_prompt_cache:
             # openai-python 2.44 does not yet expose GPT-5.6's request-wide
             # prompt_cache_options field, so use its documented forward-compatible
@@ -404,6 +439,52 @@ class OpenAIProvider:
         """Return provider-specific Responses request fields."""
 
         return {}
+
+    def native_output_for(self, response_id: str) -> NativeOutput | None:
+        """Return the output items recorded for one of this provider's responses.
+
+        Args:
+            response_id (str): Upstream response ID from a completed response.
+
+        Returns:
+            NativeOutput | None: The response's items, or None when replay is
+            disabled for this provider or the response is unknown.
+        """
+
+        return self._native_outputs.get(response_id)
+
+    def _native_output(
+        self,
+        message: Message,
+        *,
+        model: str,
+    ) -> tuple[dict[str, object], ...] | None:
+        """Return the output items that produced an assistant row, if replayable.
+
+        Items saved on the row win over the in-memory record. Encrypted reasoning
+        belongs to the model that produced it, so items from another provider or
+        model are not replayed, and a record without a message item cannot stand
+        for a row that has text.
+
+        Args:
+            message (Message): Transcript row being rebuilt for a fresh request.
+            model (str): Model the request is sent to.
+
+        Returns:
+            tuple[dict[str, object], ...] | None: The response's items in their
+            original order, or None to render the row in portable form.
+        """
+
+        if message.role != "assistant" or message.response_id is None:
+            return None
+        native = message.native_output or self._native_outputs.get(
+            message.response_id, refresh=True
+        )
+        if native is None or native.provider != self.name or native.model != model:
+            return None
+        if message.content and not any(item.get("type") == "message" for item in native.items):
+            return None
+        return native.items
 
     async def _client_or_create(self) -> AsyncOpenAI:
         if self._client_is_injected:
@@ -501,14 +582,30 @@ def _incomplete_response_message(response: Response, *, display_name: str = "Ope
     return f"{display_name} response incomplete"
 
 
+def _replay_items(response: Response) -> tuple[dict[str, object], ...]:
+    """Return a completed response's output items as a fresh request can resend them."""
+
+    items: list[dict[str, object]] = []
+    for item in response.output:
+        payload = item.model_dump(mode="json", exclude_none=True)
+        payload.pop("id", None)
+        items.append(payload)
+    return tuple(items)
+
+
 def _messages_to_response_input(
     messages: Sequence[Message],
     *,
     explicit_prompt_cache: bool = False,
+    native_output: _NativeOutputLookup | None = None,
 ) -> ResponseInputParam:
     response_input: ResponseInputParam = []
     boundary_written = False
     for message in messages:
+        native_items = native_output(message) if native_output is not None else None
+        if native_items is not None:
+            response_input.extend(cast(list[ResponseInputItemParam], list(native_items)))
+            continue
         if message.role == "tool" and message.tool_call_id:
             response_input.append(
                 cast(

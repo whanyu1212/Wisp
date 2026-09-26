@@ -9,6 +9,9 @@ from openai import AsyncOpenAI
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningItem,
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningTextDeltaEvent,
     ResponseStreamEvent,
@@ -16,7 +19,7 @@ from openai.types.responses import (
 )
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
+from wisp.agent.messages import Message, NativeOutput
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -24,6 +27,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
 )
+from wisp.providers.openai import OpenAIProvider
 from wisp.providers.xai import DEFAULT_XAI_MODEL, XAIProvider
 
 
@@ -109,6 +113,7 @@ def test_xai_provider_uses_stateful_responses_request_and_native_continuation() 
             ],
             "previous_response_id": "resp-1",
             "reasoning": {"effort": "high"},
+            "include": ["reasoning.encrypted_content"],
         }
     ]
 
@@ -204,3 +209,134 @@ def _completed_event() -> ResponseCompletedEvent:
         sequence_number=3,
         type="response.completed",
     )
+
+
+class _ScriptedResponses:
+    """Return one completed response per request, recording each request."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> AsyncIterator[ResponseStreamEvent]:
+        self.calls.append(dict(kwargs))
+        response_id = f"resp-{len(self.calls)}"
+
+        async def stream() -> AsyncIterator[ResponseStreamEvent]:
+            yield _text_delta("hello")
+            yield _completed_with_output(response_id)
+
+        return stream()
+
+
+_REPLAYED_ITEMS = [
+    {"summary": [], "type": "reasoning", "encrypted_content": "enc"},
+    {
+        "content": [{"annotations": [], "text": "hello", "type": "output_text"}],
+        "role": "assistant",
+        "status": "completed",
+        "type": "message",
+    },
+]
+
+
+def _completed_with_output(response_id: str) -> ResponseCompletedEvent:
+    event = _completed_event()
+    response = event.response.model_copy(
+        update={
+            "id": response_id,
+            "output": [
+                ResponseReasoningItem(
+                    id="rs-1", type="reasoning", summary=[], encrypted_content="enc"
+                ),
+                ResponseOutputMessage(
+                    id="msg-1",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[ResponseOutputText(type="output_text", text="hello", annotations=[])],
+                ),
+            ],
+        }
+    )
+    return event.model_copy(update={"response": response})
+
+
+def _follow_up_history(native_output: NativeOutput | None = None) -> list[Message]:
+    return [
+        Message(role="user", content="hi"),
+        Message(
+            role="assistant", content="hello", response_id="resp-1", native_output=native_output
+        ),
+        Message(role="user", content="next"),
+    ]
+
+
+def _run_prompts(provider: OpenAIProvider, *prompts: tuple[list[Message], str]) -> None:
+    async def run() -> None:
+        for messages, model in prompts:
+            async for _event in provider.stream(messages, model=model):
+                pass
+
+    anyio.run(run)
+
+
+def test_xai_fresh_request_replays_the_previous_responses_output_items() -> None:
+    responses = _ScriptedResponses()
+    provider = XAIProvider(client=cast(AsyncOpenAI, _StubClient(responses)))
+
+    _run_prompts(
+        provider,
+        ([Message(role="user", content="hi")], "grok-4.5"),
+        (_follow_up_history(), "grok-4.5"),
+        (_follow_up_history(), "grok-4.6"),
+    )
+
+    assert responses.calls[0]["include"] == ["reasoning.encrypted_content"]
+    assert responses.calls[1]["input"] == [
+        {"role": "user", "content": "hi"},
+        *_REPLAYED_ITEMS,
+        {"role": "user", "content": "next"},
+    ]
+    # Encrypted reasoning belongs to the model that produced it.
+    assert responses.calls[2]["input"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "next"},
+    ]
+    native = provider.native_output_for("resp-1")
+    assert native is not None
+    assert (native.provider, native.model) == ("xai", "grok-4.5")
+
+
+def test_xai_replays_items_saved_on_the_row_from_a_new_provider_instance() -> None:
+    responses = _ScriptedResponses()
+    provider = XAIProvider(client=cast(AsyncOpenAI, _StubClient(responses)))
+    saved = NativeOutput(provider="xai", model="grok-4.5", items=tuple(_REPLAYED_ITEMS))
+
+    _run_prompts(provider, (_follow_up_history(saved), "grok-4.5"))
+
+    assert responses.calls[0]["input"] == [
+        {"role": "user", "content": "hi"},
+        *_REPLAYED_ITEMS,
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_openai_provider_keeps_the_portable_rebuild_until_replay_is_enabled() -> None:
+    responses = _ScriptedResponses()
+    provider = OpenAIProvider(client=cast(AsyncOpenAI, _StubClient(responses)))
+    saved = NativeOutput(provider="openai", model="gpt-test", items=tuple(_REPLAYED_ITEMS))
+
+    _run_prompts(
+        provider,
+        ([Message(role="user", content="hi")], "gpt-test"),
+        (_follow_up_history(saved), "gpt-test"),
+    )
+
+    assert all("include" not in call for call in responses.calls)
+    assert responses.calls[1]["input"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+        {"role": "user", "content": "next"},
+    ]
+    assert provider.native_output_for("resp-1") is None
