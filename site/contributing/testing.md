@@ -9,6 +9,22 @@ The complete suite runs against deterministic fake or scripted providers, so the
 JSONL sessions are exercised without API keys, live model calls, or provider credentials. Run the
 complete command before considering a change verified.
 
+## Layout
+
+Unit and integration tests mirror the source tree: tests for `src/wisp/<package>/<module>.py` live
+in `tests/<package>/`, usually as `test_<module>.py`, and tests for a top-level module such as
+`wisp.retry` live directly in `tests/`. Other kinds of test have their own directories:
+
+| Directory | Contents |
+| -- | -- |
+| `tests/tui_e2e/` | Drive the built `wisp-tui` binary over a pseudo-terminal; skipped unless `RUST_TUI_BINARY_UNDER_TEST` is set |
+| `tests/benchmarks/` | Timing and resource-bound checks (`benchmark` marker) |
+| `tests/docs/` | Keep documentation, the book's examples, and SDK examples in sync with the code |
+| `tests/scripts/` | Tests for the helpers in `scripts/` |
+| `tests/repository/` | Repository-wide rules: architecture boundaries, versions, fuzz corpus, test isolation |
+| `tests/support/` | Shared helpers imported by tests; not collected |
+| `tests/fixtures/` | Static fixture files |
+
 ## Test selection
 
 CI splits the suite into two jobs that run side by side; use the same commands when triaging:
@@ -40,8 +56,8 @@ rather than live models.
 For changes to conversation orchestration, start with:
 
 ```bash
-uv run pytest tests/agent/test_agent_harness.py tests/agent/test_agent_harness_interruptions.py \
-  tests/agent/test_agent_runtime_invariants.py tests/coding/test_coding_session.py tests/agent/test_compaction.py
+uv run pytest tests/agent/harness/test_runner.py tests/agent/harness/test_interruptions.py \
+  tests/agent/test_runtime_invariants.py tests/coding/test_session.py tests/coding/test_compaction.py
 ```
 
 The interruption matrix records a normal event sequence for streaming, sequential and parallel
@@ -68,20 +84,20 @@ cargo fmt --all --check
 cargo check --workspace --all-targets --all-features
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
-uv run pytest tests/rust_tui/test_rust_tui_launcher.py tests/rust_tui/test_rust_tui_supervision.py
+uv run pytest tests/cli/native_tui/test_rust_launcher.py tests/cli/native_tui/test_supervision.py
 ```
 
-The cross-language PTY smoke test requires a built binary and runs on macOS and Linux:
+The cross-language PTY tests require a built binary and run on macOS and Linux:
 
 ```bash
 cargo build -p wisp-tui
 RUST_TUI_BINARY_UNDER_TEST="$(pwd)/target/debug/wisp-tui" \
-  uv run pytest tests/rust_tui/test_rust_tui_smoke.py
+  uv run pytest tests/tui_e2e
 ```
 
 `RUST_TUI_BINARY_UNDER_TEST` belongs only to this test harness. It is not launcher configuration and
 must not be documented as a normal way to run Wisp; source launches use the absolute
-`WISP_RUST_TUI_BINARY` override instead. Without the test-only variable, the smoke test skips.
+`WISP_RUST_TUI_BINARY` override instead. Without the test-only variable, these tests skip.
 
 ## CI policy
 

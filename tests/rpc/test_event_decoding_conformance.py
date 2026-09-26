@@ -24,7 +24,7 @@ from typing import Annotated, Any, cast
 from pydantic import TypeAdapter, ValidationError
 from pydantic_core import PydanticUndefined
 
-from tests.paths import FIXTURES_DIR, REPO_ROOT
+from tests.support.paths import FIXTURES_DIR, REPO_ROOT
 from wisp.events import KnownWispEventAdapter, wisp_event_from_dict
 from wisp.rpc.protocol_schema import _adapter_models
 

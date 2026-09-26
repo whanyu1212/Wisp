@@ -194,7 +194,7 @@ Success at one layer does not replace the others.
 ## 8. Checkpoint
 
 ```bash
-uv run pytest tests/repository/test_crafting_side_effects.py
+uv run pytest tests/docs/crafting/test_side_effects.py
 ```
 
 **Exercise 1: catalog versus policy.** Expose `edit` but disallow it in policy.

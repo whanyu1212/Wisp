@@ -90,10 +90,10 @@ jobs:
       - name: Test platform-sensitive paths
         run: >-
           uv run pytest
-          tests/mcp/test_mcp_runtime_process.py
-          tests/tools/test_process_manager.py
-          tests/rpc/test_rpc_transport.py
-          tests/tools/test_secure_tool_filesystem.py
+          tests/mcp/test_runtime_process.py
+          tests/tools/shell/test_supervisor.py
+          tests/cli/test_rpc_transport.py
+          tests/tools/files/test_secure_fs.py
           --durations=20
 
       - name: Smoke-test fake-provider CLI

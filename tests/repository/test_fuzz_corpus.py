@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.paths import REPO_ROOT
+from tests.support.paths import REPO_ROOT
 
 ROOT = REPO_ROOT
 SPEC = importlib.util.spec_from_file_location(

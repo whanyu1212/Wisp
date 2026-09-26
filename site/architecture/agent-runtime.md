@@ -184,5 +184,5 @@ Runtime event order is observable through the SDK, RPC, persistence, and fronten
 - interrupted tool exchanges are repaired before the next provider request;
 - optional provider capabilities are detected rather than assumed.
 
-Focused assertions for these contracts live in `tests/agent_runtime.py` and
-`tests/agent/test_agent_runtime_invariants.py`.
+Focused assertions for these contracts live in `tests/support/agent_runtime.py` and
+`tests/agent/test_runtime_invariants.py`.

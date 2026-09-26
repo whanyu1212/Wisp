@@ -57,7 +57,7 @@ These are the existing #459 conformance suites. They do not replace #468 hardeni
 ### Launcher and no-fallback
 
 ```bash
-uv run pytest tests/rust_tui/test_rust_tui_launcher.py tests/rust_tui/test_rust_tui_supervision.py
+uv run pytest tests/cli/native_tui/test_rust_launcher.py tests/cli/native_tui/test_supervision.py
 ```
 
 These lock Textual as the default, reject a missing or non-executable Rust binary, and keep explicit
@@ -68,7 +68,7 @@ Rust failure from selecting Textual.
 ```bash
 cargo build -p wisp-tui
 RUST_TUI_BINARY_UNDER_TEST="$(pwd)/target/debug/wisp-tui" \
-  uv run pytest tests/rust_tui/test_rust_tui_smoke.py
+  uv run pytest tests/tui_e2e/test_smoke.py
 ```
 
 Exit 0: 5 passed in 8.68s. Without `RUST_TUI_BINARY_UNDER_TEST` the same file skips (5 skipped);
