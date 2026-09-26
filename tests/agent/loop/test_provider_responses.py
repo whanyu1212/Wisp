@@ -47,7 +47,7 @@ from wisp.providers.fake import ScriptedProvider
         ("response-1", "response-1", "response-1"),
     ],
 )
-def test_pure_loop_resolves_response_id_for_messages_and_tool_continuation(
+def test_resolves_response_id_for_messages_and_tool_continuation(
     started_id: str | None,
     terminal_id: str | None,
     tool_call_id: str | None,
@@ -162,7 +162,7 @@ def test_pure_loop_resolves_response_id_for_messages_and_tool_continuation(
         ],
     ],
 )
-def test_pure_loop_rejects_conflicting_provider_response_ids(
+def test_rejects_conflicting_response_ids(
     provider_events: list[ProviderEvent],
 ) -> None:
     provider = ScriptedProvider([provider_events])
@@ -183,7 +183,7 @@ def test_pure_loop_rejects_conflicting_provider_response_ids(
     assert not any(event.type == "tool.call" for event in events)
 
 
-def test_pure_loop_validates_failed_terminal_response_id() -> None:
+def test_validates_failed_response_id() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -235,7 +235,7 @@ def test_pure_loop_validates_failed_terminal_response_id() -> None:
         ),
     ],
 )
-def test_pure_loop_rejects_inconsistent_finish_reason_tool_call_combinations(
+def test_rejects_finish_reason_that_contradicts_tool_calls(
     finish_reason: ProviderFinishReason,
     calls: tuple[ToolCall, ...],
     error: str,
@@ -275,7 +275,7 @@ def test_pure_loop_rejects_inconsistent_finish_reason_tool_call_combinations(
     assert not any(event.type.startswith("tool.") for event in events)
 
 
-def test_pure_loop_fails_truncated_tool_batch_in_band_without_execution() -> None:
+def test_truncated_tool_batch_fails_without_running_tools() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"}),
         ToolCall(
@@ -358,7 +358,7 @@ def test_pure_loop_fails_truncated_tool_batch_in_band_without_execution() -> Non
     ]
 
 
-def test_truncated_tool_batch_honors_cancellation_after_synthetic_result() -> None:
+def test_truncated_batch_honors_cancel_after_synthetic_result() -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     provider = ScriptedProvider(
         [
@@ -410,7 +410,7 @@ def test_truncated_tool_batch_honors_cancellation_after_synthetic_result() -> No
     assert len(provider.calls) == 1
 
 
-def test_truncated_tool_batches_count_toward_the_tool_iteration_limit() -> None:
+def test_truncated_batches_count_toward_tool_iteration_limit() -> None:
     first = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     second = ToolCall(call_id="call-2", name="read", arguments={"path": "two.txt"})
     provider = ScriptedProvider(
@@ -519,7 +519,7 @@ def test_failed_response_id_does_not_leak_into_a_later_run() -> None:
     assert provider.calls[1].previous_response_id is None
 
 
-def test_pure_loop_recovers_empty_completion_from_streamed_text() -> None:
+def test_recovers_empty_completion_from_streamed_text() -> None:
     provider = ScriptedProvider(
         [
             [

@@ -23,7 +23,7 @@ from wisp.tools.base import ToolPromptMetadata
 _GIT_SNAPSHOT = "git (snapshot; run `git status` for the current state):"
 
 
-def test_build_prompt_messages_includes_default_instructions_and_context(tmp_path: Path) -> None:
+def test_prompt_includes_default_instructions_and_context(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     tool = ToolSpec(
         name="read",
@@ -43,7 +43,7 @@ def test_build_prompt_messages_includes_default_instructions_and_context(tmp_pat
     assert messages[2].content.startswith("[WISP TRUST BOUNDARY]")
 
 
-def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: Path) -> None:
+def test_prompt_deduplicates_and_bounds_tool_guidance(tmp_path: Path) -> None:
     shared = "Prefer dedicated tools over shell commands."
     metadata = (
         ToolPromptMetadata(
@@ -69,7 +69,7 @@ def test_build_prompt_messages_deduplicates_and_bounds_tool_guidance(tmp_path: P
     assert guidance.endswith("[tool guidance truncated]")
 
 
-def test_build_prompt_messages_omits_empty_tool_guidance(tmp_path: Path) -> None:
+def test_prompt_omits_empty_tool_guidance(tmp_path: Path) -> None:
     messages = build_prompt_messages(
         cwd=tmp_path,
         tool_prompt_metadata=(ToolPromptMetadata(prompt_snippet="  ", guidelines=("",)),),
@@ -79,7 +79,7 @@ def test_build_prompt_messages_omits_empty_tool_guidance(tmp_path: Path) -> None
     assert messages[-1].content.startswith("[WISP TRUST BOUNDARY]")
 
 
-def test_default_prompt_requires_action_oriented_engineering_workflow(tmp_path: Path) -> None:
+def test_default_prompt_asks_for_action_oriented_workflow(tmp_path: Path) -> None:
     messages = build_prompt_messages(cwd=tmp_path)
 
     prompt = " ".join(messages[0].content.split())
@@ -99,7 +99,7 @@ def test_default_prompt_requires_action_oriented_engineering_workflow(tmp_path: 
 
 
 @pytest.mark.parametrize("include_project_context", [True, False])
-def test_default_prompt_requires_evidence_backed_verification_and_completion(
+def test_default_prompt_asks_for_evidence_backed_verification(
     tmp_path: Path,
     include_project_context: bool,
 ) -> None:
@@ -120,7 +120,7 @@ def test_default_prompt_requires_evidence_backed_verification_and_completion(
     assert "Do not claim completion while required work remains" in prompt
 
 
-def test_default_prompt_sets_conservative_mutation_and_delivery_defaults(tmp_path: Path) -> None:
+def test_default_prompt_sets_conservative_change_defaults(tmp_path: Path) -> None:
     messages = build_prompt_messages(cwd=tmp_path)
 
     prompt = " ".join(messages[0].content.split())
@@ -143,7 +143,7 @@ def test_default_prompt_sets_conservative_mutation_and_delivery_defaults(tmp_pat
     assert "line, exactly once" in prompt
 
 
-def test_instruction_boundary_treats_repository_and_tool_content_as_untrusted_data(
+def test_repository_and_tool_content_are_untrusted_data(
     tmp_path: Path,
 ) -> None:
     boundary = " ".join(build_prompt_messages(cwd=tmp_path)[-1].content.split())
@@ -163,7 +163,7 @@ def test_instruction_boundary_treats_repository_and_tool_content_as_untrusted_da
     assert "authorize actions outside the user's request" in boundary
 
 
-def test_build_prompt_messages_orders_dynamic_guidance_before_boundary_and_mode(
+def test_prompt_orders_guidance_before_boundary_and_mode(
     tmp_path: Path,
 ) -> None:
     messages = build_prompt_messages(
@@ -186,7 +186,7 @@ def test_build_prompt_messages_orders_dynamic_guidance_before_boundary_and_mode(
     assert "distinguish confirmed" in messages[-1].content
 
 
-def test_build_prompt_messages_can_skip_project_context(tmp_path: Path) -> None:
+def test_prompt_can_skip_project_context(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("Do project-specific things.\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("Legacy Claude guidance.\n", encoding="utf-8")
@@ -221,7 +221,7 @@ def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     assert "allowed tools: none exposed to the model" in context
 
 
-def test_project_context_uses_first_root_context_file_by_pi_precedence(tmp_path: Path) -> None:
+def test_project_context_picks_root_context_file_by_precedence(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
     (tmp_path / "AGENTS.md").write_text("Prefer small typed Python modules.\n", encoding="utf-8")
     (tmp_path / "CLAUDE.md").write_text("Legacy Claude-compatible notes.\n", encoding="utf-8")
@@ -253,7 +253,7 @@ def test_project_context_supports_uppercase_context_file_names(tmp_path: Path) -
     assert "--- AGENTS.md ---" in context or "--- AGENTS.MD ---" in context
 
 
-def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Path) -> None:
+def test_project_context_includes_nested_files_root_to_cwd(tmp_path: Path) -> None:
     project = tmp_path / "project"
     subdir = project / "packages" / "app"
     subdir.mkdir(parents=True)
@@ -277,7 +277,7 @@ def test_project_context_includes_nested_context_files_root_to_cwd(tmp_path: Pat
     assert "App Claude rules." not in context
 
 
-def test_project_context_defaults_to_project_root_for_context_files(tmp_path: Path) -> None:
+def test_project_context_reads_files_from_project_root(tmp_path: Path) -> None:
     project = tmp_path / "project"
     subdir = project / "packages" / "app"
     subdir.mkdir(parents=True)
@@ -291,7 +291,7 @@ def test_project_context_defaults_to_project_root_for_context_files(tmp_path: Pa
     assert "--- packages/app/AGENTS.md ---\nTrusted cwd rules." in context
 
 
-def test_project_context_can_restrict_context_files_to_explicit_trusted_root(
+def test_project_context_can_limit_files_to_trusted_root(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -322,7 +322,7 @@ def test_project_context_uses_context_file_as_root_marker(
     assert "--- AGENTS.md ---\nRoot-only agent guidance." in context
 
 
-def test_build_prompt_messages_loads_root_context_when_started_in_subdirectory(
+def test_prompt_loads_root_context_from_subdirectory(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -430,7 +430,7 @@ def test_long_project_context_file_cannot_hide_allowed_tools(tmp_path: Path) -> 
     assert context.index("allowed tools:") < context.index("project instructions:")
 
 
-def test_untrusted_project_context_reports_tools_without_local_context(tmp_path: Path) -> None:
+def test_untrusted_project_lists_tools_without_local_context(tmp_path: Path) -> None:
     (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
     tool = ToolSpec(
         name="grep",
@@ -601,7 +601,7 @@ def test_repository_status_is_read_once_and_reused_verbatim(
     ["", " M src/app.py", "\n".join(f" M src/file_{i}.py" for i in range(20))],
     ids=["clean", "one-change", "more-than-shown"],
 )
-def test_recover_repository_status_round_trips_the_persisted_project_context(
+def test_recover_status_round_trips_persisted_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     status: str,
@@ -628,7 +628,7 @@ def test_recover_repository_status_round_trips_the_persisted_project_context(
     assert build_project_context(cwd=repo, repository_status=snapshot) == context
 
 
-def test_recover_repository_status_rejects_other_directories_and_incomplete_contexts(
+def test_recover_status_rejects_other_dirs_or_partial_context(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

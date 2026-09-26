@@ -64,7 +64,7 @@ class CacheAwareScriptedProvider(ScriptedProvider):
     supports_prompt_cache_key = True
 
 
-def test_agent_loop_delegates_context_budget_to_shared_policy(
+def test_delegates_context_budget_to_shared_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = ScriptedProvider(
@@ -132,7 +132,7 @@ def test_agent_loop_delegates_context_budget_to_shared_policy(
     )
 
 
-def test_pure_loop_streams_without_application_dependencies() -> None:
+def test_streams_without_application_dependencies() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -183,7 +183,7 @@ class RaisingCancellationToken:
         raise RuntimeError("boom")
 
 
-def test_pure_loop_does_not_mask_cancellation_token_errors() -> None:
+def test_does_not_mask_cancellation_token_errors() -> None:
     """A cancellation-token failure before the first turn must not raise UnboundLocalError.
 
     Regression test for #359: `turn` was previously only bound inside the loop body
@@ -211,7 +211,7 @@ def test_pure_loop_does_not_mask_cancellation_token_errors() -> None:
     assert [event.type for event in events] == ["error"]
 
 
-def test_pure_loop_does_not_complete_unstarted_turn_with_nonzero_offset() -> None:
+def test_does_not_complete_unstarted_turn_with_offset() -> None:
     """A nonzero turn_offset must not make an unstarted turn look completed.
 
     Regression test for a follow-up to #359: using `turn > 0` to decide whether to
@@ -243,7 +243,7 @@ def test_pure_loop_does_not_complete_unstarted_turn_with_nonzero_offset() -> Non
     assert_turn_terminals(events)
 
 
-def test_pure_loop_passes_the_provider_response_model_to_cost_estimator() -> None:
+def test_cost_estimator_gets_the_response_model() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -304,7 +304,7 @@ def test_pure_loop_passes_the_provider_response_model_to_cost_estimator() -> Non
     assert completed.cost.estimated_usd == Decimal("0.00002")
 
 
-def test_pure_loop_marks_missing_usage_unpriced_without_losing_the_response() -> None:
+def test_missing_usage_is_unpriced_but_response_is_kept() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="model"), ProviderResponseCompleted(content="done")]]
     )
@@ -327,7 +327,7 @@ def test_pure_loop_marks_missing_usage_unpriced_without_losing_the_response() ->
     assert events[-1].type == "turn.completed"
 
 
-def test_pure_loop_contains_cost_estimator_failures() -> None:
+def test_contains_cost_estimator_failures() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -394,7 +394,7 @@ class _LegacyProviderWithoutEffortParameter:
         yield ProviderResponseCompleted(content="hello")
 
 
-def test_pure_loop_does_not_break_a_provider_without_an_effort_parameter() -> None:
+def test_works_with_provider_without_effort_parameter() -> None:
     # Regression test for a real Codex finding: config.effort defaults to
     # None, but the loop previously passed effort=None unconditionally on
     # every call, which raised TypeError against any Provider implemented
@@ -427,7 +427,7 @@ def test_pure_loop_does_not_break_a_provider_without_an_effort_parameter() -> No
     ]
 
 
-def test_pure_loop_forwards_effort_to_a_provider_that_supports_it() -> None:
+def test_forwards_effort_to_provider_that_supports_it() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -457,7 +457,7 @@ def test_pure_loop_forwards_effort_to_a_provider_that_supports_it() -> None:
     assert provider.calls[0].effort == "high"
 
 
-def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
+def test_forwards_executor_events_and_provider_results() -> None:
     call = ToolCall(
         call_id="call-1",
         name="bash",
@@ -558,7 +558,7 @@ def test_pure_loop_forwards_executor_events_and_provider_results() -> None:
     assert ended_round_tripped.stdout == "tool stdout\n"
 
 
-def test_raised_context_overflow_closes_started_message_before_retry() -> None:
+def test_context_overflow_closes_started_message_before_retry() -> None:
     """A raised overflow must settle the public response before a retry turn."""
 
     class StartedOverflowProvider:
@@ -725,7 +725,7 @@ def test_context_overflow_hook_retries_in_the_same_loop(raised: bool) -> None:
 
 @pytest.mark.parametrize("raised", [False, True])
 @pytest.mark.parametrize("with_hook", [False, True])
-def test_unrecovered_overflow_preserves_events_and_exception_contract(
+def test_unrecovered_overflow_keeps_events_and_raises(
     raised: bool,
     with_hook: bool,
 ) -> None:
@@ -798,7 +798,7 @@ def test_unrecovered_overflow_preserves_events_and_exception_contract(
 
 
 @pytest.mark.parametrize("had_tool_calls", [False, True])
-def test_cancellation_after_completed_turn_preserves_boundary_behavior(
+def test_cancel_after_completed_turn_keeps_boundary_behavior(
     had_tool_calls: bool,
 ) -> None:
     class Token:

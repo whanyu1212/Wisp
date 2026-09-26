@@ -96,7 +96,7 @@ class ScriptedToolExecutor:
             yield cast(ToolExecutionEvent, event)
 
 
-def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
+def test_projection_keeps_the_complete_wire_payload() -> None:
     ended = ToolExecutionEnded(
         message_entry_id="persisted-result",
         call_id="call-1",
@@ -156,7 +156,7 @@ def test_tool_result_projection_preserves_the_complete_wire_payload() -> None:
     assert wisp_event_from_json(result.model_dump_json()) == result
 
 
-def test_completion_and_continuation_snapshot_projection_is_single_and_isolated(
+def test_snapshots_are_projected_once_and_isolated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     call = ToolCall(
@@ -223,7 +223,7 @@ def test_completion_and_continuation_snapshot_projection_is_single_and_isolated(
     )
 
 
-def test_execution_end_immediately_precedes_projected_tool_result() -> None:
+def test_execution_end_directly_precedes_tool_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -319,7 +319,7 @@ def _run_bash_loop(
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
-def test_pure_loop_exposes_bash_exit_code_to_provider(
+def test_bash_exit_code_reaches_provider(
     tmp_path: Path,
     exit_code: int,
 ) -> None:
@@ -335,7 +335,7 @@ def test_pure_loop_exposes_bash_exit_code_to_provider(
     assert result.output_has_exit_status is True
 
 
-def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
+def test_bash_timeout_reaches_provider_as_inconclusive_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -368,7 +368,7 @@ def test_pure_loop_exposes_bash_timeout_as_inconclusive_error(
     assert result.exit_code is None
 
 
-def test_pure_loop_rejects_executor_with_unresolved_approval() -> None:
+def test_rejects_executor_with_unresolved_approval() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -407,7 +407,7 @@ def test_pure_loop_rejects_executor_with_unresolved_approval() -> None:
         (ExtraEventExecutor(), "emitted an event after the result"),
     ],
 )
-def test_pure_loop_rejects_malformed_terminal_results(
+def test_rejects_malformed_tool_results(
     executor: ToolExecutor,
     error: str,
 ) -> None:
@@ -509,7 +509,7 @@ def _terminal_result(*, is_error: bool = False) -> ToolExecutionEnded:
         ),
     ],
 )
-def test_pure_loop_rejects_malformed_approval_lifecycle(
+def test_rejects_malformed_approval_lifecycle(
     events: tuple[object, ...],
     error: str,
 ) -> None:
@@ -549,7 +549,7 @@ def test_pure_loop_rejects_malformed_approval_lifecycle(
     assert len(provider.calls) == 1
 
 
-def test_pure_loop_rejects_type_changing_nested_approval_arguments() -> None:
+def test_rejects_approval_that_changes_nested_argument_types() -> None:
     call = ToolCall(
         call_id="call-1",
         name="bash",
@@ -586,7 +586,7 @@ def test_pure_loop_rejects_type_changing_nested_approval_arguments() -> None:
     anyio.run(run)
 
 
-def test_pure_loop_accepts_denied_approval_with_error_result() -> None:
+def test_accepts_denied_approval_with_error_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -645,7 +645,7 @@ class WriteSnapshotExecutor:
         )
 
 
-def test_pure_loop_forwards_before_text_across_the_wire() -> None:
+def test_forwards_before_text_across_the_wire() -> None:
     # The write tool's pre-write snapshot AND its create flag must reach
     # ToolResultReady AND survive serialization: the TUI renderer only sees events
     # after the agent subprocess serializes them to JSON, so a field that doesn't
@@ -714,7 +714,7 @@ class SummaryExecutor:
         )
 
 
-def test_pure_loop_forwards_summary_across_the_wire() -> None:
+def test_forwards_summary_across_the_wire() -> None:
     # A read-type tool's one-line summary AND its truncation flag must reach
     # ToolResultReady AND survive serialization — the renderer shows the summary in
     # place of the raw output, and the card shows a "truncated" marker on expand, so a

@@ -49,7 +49,7 @@ class OpaqueReplayScriptedProvider(ScriptedProvider):
         return effort is None
 
 
-def test_request_boundary_hook_not_configured_matches_default_behavior() -> None:
+def test_no_hook_matches_default_behavior() -> None:
     """No hook configured must produce the exact same events as before hooks existed."""
 
     provider = ScriptedProvider([completed_stream("hi")])
@@ -77,7 +77,7 @@ def test_request_boundary_hook_not_configured_matches_default_behavior() -> None
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_can_stop_after_tool_round() -> None:
+def test_hook_can_stop_after_tool_round() -> None:
     """A hook may still stop the run at the tool-round boundary."""
 
     provider = ScriptedProvider(
@@ -119,7 +119,7 @@ def test_request_boundary_hook_can_stop_after_tool_round() -> None:
     assert hook.snapshots[0].had_tool_calls is True
 
 
-def test_request_boundary_snapshot_mutation_does_not_leak_to_next_boundary() -> None:
+def test_snapshot_edits_do_not_leak_to_next_boundary() -> None:
     """A snapshot mutation at one boundary must not appear in a later one.
 
     If `continuation_messages` were shared (not deep-copied) with
@@ -198,7 +198,7 @@ def test_request_boundary_snapshot_mutation_does_not_leak_to_next_boundary() -> 
     assert hook.second_boundary_arguments == {"path": "original"}
 
 
-def test_request_boundary_hook_stop_wins_over_unused_message_edits() -> None:
+def test_stop_wins_over_unused_message_edits() -> None:
     """`stop=True` is honored even when combined with `messages`/`extra_messages`.
 
     Regression for #363 review: the loop previously raised
@@ -250,7 +250,7 @@ def test_request_boundary_hook_stop_wins_over_unused_message_edits() -> None:
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_injects_steering_after_tool_round() -> None:
+def test_hook_injects_steering_after_tool_round() -> None:
     """A capable provider can receive steering injected right after a tool round.
 
     `ScriptedProvider` declares `supports_continuation_messages = True`, so
@@ -313,7 +313,7 @@ def test_request_boundary_hook_injects_steering_after_tool_round() -> None:
     assert second_call.messages == messages
 
 
-def test_request_boundary_hook_rejects_tool_shaped_extra_message_with_no_history() -> None:
+def test_rejects_tool_shaped_extra_message_without_history() -> None:
     """A hook's own `extra_messages` must not carry tool-shaped content either.
 
     Regression for #363 review: earlier validation only checked the loop's
@@ -351,7 +351,7 @@ def test_request_boundary_hook_rejects_tool_shaped_extra_message_with_no_history
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_replaces_context_with_active_tool_exchange() -> None:
+def test_replaces_context_with_active_tool_exchange() -> None:
     """A full replacement may retain the active structured tool pair."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -388,7 +388,7 @@ def test_request_boundary_hook_replaces_context_with_active_tool_exchange() -> N
     assert provider.calls[1].previous_response_id is None
 
 
-def test_request_boundary_hook_rejects_orphaned_tool_replacement() -> None:
+def test_rejects_orphaned_tool_replacement() -> None:
     """A fresh replacement cannot inject a tool result without its call."""
 
     provider = ScriptedProvider([completed_stream("first")])
@@ -419,7 +419,7 @@ def test_request_boundary_hook_rejects_orphaned_tool_replacement() -> None:
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_rejects_interleaved_or_mismatched_tool_replacement() -> None:
+def test_rejects_interleaved_or_mismatched_tool_replacement() -> None:
     """Structured replacements preserve the native assistant/result adjacency."""
 
     provider = ScriptedProvider([completed_stream("first")])
@@ -462,7 +462,7 @@ def test_request_boundary_hook_rejects_interleaved_or_mismatched_tool_replacemen
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_rejects_opaque_structured_tool_replacement() -> None:
+def test_rejects_opaque_structured_tool_replacement() -> None:
     """Providers may guard configurations with unrepresentable native blocks."""
 
     provider = OpaqueReplayScriptedProvider([completed_stream("first")])
@@ -505,7 +505,7 @@ def test_request_boundary_hook_rejects_opaque_structured_tool_replacement() -> N
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_rejects_mismatched_tool_name_in_replacement() -> None:
+def test_rejects_mismatched_tool_name_in_replacement() -> None:
     """A tool result must retain the provider-visible name of its matching call."""
 
     provider = ScriptedProvider([completed_stream("first")])
@@ -547,7 +547,7 @@ def test_request_boundary_hook_rejects_mismatched_tool_name_in_replacement() -> 
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_fires_after_clean_turn_and_can_continue() -> None:
+def test_hook_fires_after_clean_turn_and_can_continue() -> None:
     """A hook can turn a would-be-final turn (no tool calls) into a follow-up.
 
     `ScriptedProvider` is `ContinuationMessageProvider`-capable, so the
@@ -613,7 +613,7 @@ class _LegacyProviderWithoutContinuationMessages:
             yield item
 
 
-def test_request_boundary_hook_folds_clean_continuation_for_incapable_provider() -> None:
+def test_folds_clean_continuation_for_incapable_provider() -> None:
     """A provider without ContinuationMessageProvider support keeps today's fold fallback."""
 
     provider = _LegacyProviderWithoutContinuationMessages(
@@ -671,7 +671,7 @@ class _PromptCacheOnlyProvider:
             yield event
 
 
-def test_request_boundary_keeps_prompt_cache_capability_independent() -> None:
+def test_prompt_cache_capability_is_independent() -> None:
     """A prompt-cache-only provider never receives the new optional keyword."""
 
     provider = _PromptCacheOnlyProvider([completed_stream("first"), completed_stream("second")])
@@ -703,7 +703,7 @@ def test_request_boundary_keeps_prompt_cache_capability_independent() -> None:
     ]
 
 
-def test_request_boundary_combines_prompt_cache_and_native_append() -> None:
+def test_combines_prompt_cache_and_native_append() -> None:
     """A provider opting into both features receives each independently."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -732,7 +732,7 @@ def test_request_boundary_combines_prompt_cache_and_native_append() -> None:
     ]
 
 
-def test_request_boundary_replacement_folds_extras_and_discards_old_state() -> None:
+def test_replacement_folds_extras_and_discards_old_state() -> None:
     """Replacement plus extras is fresh and later snapshots cannot see old context."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -765,7 +765,7 @@ def test_request_boundary_replacement_folds_extras_and_discards_old_state() -> N
     ]
 
 
-def test_request_boundary_folds_idless_clean_response_before_appending() -> None:
+def test_folds_id_less_clean_response_before_appending() -> None:
     """The loop does not invent a public response ID for a clean response."""
 
     provider = ScriptedProvider(
@@ -801,7 +801,7 @@ def test_request_boundary_folds_idless_clean_response_before_appending() -> None
 
 
 @pytest.mark.parametrize("had_tool_calls", [False, True])
-def test_request_boundary_hook_failure_does_not_double_complete_the_turn(
+def test_hook_failure_does_not_complete_turn_twice(
     had_tool_calls: bool,
 ) -> None:
     """A hook failure after a completed turn must not emit a second TurnCompleted.
@@ -849,7 +849,7 @@ def test_request_boundary_hook_failure_does_not_double_complete_the_turn(
     assert_turn_terminals(collected)
 
 
-def test_request_boundary_hook_stops_clean_turn_after_earlier_tool_round() -> None:
+def test_hook_stops_clean_turn_after_earlier_tool_round() -> None:
     """A clean turn that follows an earlier tool round can only stop, not continue.
 
     Regression for #363 review: no provider-native mechanism carries a tool
@@ -910,7 +910,7 @@ def test_request_boundary_hook_stops_clean_turn_after_earlier_tool_round() -> No
     )
 
 
-def test_request_boundary_hook_continues_plain_after_earlier_tool_round() -> None:
+def test_hook_continues_plain_after_earlier_tool_round() -> None:
     """A capable provider can continue past a clean turn that followed a tool round.
 
     The provider's own `previous_response_id` continuation already carries
@@ -968,7 +968,7 @@ def test_request_boundary_hook_continues_plain_after_earlier_tool_round() -> Non
     assert provider.calls[2].previous_response_id is not None
 
 
-def test_request_boundary_hook_injects_after_earlier_tool_round() -> None:
+def test_hook_injects_after_earlier_tool_round() -> None:
     """A capable provider can also receive injected content at that later boundary.
 
     `messages`/`extra_messages` were unsupported here before a real
@@ -1023,7 +1023,7 @@ def test_request_boundary_hook_injects_after_earlier_tool_round() -> None:
     assert provider.calls[2].messages == messages
 
 
-def test_request_boundary_hook_rejects_plain_continuation_for_incapable_provider() -> None:
+def test_rejects_plain_continuation_for_incapable_provider() -> None:
     """An incapable provider still cannot continue past a boundary with tool history.
 
     Preserves the original, narrower contract for a provider that doesn't
@@ -1071,7 +1071,7 @@ def test_request_boundary_hook_rejects_plain_continuation_for_incapable_provider
     assert len(provider.calls) == 2
 
 
-def test_request_boundary_hook_rejects_injection_for_incapable_provider() -> None:
+def test_rejects_injection_for_incapable_provider() -> None:
     """An incapable provider still cannot receive injected content immediately
 
     after a tool round, either -- there is no delivery channel for it at
@@ -1115,7 +1115,7 @@ def test_request_boundary_hook_rejects_injection_for_incapable_provider() -> Non
     assert len(provider.calls) == 1
 
 
-def test_request_boundary_hook_can_replace_base_messages() -> None:
+def test_hook_can_replace_base_messages() -> None:
     """A hook can replace the loop's base history (e.g. after compaction)."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -1146,7 +1146,7 @@ def test_request_boundary_hook_can_replace_base_messages() -> None:
     assert provider.calls[1].previous_response_id is None
 
 
-def test_request_boundary_context_rebase_keeps_live_native_continuation() -> None:
+def test_rebase_keeps_live_native_continuation() -> None:
     """A rebase changes only the portable base beneath an active tool cursor."""
 
     tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
@@ -1206,7 +1206,7 @@ def test_request_boundary_context_rebase_keeps_live_native_continuation() -> Non
     assert len(executor.calls) == 1
 
 
-def test_clean_boundary_rebase_drops_consumed_tool_results() -> None:
+def test_clean_rebase_drops_consumed_tool_results() -> None:
     """A clean response must not resend the prior round's tool results."""
 
     tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
@@ -1266,7 +1266,7 @@ def test_clean_boundary_rebase_drops_consumed_tool_results() -> None:
     assert [message.content for message in provider.calls[2].extra_messages] == ["follow up"]
 
 
-def test_request_boundary_context_rebase_rejects_stale_continuation() -> None:
+def test_rebase_rejects_stale_continuation() -> None:
     """A stale compaction plan must not mutate the loop's continuation state."""
 
     provider = ScriptedProvider([completed_stream("first")])

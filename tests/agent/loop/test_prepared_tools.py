@@ -123,7 +123,7 @@ def _scripted_tool_batch_provider(calls: tuple[ToolCall, ...]) -> ScriptedProvid
     )
 
 
-def test_prepared_tool_batch_overlaps_execution_and_publishes_source_order() -> None:
+def test_overlaps_execution_and_publishes_in_source_order() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -180,7 +180,7 @@ def test_prepared_tool_batch_overlaps_execution_and_publishes_source_order() -> 
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_configured_parallel_batch_isolates_tool_owned_failure() -> None:
+def test_parallel_batch_isolates_one_tool_failure() -> None:
     calls = (
         ToolCall(call_id="call-1", name="first", arguments={}),
         ToolCall(call_id="call-2", name="second", arguments={}),
@@ -230,7 +230,7 @@ def test_configured_parallel_batch_isolates_tool_owned_failure() -> None:
 
 
 @pytest.mark.parametrize("first_raises", [True, False])
-def test_prepared_cancellation_distinguishes_tool_results_from_settlement(
+def test_cancel_separates_tool_results_from_settlement(
     first_raises: bool,
 ) -> None:
     class Token:
@@ -288,7 +288,7 @@ def test_prepared_cancellation_distinguishes_tool_results_from_settlement(
     assert_continuation_invariants(events)
 
 
-def test_prepared_failure_matches_later_repeated_call_occurrence() -> None:
+def test_failure_matches_later_repeated_call() -> None:
     calls = (
         ToolCall(call_id="repeat", name="lookup", arguments={"n": 1}),
         ToolCall(call_id="middle", name="lookup", arguments={"n": 2}),
@@ -380,7 +380,7 @@ def _assert_batch_left_unsettled(events: Sequence[object]) -> None:
 
 
 @pytest.mark.parametrize("phase", ["preparation", "execution"])
-def test_prepared_batch_propagates_an_unrequested_scope_cancellation(
+def test_propagates_unrequested_scope_cancellation(
     phase: Literal["preparation", "execution"],
 ) -> None:
     async def run() -> tuple[bool, list[object]]:
@@ -407,7 +407,7 @@ def test_prepared_batch_propagates_an_unrequested_scope_cancellation(
 
 
 @pytest.mark.parametrize("phase", ["preparation", "execution"])
-def test_prepared_batch_propagates_native_asyncio_task_cancellation(
+def test_propagates_asyncio_task_cancellation(
     phase: Literal["preparation", "execution"],
 ) -> None:
     async def main() -> list[object]:
@@ -424,7 +424,7 @@ def test_prepared_batch_propagates_native_asyncio_task_cancellation(
 
 
 @pytest.mark.parametrize("phase", ["preparation", "execution"])
-def test_prepared_batch_settles_a_cancellation_requested_by_the_harness(
+def test_settles_cancellation_requested_by_harness(
     phase: Literal["preparation", "execution"],
 ) -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
@@ -459,7 +459,7 @@ def test_prepared_batch_settles_a_cancellation_requested_by_the_harness(
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_prepared_cancellation_skips_already_settled_duplicate_snapshot() -> None:
+def test_cancel_skips_already_settled_duplicate() -> None:
     class Token:
         cancelled = False
 
@@ -500,7 +500,7 @@ def test_prepared_cancellation_skips_already_settled_duplicate_snapshot() -> Non
     assert_continuation_invariants(events)
 
 
-def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> None:
+def test_does_not_start_after_cooperative_cancellation() -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = _scripted_tool_batch_provider((call,))
 
@@ -571,7 +571,7 @@ def test_prepared_tool_batch_does_not_start_after_cooperative_cancellation() -> 
     assert len(provider.calls) == 1
 
 
-def test_prepared_tool_batch_enforces_bounded_live_tasks(
+def test_bounds_live_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(prepared_tools_module, "_MAX_PARALLEL_TOOL_EXECUTIONS", 2)
@@ -631,7 +631,7 @@ def test_prepared_tool_batch_enforces_bounded_live_tasks(
     assert len([event for event in events if isinstance(event, ToolResultReady)]) == 5
 
 
-def test_prepared_tool_batch_publishes_sibling_results_before_fatal_error() -> None:
+def test_publishes_sibling_results_before_fatal_error() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -672,7 +672,7 @@ def test_prepared_tool_batch_publishes_sibling_results_before_fatal_error() -> N
     assert len(provider.calls) == 1
 
 
-def test_prepared_tool_batch_publishes_sibling_after_malformed_terminal() -> None:
+def test_publishes_sibling_after_malformed_result() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -707,7 +707,7 @@ def test_prepared_tool_batch_publishes_sibling_after_malformed_terminal() -> Non
     assert completed[-1].outcome == "failed"
 
 
-def test_prepared_tool_batch_with_sequential_call_runs_entire_batch_serially() -> None:
+def test_one_sequential_call_makes_whole_batch_serial() -> None:
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="tool", arguments={}) for index in range(1, 4)
     )

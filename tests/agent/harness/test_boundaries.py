@@ -37,7 +37,7 @@ from wisp.providers.events import (
 from wisp.providers.fake import ScriptedProvider
 
 
-def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> None:
+def test_coordinator_rejects_unarmed_or_mismatched_boundary() -> None:
     harness = build_harness(ScriptedProvider([]))
     coordinator = agent_boundary_module._HarnessBoundaryCoordinator(
         get_messages=lambda: harness.messages,
@@ -70,7 +70,7 @@ def test_boundary_coordinator_rejects_unarmed_and_mismatched_boundaries() -> Non
     anyio.run(run)
 
 
-def test_boundary_coordinator_returns_replacement_without_mutating_transcript() -> None:
+def test_coordinator_replacement_leaves_transcript_untouched() -> None:
     original = Message(role="user", content="old")
     replacement = Message(role="user", content="compressed")
     extra = Message(role="user", content="steered")
@@ -122,7 +122,7 @@ def test_boundary_coordinator_returns_replacement_without_mutating_transcript() 
     assert coordinator.pending_transcript_replacement is None
 
 
-def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition() -> None:
+def test_fallback_replacement_needs_no_pending_transition() -> None:
     user = Message(role="user", content="initial")
     injected = Message(role="user", content="steered")
     harness = build_harness(ScriptedProvider([]), messages=(user, injected))
@@ -161,7 +161,7 @@ def test_boundary_coordinator_fallback_replacement_needs_no_pending_transition()
 
 @pytest.mark.parametrize("raised", [False, True])
 @pytest.mark.parametrize("empty_replacement", [False, True])
-def test_harness_applies_overflow_replacement_only_when_retry_starts(
+def test_overflow_replacement_applies_only_when_retry_starts(
     raised: bool, empty_replacement: bool
 ) -> None:
     original = Message(role="user", content="long prompt")
@@ -213,7 +213,7 @@ def test_harness_applies_overflow_replacement_only_when_retry_starts(
     assert harness.messages[-1].content == "done"
 
 
-def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
+def test_rebases_active_boundary_after_transcript_replacement() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -288,7 +288,7 @@ def test_harness_rebases_active_boundary_after_transcript_replacement() -> None:
 
 
 @pytest.mark.parametrize("transition", ["replacement", "rebase", "overflow"])
-def test_harness_boundary_adoption_detaches_callback_and_provider_messages(transition: str) -> None:
+def test_adopted_boundary_detaches_callback_and_provider_messages(transition: str) -> None:
     class NativeProvider(ScriptedProvider):
         def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
             return True
@@ -357,7 +357,7 @@ def test_harness_boundary_adoption_detaches_callback_and_provider_messages(trans
     anyio.run(run)
 
 
-def test_boundary_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
+def test_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
     original = message_with_nested_arguments(role="user")
     expected = original.model_copy(deep=True)
     harness = build_harness(ScriptedProvider([]), messages=(original,))
@@ -403,7 +403,7 @@ def test_boundary_callback_cannot_mutate_transcript_injections_or_fallback() -> 
     anyio.run(run)
 
 
-def test_harness_rejects_a_stale_rebase_without_mutating_its_transcript() -> None:
+def test_stale_rebase_is_rejected_without_touching_transcript() -> None:
     provider = ScriptedProvider(
         [
             [

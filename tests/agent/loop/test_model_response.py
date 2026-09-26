@@ -157,7 +157,7 @@ def test_resolve_provider_response_id_rejects_conflicts() -> None:
         )
 
 
-def test_lifecycle_rejects_inconsistent_finish_reason_and_tool_calls() -> None:
+def test_lifecycle_rejects_mismatched_finish_reason_and_tools() -> None:
     call = _call()
     empty = ProviderResponseLifecycle()
     empty.start(ProviderResponseStarted(model="test"))
@@ -183,7 +183,7 @@ def test_lifecycle_failed_response_does_not_require_start() -> None:
     assert failed.response.message == "upstream failed"
 
 
-def test_open_provider_stream_omits_optional_keywords_for_legacy_providers() -> None:
+def test_omits_optional_keywords_for_providers_without_them() -> None:
     provider = _LegacyProvider()
     config = _config(provider=provider, prompt_cache_key="wisp:session-1")
     messages = (Message(role="user", content="hi"),)
@@ -245,7 +245,7 @@ def test_project_usage_and_cost_covers_unavailable_reasons() -> None:
     assert failed.unavailable_reason == "estimation_failed"
 
 
-def test_iter_provider_events_promotes_overflow_shaped_exceptions() -> None:
+def test_overflow_shaped_exception_becomes_context_overflow() -> None:
     async def run() -> None:
         with pytest.raises(ContextOverflowError, match="maximum context length exceeded"):
             async for _event in iter_provider_events(_OverflowStream()):
@@ -254,7 +254,7 @@ def test_iter_provider_events_promotes_overflow_shaped_exceptions() -> None:
     anyio.run(run)
 
 
-def test_iter_provider_events_does_not_promote_overflow_shaped_close_after_terminal() -> None:
+def test_close_error_after_terminal_is_not_treated_as_overflow() -> None:
     async def events() -> AsyncIterator[ProviderEvent]:
         try:
             yield ProviderResponseStarted(model="test")
@@ -274,7 +274,7 @@ def test_iter_provider_events_does_not_promote_overflow_shaped_close_after_termi
     anyio.run(run)
 
 
-def test_completed_response_does_not_classify_overflow_worded_close_as_overflow() -> None:
+def test_completed_response_ignores_overflow_worded_close() -> None:
     stream = ModelResponseStream(
         config=_config(provider=_ClosingOverflowProvider()),
         messages=(Message(role="user", content="go"),),
@@ -294,7 +294,7 @@ def test_completed_response_does_not_classify_overflow_worded_close_as_overflow(
     anyio.run(run)
 
 
-def test_model_response_reports_cancellation_to_the_loop_as_an_internal_outcome() -> None:
+def test_cancellation_is_reported_to_loop_as_internal_outcome() -> None:
     stream = ModelResponseStream(
         config=_config(cancellation_token=_CancelledToken()),
         messages=(Message(role="user", content="go"),),

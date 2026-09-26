@@ -11,7 +11,7 @@ from wisp.agent.harness import AgentHarnessConfig
 from wisp.providers.fake import ScriptedProvider
 
 
-def test_agent_harness_config_preserves_positional_field_order() -> None:
+def test_positional_field_order_is_stable() -> None:
     config = AgentHarnessConfig(
         ScriptedProvider([]),
         RecordingToolExecutor(),
@@ -41,9 +41,7 @@ def test_agent_harness_config_preserves_positional_field_order() -> None:
         ("context_pressure_threshold", float("inf")),
     ],
 )
-def test_agent_harness_config_rejects_invalid_shared_runtime_limits(
-    field: str, value: object
-) -> None:
+def test_rejects_invalid_runtime_limits(field: str, value: object) -> None:
     with pytest.raises(ValueError, match=field):
         AgentHarnessConfig(
             provider=ScriptedProvider([]),
@@ -52,7 +50,7 @@ def test_agent_harness_config_rejects_invalid_shared_runtime_limits(
         )
 
 
-def test_agent_harness_config_accepts_runtime_limit_boundaries() -> None:
+def test_accepts_runtime_limits_at_their_bounds() -> None:
     config = AgentHarnessConfig(
         provider=ScriptedProvider([]),
         tool_executor=RecordingToolExecutor(),

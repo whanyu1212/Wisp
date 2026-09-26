@@ -11,7 +11,7 @@ from wisp.agent.loop import AgentLoopConfig
 from wisp.providers.fake import ScriptedProvider
 
 
-def test_agent_loop_config_preserves_positional_field_order() -> None:
+def test_positional_field_order_is_stable() -> None:
     config = AgentLoopConfig(
         ScriptedProvider([]),
         NeverToolExecutor(),
@@ -52,9 +52,7 @@ def test_agent_loop_config_preserves_positional_field_order() -> None:
         ("tool_iteration_offset", False, "tool_iteration_offset"),
     ],
 )
-def test_agent_loop_config_rejects_invalid_runtime_limits(
-    field: str, value: object, message: str
-) -> None:
+def test_rejects_invalid_runtime_limits(field: str, value: object, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         AgentLoopConfig(
             provider=ScriptedProvider([]),
@@ -63,7 +61,7 @@ def test_agent_loop_config_rejects_invalid_runtime_limits(
         )
 
 
-def test_agent_loop_config_accepts_runtime_limit_boundaries() -> None:
+def test_accepts_runtime_limits_at_their_bounds() -> None:
     config = AgentLoopConfig(
         provider=ScriptedProvider([]),
         tool_executor=NeverToolExecutor(),

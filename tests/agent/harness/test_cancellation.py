@@ -165,7 +165,7 @@ class BlockingProvider:
         yield ProviderResponseCompleted(content="too late")
 
 
-def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
+def test_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> None:
     async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
         provider = BlockingProvider(
             waiting=anyio.Event(),
@@ -204,7 +204,7 @@ def test_harness_cancel_stops_at_event_boundary_and_marks_turn_cancelled() -> No
     assert_tool_result_pairing(events)
 
 
-def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
+def test_cancel_interrupts_blocked_provider_stream() -> None:
     async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
         provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
         harness = build_harness(provider)
@@ -236,7 +236,7 @@ def test_harness_cancel_interrupts_a_blocked_provider_stream() -> None:
     assert harness.is_running is False
 
 
-def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> None:
+def test_close_after_tool_finishes_keeps_tool_output() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -273,7 +273,7 @@ def test_harness_closing_after_tool_execution_end_preserves_tool_output() -> Non
     ]
 
 
-def test_harness_cancellation_drains_prepared_batch_results_in_source_order() -> None:
+def test_cancel_drains_prepared_batch_results_in_source_order() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -332,7 +332,7 @@ def test_harness_cancellation_drains_prepared_batch_results_in_source_order() ->
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_harness_cancellation_settles_a_blocked_sequential_batch() -> None:
+def test_cancel_settles_blocked_sequential_batch() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -404,7 +404,7 @@ def test_harness_cancellation_settles_a_blocked_sequential_batch() -> None:
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_harness_cancellation_publishes_a_result_returned_before_executor_cleanup() -> None:
+def test_cancel_publishes_result_returned_before_executor_cleanup() -> None:
     tool_call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
         [
@@ -460,7 +460,7 @@ def test_harness_cancellation_publishes_a_result_returned_before_executor_cleanu
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> None:
+def test_cancel_settles_batch_before_sibling_executor_error() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -511,7 +511,7 @@ def test_harness_cancellation_settles_batch_before_sibling_executor_error() -> N
     assert completed[0].outcome == "cancelled"
 
 
-def test_harness_cancel_after_prepared_terminal_finishes_batch_then_cancels_turn() -> None:
+def test_cancel_after_prepared_result_finishes_batch_then_turn() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -561,7 +561,7 @@ def test_harness_cancel_after_prepared_terminal_finishes_batch_then_cancels_turn
     ]
 
 
-def test_harness_cancel_after_tool_execution_end_preserves_tool_output() -> None:
+def test_cancel_after_tool_finishes_keeps_tool_output() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -604,7 +604,7 @@ def test_harness_cancel_after_tool_execution_end_preserves_tool_output() -> None
 
 
 @pytest.mark.parametrize("prepared", [False, True])
-def test_harness_cancellation_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None:
+def test_cancel_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
         [
