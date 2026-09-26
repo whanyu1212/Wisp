@@ -50,7 +50,7 @@ def test_prompt_cache_boundary_is_transient_provider_metadata() -> None:
     assert context_fingerprint((marked,)) == context_fingerprint((unmarked,))
 
 
-def test_complete_historical_exchange_uses_assistant_json_fallback_by_default() -> None:
+def test_past_exchange_uses_json_fallback_by_default() -> None:
     transcript = (
         Message(role="assistant", content="checking", tool_calls=(_call(),)),
         _result(is_error=False),
@@ -83,7 +83,7 @@ def test_complete_historical_exchange_uses_assistant_json_fallback_by_default() 
     }
 
 
-def test_explicit_native_history_preserves_complete_exchange_in_call_order() -> None:
+def test_native_history_keeps_exchange_in_call_order() -> None:
     transcript = (
         Message(
             role="assistant",
@@ -101,7 +101,7 @@ def test_explicit_native_history_preserves_complete_exchange_in_call_order() -> 
     assert [message.tool_name for message in normalized[1:]] == ["lookup", "read"]
 
 
-def test_active_turn_exchange_stays_structured_without_historical_opt_in() -> None:
+def test_active_turn_stays_structured_without_opt_in() -> None:
     transcript = (
         Message(role="user", content="previous turn"),
         Message(role="assistant", content="", tool_calls=(_call(),)),
@@ -125,7 +125,7 @@ def test_active_turn_exchange_stays_structured_without_historical_opt_in() -> No
     assert normalized[4].tool_call_id == "call-2"
 
 
-def test_boundary_inside_exchange_cannot_create_orphan_native_result() -> None:
+def test_boundary_inside_exchange_creates_no_orphan_result() -> None:
     transcript = (
         Message(role="assistant", content="checking", tool_calls=(_call(),)),
         _result(),
@@ -137,7 +137,7 @@ def test_boundary_inside_exchange_cannot_create_orphan_native_result() -> None:
     assert json.loads(normalized[0].content)["type"] == "wisp.portable_tool_exchange"
 
 
-def test_malformed_batch_and_orphan_result_use_assistant_fallbacks() -> None:
+def test_malformed_batch_and_orphan_result_use_fallbacks() -> None:
     transcript = (
         Message(
             role="assistant",
@@ -239,7 +239,7 @@ def test_malicious_marker_text_remains_a_json_result_value() -> None:
     assert payload["calls"][0]["result"]["output"] == injected
 
 
-def test_fallback_preserves_valid_unicode_without_ascii_expansion() -> None:
+def test_fallback_keeps_unicode_unescaped() -> None:
     output = "工具结果：你好 🌍"
     transcript = (
         Message(role="assistant", content="", tool_calls=(_call(),)),

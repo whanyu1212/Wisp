@@ -128,7 +128,7 @@ def test_is_tool_shaped_detects_assistant_calls_and_tool_rows() -> None:
     assert not is_tool_shaped(_user())
 
 
-def test_has_valid_replacement_tool_order_rejects_orphans_and_mismatches() -> None:
+def test_replacement_tool_order_rejects_orphans_and_mismatches() -> None:
     assert has_valid_replacement_tool_order((_user(), _assistant()))
     assert has_valid_replacement_tool_order((_user(), _assistant_with_tool(), _tool_result()))
     assert not has_valid_replacement_tool_order((_tool_result(),))
@@ -285,7 +285,7 @@ def test_rebase_keeps_cursor_and_pending_tool_results() -> None:
     assert [message.role for message in state.continuation_messages] == ["assistant", "tool"]
 
 
-def test_clean_rebase_consumes_pending_tool_results_and_queues_extras() -> None:
+def test_clean_rebase_consumes_tool_results_and_queues_extras() -> None:
     state = _state_with_cursor(tool_history=True)
     extra = _user("follow up")
     apply_request_boundary_decision(
@@ -430,7 +430,7 @@ def test_cursorless_clean_response_folds_portable_history() -> None:
     assert state.continuation_messages == []
 
 
-def test_record_response_keeps_existing_cursor_when_id_is_missing() -> None:
+def test_response_without_id_keeps_existing_cursor() -> None:
     state = ContinuationState(previous_response_id="kept")
     state.record_response(_assistant(response_id=None), response_id=None)
     assert state.previous_response_id == "kept"
@@ -460,7 +460,7 @@ def test_record_tool_result_appends_matching_tool_row() -> None:
     assert recorded.is_error is False
 
 
-def test_request_boundary_hook_stop_by_default_without_hook() -> None:
+def test_stops_by_default_without_boundary_hook() -> None:
     original = (_user(),)
 
     async def run() -> None:
@@ -479,7 +479,7 @@ def test_request_boundary_hook_stop_by_default_without_hook() -> None:
     anyio.run(run)
 
 
-def test_request_boundary_hook_snapshot_is_isolated() -> None:
+def test_boundary_snapshot_is_isolated() -> None:
     live = _assistant_with_tool()
     state = ContinuationState(previous_response_id="resp-1", continuation_messages=[live])
 
@@ -553,7 +553,7 @@ def test_overflow_recovery_requires_replacement_or_rebase() -> None:
     anyio.run(run)
 
 
-def test_transcript_replacement_keeps_the_conversation_unless_replaced_or_rebased() -> None:
+def test_conversation_survives_unless_replaced_or_rebased() -> None:
     continuation = (_assistant(),)
 
     stopped = RequestBoundaryDecision(stop=True, messages=(_user("compacted"),))

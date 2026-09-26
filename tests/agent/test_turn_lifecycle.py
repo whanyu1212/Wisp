@@ -78,7 +78,7 @@ def test_cancelled_events_without_a_turn_carry_only_the_error() -> None:
     assert lifecycle.latest_turn == 0
 
 
-def test_observe_tracks_consumed_events_and_resets_tool_calls_per_turn() -> None:
+def test_observe_tracks_events_and_resets_tool_calls_per_turn() -> None:
     lifecycle = TurnLifecycle()
     tool_call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
 

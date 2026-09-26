@@ -127,7 +127,7 @@ class _PreparedExecutor:
                 yield event
 
 
-def test_tool_execution_lifecycle_accepts_valid_approval_sequence() -> None:
+def test_lifecycle_accepts_valid_approval_sequence() -> None:
     call = _call()
     lifecycle = ToolExecutionLifecycle(call)
 
@@ -165,7 +165,7 @@ def test_tool_execution_lifecycle_accepts_valid_approval_sequence() -> None:
         ),
     ],
 )
-def test_tool_execution_lifecycle_rejects_malformed_sequences(
+def test_lifecycle_rejects_malformed_sequences(
     events: tuple[object, ...],
     error: str,
 ) -> None:
@@ -179,7 +179,7 @@ def test_tool_execution_lifecycle_rejects_malformed_sequences(
         lifecycle.finish()
 
 
-def test_sequential_batch_streams_events_and_returns_provider_results() -> None:
+def test_sequential_batch_streams_events_and_returns_results() -> None:
     call = _call()
     executor = _ScriptedExecutor((_approval(call), _resolution(call), _ended(call)))
     recorded: list[ToolResultReady] = []
@@ -240,7 +240,7 @@ def test_truncated_batch_synthesizes_results_without_execution() -> None:
     assert recorded[0].failure_code == "invalid_arguments"
 
 
-def test_prepared_batch_publishes_source_order_after_reverse_completion() -> None:
+def test_prepared_batch_orders_results_despite_reverse_completion() -> None:
     calls = (_call("call-1"), _call("call-2"))
     first_started = anyio.Event()
     release_first = anyio.Event()
@@ -422,7 +422,7 @@ def test_sequential_cancellation_settles_every_requested_call(
         assert (denial.approved, denial.reason) == (False, "Agent run cancelled")
 
 
-def test_truncated_batch_rejects_every_call_even_when_cancelled_midway() -> None:
+def test_truncated_batch_rejects_every_call_even_if_cancelled() -> None:
     calls = (_call("call-1"), _call("call-2"))
     executor = _NeverExecutor()
     cancelled = False

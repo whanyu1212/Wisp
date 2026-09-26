@@ -189,7 +189,7 @@ def test_completion_message_owns_tool_snapshots() -> None:
 
 
 @pytest.mark.parametrize("offset", ["turn_offset", "tool_iteration_offset"])
-def test_invalid_startup_does_not_mutate_transcript_and_allows_retry(offset: str) -> None:
+def test_invalid_startup_leaves_transcript_and_allows_retry(offset: str) -> None:
     initial = Message(role="user", content="earlier")
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]]
@@ -390,7 +390,7 @@ def test_provider_protocol_failure_survives_close_failure() -> None:
 
 
 @pytest.mark.parametrize("close_message", ["close failed", "maximum context length exceeded"])
-def test_cancelled_turn_is_not_completed_twice_when_provider_close_fails(
+def test_cancelled_turn_completes_once_when_provider_close_fails(
     close_message: str,
 ) -> None:
     from wisp.agent.harness import SimpleCancellationToken
@@ -481,7 +481,7 @@ def test_loop_rejects_model_response_events_after_cancellation(
     anyio.run(run)
 
 
-def test_completed_turn_does_not_retry_overflow_worded_provider_close() -> None:
+def test_completed_turn_ignores_overflow_worded_provider_close() -> None:
     class ForbiddenOverflowHook:
         async def recover_context_overflow(self, *, snapshot: object) -> None:
             del snapshot

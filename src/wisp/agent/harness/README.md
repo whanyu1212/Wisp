@@ -130,10 +130,7 @@ The detailed compatibility list is in
 The focused harness checks are:
 
 ```bash
-uv run pytest \
-  tests/agent/harness/test_runner.py \
-  tests/agent/harness/test_interruptions.py \
-  tests/agent/test_runtime_invariants.py
+uv run pytest tests/agent/harness tests/agent/test_runtime_invariants.py
 ```
 
 `tests/agent/harness/test_interruptions.py` records a successful baseline for six small workflows:
@@ -149,7 +146,7 @@ failures plus a rejected stale rebase. The parallel fixture requires overlap and
 using event barriers, not sleeps.
 
 This is a bounded event-boundary matrix, not exhaustive coverage of task scheduling or real provider
-implementations. Keep targeted in-flight cancellation tests in `tests/agent/harness/test_runner.py` alongside it.
+implementations. Keep targeted in-flight cancellation tests in `tests/agent/harness/test_cancellation.py` alongside it.
 
 Changes to boundary preparation or transcript persistence should also run
 `tests/coding/test_session.py` and `tests/coding/test_compaction.py`.

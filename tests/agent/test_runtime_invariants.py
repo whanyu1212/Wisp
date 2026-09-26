@@ -86,26 +86,26 @@ def _tool_turn_end(outcome: Literal["completed", "failed", "cancelled"]) -> tupl
     )
 
 
-def test_assert_turn_terminals_accepts_matched_starts_and_completes() -> None:
+def test_terminal_check_accepts_matched_starts_and_completes() -> None:
     assert_turn_terminals(_completed_turn())
     assert_turn_terminals((*_completed_turn(1), *_completed_turn(2)))
 
 
-def test_assert_turn_terminals_accepts_unstarted_failure() -> None:
+def test_terminal_check_accepts_unstarted_failure() -> None:
     assert_turn_terminals((ErrorEvent(message="boom"),))
 
 
-def test_assert_turn_terminals_rejects_missing_terminal() -> None:
+def test_terminal_check_rejects_missing_terminal() -> None:
     with pytest.raises(AssertionError, match="started without a terminal"):
         assert_turn_terminals((TurnStarted(turn=1),))
 
 
-def test_assert_turn_terminals_rejects_unstarted_complete() -> None:
+def test_terminal_check_rejects_unstarted_complete() -> None:
     with pytest.raises(AssertionError, match="without a matching TurnStarted"):
         assert_turn_terminals((TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),))
 
 
-def test_assert_turn_terminals_rejects_double_complete() -> None:
+def test_terminal_check_rejects_double_complete() -> None:
     with pytest.raises(AssertionError, match="completed more than once"):
         assert_turn_terminals(
             (
@@ -115,13 +115,13 @@ def test_assert_turn_terminals_rejects_double_complete() -> None:
         )
 
 
-def test_assert_tool_result_pairing_accepts_adjacent_ended_and_ready() -> None:
+def test_pairing_check_accepts_adjacent_ended_and_ready() -> None:
     events = (*_completed_turn(), _ended(), _ready())
     assert_tool_result_pairing(events)
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_assert_tool_result_pairing_allows_requested_call_without_terminal() -> None:
+def test_pairing_check_allows_requested_call_without_result() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -133,17 +133,17 @@ def test_assert_tool_result_pairing_allows_requested_call_without_terminal() -> 
     assert_tool_result_pairing(events)
 
 
-def test_assert_tool_result_pairing_rejects_ready_without_ended() -> None:
+def test_pairing_check_rejects_ready_without_ended() -> None:
     with pytest.raises(AssertionError, match="without ToolExecutionEnded"):
         assert_tool_result_pairing((_ready(),))
 
 
-def test_assert_tool_result_pairing_rejects_ended_without_ready() -> None:
+def test_pairing_check_rejects_ended_without_ready() -> None:
     with pytest.raises(AssertionError, match="without ToolResultReady"):
         assert_tool_result_pairing((_ended(),))
 
 
-def test_assert_tool_result_pairing_allows_reused_call_id_across_rounds() -> None:
+def test_pairing_check_allows_reused_call_id_across_rounds() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-lookup-0"),
@@ -159,17 +159,17 @@ def test_assert_tool_result_pairing_allows_reused_call_id_across_rounds() -> Non
     assert_settled_tool_calls(events, ("call-lookup-0",))
 
 
-def test_assert_tool_result_pairing_rejects_duplicate_ended() -> None:
+def test_pairing_check_rejects_duplicate_ended() -> None:
     with pytest.raises(AssertionError, match="appeared more than once"):
         assert_tool_result_pairing((_ended(), _ended(), _ready()))
 
 
-def test_assert_tool_result_pairing_rejects_nonadjacent_projection() -> None:
+def test_pairing_check_rejects_nonadjacent_projection() -> None:
     with pytest.raises(AssertionError, match="must immediately follow"):
         assert_tool_result_pairing((_ended(), ErrorEvent(message="gap"), _ready()))
 
 
-def test_assert_tool_result_pairing_rejects_mismatched_payload() -> None:
+def test_pairing_check_rejects_mismatched_payload() -> None:
     ended = _ended()
     ready = ToolResultReady(
         call_id=ended.call_id,
@@ -181,19 +181,19 @@ def test_assert_tool_result_pairing_rejects_mismatched_payload() -> None:
         assert_tool_result_pairing((ended, ready))
 
 
-def test_assert_settled_tool_calls_rejects_missing_listed_call() -> None:
+def test_settlement_check_rejects_missing_listed_call() -> None:
     events = (*_completed_turn(), _ended("call-1"), _ready("call-1"))
     with pytest.raises(AssertionError, match="missing terminal tool results"):
         assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_assert_settled_tool_calls_counts_reused_call_id_occurrences() -> None:
+def test_settlement_check_counts_reused_call_id_occurrences() -> None:
     events = (*_completed_turn(), _ended("call-lookup-0"), _ready("call-lookup-0"))
     with pytest.raises(AssertionError, match="missing terminal tool results"):
         assert_settled_tool_calls(events, ("call-lookup-0", "call-lookup-0"))
 
 
-def test_assert_settled_tool_calls_accepts_matching_reused_occurrences() -> None:
+def test_settlement_check_accepts_matching_reused_occurrences() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-lookup-0"),
@@ -441,7 +441,7 @@ def test_live_prepared_batch_cancel_settles_each_requested_call() -> None:
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_assert_turn_invariants_accepts_clean_turn_sequence() -> None:
+def test_turn_check_accepts_clean_turn_sequence() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -451,7 +451,7 @@ def test_assert_turn_invariants_accepts_clean_turn_sequence() -> None:
     assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_non_1_initial_turn() -> None:
+def test_turn_check_rejects_non_1_initial_turn() -> None:
     events = (
         TurnStarted(turn=2),
         TurnCompleted(turn=2, outcome="completed", finish_reason="stop"),
@@ -460,7 +460,7 @@ def test_assert_turn_invariants_rejects_non_1_initial_turn() -> None:
         assert_turn_invariants(events, initial_turn=1)
 
 
-def test_assert_turn_invariants_rejects_turn_gap() -> None:
+def test_turn_check_rejects_turn_gap() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -471,7 +471,7 @@ def test_assert_turn_invariants_rejects_turn_gap() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_invalid_outcome() -> None:
+def test_turn_check_rejects_invalid_outcome() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted.model_construct(turn=1, outcome="unknown", finish_reason="stop"),
@@ -480,7 +480,7 @@ def test_assert_turn_invariants_rejects_invalid_outcome() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_cancelled_with_wrong_finish_reason() -> None:
+def test_turn_check_rejects_cancelled_with_wrong_reason() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="stop"),
@@ -489,7 +489,7 @@ def test_assert_turn_invariants_rejects_cancelled_with_wrong_finish_reason() -> 
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_completed_with_cancelled_finish_reason() -> None:
+def test_turn_check_rejects_completed_with_cancelled_reason() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="cancelled"),
@@ -498,7 +498,7 @@ def test_assert_turn_invariants_rejects_completed_with_cancelled_finish_reason()
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_completed_with_error_finish_reason() -> None:
+def test_turn_check_rejects_completed_with_error_reason() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="error"),
@@ -507,7 +507,7 @@ def test_assert_turn_invariants_rejects_completed_with_error_finish_reason() -> 
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_failed_with_non_error_finish_reason() -> None:
+def test_turn_check_rejects_failed_with_non_error_reason() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="failed", finish_reason="stop"),
@@ -516,7 +516,7 @@ def test_assert_turn_invariants_rejects_failed_with_non_error_finish_reason() ->
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_turn_activity_after_cancellation() -> None:
+def test_turn_check_rejects_activity_after_cancellation() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
@@ -527,7 +527,7 @@ def test_assert_turn_invariants_rejects_turn_activity_after_cancellation() -> No
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_turn_event_after_final_turn_completed() -> None:
+def test_turn_check_rejects_turn_event_after_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
@@ -537,7 +537,7 @@ def test_assert_turn_invariants_rejects_turn_event_after_final_turn_completed() 
         assert_turn_invariants(events)
 
 
-def test_assert_cancellation_settled_accepts_clean_cancellation() -> None:
+def test_cancellation_check_accepts_clean_cancellation() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -546,7 +546,7 @@ def test_assert_cancellation_settled_accepts_clean_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
+def test_cancellation_check_accepts_pre_turn_cancellation() -> None:
     events = (ErrorEvent(message="Agent run cancelled"),)
     assert_cancellation_settled(events)
 
@@ -558,7 +558,7 @@ def test_assert_cancellation_settled_accepts_pre_turn_cancellation() -> None:
         QueueMessageInjected(kind="follow_up", content="Late follow-up"),
     ],
 )
-def test_assert_cancellation_settled_rejects_trailing_boundary_events(trailing: object) -> None:
+def test_cancellation_check_rejects_trailing_boundary_events(trailing: object) -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -570,7 +570,7 @@ def test_assert_cancellation_settled_rejects_trailing_boundary_events(trailing: 
 
 
 @pytest.mark.parametrize("position", ["before", "after", "next_turn"])
-def test_assert_cancellation_settled_rejects_activity_outside_cancelled_turn(position: str) -> None:
+def test_cancellation_check_rejects_activity_outside_turn(position: str) -> None:
     events: list[object] = [
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -595,7 +595,7 @@ def test_assert_cancellation_settled_rejects_activity_outside_cancelled_turn(pos
         assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_rejects_scoped_activity_before_first_turn() -> None:
+def test_cancellation_check_rejects_activity_before_first_turn() -> None:
     events = (
         _ended("call-1"),
         _ready("call-1"),
@@ -605,7 +605,7 @@ def test_assert_cancellation_settled_rejects_scoped_activity_before_first_turn()
         assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_accepts_error_after_completed_turn() -> None:
+def test_cancellation_check_accepts_error_after_completed_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
@@ -616,7 +616,7 @@ def test_assert_cancellation_settled_accepts_error_after_completed_turn() -> Non
 
 @pytest.mark.parametrize("boundary", ["pre_turn", "completed", "failed"])
 @pytest.mark.parametrize("tail_kind", ["queue_then_error", "error_then_queue", "two_errors"])
-def test_assert_cancellation_settled_requires_one_final_boundary_error(
+def test_cancellation_check_requires_one_final_boundary_error(
     boundary: str, tail_kind: str
 ) -> None:
     events: list[object] = []
@@ -643,7 +643,7 @@ def test_assert_cancellation_settled_requires_one_final_boundary_error(
             assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() -> None:
+def test_cancellation_check_accepts_aborted_provider_wording() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="request aborted"),
@@ -652,7 +652,7 @@ def test_assert_cancellation_settled_accepts_aborted_provider_error_wording() ->
     assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_rejects_ended_without_ready() -> None:
+def test_cancellation_check_rejects_ended_without_ready() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-1"),
@@ -663,7 +663,7 @@ def test_assert_cancellation_settled_rejects_ended_without_ready() -> None:
         assert_cancellation_settled(events)
 
 
-def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -> None:
+def test_turn_check_rejects_tool_call_after_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
@@ -673,7 +673,7 @@ def test_assert_turn_invariants_rejects_tool_call_requested_after_final_turn() -
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_message_event_after_final_turn() -> None:
+def test_turn_check_rejects_message_event_after_final_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
@@ -683,7 +683,7 @@ def test_assert_turn_invariants_rejects_message_event_after_final_turn() -> None
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_tool_event_before_first_turn() -> None:
+def test_turn_check_rejects_tool_event_before_first_turn() -> None:
     events = (
         _ended("call-1"),
         _ready("call-1"),
@@ -693,7 +693,7 @@ def test_assert_turn_invariants_rejects_tool_event_before_first_turn() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_tool_event_between_turns() -> None:
+def test_turn_check_rejects_tool_event_between_turns() -> None:
     events = (
         *_completed_turn(1),
         _ended("call-1"),
@@ -704,7 +704,7 @@ def test_assert_turn_invariants_rejects_tool_event_between_turns() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_message_event_between_turns() -> None:
+def test_turn_check_rejects_message_event_between_turns() -> None:
     events = (
         *_completed_turn(1),
         MessageStarted(turn=2),
@@ -715,7 +715,7 @@ def test_assert_turn_invariants_rejects_message_event_between_turns() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_turn_invariants_rejects_scoped_event_for_wrong_turn() -> None:
+def test_turn_check_rejects_scoped_event_for_wrong_turn() -> None:
     events = (
         TurnStarted(turn=1),
         MessageStarted(turn=2),
@@ -725,7 +725,7 @@ def test_assert_turn_invariants_rejects_scoped_event_for_wrong_turn() -> None:
         assert_turn_invariants(events)
 
 
-def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_reversal() -> None:
+def test_queue_order_check_rejects_priority_reversal() -> None:
     events = (
         QueueMessageInjected(kind="follow_up", content="follow 1"),
         TurnStarted(turn=1),
@@ -742,9 +742,7 @@ def test_assert_queue_ordering_invariants_rejects_cross_boundary_priority_revers
         )
 
 
-def test_assert_queue_ordering_invariants_accepts_dynamic_steering_before_initial_follow_up() -> (
-    None
-):
+def test_queue_order_check_accepts_new_steering_before_follow_up() -> None:
     events = (
         *_completed_turn(1),
         QueueMessageInjected(kind="steering", content="initial steer"),
@@ -761,7 +759,7 @@ def test_assert_queue_ordering_invariants_accepts_dynamic_steering_before_initia
     )
 
 
-def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> None:
+def test_continuation_check_recognizes_truncated_tool_calls() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -774,7 +772,7 @@ def test_assert_continuation_invariants_recognizes_truncated_tool_calls() -> Non
     assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn() -> None:
+def test_continuation_check_rejects_dropped_call() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -789,7 +787,7 @@ def test_assert_continuation_invariants_rejects_dropped_call_in_multi_call_turn(
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_empty_completion_call_list() -> None:
+def test_continuation_check_rejects_empty_completion_call_list() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
@@ -804,7 +802,7 @@ def test_assert_continuation_invariants_rejects_empty_completion_call_list() -> 
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_reconciles_completed_and_requested_calls() -> None:
+def test_continuation_check_reconciles_completed_and_requested() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -827,7 +825,7 @@ def test_assert_continuation_invariants_reconciles_completed_and_requested_calls
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_terminal_for_unrequested_call() -> None:
+def test_continuation_check_rejects_result_for_unrequested_call() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -850,7 +848,7 @@ def test_assert_continuation_invariants_rejects_terminal_for_unrequested_call() 
 
 
 @pytest.mark.parametrize("finish_reason", ["stop", "tool_calls"])
-def test_assert_continuation_invariants_rejects_results_for_empty_request_bags(
+def test_continuation_check_rejects_results_without_requests(
     finish_reason: Literal["stop", "tool_calls"],
 ) -> None:
     events = (
@@ -866,7 +864,7 @@ def test_assert_continuation_invariants_rejects_results_for_empty_request_bags(
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_requested_call_absent_from_completion() -> None:
+def test_continuation_check_rejects_call_missing_from_completion() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -889,7 +887,7 @@ def test_assert_continuation_invariants_rejects_requested_call_absent_from_compl
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_empty_tool_continuation() -> None:
+def test_continuation_check_rejects_empty_tool_continuation() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
@@ -909,7 +907,7 @@ def test_assert_continuation_invariants_rejects_empty_tool_continuation() -> Non
     ],
 )
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_assert_continuation_invariants_rejects_changed_request_payload(
+def test_continuation_check_rejects_changed_request_payload(
     request_event: ToolCallRequested,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -932,7 +930,7 @@ def test_assert_continuation_invariants_rejects_changed_request_payload(
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_accepts_reordered_argument_keys() -> None:
+def test_continuation_check_accepts_reordered_argument_keys() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -956,7 +954,7 @@ def test_assert_continuation_invariants_accepts_reordered_argument_keys() -> Non
 
 @pytest.mark.parametrize("include_completion", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_assert_continuation_invariants_rejects_changed_result_name(
+def test_continuation_check_rejects_changed_result_name(
     include_completion: bool,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -978,7 +976,7 @@ def test_assert_continuation_invariants_rejects_changed_result_name(
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_checks_result_names_for_repeated_call_ids() -> None:
+def test_continuation_check_verifies_names_for_repeated_ids() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -994,7 +992,7 @@ def test_assert_continuation_invariants_checks_result_names_for_repeated_call_id
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_reordered_request_occurrences() -> None:
+def test_continuation_check_rejects_reordered_requests() -> None:
     calls = (
         ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "a"}),
         ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "b"}),
@@ -1022,7 +1020,7 @@ def test_assert_continuation_invariants_rejects_reordered_request_occurrences() 
 @pytest.mark.parametrize("request_first", [True, False])
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_assert_continuation_invariants_checks_completion_request_order(
+def test_continuation_check_checks_completion_request_order(
     request_first: bool,
     repeat_id: bool,
     outcome: Literal["completed", "failed", "cancelled"],
@@ -1053,7 +1051,7 @@ def test_assert_continuation_invariants_checks_completion_request_order(
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("reverse_results", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_assert_continuation_invariants_matches_result_occurrence_order(
+def test_continuation_check_matches_result_occurrence_order(
     repeat_id: bool,
     reverse_results: bool,
     outcome: Literal["completed", "failed", "cancelled"],
@@ -1089,7 +1087,7 @@ def test_assert_continuation_invariants_matches_result_occurrence_order(
 
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_assert_continuation_invariants_rejects_result_before_request_occurrence(
+def test_continuation_check_rejects_result_before_request(
     repeat_id: bool,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -1114,7 +1112,7 @@ def test_assert_continuation_invariants_rejects_result_before_request_occurrence
 
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
 @pytest.mark.parametrize("settled_id", [None, "call-1", "call-2"])
-def test_assert_continuation_invariants_allows_partial_interrupted_tool_turn(
+def test_continuation_check_allows_partial_interrupted_turn(
     outcome: Literal["failed", "cancelled"],
     settled_id: str | None,
 ) -> None:
@@ -1136,7 +1134,7 @@ def test_assert_continuation_invariants_allows_partial_interrupted_tool_turn(
 
 
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
-def test_assert_continuation_invariants_rejects_skipped_request_in_interrupted_turn(
+def test_continuation_check_rejects_skipped_interrupted_call(
     outcome: Literal["failed", "cancelled"],
 ) -> None:
     events = (
@@ -1160,7 +1158,7 @@ def test_assert_continuation_invariants_rejects_skipped_request_in_interrupted_t
 
 
 @pytest.mark.parametrize("settled_first", [True, False])
-def test_assert_continuation_invariants_only_skips_settled_duplicates_on_cancellation(
+def test_continuation_check_skips_only_settled_duplicates(
     settled_first: bool,
 ) -> None:
     events = (
@@ -1199,7 +1197,7 @@ def test_assert_continuation_invariants_only_skips_settled_duplicates_on_cancell
         (("cancel-2", "cancel-1"), "cancellation settlements appeared out of request order"),
     ],
 )
-def test_assert_continuation_invariants_checks_cancellation_settlement_phase(
+def test_continuation_check_verifies_cancellation_settlement(
     result_order: tuple[str, str],
     error: str | None,
 ) -> None:
@@ -1238,7 +1236,7 @@ def test_assert_continuation_invariants_checks_cancellation_settlement_phase(
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_resettling_cancelled_call_id() -> None:
+def test_continuation_check_rejects_resettled_cancelled_call() -> None:
     cancellation = _ended().model_copy(
         update={
             "output": INTERRUPTED_TOOL_RESULT_TEXT,
@@ -1260,7 +1258,7 @@ def test_assert_continuation_invariants_rejects_resettling_cancelled_call_id() -
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() -> None:
+def test_continuation_check_allows_failed_final_tool_turn() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -1279,7 +1277,7 @@ def test_assert_continuation_invariants_allows_failed_tool_bearing_final_turn() 
     assert_continuation_invariants(events)
 
 
-def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
+def test_cancellation_check_rejects_missing_error_event() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
@@ -1289,7 +1287,7 @@ def test_assert_cancellation_settled_rejects_missing_error_event() -> None:
 
 
 @pytest.mark.parametrize("earlier_turn", [True, False])
-def test_assert_cancellation_settled_rejects_nonadjacent_error(earlier_turn: bool) -> None:
+def test_cancellation_check_rejects_nonadjacent_error(earlier_turn: bool) -> None:
     events: list[object] = [TurnStarted(turn=1), ErrorEvent(message="Earlier failure")]
     if earlier_turn:
         events.extend(
@@ -1307,7 +1305,7 @@ def test_assert_cancellation_settled_rejects_nonadjacent_error(earlier_turn: boo
         assert_cancellation_settled(events)
 
 
-def test_assert_cancellation_settled_rejects_completed_outcome() -> None:
+def test_cancellation_check_rejects_completed_outcome() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -1317,7 +1315,7 @@ def test_assert_cancellation_settled_rejects_completed_outcome() -> None:
         assert_cancellation_settled(events)
 
 
-def test_assert_turn_invariants_accepts_nonzero_initial_turn() -> None:
+def test_turn_check_accepts_nonzero_initial_turn() -> None:
     events = (
         TurnStarted(turn=5),
         TurnCompleted(turn=5, outcome="completed", finish_reason="stop"),
@@ -1326,7 +1324,7 @@ def test_assert_turn_invariants_accepts_nonzero_initial_turn() -> None:
     assert_turn_invariants(events, initial_turn=5)
 
 
-def test_assert_turn_invariants_accepts_context_overflow_retry_after_failed_turn() -> None:
+def test_turn_check_accepts_overflow_retry_after_failed_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="failed", finish_reason="error"),
@@ -1336,7 +1334,7 @@ def test_assert_turn_invariants_accepts_context_overflow_retry_after_failed_turn
     assert_turn_invariants(events)
 
 
-def test_assert_queue_ordering_invariants_accepts_steering_before_follow_up() -> None:
+def test_queue_order_check_accepts_steering_before_follow_up() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer text"),
         QueueMessageInjected(kind="follow_up", content="follow text"),
@@ -1346,7 +1344,7 @@ def test_assert_queue_ordering_invariants_accepts_steering_before_follow_up() ->
     assert_queue_ordering_invariants(events)
 
 
-def test_assert_queue_ordering_invariants_rejects_follow_up_before_steering() -> None:
+def test_queue_order_check_rejects_follow_up_before_steering() -> None:
     events = (
         QueueMessageInjected(kind="follow_up", content="follow text"),
         QueueMessageInjected(kind="steering", content="steer text"),
@@ -1357,7 +1355,7 @@ def test_assert_queue_ordering_invariants_rejects_follow_up_before_steering() ->
         assert_queue_ordering_invariants(events)
 
 
-def test_assert_queue_ordering_invariants_rejects_injection_during_active_turn() -> None:
+def test_queue_order_check_rejects_injection_mid_turn() -> None:
     events = (
         TurnStarted(turn=1),
         QueueMessageInjected(kind="steering", content="in flight"),
@@ -1367,7 +1365,7 @@ def test_assert_queue_ordering_invariants_rejects_injection_during_active_turn()
         assert_queue_ordering_invariants(events)
 
 
-def test_assert_queue_ordering_invariants_rejects_within_kind_reorder() -> None:
+def test_queue_order_check_rejects_within_kind_reorder() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer 2"),
         QueueMessageInjected(kind="steering", content="steer 1"),
@@ -1378,7 +1376,7 @@ def test_assert_queue_ordering_invariants_rejects_within_kind_reorder() -> None:
         assert_queue_ordering_invariants(events, expected_steering=("steer 1", "steer 2"))
 
 
-def test_assert_queue_ordering_invariants_accepts_matching_fifo_snapshot() -> None:
+def test_queue_order_check_accepts_matching_fifo_snapshot() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer 1"),
         QueueMessageInjected(kind="steering", content="steer 2"),
@@ -1393,7 +1391,7 @@ def test_assert_queue_ordering_invariants_accepts_matching_fifo_snapshot() -> No
     )
 
 
-def test_assert_continuation_invariants_accepts_tool_continuation() -> None:
+def test_continuation_check_accepts_tool_continuation() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-1"),
@@ -1405,7 +1403,7 @@ def test_assert_continuation_invariants_accepts_tool_continuation() -> None:
     assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_uncompleted_tool_calls_at_final_turn() -> None:
+def test_continuation_check_rejects_unfinished_calls_at_end() -> None:
     events = (
         TurnStarted(turn=1),
         _ended("call-1"),
@@ -1416,9 +1414,7 @@ def test_assert_continuation_invariants_rejects_uncompleted_tool_calls_at_final_
         assert_continuation_invariants(events)
 
 
-def test_assert_continuation_invariants_rejects_tool_call_without_results_before_next_turn() -> (
-    None
-):
+def test_continuation_check_rejects_call_without_result() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),
@@ -1491,7 +1487,7 @@ def test_live_cancellation_settlement_satisfies_invariants() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_cancel_after_completed_turn_satisfies_cancellation_invariants() -> None:
+def test_live_cancel_after_completed_turn_settles_cleanly() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -1586,7 +1582,7 @@ def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_cancel_after_tool_execution_end_satisfies_cancellation_invariants() -> None:
+def test_live_cancel_after_tool_finishes_settles_cleanly() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -1618,7 +1614,7 @@ def test_live_cancel_after_tool_execution_end_satisfies_cancellation_invariants(
     assert_cancellation_settled(events)
 
 
-def test_live_failed_truncated_tool_limit_satisfies_continuation_invariants() -> None:
+def test_live_truncated_tool_limit_keeps_continuation_valid() -> None:
     first = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     second = ToolCall(call_id="call-2", name="read", arguments={"path": "two.txt"})
     provider = ScriptedProvider(
