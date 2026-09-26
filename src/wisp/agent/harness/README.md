@@ -148,5 +148,4 @@ using event barriers, not sleeps.
 This is a bounded event-boundary matrix, not exhaustive coverage of task scheduling or real provider
 implementations. Keep targeted in-flight cancellation tests in `tests/agent/harness/test_cancellation.py` alongside it.
 
-Changes to boundary preparation or transcript persistence should also run
-`tests/coding/test_session.py` and `tests/coding/test_compaction.py`.
+Changes to boundary preparation or transcript persistence should also run `tests/coding`.

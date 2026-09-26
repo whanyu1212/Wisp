@@ -246,7 +246,7 @@ jobs:
           tests/tools/shell/test_supervisor.py
           tests/cli/test_rpc_transport.py
           tests/tools/files/test_secure_fs.py
-          tests/sessions/test_jsonl.py
+          tests/sessions
           --durations=20
           --junitxml=test-results/macos-smoke/junit.xml
 

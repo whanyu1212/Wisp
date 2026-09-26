@@ -6,7 +6,7 @@
 `test_configure_model.py`) has no observable trace of `effort` in its output,
 so it cannot prove the value actually reached the provider. `CapturingProvider`
 can -- these tests exercise `_configure_rpc` directly against a
-runtime built around it, mirroring how `tests/coding/test_session.py` already proves
+runtime built around it, mirroring how `tests/coding/test_session_requests.py` already proves
 `CodingSession.effort` reaches the provider; what's missing is specifically
 whether the RPC command layer correctly sets `agent.effort`.
 """
@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
-from tests.coding.test_session import CapturingProvider
+from tests.coding.session_support import CapturingProvider
 from tests.support.cli import *
 from tests.support.cli import _test_model_registry
 from wisp.events import ErrorEvent, RpcCommandFinished, WispEvent
