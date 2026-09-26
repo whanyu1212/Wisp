@@ -26,6 +26,9 @@ behavior, providers, tools, permissions, and saved sessions.
   reasoning) when a new prompt rebuilds history, and sessions save those items on the response's
   row in a new optional `Message.native_output` field. The prompt cache now reaches the end of the
   previous run, including after a restart or `/resume`. The field is not sent over RPC.
+- The xAI adapter does the same: fresh requests replay each earlier response's output items and
+  request encrypted reasoning (`include: ["reasoning.encrypted_content"]`). The OpenAI adapter keeps
+  the portable rebuild until its backend has been checked.
 - **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
   `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
   range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the

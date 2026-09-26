@@ -25,6 +25,10 @@ class XAIProvider(OpenAIProvider):
     # xAI documents prompt_cache_key, but Wisp should not assume its routing
     # semantics match OpenAI's until the provider-specific behavior is tested.
     supports_prompt_cache_key: Literal[False] = False
+    # Checked against grok-4.5: a fresh request that replays the previous run's
+    # output items reaches the same cached prefix as chaining with
+    # previous_response_id, while the portable rebuild does not.
+    _replays_native_output = True
 
     def __init__(
         self,
