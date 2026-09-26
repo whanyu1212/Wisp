@@ -87,7 +87,7 @@ def _compaction_entry(
     )
 
 
-def test_jsonl_raw_messages_remain_audit_while_context_uses_summary_and_suffix(
+def test_raw_messages_stay_while_context_uses_summary(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -322,7 +322,7 @@ def test_replay_rejects_invalid_compaction_targets(
         replay_session_entries(linked_entries(entries))
 
 
-def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
+def test_compaction_append_rejects_stale_plan_idempotently(
     tmp_path: Path,
 ) -> None:
     store = JsonlSessionStore(tmp_path)
@@ -392,7 +392,7 @@ def test_atomic_compaction_append_rejects_stale_plan_and_remains_idempotent(
         (("user-1", "assistant-1", "user-2"), "splits a conversation turn"),
     ],
 )
-def test_atomic_compaction_append_rejects_invalid_candidate_before_persisting(
+def test_compaction_append_rejects_invalid_candidate(
     tmp_path: Path,
     replaced_entry_ids: tuple[str, ...],
     error: str,
@@ -433,7 +433,7 @@ def test_atomic_compaction_append_rejects_invalid_candidate_before_persisting(
     assert all(entry.kind != "compaction" for entry in session.read_entries())
 
 
-def test_atomic_compaction_append_rejects_inactive_candidate_before_persisting(
+def test_compaction_append_rejects_inactive_candidate(
     tmp_path: Path,
 ) -> None:
     session = JsonlSessionStore(tmp_path).create()
@@ -481,7 +481,7 @@ def test_atomic_compaction_append_rejects_inactive_candidate_before_persisting(
     assert [entry.id for entry in session.read_entries() if entry.kind == "compaction"] == ["valid"]
 
 
-def test_generic_append_rejects_invalid_compaction_before_persisting(tmp_path: Path) -> None:
+def test_plain_append_rejects_invalid_compaction(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
 
     async def write() -> None:
@@ -505,7 +505,7 @@ def test_generic_append_rejects_invalid_compaction_before_persisting(tmp_path: P
     assert all(entry.kind != "compaction" for entry in session.read_entries())
 
 
-def test_atomic_compaction_append_serializes_competing_processes(tmp_path: Path) -> None:
+def test_compaction_append_serializes_competing_processes(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -554,7 +554,7 @@ def test_atomic_compaction_append_serializes_competing_processes(tmp_path: Path)
     assert len(tuple(entry for entry in session.read_entries() if entry.kind == "compaction")) == 1
 
 
-def test_replay_preserves_tool_result_order_and_nearest_call_entry_ids() -> None:
+def test_replay_keeps_tool_result_order_and_call_entry_ids() -> None:
     first_call = _message_entry(
         "call-1-first",
         "assistant",
@@ -624,7 +624,7 @@ def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
         replay_session_entries(entries)
 
 
-def test_replay_rejects_compaction_that_splits_tool_call_and_result() -> None:
+def test_replay_rejects_compaction_splitting_call_and_result() -> None:
     call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
     entries = (
         _message_entry("user-1", "user", "first"),

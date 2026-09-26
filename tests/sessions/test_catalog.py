@@ -114,7 +114,7 @@ def test_unfiltered_page_only_parses_returned_summaries(
     assert len(seen) == 3
 
 
-def test_catalog_change_during_scan_fails_instead_of_publishing_mixed_page(tmp_path: Path) -> None:
+def test_change_during_scan_fails_instead_of_mixing_pages(tmp_path: Path) -> None:
     store, sessions = seed(tmp_path, 2)
 
     def summary(path: Path) -> SessionSummary:

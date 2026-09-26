@@ -88,7 +88,7 @@ class SynchronousFailingProvider:
         raise RuntimeError(self.message)
 
 
-def test_tool_failure_with_overflow_words_is_not_context_overflow() -> None:
+def test_tool_failure_mentioning_overflow_is_not_overflow() -> None:
     tool_call = ToolCall(call_id="call-1", name="test", arguments={})
     provider = ScriptedProvider(
         [
@@ -140,7 +140,7 @@ def _run_loop(config: AgentLoopConfig) -> list[object]:
 
 
 @pytest.mark.parametrize("context_input_tokens", [None, 95])
-def test_context_pressure_emits_after_completed_message_at_threshold(
+def test_pressure_event_after_message_at_threshold(
     context_input_tokens: int | None,
 ) -> None:
     provider = ScriptedProvider(
@@ -198,7 +198,7 @@ def test_context_pressure_emits_after_completed_message_at_threshold(
         (100, 79),
     ],
 )
-def test_context_pressure_is_not_emitted_without_a_known_crossed_limit(
+def test_no_pressure_event_without_a_known_limit(
     context_window: int | None,
     total_tokens: int,
 ) -> None:
@@ -229,7 +229,7 @@ def test_context_pressure_is_not_emitted_without_a_known_crossed_limit(
     assert not any(isinstance(event, ContextPressure) for event in events)
 
 
-def test_terminal_context_overflow_emits_structured_event_and_does_not_retry() -> None:
+def test_terminal_overflow_emits_event_without_retry() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -323,7 +323,7 @@ def test_declined_overflow_recovery_ends_the_turn_once(
 
 
 @pytest.mark.parametrize("effort", [None, "high"])
-def test_synchronous_provider_opening_overflow_is_structured(effort: str | None) -> None:
+def test_sync_opening_overflow_is_structured(effort: str | None) -> None:
     provider = SynchronousFailingProvider("context window exceeded")
 
     async def run() -> list[object]:
@@ -357,7 +357,7 @@ def test_synchronous_provider_opening_overflow_is_structured(effort: str | None)
     assert provider.calls == 1
 
 
-def test_synchronous_provider_opening_non_overflow_is_not_reclassified() -> None:
+def test_sync_opening_error_is_not_reclassified_as_overflow() -> None:
     provider = SynchronousFailingProvider("authentication failed")
 
     async def run() -> list[object]:
@@ -382,7 +382,7 @@ def test_synchronous_provider_opening_non_overflow_is_not_reclassified() -> None
     assert provider.calls == 1
 
 
-def test_raised_context_overflow_emits_structured_event_before_error() -> None:
+def test_raised_overflow_emits_event_before_error() -> None:
     provider = OverflowingProvider()
 
     async def run() -> list[object]:

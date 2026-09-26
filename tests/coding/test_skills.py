@@ -54,7 +54,7 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def test_coding_session_sends_bounded_skill_index_and_tool(tmp_path: Path) -> None:
+def test_sends_bounded_skill_index_and_tool(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
     )
@@ -82,7 +82,7 @@ def test_coding_session_sends_bounded_skill_index_and_tool(tmp_path: Path) -> No
     assert str(entry.root) not in skill_messages[0]
 
 
-def test_coding_session_omits_skill_index_when_tool_is_not_exposed(tmp_path: Path) -> None:
+def test_omits_skill_index_when_tool_is_not_exposed(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
     )
@@ -179,7 +179,7 @@ def test_extension_replacement_named_skill_is_not_overwritten(tmp_path: Path) ->
     )
 
 
-def test_explicit_skill_invocation_is_expanded_persisted_and_emitted(tmp_path: Path) -> None:
+def test_explicit_skill_is_expanded_saved_and_emitted(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
     )

@@ -53,7 +53,7 @@ def _usage(
     )
 
 
-def test_context_estimate_accounts_for_system_messages_tools_and_results() -> None:
+def test_estimate_counts_system_messages_tools_and_results() -> None:
     messages = (
         Message(role="system", content="system"),
         Message(role="user", content="hello"),
@@ -89,7 +89,7 @@ def _serialized_tokens(payload: object) -> int:
     return math.ceil(len(text.encode("utf-8")) / 4)
 
 
-def test_provider_observation_anchors_prefix_and_estimates_only_trailing_context() -> None:
+def test_observed_prefix_plus_estimated_trailing_context() -> None:
     prefix = (Message(role="system", content="system"), Message(role="user", content="hello"))
     trailing = Message(role="assistant", content="world 🌍")
     observation = observe_context(
@@ -146,7 +146,7 @@ def test_stale_provider_observation_falls_back_to_full_estimate(change: str) -> 
     assert budget.accounting_method == "fully_estimated"
 
 
-def test_context_estimate_accepts_legacy_method_values() -> None:
+def test_estimate_accepts_old_method_values() -> None:
     legacy = {
         "method": "chars_div_4_v1",
         "system_tokens": 1,
@@ -160,7 +160,7 @@ def test_context_estimate_accepts_legacy_method_values() -> None:
     assert estimate.method == "chars_div_4_v1"
 
 
-def test_context_estimate_preserves_ascii_heuristic() -> None:
+def test_estimate_keeps_ascii_heuristic() -> None:
     message = Message(role="user", content="plain ASCII")
     payload = [{"role": "user", "content": "plain ASCII"}]
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -172,7 +172,7 @@ def test_context_estimate_preserves_ascii_heuristic() -> None:
 
 
 @pytest.mark.parametrize("content", ["漢字かな", "👩‍💻🚀", "e\u0301", "ASCII と emoji 🌍"])
-def test_context_estimate_uses_utf8_size_for_unicode_messages(content: str) -> None:
+def test_estimate_uses_utf8_size_for_unicode_messages(content: str) -> None:
     payload = [{"role": "user", "content": content}]
 
     first = estimate_context((Message(role="user", content=content),))
@@ -185,7 +185,7 @@ def test_context_estimate_uses_utf8_size_for_unicode_messages(content: str) -> N
     )
 
 
-def test_context_estimate_and_fingerprint_escape_lone_surrogates() -> None:
+def test_estimate_and_fingerprint_escape_lone_surrogates() -> None:
     content = "invalid surrogate: \ud800"
     payload = [{"role": "user", "content": content}]
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -199,7 +199,7 @@ def test_context_estimate_and_fingerprint_escape_lone_surrogates() -> None:
     assert first_fingerprint == context_fingerprint((message,))
 
 
-def test_context_estimate_uses_utf8_size_for_every_payload_category() -> None:
+def test_estimate_uses_utf8_size_for_every_payload() -> None:
     messages = (
         Message(role="system", content="系统 🌐"),
         Message(role="user", content="質問 e\u0301"),
@@ -237,7 +237,7 @@ def test_context_estimate_uses_utf8_size_for_every_payload_category() -> None:
     )
 
 
-def test_saved_native_output_does_not_change_the_context_fingerprint() -> None:
+def test_saved_native_output_leaves_fingerprint_unchanged() -> None:
     """Rows reloaded with saved provider items keep the same context identity."""
 
     plain = Message(role="assistant", content="answer", response_id="response-1")
@@ -272,7 +272,7 @@ def test_unicode_context_fingerprint_remains_compatible() -> None:
     )
 
 
-def test_hybrid_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
+def test_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
     prefix = (Message(role="user", content="prefix"),)
     trailing = Message(role="assistant", content="trailing content")
     observation = observe_context(
@@ -299,7 +299,7 @@ def test_hybrid_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
     assert budget.over_budget is (trailing_tokens >= 10)
 
 
-def test_context_budget_is_permissive_for_unknown_models_and_tracks_reserve() -> None:
+def test_budget_allows_unknown_models_and_tracks_reserve() -> None:
     estimate = estimate_context((Message(role="user", content="x" * 400),))
 
     unknown = build_context_budget(estimate, context_window=None, reserve_tokens=16)
@@ -324,7 +324,7 @@ def test_context_budget_is_permissive_for_unknown_models_and_tracks_reserve() ->
         (True, 100, 79, False, 81, True),
     ],
 )
-def test_auto_compaction_uses_strict_threshold_and_current_observation(
+def test_auto_compaction_uses_strict_threshold_and_latest_count(
     enabled: bool,
     window: int | None,
     observed: int | None,
@@ -346,7 +346,7 @@ def test_auto_compaction_uses_strict_threshold_and_current_observation(
 
 
 @pytest.mark.parametrize("reserve", [100, 101, 16_384])
-def test_auto_compaction_skips_when_reserve_consumes_context_window(reserve: int) -> None:
+def test_auto_compaction_skips_when_reserve_fills_window(reserve: int) -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(
         estimate,
@@ -357,7 +357,7 @@ def test_auto_compaction_skips_when_reserve_consumes_context_window(reserve: int
     assert should_auto_compact(budget, enabled=True) is False
 
 
-def test_session_stats_reject_persisted_observation_after_provider_change() -> None:
+def test_stats_ignore_saved_count_after_provider_change() -> None:
     prefix = (Message(role="user", content="hello"),)
     observation = observe_context(prefix, provider="old", model="model", input_tokens=12)
     entries: tuple[SessionEntry, ...] = (
@@ -392,7 +392,7 @@ def test_session_stats_reject_persisted_observation_after_provider_change() -> N
     assert stats.context.accounting_method == "fully_estimated"
 
 
-def test_session_stats_reports_threshold_policy_eligibility() -> None:
+def test_stats_report_threshold_policy_eligibility() -> None:
     entries: tuple[SessionEntry, ...] = (
         MessageSessionEntry(
             id="user-1", session_id="s", message=Message(role="user", content="one")
@@ -453,7 +453,7 @@ def test_session_stats_reports_threshold_policy_eligibility() -> None:
         (100, 10, False, "automatic compaction is disabled", False),
     ],
 )
-def test_session_stats_explains_unavailable_threshold_policy(
+def test_stats_explain_unavailable_threshold_policy(
     context_window: int | None,
     reserve_tokens: int,
     enabled: bool,
@@ -476,7 +476,7 @@ def test_session_stats_explains_unavailable_threshold_policy(
     assert stats.compaction.overflow_recovery_enabled is overflow_enabled
 
 
-def test_context_statistics_events_round_trip_and_tolerate_missing_policy() -> None:
+def test_stats_events_round_trip_without_policy() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=1_000, reserve_tokens=100)
     estimated = ContextEstimated(turn=1, provider="test", model="model", budget=budget)
@@ -501,7 +501,7 @@ def test_context_statistics_events_round_trip_and_tolerate_missing_policy() -> N
     assert restored.stats.compaction is None
 
 
-def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_observation() -> None:
+def test_stats_sum_reported_usage_and_drop_pre_compaction_count() -> None:
     old_user = MessageSessionEntry(
         id="old-user", session_id="s", message=Message(role="user", content="a")
     )
@@ -565,7 +565,7 @@ def test_session_stats_sum_authoritative_usage_and_invalidate_pre_compaction_obs
     assert stats.context.observed_is_current is False
 
 
-def test_session_stats_sum_cache_usage_only_when_every_record_reports_it() -> None:
+def test_stats_sum_cache_usage_only_when_always_reported() -> None:
     first = MessageSessionEntry(
         id="assistant-1",
         session_id="s",
@@ -604,7 +604,7 @@ def test_session_stats_sum_cache_usage_only_when_every_record_reports_it() -> No
     assert stats.usage.cache_write_input_tokens == 8
 
 
-def test_session_stats_use_latest_post_compaction_assistant_observation() -> None:
+def test_stats_use_latest_count_after_compaction() -> None:
     def assistant(entry_id: str, content: str, observed: int | None = None) -> MessageSessionEntry:
         observation = (
             observe_context((), provider="test", model="model", input_tokens=observed)
@@ -679,7 +679,7 @@ def test_session_stats_use_latest_post_compaction_assistant_observation() -> Non
     assert stats.context.observed_is_current is True
 
 
-def test_session_stats_use_active_branch_observation_but_lifetime_usage() -> None:
+def test_stats_use_branch_count_but_lifetime_usage() -> None:
     root = MessageSessionEntry(
         id="root",
         session_id="s",

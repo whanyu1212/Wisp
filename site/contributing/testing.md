@@ -56,8 +56,7 @@ rather than live models.
 For changes to conversation orchestration, start with:
 
 ```bash
-uv run pytest tests/agent/harness tests/agent/test_runtime_invariants.py \
-  tests/coding/test_session.py tests/coding/test_compaction.py
+uv run pytest tests/agent/harness tests/agent/test_runtime_invariants.py tests/coding
 ```
 
 The interruption matrix records a normal event sequence for streaming, sequential and parallel
