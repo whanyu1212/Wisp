@@ -104,9 +104,12 @@ exercises an installed fake-provider Rust TUI prompt, the managed-output extensi
 replacement with an actionable missing-binary error, corruption, offline reinstall, and uninstall;
 it uploads checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
-Pull requests and manual workflow runs only upload candidates. The tag-gated release workflow calls
-the same reusable builder, verifies the complete downloaded distribution set, and requires
-provenance attestation before trusted publication.
+It runs on every push to `main`, and on pull requests only when they change Rust crates, packaging
+files, the wheel scripts or tests, or the Python modules that load a native binary (the TUI
+launcher and the search and shell tools). Pull requests, `main` pushes, and manual workflow runs
+only upload candidates. The tag-gated release workflow calls the same reusable builder, verifies the
+complete downloaded distribution set, and requires provenance attestation before trusted
+publication.
 
 The `production_fault` tests are a deterministic regression contract that runs with the rest of
 the suite; to run them alone:
