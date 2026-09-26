@@ -3,6 +3,13 @@ name: Rust TUI wheel candidates
 on:
   workflow_call:
   workflow_dispatch:
+  # Every merge gets a wheel build, so a Python change that breaks the
+  # installed wheel surfaces on main even when its pull request skipped this.
+  push:
+    branches:
+      - main
+  # Pull requests build wheels only when they touch Rust, packaging, the
+  # wheel scripts and tests, or the Python code that loads a native binary.
   pull_request:
     branches:
       - main
@@ -20,7 +27,9 @@ on:
       - "scripts/smoke_installed_rust_tui.py"
       - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"
-      - "src/wisp/**"
+      - "src/wisp/cli/native_tui/**"
+      - "src/wisp/tools/search/**"
+      - "src/wisp/tools/shell/**"
       - "tests/rust_tui/test_pending_text_conformance.py"
       - "tests/rust_tui/test_native_grep_conformance.py"
       - "tests/tools/test_process_manager.py"
