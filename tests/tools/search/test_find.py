@@ -16,8 +16,6 @@ from wisp.tools.result import ToolResult
 from wisp.tools.search import tools as search_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 
-pytestmark = pytest.mark.process
-
 
 def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
     tmp_path: Path,

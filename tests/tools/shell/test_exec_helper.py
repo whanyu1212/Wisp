@@ -12,9 +12,8 @@ from wisp.tools.result import ToolError
 from wisp.tools.shell import process as process_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 
-pytestmark = pytest.mark.process
 
-
+@pytest.mark.process
 def test_exec_helper_bounds_stderr_before_buffering(tmp_path: Path) -> None:
     async def run() -> process_tools_module.ProcessResult:
         supervisor = process_manager_module.ProcessSupervisor()
@@ -105,6 +104,7 @@ def test_exec_helper_reports_failed_output_limit_termination(
     assert retained == 1
 
 
+@pytest.mark.process
 def test_exec_helper_cleans_process_when_cancelled_during_registration(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -236,6 +236,7 @@ def test_exec_helper_finishes_reservation_rollback_after_repeated_cancel(
     assert anyio.run(run) == 0
 
 
+@pytest.mark.process
 def test_aclose_waits_for_one_shot_reserved_before_close(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -282,6 +283,7 @@ def test_aclose_waits_for_one_shot_reserved_before_close(
     assert retained == 0
 
 
+@pytest.mark.process
 def test_exec_helper_delays_repeated_cancellation_until_cleanup_finishes(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

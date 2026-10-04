@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import pytest
-
 from wisp.tools.truncation import truncate_text_tail
-
-pytestmark = pytest.mark.process
 
 
 def test_tail_truncation_with_marker_only_budget_stays_bounded() -> None:

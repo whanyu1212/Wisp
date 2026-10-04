@@ -22,8 +22,6 @@ from wisp.tools.shell import process as process_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 from wisp.tools.shell import tool as shell_tools_module
 
-pytestmark = pytest.mark.process
-
 
 def test_process_result_preserves_public_positional_stdout_count_slot() -> None:
     result = ProcessResult(0, "out", "err", False, False, 7)
@@ -56,6 +54,7 @@ def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
     ]
 
 
+@pytest.mark.process
 def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -71,6 +70,7 @@ def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     assert result.text == "Command exited with code 3: out\nerr"
 
 
+@pytest.mark.process
 def test_bash_tool_reports_successful_exit_code_with_output(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -82,6 +82,7 @@ def test_bash_tool_reports_successful_exit_code_with_output(tmp_path: Path) -> N
     assert result.data["exit_code"] == 0
 
 
+@pytest.mark.process
 def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -93,6 +94,7 @@ def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -
     assert result.data["exit_code"] == 0
 
 
+@pytest.mark.process
 def test_bash_tool_starts_polls_and_completes_resumable_process(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)
@@ -203,6 +205,7 @@ def test_bash_managed_update_counts_marker_only_output_as_dropped_bytes(
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)
@@ -237,6 +240,7 @@ def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
     anyio.run(run)
 
 
+@pytest.mark.process
 def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
     tmp_path: Path,
 ) -> None:
@@ -277,6 +281,7 @@ def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
     anyio.run(run)
 
 
+@pytest.mark.process
 def test_bash_tool_shields_initial_poll_cleanup_under_anyio_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -317,6 +322,7 @@ def test_bash_tool_shields_initial_poll_cleanup_under_anyio_cancellation(
     anyio.run(run)
 
 
+@pytest.mark.process
 def test_bash_tool_reports_resumable_timeout_as_terminal_state(tmp_path: Path) -> None:
     async def run() -> None:
         context = ToolContext(cwd=tmp_path)
@@ -389,6 +395,7 @@ def test_bash_tool_validates_resumable_arguments(
         run_tool(BashTool(), arguments, context)
 
 
+@pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell signal assertion")
 @pytest.mark.parametrize(("signal_name", "exit_code"), [("HUP", 129), ("INT", 130), ("TERM", 143)])
 def test_bash_tool_preserves_posix_shell_signal_exit(
@@ -425,6 +432,7 @@ def test_bash_tool_preserves_exit_code_outside_tiny_body_budget(
     assert result.truncated is False
 
 
+@pytest.mark.process
 def test_bash_tool_does_not_add_separator_for_newline_only_output(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -436,6 +444,7 @@ def test_bash_tool_does_not_add_separator_for_newline_only_output(tmp_path: Path
     assert result.data["stdout"] == "\n"
 
 
+@pytest.mark.process
 def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=40, max_output_lines=100)
     python = shlex.quote(sys.executable)
@@ -475,6 +484,7 @@ def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
     python = shlex.quote(sys.executable)
@@ -491,6 +501,7 @@ def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_reports_one_shot_stream_truncation_metadata(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
     python = shlex.quote(sys.executable)
@@ -524,6 +535,7 @@ def test_bash_tool_counts_marker_only_output_as_dropped_bytes(
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
     tmp_path: Path,
 ) -> None:
@@ -540,6 +552,7 @@ def test_bash_tool_counts_source_bytes_when_utf8_clip_decodes_replacement(
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_counts_retruncated_replacement_source_bytes(
     tmp_path: Path,
 ) -> None:
@@ -556,6 +569,7 @@ def test_bash_tool_counts_retruncated_replacement_source_bytes(
     assert result.truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacement(
     tmp_path: Path,
 ) -> None:
@@ -604,6 +618,7 @@ def test_bash_tool_counts_managed_source_bytes_when_utf8_clip_decodes_replacemen
     assert truncated is True
 
 
+@pytest.mark.process
 def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
     tmp_path: Path,
 ) -> None:
@@ -627,6 +642,7 @@ def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
     assert marker.read_text(encoding="utf-8") == "ok"
 
 
+@pytest.mark.process
 def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=1)
     python = shlex.quote(sys.executable)
@@ -645,6 +661,7 @@ def test_bash_tool_does_not_kill_process_at_exact_output_limit(tmp_path: Path) -
     assert marker.read_text(encoding="utf-8") == "ok"
 
 
+@pytest.mark.process
 def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     python = shlex.quote(sys.executable)
@@ -666,6 +683,7 @@ def test_bash_tool_reports_timeout_and_kills_child_processes(tmp_path: Path) -> 
     assert not marker.exists()
 
 
+@pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_bash_completion_kills_background_child_with_redirected_output(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
@@ -688,6 +706,7 @@ def test_bash_completion_kills_background_child_with_redirected_output(tmp_path:
     assert result.data["exit_code"] == 0
 
 
+@pytest.mark.process
 def test_bash_tool_reports_process_tree_cleanup_failure(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -718,6 +737,7 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
     assert cleanup_attempts == 2
 
 
+@pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
 def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
@@ -731,6 +751,7 @@ def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -
     assert not marker.exists()
 
 
+@pytest.mark.process
 def test_bash_tool_cancellation_kills_child_processes(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX process-group cancellation regression")
@@ -815,6 +836,7 @@ def test_direct_bash_cancellation_surfaces_cleanup_failure(
     anyio.run(run_and_cancel)
 
 
+@pytest.mark.process
 def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,

@@ -18,8 +18,6 @@ from wisp.tools.builtin import (
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 
-pytestmark = pytest.mark.process
-
 
 def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
     # Guard against the formatter and the tools drifting on data-key names (grep uses

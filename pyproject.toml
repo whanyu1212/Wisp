@@ -91,7 +91,7 @@ dev = [
 testpaths = ["tests"]
 markers = [
     "tui: terminal UI integration tests",
-    "process: tests covering process-backed tools or process trees",
+    "process: tests that start a real OS process",
     "benchmark: deterministic performance and resource-bound scenarios",
     "slow: intentionally long-running tests outside the other categories",
     "production_fault: required deterministic production fault-injection regressions",

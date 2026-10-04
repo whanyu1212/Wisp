@@ -13,8 +13,6 @@ from pytest import MonkeyPatch
 
 from wisp.tools.shell import process as process_tools_module
 
-pytestmark = pytest.mark.process
-
 
 def test_kill_process_tree_and_wait_returns_failure_without_waiting(
     monkeypatch: MonkeyPatch,
@@ -504,6 +502,7 @@ def test_posix_permission_error_reports_cleanup_failure_for_running_leader(
     assert process.killed is True
 
 
+@pytest.mark.process
 def test_posix_group_signal_skips_exited_leader_pid(
     monkeypatch: MonkeyPatch,
 ) -> None:

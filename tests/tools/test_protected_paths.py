@@ -15,8 +15,6 @@ from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path, resolve_tool_path
 from wisp.tools.result import ToolError
 
-pytestmark = pytest.mark.process
-
 PROTECTED = (".env", "*.key", "credentials.json", ".wisp/auth.json", ".wisp/settings.json")
 
 

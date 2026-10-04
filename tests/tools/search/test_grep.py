@@ -17,8 +17,6 @@ from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.search import tools as search_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 
-pytestmark = pytest.mark.process
-
 
 def test_grep_regex_timeout_is_actionable(
     tmp_path: Path,

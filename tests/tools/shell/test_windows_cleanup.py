@@ -13,8 +13,6 @@ from pytest import MonkeyPatch
 from wisp.tools.result import ToolError
 from wisp.tools.shell import process as process_tools_module
 
-pytestmark = pytest.mark.process
-
 
 def test_bash_tool_uses_taskkill_for_windows_process_tree_cleanup(
     monkeypatch: MonkeyPatch,
@@ -791,6 +789,8 @@ def test_bash_tool_skips_taskkill_for_exited_windows_leader_without_job(
     assert process.killed is False
 
 
+# Asserts a wall-clock margin, so it stays out of the parallel suite.
+@pytest.mark.process
 def test_async_windows_tree_cleanup_does_not_block_event_loop(
     monkeypatch: MonkeyPatch,
 ) -> None:

@@ -18,8 +18,6 @@ from wisp.tools.context import ToolContext
 from wisp.tools.files import operations as file_ops_module
 from wisp.tools.result import ToolError
 
-pytestmark = pytest.mark.process
-
 
 def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
     path = tmp_path / "notes.txt"

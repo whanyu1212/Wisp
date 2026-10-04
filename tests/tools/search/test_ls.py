@@ -4,7 +4,6 @@ import threading
 from pathlib import Path
 
 import anyio
-import pytest
 from pytest import MonkeyPatch
 
 from tests.tools.support import run_tool
@@ -12,8 +11,6 @@ from wisp.tools.builtin import LsTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 from wisp.tools.search import tools as search_tools_module
-
-pytestmark = pytest.mark.process
 
 
 def test_ls_tool_lists_sorted_entries_with_directory_suffix(tmp_path: Path) -> None:

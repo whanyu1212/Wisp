@@ -20,9 +20,8 @@ from wisp.tools.shell.supervisor import (
     _pending_text_backends,
 )
 
-pytestmark = pytest.mark.process
 
-
+@pytest.mark.process
 @pytest.mark.parametrize(
     "pending_text_backend",
     [name for name, _pending_text_type in _pending_text_backends()],
@@ -58,6 +57,7 @@ def test_managed_process_polling_delivers_incremental_output_once(
     assert updates[-1].exit_code == 0
 
 
+@pytest.mark.process
 def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> None:
     async def run() -> tuple[ProcessUpdate, str, bool, int]:
         supervisor = ProcessSupervisor()
@@ -89,6 +89,7 @@ def test_managed_process_retention_is_bounded_and_utf8_safe(tmp_path: Path) -> N
     assert stdout_dropped_bytes > 0
 
 
+@pytest.mark.process
 def test_managed_process_counts_source_bytes_when_utf8_tail_decodes_replacement(
     tmp_path: Path,
 ) -> None:
@@ -120,6 +121,7 @@ def test_managed_process_counts_source_bytes_when_utf8_tail_decodes_replacement(
     assert stdout_retained_bytes == 1
 
 
+@pytest.mark.process
 def test_managed_process_preserves_valid_suffix_after_incomplete_utf8_lead(
     tmp_path: Path,
 ) -> None:
@@ -151,6 +153,7 @@ def test_managed_process_preserves_valid_suffix_after_incomplete_utf8_lead(
     assert stdout_retained_bytes == 2
 
 
+@pytest.mark.process
 def test_managed_process_surfaces_established_malformed_utf8_before_exit(
     tmp_path: Path,
 ) -> None:
@@ -188,6 +191,7 @@ def test_managed_process_surfaces_established_malformed_utf8_before_exit(
     assert update.stdout_retained_bytes == 2
 
 
+@pytest.mark.process
 def test_managed_process_reports_stream_reader_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -217,6 +221,7 @@ def test_managed_process_reports_stream_reader_failures(
     assert update.error == "Failed to read process output"
 
 
+@pytest.mark.process
 def test_managed_process_reports_reader_failure_before_process_exit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +251,7 @@ def test_managed_process_reports_reader_failure_before_process_exit(
     assert update.error == "Failed to read process output"
 
 
+@pytest.mark.process
 def test_cleanup_retry_restores_stream_reader_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -362,6 +368,7 @@ def test_pending_text_applies_byte_cap_to_malformed_utf8(
     assert source_byte_lengths == ()
 
 
+@pytest.mark.process
 def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     async def run() -> ProcessUpdate:
         supervisor = ProcessSupervisor()
@@ -381,6 +388,7 @@ def test_managed_process_timeout_is_not_an_exit_code(tmp_path: Path) -> None:
     assert update.exit_code is None
 
 
+@pytest.mark.process
 def test_managed_timeout_serializes_with_explicit_cancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -426,6 +434,7 @@ def test_managed_timeout_serializes_with_explicit_cancel(
     assert max_active_cleanups == 1
 
 
+@pytest.mark.process
 def test_polling_terminal_process_does_not_repeat_output(tmp_path: Path) -> None:
     async def run() -> tuple[tuple[ProcessUpdate, ...], ProcessUpdate]:
         supervisor = ProcessSupervisor()
