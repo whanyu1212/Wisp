@@ -243,7 +243,7 @@ jobs:
           uv run pytest
           tests/auth/test_storage.py
           tests/mcp/test_runtime_process.py
-          tests/tools/shell/test_supervisor.py
+          tests/tools/shell/test_supervisor*.py
           tests/cli/test_rpc_transport.py
           tests/tools/files/test_secure_fs.py
           tests/sessions

@@ -73,7 +73,7 @@ blocked terminal itself is outside that fairness guarantee.
 | Terminal-output hygiene | `ui::tests::terminal_sanitizer_*`, renderer-specific hostile-input tests, `tests/tui_e2e/test_pressure.py::test_hostile_live_payloads_cannot_inject_terminal_controls` | Tested C0/C1, ANSI/CSI/OSC/DCS, title, hyperlink, clipboard, cursor, alternate-screen, terminal-query and bidi payloads are neutralized while ordinary Unicode remains renderable; fragmented JSONL writes are reassembled before typed decoding and rendering; dynamic connection titles use the same bounded sanitizer |
 | Shared control ordering | `tests/fixtures/tui_traces/approval_resolution_then_cancel.json`, existing cancel-before-approval/trust and decision traces | Python and Rust agree on exact commands and terminal state; these reducer traces do not test live channel scheduling |
 | Live transcript retention | `transcript::tests::live_retention_*`, `tests/tui_e2e/test_pressure.py::test_long_session_bounds_live_transcript_and_remains_responsive` | Completed live presentation stays within count/payload limits while active lifecycle state survives; a 1,205-turn built-binary stream completes and exits cleanly |
-| Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `tools/shell/test_supervisor.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no exact process-RSS claim |
+| Existing retained history/process bounds | `transcript.rs`, `history.rs`, `tool_cards.rs` tests; Python `test_tui_process_lifecycle.py` and `tools/shell/test_supervisor*.py` | Existing bounded history windows, process-card tails/indexes and presentation budgets remain intact; no exact process-RSS claim |
 
 The generated cases are deterministic, finite smoke tests in ordinary Cargo CI. They are not a
 standalone coverage-guided fuzz campaign or proof for every terminal emulator. Secret cleanup,
@@ -100,7 +100,7 @@ RUST_TUI_BINARY_UNDER_TEST="$PWD/target/debug/wisp-tui" uv run pytest \
   tests/tui_e2e/test_smoke.py tests/tui_e2e/test_themes.py \
   tests/tui_e2e/test_mouse.py tests/tui_e2e/test_readiness.py tests/tui_e2e/test_pressure.py
 uv run pytest tests/test_tui_traces.py tests/rpc/test_protocol.py tests/rpc/test_protocol_schema.py \
-  tests/test_tui_process_lifecycle.py tests/tools/shell/test_supervisor.py
+  tests/test_tui_process_lifecycle.py tests/tools/shell/test_supervisor*.py
 uv run python -m wisp.rpc.protocol_schema --check
 ```
 
