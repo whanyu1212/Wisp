@@ -38,8 +38,9 @@ Process, slow, and benchmark tests assert timing and resource bounds that flake 
 with parallel workers, so they run one at a time.
 
 Markers are declared in `pyproject.toml`: `tui`, `process`, `benchmark`, `slow`, and
-`production_fault`. TUI, process, benchmark, and production-fault files declare their relevant
-markers via `pytestmark`.
+`production_fault`. TUI, benchmark, and production-fault files declare their relevant markers via
+`pytestmark`. Mark `process` only on tests that start a real OS process, or on the whole file when
+every test in it does; tests that fake the process layer belong in the parallel subset.
 
 ## Isolation
 
