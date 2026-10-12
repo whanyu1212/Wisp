@@ -4569,6 +4569,11 @@ enum Input {
     Error(io::Error),
 }
 
+/// Poll timeout while draining a scroll run. crossterm's poll-based Unix source
+/// (`use-dev-tty`) returns no event for a zero timeout even when an earlier read
+/// already parsed one, so a zero timeout would end every run after one event.
+const SCROLL_DRAIN_POLL: Duration = Duration::from_millis(1);
+
 /// Drain one immediately available directional run before it can backlog behind itself.
 fn collect_scroll_run(
     first: MouseEvent,
@@ -4630,7 +4635,9 @@ fn input_task(
             Ok(Event::Mouse(event)) if mouse_enabled && mouse::supported(event) => {
                 let input = if mouse::Scroll::from_event(event).is_some() {
                     let (scroll, next) = collect_scroll_run(event, || {
-                        event::poll(Duration::ZERO)?.then(event::read).transpose()
+                        event::poll(SCROLL_DRAIN_POLL)?
+                            .then(event::read)
+                            .transpose()
                     })?;
                     deferred = next;
                     Input::Scroll(scroll)
