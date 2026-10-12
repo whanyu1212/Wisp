@@ -19,6 +19,11 @@ import time
 from pathlib import Path
 
 _HISTORY_READY = b"RC2 saved history ready"
+_ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+# The context snapshot replaces the footer's "ctx ~?" with a token count, such as
+# "ctx ~6.8k/1.0k" or "ctx ~2.6k/?". Frames repaint only changed cells, so "ctx ~"
+# may never be resent next to the count; match the newly painted count instead.
+_CONTEXT_COUNT = re.compile(rb"[0-9](?:\.[0-9])?k?/[0-9?]")
 
 
 def _seed_history(session_dir: Path, count: int) -> int:
@@ -141,7 +146,9 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if startup_redraw_offset is None and re.search(rb"ctx [~]?[0-9]", output):
+            if startup_redraw_offset is None and _CONTEXT_COUNT.search(
+                _ESCAPE_SEQUENCE.sub(b"", output[-65536:])
+            ):
                 # The empty-transcript hint can appear before startup metadata
                 # hydration finishes. Request a complete frame after the context
                 # snapshot lands, then submit only from that settled frame.
