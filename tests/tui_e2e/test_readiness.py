@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_e2e.support import rendered_without_spacing
+
 
 def _rust_binary() -> Path:
     value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
@@ -275,6 +277,13 @@ def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: P
 
         offset = len(tui.output)
         tui.send(b"\x1a")  # Ctrl+Z
+        # Resize only after the undo paints the empty-composer placeholder; a resize
+        # ready in the same input wake-up can leave the key unread (crossterm's
+        # input sources are edge-triggered).
+        tui.wait_until(
+            lambda output: b"AskWispanything" in rendered_without_spacing(output[offset:]),
+            failure="undo did not clear the composer",
+        )
         tui.resize(width=102)
         tui.wait_for(
             b"Type a prompt or / for commands.",
