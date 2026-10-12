@@ -29,6 +29,10 @@ behavior, providers, tools, permissions, and saved sessions.
 - The xAI adapter does the same: fresh requests replay each earlier response's output items and
   request encrypted reasoning (`include: ["reasoning.encrypted_content"]`). The OpenAI adapter keeps
   the portable rebuild until its backend has been checked.
+- Fixed the RPC backend aborting at shutdown (`Fatal Python error: _enter_buffered_busy`, exit
+  code -6) whenever the frontend kept stdin open, as the Rust TUI does. The handshake is now read
+  from the stdin descriptor without buffering later commands, so POSIX backends read stdin without
+  a thread and the Windows reader thread no longer holds the stdin buffer lock.
 - **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
   `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
   range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the

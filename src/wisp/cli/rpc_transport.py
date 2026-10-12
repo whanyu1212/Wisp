@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import select
 import stat
 from collections.abc import Awaitable, Callable
 from functools import partial
@@ -30,15 +31,15 @@ from wisp.rpc.protocol import (
 
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
-# Keep at most one complete raw frame ahead of async parsing. Each negotiated
-# frame may be large, so a deeper queue would multiply the per-frame limit into
-# an unsafe aggregate allocation while the coordinator is backpressured.
-_STDIN_THREAD_QUEUE_SIZE = 1
+# Let the reader thread run at most 1 MiB of raw chunks ahead of async parsing:
+# deep enough that a large frame is not paced by the poll interval, and bounded
+# so the thread cannot grow memory while the coordinator is backpressured.
+_STDIN_THREAD_QUEUE_SIZE = 16
 _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
 
 
 type RpcEventWriter = Callable[[WispEvent], None]
-type QueueFactory = Callable[[int], Queue[str | bytes | Exception]]
+type QueueFactory = Callable[[int], Queue[bytes | Exception]]
 type ThreadFactory = Callable[..., Thread]
 type WaitReadable = Callable[[int], Awaitable[None]]
 type ReadFd = Callable[[int, int], bytes]
@@ -57,12 +58,24 @@ async def read_rpc_stdin_handshake(
     supported_capabilities: tuple[str, ...],
     limits: RpcTransportLimits,
     write_response: Callable[[RpcHandshakeResponse], None],
+    read_fd: ReadFd = os.read,
 ) -> RpcHandshakeAccepted | None:
-    """Read and answer the mandatory first external RPC frame."""
+    """Read and answer the mandatory first external RPC frame.
 
-    raw_line = await anyio.to_thread.run_sync(
-        partial(stdin.readline, MAX_HANDSHAKE_FRAME_BYTES + 2)
-    )
+    Args:
+        stdin (RpcTextInput): Binary stdin, or a line source without a file descriptor.
+        backend_package_version (str): Wisp release reported to the frontend.
+        supported_capabilities (tuple[str, ...]): Capabilities this backend offers.
+        limits (RpcTransportLimits): Frame limits advertised on acceptance.
+        write_response (Callable[[RpcHandshakeResponse], None]): Writes the response frame.
+        read_fd (ReadFd): Reads bytes from a file descriptor.
+
+    Returns:
+        RpcHandshakeAccepted | None: The accepted handshake, or None when stdin closed
+            before a handshake or the handshake was rejected.
+    """
+
+    raw_line = await anyio.to_thread.run_sync(partial(_read_handshake_line, stdin, read_fd))
     if raw_line in {"", b""}:
         return None
     encoded_line = raw_line.encode("utf-8") if isinstance(raw_line, str) else raw_line
@@ -92,6 +105,35 @@ async def read_rpc_stdin_handshake(
         )
     write_response(response)
     return response if isinstance(response, RpcHandshakeAccepted) else None
+
+
+def _read_handshake_line(stdin: RpcTextInput, read_fd: ReadFd) -> str | bytes:
+    """Read the handshake line without buffering any byte after its newline.
+
+    Commands that follow are read from the same file descriptor. A stream buffer
+    that prefetched them would hide them from that reader, so the line is read
+    from the descriptor one byte at a time, waiting while a non-blocking
+    descriptor has no data yet. Sources without a descriptor are read by line.
+    """
+
+    limit = MAX_HANDSHAKE_FRAME_BYTES + 2
+    try:
+        fd = stdin.fileno()
+    except (AttributeError, OSError, ValueError):
+        return stdin.readline(limit)
+    line = bytearray()
+    while len(line) < limit:
+        try:
+            byte = read_fd(fd, 1)
+        except BlockingIOError:
+            select.select([fd], [], [])
+            continue
+        if not byte:
+            break
+        line += byte
+        if byte == b"\n":
+            break
+    return bytes(line)
 
 
 class RpcStdinTransport[TControlEvent]:
@@ -148,7 +190,7 @@ class RpcStdinTransport[TControlEvent]:
                 await self.read_text(send, stop_reader)
                 return
             if self._needs_thread_reader(stdin_mode):
-                await self.read_thread(send, stop_reader)
+                await self.read_thread(send, stop_reader, fd)
                 return
             await self.read_fd(send, stop_reader, fd)
 
@@ -173,38 +215,44 @@ class RpcStdinTransport[TControlEvent]:
         self,
         send: MemoryObjectSendStream[TControlEvent],
         stop_reader: anyio.Event,
+        fd: int,
     ) -> None:
-        lines = self._queue_factory(self._thread_queue_size)
-        stdin = self._stdin
+        """Read descriptor chunks on a daemon thread where stdin cannot be polled.
 
-        def read_lines() -> None:
+        The thread reads the descriptor directly rather than through a stream
+        buffer. It is never joined, and a daemon thread blocked inside a buffered
+        stream read would still hold that stream's lock when the interpreter
+        finalizes, which aborts the process.
+        """
+
+        chunks = self._queue_factory(self._thread_queue_size)
+
+        def read_chunks() -> None:
             try:
                 while True:
-                    raw_line = stdin.readline(self._max_frame_bytes + 2)
-                    lines.put(raw_line)
-                    if raw_line in {"", b""}:
+                    chunk = self._read_fd(fd, self._read_chunk_size)
+                    chunks.put(chunk)
+                    if chunk == b"":
                         return
             except Exception as exc:  # noqa: BLE001 - forwarded to the async reader
-                lines.put(exc)
+                chunks.put(exc)
 
         self._thread_factory(
-            target=read_lines,
+            target=read_chunks,
             name="wisp-rpc-stdin-reader",
             daemon=True,
         ).start()
+        buffer = bytearray()
         while not stop_reader.is_set():
             try:
-                item = lines.get_nowait()
+                item = chunks.get_nowait()
             except Empty:
                 await anyio.sleep(self._thread_poll_interval)
                 continue
             if isinstance(item, Exception):
                 await self._report_failure(send, item)
                 return
-            if item in {"", b""}:
-                await self._send_closed(send)
-                return
-            if not await self._accept_readline_result(send, item):
+            if not await self._accept_chunk(send, buffer, item):
                 return
 
     async def read_fd(
@@ -225,25 +273,45 @@ class RpcStdinTransport[TControlEvent]:
             except Exception as exc:  # noqa: BLE001 - source failures become RPC errors
                 await self._report_failure(send, exc)
                 return
-            if chunk == b"":
-                if buffer:
-                    self._write_event(
-                        ErrorEvent(message="RPC stream ended with an incomplete frame")
-                    )
-                await self._send_closed(send)
+            if not await self._accept_chunk(send, buffer, chunk):
                 return
-            buffer.extend(chunk)
-            while True:
-                try:
-                    frame = pop_rpc_frame(buffer, max_frame_bytes=self._max_frame_bytes)
-                except RpcFrameError as exc:
-                    self._write_event(ErrorEvent(message=str(exc)))
-                    await self._send_closed(send)
-                    return
-                if frame is None:
-                    break
-                if not await self.send_line(send, frame):
-                    return
+
+    async def _accept_chunk(
+        self,
+        send: MemoryObjectSendStream[TControlEvent],
+        buffer: bytearray,
+        chunk: bytes,
+    ) -> bool:
+        """Publish every complete frame in ``buffer`` after appending ``chunk``.
+
+        Args:
+            send (MemoryObjectSendStream[TControlEvent]): Receives parsed commands and
+                the closing event.
+            buffer (bytearray): Bytes read but not yet framed; updated in place.
+            chunk (bytes): Bytes just read; empty at end of stream.
+
+        Returns:
+            bool: False once the input is closed, at end of stream or on a frame
+                error, so the caller stops reading.
+        """
+
+        if chunk == b"":
+            if buffer:
+                self._write_event(ErrorEvent(message="RPC stream ended with an incomplete frame"))
+            await self._send_closed(send)
+            return False
+        buffer.extend(chunk)
+        while True:
+            try:
+                frame = pop_rpc_frame(buffer, max_frame_bytes=self._max_frame_bytes)
+            except RpcFrameError as exc:
+                self._write_event(ErrorEvent(message=str(exc)))
+                await self._send_closed(send)
+                return False
+            if frame is None:
+                return True
+            if not await self.send_line(send, frame):
+                return False
 
     async def send_line(
         self,

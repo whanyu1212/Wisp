@@ -3,7 +3,11 @@ from __future__ import annotations
 import io
 import json
 import os
+import sys
+import threading
 from collections import deque
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
 
@@ -30,6 +34,7 @@ from wisp.rpc.protocol import (
     RpcHandshakeAccepted,
     RpcHandshakeRejected,
     RpcHandshakeRequest,
+    RpcHandshakeResponse,
     RpcTransportLimits,
 )
 
@@ -64,22 +69,57 @@ def _limits() -> RpcTransportLimits:
     return RpcTransportLimits(max_client_frame_bytes=1024, max_server_frame_bytes=2048)
 
 
-def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
-    async def scenario() -> None:
-        responses: list[object] = []
-        accepted = await read_rpc_stdin_handshake(
-            io.BytesIO(_handshake_line()),
+@contextmanager
+def _handshake_stdin(source: str, data: bytes) -> Iterator[io.BufferedIOBase]:
+    """Yield ``data`` as an in-memory stream or as a pipe read through its descriptor."""
+    if source == "stream":
+        yield io.BytesIO(data)
+        return
+    read_fd, write_fd = os.pipe()
+
+    def write_all() -> None:
+        try:
+            os.write(write_fd, data)
+        finally:
+            os.close(write_fd)
+
+    # A frame larger than the pipe buffer would block a write made before reading.
+    writer = threading.Thread(target=write_all)
+    writer.start()
+    stdin = os.fdopen(read_fd, "rb")
+    try:
+        yield stdin
+    finally:
+        stdin.close()
+        writer.join()
+
+
+def _read_handshake(
+    stdin: io.BufferedIOBase,
+) -> tuple[RpcHandshakeAccepted | None, list[RpcHandshakeResponse]]:
+    responses: list[RpcHandshakeResponse] = []
+
+    async def scenario() -> RpcHandshakeAccepted | None:
+        return await read_rpc_stdin_handshake(
+            stdin,
             backend_package_version="0.1.0",
             supported_capabilities=(),
             limits=_limits(),
             write_response=responses.append,
         )
 
-        assert isinstance(accepted, RpcHandshakeAccepted)
-        assert responses == [accepted]
-        assert accepted.type == "rpc.handshake.accepted"
+    return anyio.run(scenario), responses
 
-    anyio.run(scenario)
+
+@pytest.mark.parametrize("source", ["stream", "descriptor"])
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_stdin_handshake_accepts_the_first_bounded_frame(source: str, line_ending: bytes) -> None:
+    with _handshake_stdin(source, _handshake_line()[:-1] + line_ending) as stdin:
+        accepted, responses = _read_handshake(stdin)
+
+    assert isinstance(accepted, RpcHandshakeAccepted)
+    assert responses == [accepted]
+    assert accepted.type == "rpc.handshake.accepted"
 
 
 @pytest.mark.parametrize(
@@ -93,23 +133,58 @@ def test_stdin_handshake_accepts_the_first_bounded_frame() -> None:
         b"x" * (MAX_HANDSHAKE_FRAME_BYTES + 1) + b"\n",
     ],
 )
-def test_stdin_handshake_rejects_invalid_first_frames(frame: bytes) -> None:
+@pytest.mark.parametrize("source", ["stream", "descriptor"])
+def test_stdin_handshake_rejects_invalid_first_frames(source: str, frame: bytes) -> None:
+    with _handshake_stdin(source, frame) as stdin:
+        accepted, responses = _read_handshake(stdin)
+
+    assert accepted is None
+    assert len(responses) == 1
+    assert isinstance(responses[0], RpcHandshakeRejected)
+    assert responses[0].code == "invalid_handshake"
+
+
+def test_stdin_handshake_leaves_later_frames_on_the_descriptor() -> None:
+    read_fd, write_fd = os.pipe()
+    command = b'{"id":"shutdown-1","type":"shutdown"}\n'
+    os.write(write_fd, _handshake_line() + command)
+    os.close(write_fd)
+    stdin = os.fdopen(read_fd, "rb")
+
     async def scenario() -> None:
-        responses: list[object] = []
         accepted = await read_rpc_stdin_handshake(
-            io.BytesIO(frame),
+            stdin,
             backend_package_version="0.1.0",
             supported_capabilities=(),
             limits=_limits(),
-            write_response=responses.append,
+            write_response=lambda _response: None,
         )
+        assert isinstance(accepted, RpcHandshakeAccepted)
 
-        assert accepted is None
-        assert len(responses) == 1
-        assert isinstance(responses[0], RpcHandshakeRejected)
-        assert responses[0].code == "invalid_handshake"
+    try:
+        anyio.run(scenario)
+        assert os.read(read_fd, 1024) == command
+    finally:
+        stdin.close()
 
-    anyio.run(scenario)
+
+@pytest.mark.skipif(sys.platform == "win32", reason="select() needs a socket on Windows")
+def test_stdin_handshake_waits_on_a_non_blocking_descriptor() -> None:
+    read_fd, write_fd = os.pipe()
+    os.set_blocking(read_fd, False)
+    stdin = os.fdopen(read_fd, "rb")
+    # Nothing is written yet, so the first read would raise BlockingIOError.
+    writer = threading.Timer(0.05, os.write, (write_fd, _handshake_line()))
+    writer.start()
+    try:
+        accepted, responses = _read_handshake(stdin)
+    finally:
+        writer.join()
+        os.close(write_fd)
+        stdin.close()
+
+    assert isinstance(accepted, RpcHandshakeAccepted)
+    assert responses == [accepted]
 
 
 def test_stdin_handshake_clean_eof_emits_no_response() -> None:
@@ -182,16 +257,21 @@ def test_fd_transport_reports_wait_failure_and_closes() -> None:
 def test_thread_transport_reports_reader_failure_and_closes() -> None:
     async def scenario() -> None:
         events: list[object] = []
+
+        def fail_read(_fd: int, _size: int) -> bytes:
+            raise RuntimeError("thread failed")
+
         transport = RpcStdinTransport(
-            stdin=_Input([RuntimeError("thread failed")]),
+            stdin=_Input([]),
             write_event=events.append,
             input_command_factory=_RpcInputCommand,
             input_closed_factory=_RpcInputClosed,
+            read_fd=fail_read,
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
             with anyio.fail_after(1):
-                await transport.read_thread(send, anyio.Event())
+                await transport.read_thread(send, anyio.Event(), 0)
                 closed = await receive.receive()
 
         assert isinstance(closed, _RpcInputClosed)
@@ -215,12 +295,16 @@ def test_line_transport_rejects_oversized_frame_without_executing_suffix(
             write_event=events.append,
             input_command_factory=_RpcInputCommand,
             input_closed_factory=_RpcInputClosed,
+            read_fd=lambda _fd, size: stdin.read(size),
             max_frame_bytes=limit,
         )
         send, receive = anyio.create_memory_object_stream(2)
         async with send, receive:
             with anyio.fail_after(1):
-                await getattr(transport, reader_name)(send, anyio.Event())
+                if reader_name == "read_text":
+                    await transport.read_text(send, anyio.Event())
+                else:
+                    await transport.read_thread(send, anyio.Event(), 0)
                 closed = await receive.receive()
 
         assert isinstance(closed, _RpcInputClosed)
@@ -869,7 +953,7 @@ def test_transport_dispatches_buffered_pipe_lines() -> None:
 def test_thread_transport_uses_configured_bounded_queue() -> None:
     created_queue_sizes: list[int] = []
 
-    class RecordingQueue(Queue[str | Exception]):
+    class RecordingQueue(Queue[bytes | Exception]):
         def __init__(self, maxsize: int = 0) -> None:
             created_queue_sizes.append(maxsize)
             super().__init__(maxsize=maxsize)
@@ -883,21 +967,22 @@ def test_thread_transport_uses_configured_bounded_queue() -> None:
             input_command_factory=_RpcInputCommand,
             input_closed_factory=_RpcInputClosed,
             queue_factory=RecordingQueue,
+            read_fd=lambda _fd, _size: b"",
             thread_queue_size=7,
         )
         send, receive = anyio.create_memory_object_stream(10)
         async with send, receive:
-            await transport.read_thread(send, stop_reader)
+            await transport.read_thread(send, stop_reader, 0)
 
     anyio.run(scenario)
 
     assert created_queue_sizes == [7]
 
 
-def test_thread_transport_defaults_to_single_frame_queue() -> None:
+def test_thread_transport_defaults_to_bounded_chunk_queue() -> None:
     created_queue_sizes: list[int] = []
 
-    class RecordingQueue(Queue[str | bytes | Exception]):
+    class RecordingQueue(Queue[bytes | Exception]):
         def __init__(self, maxsize: int = 0) -> None:
             created_queue_sizes.append(maxsize)
             super().__init__(maxsize=maxsize)
@@ -911,14 +996,15 @@ def test_thread_transport_defaults_to_single_frame_queue() -> None:
             input_command_factory=_RpcInputCommand,
             input_closed_factory=_RpcInputClosed,
             queue_factory=RecordingQueue,
+            read_fd=lambda _fd, _size: b"",
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
-            await transport.read_thread(send, stop_reader)
+            await transport.read_thread(send, stop_reader, 0)
 
     anyio.run(scenario)
 
-    assert created_queue_sizes == [1]
+    assert created_queue_sizes == [16]
 
 
 def test_transport_uses_thread_reader_for_windows_pipe() -> None:
@@ -962,6 +1048,45 @@ def test_transport_uses_thread_reader_for_windows_pipe() -> None:
     finally:
         os.close(write_fd)
         stdin.close()
+
+
+def test_thread_transport_reads_the_descriptor_not_the_stream_buffer() -> None:
+    """A daemon thread blocked in a buffered read would hold its lock at interpreter exit."""
+
+    read_fd, write_fd = os.pipe()
+
+    class UnbufferedOnly:
+        def fileno(self) -> int:
+            return read_fd
+
+        def readline(self, _size: int = -1) -> bytes:
+            raise AssertionError("the reader thread must not use the stream buffer")
+
+    async def scenario() -> None:
+        transport = RpcStdinTransport(
+            stdin=UnbufferedOnly(),
+            write_event=lambda _event: None,
+            input_command_factory=_RpcInputCommand,
+            input_closed_factory=_RpcInputClosed,
+            needs_thread_reader=lambda _mode: True,
+        )
+        send, receive = anyio.create_memory_object_stream(10)
+        async with receive:
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(transport.read, send, anyio.Event())
+                os.write(write_fd, b'{"id":"shutdown-1","type":"shutdown"}\n')
+                os.close(write_fd)
+                with anyio.fail_after(1):
+                    command = await receive.receive()
+                    closed = await receive.receive()
+                assert isinstance(command, _RpcInputCommand)
+                assert command.command.command_id == "shutdown-1"
+                assert isinstance(closed, _RpcInputClosed)
+
+    try:
+        anyio.run(scenario)
+    finally:
+        os.close(read_fd)
 
 
 def test_transport_handles_regular_file_stdin(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from anyio.abc import Process
 
 from tests.support.cli import *
 from tests.support.rpc import guard_rpc_command_serialization
@@ -123,7 +124,7 @@ def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) ->
                 except anyio.EndOfStream:
                     break
             await process.wait()
-        assert process.returncode == 0
+        assert process.returncode == 0, await _read_stderr(process)
         return _base_jsonl_records(output.decode())
 
     records = anyio.run(scenario)
@@ -132,6 +133,56 @@ def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) ->
         "rpc.command.started",
         "rpc.command.finished",
     ]
+
+
+@pytest.mark.process
+def test_rpc_mode_exits_cleanly_on_shutdown_while_stdin_stays_open(tmp_path: Path) -> None:
+    """A live frontend keeps stdin open after shutdown; the stdin reader must not abort exit."""
+
+    async def scenario() -> tuple[int | None, str]:
+        process = await anyio.open_process(
+            [
+                sys.executable,
+                "-m",
+                "wisp",
+                "--mode",
+                "rpc",
+                "--session-dir",
+                str(tmp_path),
+            ],
+            env={**os.environ, "WISP_PROVIDER": "fake", "WISP_MODEL": ""},
+        )
+        assert process.stdin is not None
+        assert process.stdout is not None
+        try:
+            await process.stdin.send(
+                (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
+            )
+            with anyio.fail_after(10):
+                while True:
+                    try:
+                        await process.stdout.receive()
+                    except anyio.EndOfStream:
+                        break
+                await process.wait()
+            return process.returncode, await _read_stderr(process)
+        finally:
+            await process.stdin.aclose()
+
+    returncode, stderr = anyio.run(scenario)
+    assert returncode == 0, stderr
+    assert "Fatal Python error" not in stderr
+
+
+async def _read_stderr(process: Process) -> str:
+    assert process.stderr is not None
+    stderr = bytearray()
+    with anyio.fail_after(5):
+        while True:
+            try:
+                stderr.extend(await process.stderr.receive())
+            except anyio.EndOfStream:
+                return stderr.decode(errors="replace")
 
 
 @pytest.mark.process
