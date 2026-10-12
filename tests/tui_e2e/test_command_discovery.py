@@ -326,7 +326,15 @@ for line in sys.stdin:
                     sum(command["type"] == "get_session_stats" for command in commands)
                     == stats_before_cached_view
                 )
+                # Send Escape on its own. crossterm's input sources are edge-triggered, so
+                # a resize signal ready in the same wake-up can leave the key unread until
+                # the next keypress. Resize only after the frame that closes the overlay.
                 os.write(terminal_fd, b"\x1b")
+                phase = "closing context"
+                output.clear()
+            elif phase == "closing context" and b"keep running" in output:
+                # The overlay covered this transcript text; repainting it shows Escape
+                # was handled. Request a full frame for the transcript checks below.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
                 phase = "cached closed"
                 output.clear()
