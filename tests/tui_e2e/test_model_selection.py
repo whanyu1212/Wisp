@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import welcome_ready
+from tests.tui_e2e.support import rendered_without_spacing, welcome_ready
 
 
 @pytest.mark.process
@@ -63,6 +63,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         quit_frame_requested = False
         context_redrawn = False
         selection_redrawn = False
+        restored_label_redrawn = False
         deadline = time.monotonic() + 25
         try:
             while time.monotonic() < deadline:
@@ -129,6 +130,18 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     # Request a full frame so the raw PTY stream contains the label.
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
                     selection_redrawn = True
+                if (
+                    restart
+                    and ready
+                    and not restored_label_redrawn
+                    and b"fake/custom" in rendered_without_spacing(output)
+                ):
+                    # The restored footer label can arrive in a differential frame that
+                    # skips letters shared with the previous frame. Request a full frame
+                    # so the raw PTY stream contains the whole label.
+                    output.clear()
+                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
+                    restored_label_redrawn = True
                 applied = (
                     ready and b"fake/custom-model" in output and b"effort" in output
                     if restart
