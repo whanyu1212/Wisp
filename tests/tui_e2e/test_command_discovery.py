@@ -18,6 +18,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    rendered_without_spacing,
     welcome_ready,
 )
 from wisp import __version__
@@ -234,7 +235,15 @@ for line in sys.stdin:
             ):
                 assert b"/context" in output
                 assert b"/compact" in output
+                # Send Escape on its own and resize only after the popup closes.
+                # crossterm's input sources are edge-triggered, so a resize signal
+                # ready in the same wake-up can leave a key unread until the next
+                # keypress. Closing repaints the welcome tagline the popup covered; its
+                # words can arrive between cursor moves, so match it without spacing.
                 os.write(terminal_fd, b"\x1b")
+                phase = "closing help"
+                output.clear()
+            elif phase == "closing help" and b"staysinsync" in rendered_without_spacing(output):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
@@ -271,6 +280,9 @@ for line in sys.stdin:
                 output.clear()
             elif phase == "context" and b"Context" in output and b"0.0123" in output:
                 os.write(terminal_fd, b"\x1b")
+                phase = "closing context"
+                output.clear()
+            elif phase == "closing context" and b"staysinsync" in rendered_without_spacing(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
                 phase = "context closed"
                 output.clear()
@@ -326,13 +338,12 @@ for line in sys.stdin:
                     sum(command["type"] == "get_session_stats" for command in commands)
                     == stats_before_cached_view
                 )
-                # Send Escape on its own. crossterm's input sources are edge-triggered, so
-                # a resize signal ready in the same wake-up can leave the key unread until
-                # the next keypress. Resize only after the frame that closes the overlay.
                 os.write(terminal_fd, b"\x1b")
-                phase = "closing context"
+                phase = "closing cached context"
                 output.clear()
-            elif phase == "closing context" and b"keep running" in output:
+            elif phase == "closing cached context" and b"keeprunning" in rendered_without_spacing(
+                output
+            ):
                 # The overlay covered this transcript text; repainting it shows Escape
                 # was handled. Request a full frame for the transcript checks below.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
@@ -362,6 +373,11 @@ for line in sys.stdin:
                 and sum(command["type"] == "get_mcp_status" for command in commands) == 2
             ):
                 os.write(terminal_fd, b"\x03")
+                phase = "closing mcp"
+                output.clear()
+            elif phase == "closing mcp" and b"keeprunning" in rendered_without_spacing(output):
+                # The overlay covered this transcript text; repainting it shows the key
+                # was handled before the resize below.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 108, 0, 0))
                 phase = "prompt restored"
                 output.clear()
