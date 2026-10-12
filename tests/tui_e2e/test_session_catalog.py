@@ -14,6 +14,7 @@ from pathlib import Path
 import anyio
 import pytest
 
+from tests.tui_e2e.support import rendered_without_spacing
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 from wisp.agent.messages import Message
@@ -138,7 +139,17 @@ main()
         offset = len(tui.output)
         tui.send(b"\x1b")
         # Escape has a terminal decoding delay. Wait for the UI acknowledgement
-        # before sending '/', which could otherwise be decoded as Alt+/.
+        # before sending '/', which could otherwise be decoded as Alt+/. Resize
+        # only once the picker has closed and repainted the welcome text it
+        # covered: crossterm's input sources are edge-triggered, so a resize
+        # ready in the same wake-up can leave Escape unread.
+        tui.wait_until(
+            lambda output: (
+                b"Typeapromptor/forcommands." in rendered_without_spacing(output[offset:])
+            ),
+            failure="picker did not close",
+        )
+        offset = len(tui.output)
         width += 1
         tui.resize(width=width)
         tui.wait_for(b"Session selection cancelled.", since=offset, failure="picker did not close")
