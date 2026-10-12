@@ -33,6 +33,9 @@ behavior, providers, tools, permissions, and saved sessions.
   code -6) whenever the frontend kept stdin open, as the Rust TUI does. The handshake is now read
   from the stdin descriptor without buffering later commands, so POSIX backends read stdin without
   a thread and the Windows reader thread no longer holds the stdin buffer lock.
+- Fixed the Rust TUI on Linux occasionally ignoring a key pressed at the same moment the
+  terminal was resized until the next keypress. crossterm now reads input through its poll-based
+  `/dev/tty` source (`use-dev-tty`) instead of edge-triggered mio.
 - **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
   `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
   range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the
