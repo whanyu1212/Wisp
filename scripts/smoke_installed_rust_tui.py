@@ -21,9 +21,10 @@ from pathlib import Path
 _HISTORY_READY = b"RC2 saved history ready"
 _ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 # The context snapshot replaces the footer's "ctx ~?" with a token count, such as
-# "ctx ~6.8k/1.0k" or "ctx ~2.6k/?". Frames repaint only changed cells, so "ctx ~"
-# may never be resent next to the count; match the newly painted count instead.
-_CONTEXT_COUNT = re.compile(rb"[0-9](?:\.[0-9])?k?/[0-9?]")
+# "ctx ~6.8k/1.0k", "ctx ~1.2m/1.0k", or "ctx ~2.6k/?". Frames repaint only changed
+# cells, so "ctx ~" may never be resent next to the count; match the newly painted
+# count instead.
+_CONTEXT_COUNT = re.compile(rb"[0-9](?:\.[0-9])?[km]?/[0-9?]")
 
 
 def _seed_history(session_dir: Path, count: int) -> int:
