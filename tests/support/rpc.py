@@ -11,7 +11,7 @@ from pytest import MonkeyPatch
 from wisp.coding import CodingSession
 from wisp.config.runtime import WispConfig
 from wisp.events import WispEvent
-from wisp.rpc.commands import ParsedRpcCommand
+from wisp.rpc.commands import ParsedRpcCommand, RpcCommand
 from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     RpcCoordinator,
@@ -36,6 +36,26 @@ class RecordingEventWriter:
     async def render_events(self, stream: AsyncIterator[WispEvent]) -> None:
         async for event in stream:
             self.events.append(event)
+
+
+class RecordingTransport:
+    def __init__(self, events: list[object] | None = None) -> None:
+        self.commands: list[RpcCommand] = []
+        self._events = events or []
+        self.closed = False
+
+    async def send(self, command: RpcCommand) -> None:
+        self.commands.append(command)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def events(self) -> AsyncIterator[object]:
+        return self._iter_events()
+
+    async def _iter_events(self) -> AsyncIterator[object]:
+        for event in self._events:
+            yield event
 
 
 class ApprovalResolver:

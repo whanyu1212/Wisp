@@ -237,7 +237,7 @@ def test_cross_language_project_files_fixture() -> None:
 
 
 def test_controller_uses_injected_command_id_factory() -> None:
-    from tests.rpc.test_commands import RecordingTransport
+    from tests.support.rpc import RecordingTransport
     from wisp.rpc.client import RpcController
 
     async def scenario() -> None:
