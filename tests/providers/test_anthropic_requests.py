@@ -14,7 +14,7 @@ from tests.providers.anthropic_support import (
     text_delta_event,
 )
 from wisp.agent.messages import Message as WispMessage
-from wisp.providers.anthropic import AnthropicProvider
+from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
@@ -279,3 +279,37 @@ def test_anthropic_provider_stream_forwards_effort_to_create_stream() -> None:
     anyio.run(run)
 
     assert provider.seen_effort == "medium"
+
+
+@pytest.mark.parametrize(
+    ("cache_ttl", "cache_control"),
+    [
+        pytest.param("5m", {"type": "ephemeral"}, id="five-minutes-sends-no-ttl"),
+        pytest.param("1h", {"type": "ephemeral", "ttl": "1h"}, id="one-hour"),
+    ],
+)
+def test_anthropic_provider_sends_configured_cache_ttl(
+    cache_ttl: AnthropicCacheTtl, cache_control: dict[str, str]
+) -> None:
+    messages_resource = StubMessagesResource()
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+        cache_ttl=cache_ttl,
+    )
+
+    async def run() -> None:
+        stream = await provider._create_stream(  # noqa: SLF001
+            [WispMessage(role="user", content="hello")],
+            model="claude-test",
+        )
+        assert [event async for event in stream] == []
+
+    anyio.run(run)
+
+    assert messages_resource.calls[0]["cache_control"] == cache_control
+
+
+def test_anthropic_provider_rejects_unknown_cache_ttl() -> None:
+    with pytest.raises(ValueError, match="Unsupported Anthropic cache TTL"):
+        AnthropicProvider(api_key="test-key", cache_ttl=cast(AnthropicCacheTtl, "24h"))

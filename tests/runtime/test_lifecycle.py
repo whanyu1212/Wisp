@@ -15,6 +15,7 @@ import wisp.cli.rpc as rpc_module
 import wisp.runtime.extensions as runtime_extensions
 from wisp.cli.native_tui.launch import TuiOptions
 from wisp.config.runtime import WispConfig
+from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
@@ -85,7 +86,7 @@ def test_cli_frontends_close_runtime_when_execution_fails(
     runtime = _RecordingRuntime()
     config = WispConfig(provider="fake", session_dir=tmp_path)
 
-    async def fake_build(_config: WispConfig) -> Any:
+    async def fake_build(_config: WispConfig, **_kwargs: object) -> Any:
         return runtime
 
     async def fail(*_args: object, **_kwargs: object) -> None:
@@ -241,3 +242,85 @@ def test_runtime_build_failure_closes_allocated_supervisor(
 
     with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
         anyio.run(start_after_close)
+
+
+@pytest.mark.parametrize("cache_ttl", ["5m", "1h"])
+def test_build_runtime_passes_anthropic_cache_ttl_to_provider(
+    tmp_path: Path, cache_ttl: AnthropicCacheTtl
+) -> None:
+    async def run() -> AnthropicCacheTtl:
+        runtime = await build_runtime(
+            auth_path=tmp_path / "auth.json", anthropic_cache_ttl=cache_ttl
+        )
+        try:
+            provider = runtime.providers.get("anthropic")
+            assert isinstance(provider, AnthropicProvider)
+            return provider._cache_ttl  # noqa: SLF001
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(run) == cache_ttl
+
+
+def test_build_runtime_defaults_anthropic_cache_ttl_to_five_minutes(tmp_path: Path) -> None:
+    async def run() -> AnthropicCacheTtl:
+        runtime = await build_runtime(auth_path=tmp_path / "auth.json")
+        try:
+            provider = runtime.providers.get("anthropic")
+            assert isinstance(provider, AnthropicProvider)
+            return provider._cache_ttl  # noqa: SLF001
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(run) == "5m"
+
+
+def test_rpc_backend_builds_runtimes_with_one_hour_anthropic_cache(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """RPC sessions stay open between prompts, so they use the 1-hour lifetime.
+
+    The host reuses the same builder for trust-time and configuration rebuilds.
+    """
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    build_kwargs: list[dict[str, object]] = []
+    host_builders: list[object] = []
+
+    async def record_build(_config: WispConfig, **kwargs: object) -> Any:
+        build_kwargs.append(kwargs)
+        return object()
+
+    async def stop_create(*_args: object, **kwargs: object) -> Any:
+        host_builders.append(kwargs["runtime_builder"])
+        raise RuntimeError("stop after host creation")
+
+    monkeypatch.setattr(rpc_module, "build_runtime_for_config", record_build)
+    monkeypatch.setattr(rpc_module.RpcHost, "create", stop_create)
+
+    anyio.run(rpc_module._build_rpc_runtime, config)
+    with pytest.raises(RuntimeError, match="stop after host creation"):
+        anyio.run(rpc_module._run_rpc_with_runtime, config, cast(WispRuntime, object()))
+
+    assert build_kwargs == [{"anthropic_cache_ttl": "1h"}]
+    assert host_builders == [rpc_module._build_rpc_runtime]
+
+
+def test_print_mode_builds_runtime_with_default_anthropic_cache(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A one-off print run gains nothing from the 1-hour lifetime's higher write price."""
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    build_kwargs: list[dict[str, object]] = []
+
+    async def record_build(_config: WispConfig, **kwargs: object) -> Any:
+        build_kwargs.append(kwargs)
+        raise RuntimeError("stop after runtime build")
+
+    monkeypatch.setattr(cli_module, "build_runtime_for_config", record_build)
+
+    with pytest.raises(RuntimeError, match="stop after runtime build"):
+        anyio.run(cli_module._run_print, "hello", config)
+
+    assert build_kwargs == [{}]

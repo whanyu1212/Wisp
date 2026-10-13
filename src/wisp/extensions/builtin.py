@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from wisp.auth.storage import JsonAuthStore
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.auth import StoredProviderAuthResolver
@@ -14,6 +16,9 @@ from wisp.skills.tool import SkillTool
 from wisp.tools.base import ToolExecutionMetadata, ToolPromptMetadata
 from wisp.tools.builtin import builtin_tools
 from wisp.tools.shell.supervisor import ProcessSupervisor
+
+if TYPE_CHECKING:
+    from wisp.providers.anthropic import AnthropicCacheTtl
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
 _PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)
@@ -50,8 +55,23 @@ def activate(
     retry_policy: RetryPolicy | None = None,
     process_supervisor: ProcessSupervisor | None = None,
     openai_compatible: OpenAICompatibleSettings | None = None,
+    anthropic_cache_ttl: AnthropicCacheTtl = "5m",
 ) -> None:
-    """Register Wisp's baseline capabilities."""
+    """Register Wisp's baseline capabilities.
+
+    Args:
+        api (ExtensionAPI): Extension API receiving the registrations.
+        auth_store (JsonAuthStore | None, optional): Credential store for provider
+            authentication. Defaults to None.
+        retry_policy (RetryPolicy | None, optional): Retry policy for provider
+            requests. Defaults to None.
+        process_supervisor (ProcessSupervisor | None, optional): Supervisor for
+            shell tools. Defaults to None.
+        openai_compatible (OpenAICompatibleSettings | None, optional): Settings
+            for an OpenAI-compatible endpoint. Defaults to None.
+        anthropic_cache_ttl (AnthropicCacheTtl, optional): Anthropic prompt-cache
+            lifetime. Defaults to "5m".
+    """
 
     auth_resolver = StoredProviderAuthResolver(auth_store) if auth_store is not None else None
     # Every provider below imports a vendor SDK at module scope, and those imports
@@ -84,7 +104,11 @@ def activate(
     def _anthropic() -> Provider:
         from wisp.providers.anthropic import AnthropicProvider
 
-        return AnthropicProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+        return AnthropicProvider(
+            auth_resolver=auth_resolver,
+            retry_policy=retry_policy,
+            cache_ttl=anthropic_cache_ttl,
+        )
 
     def _google() -> Provider:
         from wisp.providers.google import GoogleProvider

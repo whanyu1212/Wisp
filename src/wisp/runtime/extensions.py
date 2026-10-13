@@ -31,6 +31,7 @@ from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 
 if TYPE_CHECKING:
     from wisp.mcp.runtime import McpRuntime
+    from wisp.providers.anthropic import AnthropicCacheTtl
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
 type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
@@ -42,6 +43,7 @@ async def build_runtime(
     retry_policy: RetryPolicy | None = None,
     mcp_servers: tuple[McpServerConfig, ...] = (),
     openai_compatible: OpenAICompatibleSettings | None = None,
+    anthropic_cache_ttl: AnthropicCacheTtl = "5m",
 ) -> WispRuntime:
     """Create runtime state and activate built-in extensions."""
 
@@ -72,6 +74,7 @@ async def build_runtime(
             retry_policy=retry_policy,
             process_supervisor=process_supervisor,
             openai_compatible=openai_compatible,
+            anthropic_cache_ttl=anthropic_cache_ttl,
         )
         if mcp_servers:
             # `mcp` costs ~430 ms to import and is only reachable through this
@@ -125,6 +128,7 @@ async def activate_builtin_extensions(
     retry_policy: RetryPolicy | None = None,
     process_supervisor: ProcessSupervisor | None = None,
     openai_compatible: OpenAICompatibleSettings | None = None,
+    anthropic_cache_ttl: AnthropicCacheTtl = "5m",
 ) -> None:
     """Activate extensions that ship with Wisp."""
 
@@ -135,6 +139,7 @@ async def activate_builtin_extensions(
         retry_policy=retry_policy,
         process_supervisor=supervisor,
         openai_compatible=openai_compatible,
+        anthropic_cache_ttl=anthropic_cache_ttl,
     )
 
 

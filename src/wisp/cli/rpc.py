@@ -83,7 +83,7 @@ async def _run_rpc(
 ) -> None:
     if not handshake_complete and not await _negotiate_rpc_connection():
         return
-    runtime = await build_runtime_for_config(config)
+    runtime = await _build_rpc_runtime(config)
     try:
         await _run_rpc_with_runtime(
             config,
@@ -101,6 +101,24 @@ async def _run_rpc(
         )
     finally:
         await runtime.aclose()
+
+
+async def _build_rpc_runtime(config: WispConfig) -> WispRuntime:
+    """Build the RPC backend's runtime with a 1-hour Anthropic prompt-cache lifetime.
+
+    RPC sessions (the TUI backend and SDK subprocesses) stay open between prompts,
+    and the next prompt often arrives more than five minutes later, after a
+    5-minute cache entry would have expired. The host reuses this builder for
+    trust-time and configuration rebuilds, so they keep the same lifetime.
+
+    Args:
+        config (WispConfig): Runtime configuration.
+
+    Returns:
+        WispRuntime: The backend runtime.
+    """
+
+    return await build_runtime_for_config(config, anthropic_cache_ttl="1h")
 
 
 async def _negotiate_rpc_connection() -> bool:
@@ -158,7 +176,7 @@ async def _run_rpc_with_runtime(
                 write_event=event_writer,
                 render_events=render_events,
                 config_overrides=config_overrides,
-                runtime_builder=build_runtime_for_config,
+                runtime_builder=_build_rpc_runtime,
                 outbound_frame_limit=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes,
             )
             send, receive = anyio.create_memory_object_stream[_RpcControlEvent](
