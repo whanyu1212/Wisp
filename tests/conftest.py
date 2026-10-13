@@ -7,11 +7,15 @@ fixture below clears inherited Wisp configuration, then redirects ``HOME`` and t
 working directory to fresh temporary directories for every test. Tests that need
 specific configuration opt in explicitly with ``monkeypatch.setenv()`` or by
 writing settings files into those directories.
+
+A second autouse fixture checks agent-loop invariants on every loop stream a test
+drives; see ``tests/support/loop_stream_checks.py``.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -39,3 +43,29 @@ def _isolate_test_environment(
     # Some code resolves the home directory via Path.home(); ensure it agrees with
     # the patched HOME rather than the real user home on every platform.
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Check agent-loop invariants on every loop stream the session drives."""
+
+    del config
+    from tests.support.loop_stream_checks import install_loop_stream_checks
+
+    install_loop_stream_checks()
+
+
+@pytest.fixture(autouse=True)
+def _check_agent_loop_streams(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail the test if any agent-loop stream it drives breaks the loop's invariants."""
+
+    from tests.support.loop_stream_checks import collecting, is_exempt
+
+    violations: list[str] = []
+    with collecting(None if is_exempt(request.node) else violations.append):
+        yield
+    if violations:
+        pytest.fail(
+            "Agent-loop stream broke loop invariants (mark the test with "
+            "loop_invariants_exempt(reason=...) only if that is intended):\n"
+            + "\n".join(f"- {violation}" for violation in violations)
+        )

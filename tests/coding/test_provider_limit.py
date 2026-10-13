@@ -715,6 +715,12 @@ def test_tool_round_not_segmented_when_auto_compaction_is_off(
     assert not any(isinstance(event, CompactionStarted) for event in events)
 
 
+@pytest.mark.loop_invariants_exempt(
+    reason=(
+        "A boundary overflow publishes context.overflow after the completed turn's "
+        "terminal; whether that is allowed is undecided (HY-201)."
+    )
+)
 @pytest.mark.parametrize("operation_id", [None, "prompt-1"])
 def test_stops_when_truncation_cannot_shrink_active_turn(
     tmp_path: Path,

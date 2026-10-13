@@ -51,19 +51,30 @@ Do not freeze these as compatibility contracts:
 - Duplicated scenario fixtures across loop and harness tests.
 - Log lines, comment wording, and test function names.
 
-## Sequential cancellation is not a synthetic-result contract
+## When tool calls are settled
 
-A sequential `ToolExecutor.execute` path may emit `ToolCallRequested` or
-`ToolExecutionStarted` and then cancel the turn without a tool terminal. That
-is current observed behavior, not a promise to synthesize interrupted tool
-results.
+When the run's cancellation token cancels a tool batch, every requested call
+ends with exactly one terminal/result pair, whichever executor ran it
+(sequential or prepared): its real result, or an interrupted result.
+`ToolBatchSettlement` closes whatever the execution path left open
+(`test_sequential_cancellation_settles_every_requested_call`,
+`test_cancel_settles_blocked_sequential_batch`).
 
-Prepared batches do synthesize one terminal result per requested call. Helpers
+Calls can still be left unsettled in two cases: a cancellation the run did not
+request (the caller's own scope, timeout, or task cancellation) propagates
+without settlement, and an executor error propagates after earlier calls were
+requested. The harness repairs those interrupted calls before the next provider
+request.
+
+`tests/conftest.py` applies `assert_turn_invariants` (which includes
+`assert_turn_terminals`) and `assert_tool_result_pairing` to every loop stream
+a test drives. Opt out only with `loop_invariants_exempt(reason=...)`. Helpers
 split the rules on purpose:
 
 - `assert_turn_terminals` — every started turn has exactly one terminal.
 - `assert_tool_result_pairing` — Ended/Ready pairing and payload projection
   when a tool terminal is present; requested-but-unsettled calls are allowed.
 - `assert_settled_tool_calls` — only on paths that promise settlement
-  (prepared batches, truncated batches). Listed `call_ids` are counted by
-  occurrence, so a reused fallback ID from two rounds needs two terminals.
+  (token-cancelled batches, prepared batches, truncated batches). Listed
+  `call_ids` are counted by occurrence, so a reused fallback ID from two rounds
+  needs two terminals.

@@ -95,3 +95,8 @@ uv run pytest tests/agent/loop tests/agent/test_runtime_invariants.py
 
 Changes at provider, session, event, or persistence boundaries require the corresponding integration
 tests as well.
+
+Every loop stream a test drives, directly or through `AgentHarness` or `CodingSession`, is checked
+automatically against `assert_turn_invariants` and `assert_tool_result_pairing` when it finishes or
+raises (see `tests/support/loop_stream_checks.py`). A test that deliberately breaks those rules opts
+out with `@pytest.mark.loop_invariants_exempt(reason="...")`.
