@@ -445,6 +445,12 @@ class AnthropicProvider:
             "max_tokens": _MAX_OUTPUT_TOKENS,
             "messages": anthropic_messages,
             "stream": True,
+            # Anthropic caches only when asked. Top-level ("automatic") caching
+            # puts the breakpoint on the last cacheable block and moves it forward
+            # as the conversation grows, so tools, system, and resent history are
+            # read from cache on the next request. No block-level breakpoints are
+            # set, which leaves the automatic one a free slot.
+            "cache_control": {"type": "ephemeral"},
         }
         if system is not None:
             kwargs["system"] = system

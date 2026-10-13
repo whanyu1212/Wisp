@@ -56,6 +56,7 @@ def test_anthropic_provider_splits_system_messages_from_conversation() -> None:
             "max_tokens": 64000,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             "stream": True,
+            "cache_control": {"type": "ephemeral"},
             "system": "instructions\n\ncontext",
         }
     ]
@@ -83,6 +84,7 @@ def test_anthropic_provider_omits_system_when_no_system_messages() -> None:
             "max_tokens": 64000,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             "stream": True,
+            "cache_control": {"type": "ephemeral"},
         }
     ]
 
@@ -136,6 +138,7 @@ def test_anthropic_provider_folds_tool_results_into_one_trailing_user_message() 
                 },
             ],
             "stream": True,
+            "cache_control": {"type": "ephemeral"},
         }
     ]
 
@@ -172,6 +175,7 @@ def test_anthropic_provider_serializes_tool_specs() -> None:
             "max_tokens": 64000,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             "stream": True,
+            "cache_control": {"type": "ephemeral"},
             "tools": [
                 {
                     "name": "lookup",
@@ -210,6 +214,7 @@ def test_anthropic_provider_sends_output_config_effort_when_provided() -> None:
             "max_tokens": 64000,
             "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
             "stream": True,
+            "cache_control": {"type": "ephemeral"},
             "output_config": {"effort": "high"},
             "thinking": {"type": "adaptive"},
         }
