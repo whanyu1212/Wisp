@@ -25,7 +25,7 @@ def _frame(body: bytes) -> bytes:
     return b"\x1b[?2026h" + body + b"\x1b[?2026l"
 
 
-def test_run_settled_ignores_a_partially_read_frame() -> None:
+def test_run_settled_ignores_partial_frame() -> None:
     """A frame cut off after the response but before its status cells is not idle.
 
     This is the CI failure on main 194e3d3a: the test saw the response with the
@@ -43,7 +43,7 @@ def test_run_settled_ignores_a_partially_read_frame() -> None:
     assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
 
 
-def test_run_settled_requires_fragments_after_offset() -> None:
+def test_run_settled_respects_offset() -> None:
     output = _frame(b"fake response to: old idle")
 
     assert not run_settled(output, len(output), b"response")
