@@ -16,8 +16,38 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    run_settled,
     welcome_ready,
 )
+
+
+def _frame(body: bytes) -> bytes:
+    return b"\x1b[?2026h" + body + b"\x1b[?2026l"
+
+
+def test_run_settled_ignores_partial_frame() -> None:
+    """A frame cut off after the response but before its status cells is not idle.
+
+    This is the CI failure on main 194e3d3a: the test saw the response with the
+    welcome frame's ``idle`` still last, sent Ctrl+C while the prompt was running,
+    and the TUI cancelled instead of quitting.
+    """
+
+    welcome = _frame(b"Ask Wisp anything idle")
+    running = _frame(b"fake response to: hi  working")
+    partial = welcome + running[: running.index(b"working")]
+
+    assert not run_settled(partial, len(welcome), b"fake", b"response", b"to:")
+    assert not run_settled(welcome + running, len(welcome), b"fake", b"response", b"to:")
+    settled = welcome + running + _frame(b"idle")
+    assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
+
+
+def test_run_settled_respects_offset() -> None:
+    output = _frame(b"fake response to: old idle")
+
+    assert not run_settled(output, len(output), b"response")
+    assert run_settled(output, 0, b"response")
 
 
 def test_command_log_ignores_incomplete_records(tmp_path: Path) -> None:
@@ -114,7 +144,7 @@ def test_rust_tui_cross_language_smoke(
                 exercise_prompt
                 and response_seen
                 and not quit_sent
-                and output.rfind(b"idle") > output.rfind(b"working")
+                and run_settled(output, 0, b"response")
             ):
                 # Ctrl-C while the prompt is still running now cancels rather
                 # than quitting. Wait until the header returns to idle first.

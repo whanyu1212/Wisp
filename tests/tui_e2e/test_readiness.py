@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing
+from tests.tui_e2e.support import rendered_without_spacing, run_settled
 
 
 def _rust_binary() -> Path:
@@ -196,10 +196,7 @@ def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_p
         offset = len(tui.output)
         tui.send(b"\x15/init\r")
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"fake", b"response", b"/init", b"failed")
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"fake", b"response", b"/init", b"failed"),
             failure="Rust TUI did not settle the backend-owned initialization lifecycle",
         )
 
@@ -247,10 +244,7 @@ def test_composer_selection_and_word_deletion_submit_exact_unicode_text(tmp_path
         # letters shared by "line" and "final" instead of emitting the word.
         tui.send(b"\x17final\r")  # Ctrl+W deletes the word on the second line.
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="edited prompt did not complete",
         )
         tui.quit()
@@ -297,10 +291,7 @@ def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: P
 
         tui.send(b"\x1afinal\x19\r")
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="branched undo draft did not complete",
         )
         tui.quit()
@@ -338,10 +329,7 @@ def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: 
         offset = len(tui.output)
         tui.send(b"\x1bOR")  # xterm F3
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="custom F3 submit did not complete",
         )
         tui.quit()
@@ -369,10 +357,7 @@ def test_invalid_binding_settings_keep_provider_and_restore_defaults(tmp_path: P
         offset = len(tui.output)
         tui.send(b"defaults recovered\r")
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"fake", b"response", b"to:")
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="default Enter submit did not recover",
         )
         tui.quit()
@@ -404,10 +389,7 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         offset = len(tui.output)
         tui.send(b"\r")
         tui.wait_until(
-            lambda output: (
-                _has_fragments(output, offset, b"idle", b"END", *marker_fragments)
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ),
+            lambda output: run_settled(output, offset, b"idle", b"END", *marker_fragments),
             timeout=20,
             failure="large pasted prompt did not complete with compact echo",
         )
