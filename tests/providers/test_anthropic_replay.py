@@ -327,6 +327,88 @@ def test_anthropic_provider_replay_preserves_thinking_blocks_alongside_tool_use(
     }
 
 
+def test_anthropic_provider_requests_automatic_prompt_caching_on_every_request() -> None:
+    """Every request asks for top-level caching and sets no block-level breakpoints.
+
+    Anthropic caches only when asked. A block-level breakpoint would also take
+    one of the four breakpoint slots automatic caching needs, and a breakpoint on
+    a replayed signed thinking block would change bytes Anthropic requires to be
+    echoed back unmodified.
+    """
+
+    messages_resource = StubMessagesResource(
+        responses=[
+            [
+                message_start_event("response-id"),
+                _thinking_block_start(index=0),
+                thinking_delta_event("checking the lookup table", index=0),
+                _signature_delta("sig", index=0),
+                tool_use_start_event("call-id", "lookup", index=1),
+                input_json_delta_event("{}", index=1),
+                message_delta_event("tool_use"),
+            ],
+            [],
+        ]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+    messages = [
+        WispMessage(role="system", content="instructions"),
+        WispMessage(role="user", content="hello"),
+    ]
+    tools = [
+        ToolSpec(
+            name="lookup",
+            description="Look something up.",
+            input_schema={"type": "object", "properties": {}},
+        )
+    ]
+
+    async def run() -> None:
+        first_events = [
+            event
+            async for event in provider.stream(
+                messages, model="claude-test", tools=tools, effort="high"
+            )
+        ]
+        completed = first_events[-1]
+        assert isinstance(completed, ProviderResponseCompleted)
+        async for _event in provider.stream(
+            messages,
+            model="claude-test",
+            tools=tools,
+            tool_results=[ToolCallResult(call_id="call-id", output="ok")],
+            previous_response_id=completed.response_id,
+            effort="high",
+        ):
+            pass
+
+    anyio.run(run)
+
+    def nested_cache_controls(value: object) -> int:
+        if isinstance(value, dict):
+            return int("cache_control" in value) + sum(
+                nested_cache_controls(item) for item in value.values()
+            )
+        if isinstance(value, list):
+            return sum(nested_cache_controls(item) for item in value)
+        return 0
+
+    assert len(messages_resource.calls) == 2
+    for request in messages_resource.calls:
+        assert request["cache_control"] == {"type": "ephemeral"}
+        body = {key: value for key, value in request.items() if key != "cache_control"}
+        assert nested_cache_controls(body) == 0
+    # The follow-up resends the signed thinking block unchanged.
+    assert messages_resource.calls[1]["messages"][1]["content"][0] == {
+        "type": "thinking",
+        "thinking": "checking the lookup table",
+        "signature": "sig",
+    }
+
+
 def test_anthropic_provider_accumulates_replay_across_multiple_tool_rounds() -> None:
     # Regression test: run_agent_loop never grows `messages` across tool
     # rounds and only ever passes each round's own new `tool_results` --
