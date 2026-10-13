@@ -18,6 +18,8 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    display_width,
+    frame_cursor,
     run_settled,
     welcome_ready,
 )
@@ -228,7 +230,17 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
                 context_redrawn = True
                 output.clear()
                 continue
-            if phase == "startup" and context_redrawn and welcome_ready(output):
+            if (
+                phase == "startup"
+                and context_redrawn
+                and welcome_ready(output)
+                and (cursor := frame_cursor(output)) is not None
+            ):
+                # The welcome frame leaves the cursor at the start of the empty
+                # composer. Later steps wait for the cursor to reach exactly the end
+                # of what was typed or inserted, which proves every keystroke was
+                # processed and painted.
+                composer_start = cursor
                 os.write(terminal_fd, b"Explain @")
                 phase = "all files"
                 output.clear()
@@ -242,11 +254,19 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
             elif (
                 phase == "filtered"
                 and b"".join(Path(relative_path).name.encode().split()) in compact
+                and frame_cursor(output)
+                == (composer_start[0], composer_start[1] + display_width("Explain @example"))
             ):
+                # The picker ignores Enter until the selected row has been painted
+                # for the complete query, so wait for the frame showing every typed
+                # character instead of any frame that lists the file.
                 os.write(terminal_fd, b"\r")
                 phase = "inserted"
                 output.clear()
-            elif phase == "inserted" and b"".join(reference[1:].encode().split()) in compact:
+            elif phase == "inserted" and frame_cursor(output) == (
+                composer_start[0],
+                composer_start[1] + display_width(prompt),
+            ):
                 assert not list(session_dir.glob("*.jsonl")), "selection must not submit"
                 os.write(terminal_fd, b"\r")
                 phase = "submitted"

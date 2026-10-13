@@ -5,7 +5,6 @@ import fcntl
 import os
 import pty
 import select
-import signal
 import struct
 import sys
 import termios
@@ -17,6 +16,8 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    frame_cursor,
+    reap,
     welcome_ready,
 )
 from wisp import __version__
@@ -209,14 +210,21 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "steer frame"
             elif (
-                phase == "steer frame" and b"steer: steer-via-enter" in output[phase_output_offset:]
+                phase == "steer frame"
+                and b"steer: steer-via-enter" in output[phase_output_offset:]
+                and (cursor := frame_cursor(output)) is not None
             ):
+                # The resize forces a full frame with the cursor at the start of the
+                # empty composer. Typed text can be painted across several frames
+                # with other cells in between, so wait for the cursor to reach the
+                # end of the text instead of matching it in the raw output.
+                composer_start = cursor
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"follow-up-via-alt-enter")
                 phase = "follow-up typed"
-            elif (
-                phase == "follow-up typed"
-                and b"follow-up-via-alt-enter" in output[phase_output_offset:]
+            elif phase == "follow-up typed" and frame_cursor(output) == (
+                composer_start[0],
+                composer_start[1] + len("follow-up-via-alt-enter"),
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b\r")
@@ -318,15 +326,7 @@ for line in sys.stdin:
             )
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
+            reap(child_pid, terminal_fd)
 
     commands = complete_logged_commands(command_log)
     command_types = [command["type"] for command in commands]
