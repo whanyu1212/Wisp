@@ -290,6 +290,79 @@ def test_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
     assert provider.calls[0][0].content.startswith("Create a concise")
 
 
+def test_preflight_steering_compacts_history_before_first_request(tmp_path: Path) -> None:
+    """Steering drained before the first request can push resumed history over the limit."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer two"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    # The resumed history and prompt fit under the limit on their own.
+    history = (
+        Message(role="user", content="question one " + "a" * 2_000),
+        Message(role="assistant", content="answer one " + "b" * 2_000, finish_reason="stop"),
+    )
+    steering = "steer " + "c" * 4_000
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=build_model_registry(context_window=4_000, auto_compact_token_limit=1_600),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+
+    async def run() -> tuple[list[WispEvent], bool]:
+        for message in history:
+            await session.append_message(message)
+        events: list[WispEvent] = []
+        rejected_late_steering = False
+        async for event in agent.run("question two", session=session, history=history):
+            if isinstance(event, AgentStarted):
+                await agent.steer(steering)
+            elif isinstance(event, QueueMessageInjected):
+                # The preflight drain has closed the queue: steering sent now could
+                # not reach the first request, so it is rejected rather than delayed.
+                with pytest.raises(RuntimeError, match="no active agent run"):
+                    await agent.steer("late")
+                rejected_late_steering = True
+            events.append(event)
+        return events, rejected_late_steering
+
+    events, rejected_late_steering = anyio.run(run)
+
+    assert rejected_late_steering
+    types = [event.type for event in events]
+    assert (
+        types.index("queue.message.injected")
+        < types.index("compaction.started")
+        < types.index("compaction.completed")
+        < types.index("turn.started")
+    )
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert completed.outcome == "completed"
+    request = provider.calls[1]
+    assert [(message.role, message.content) for message in request.messages[-2:]] == [
+        ("user", "question two"),
+        ("user", steering),
+    ]
+    assert history[0].content not in {message.content for message in request.messages}
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
+
+
 def test_rejects_oversized_fresh_prompt_before_provider(
     tmp_path: Path,
 ) -> None:
