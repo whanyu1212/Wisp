@@ -60,6 +60,14 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 
+AnthropicCacheTtl = Literal["5m", "1h"]
+"""How long Anthropic keeps a prompt-cache entry after its last use.
+
+A 5-minute entry is written at 1.25x the input price and a 1-hour entry at 2x;
+reads cost 0.1x either way. The 1-hour lifetime pays off in interactive sessions
+where the next prompt often arrives more than five minutes later.
+"""
+
 # Anthropic's Messages API requires an explicit max_tokens (unlike OpenAI's
 # Responses API, which Wisp calls with no output cap). Wisp always streams, so
 # this follows the streaming default recommended for current-generation models
@@ -141,8 +149,12 @@ class AnthropicProvider:
         client: AsyncAnthropic | None = None,
         auth_resolver: ProviderAuthResolver | None = None,
         retry_policy: RetryPolicy | None = None,
+        cache_ttl: AnthropicCacheTtl = "5m",
     ) -> None:
+        if cache_ttl not in ("5m", "1h"):
+            raise ValueError(f"Unsupported Anthropic cache TTL: {cache_ttl!r}")
         self.default_model: str | None = default_model
+        self._cache_ttl: AnthropicCacheTtl = cache_ttl
         self._api_key = _normalize_optional(api_key)
         self._client = client
         self._client_is_injected = client is not None
@@ -449,8 +461,13 @@ class AnthropicProvider:
             # puts the breakpoint on the last cacheable block and moves it forward
             # as the conversation grows, so tools, system, and resent history are
             # read from cache on the next request. No block-level breakpoints are
-            # set, which leaves the automatic one a free slot.
-            "cache_control": {"type": "ephemeral"},
+            # set, which leaves the automatic one a free slot. The 5-minute default
+            # sends no ttl, keeping that request identical to the API default.
+            "cache_control": (
+                {"type": "ephemeral", "ttl": "1h"}
+                if self._cache_ttl == "1h"
+                else {"type": "ephemeral"}
+            ),
         }
         if system is not None:
             kwargs["system"] = system
@@ -766,4 +783,4 @@ def _normalize_optional(value: str | None) -> str | None:
     return stripped or None
 
 
-__all__ = ["DEFAULT_ANTHROPIC_MODEL", "AnthropicProvider"]
+__all__ = ["DEFAULT_ANTHROPIC_MODEL", "AnthropicCacheTtl", "AnthropicProvider"]

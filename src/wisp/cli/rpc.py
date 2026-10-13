@@ -19,7 +19,7 @@ from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
 from wisp.rpc.framing import encode_rpc_frame
-from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
+from wisp.rpc.host import InProcessOptions, RpcHost, build_session_runtime
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
@@ -83,7 +83,7 @@ async def _run_rpc(
 ) -> None:
     if not handshake_complete and not await _negotiate_rpc_connection():
         return
-    runtime = await build_runtime_for_config(config)
+    runtime = await build_session_runtime(config)
     try:
         await _run_rpc_with_runtime(
             config,
@@ -158,7 +158,7 @@ async def _run_rpc_with_runtime(
                 write_event=event_writer,
                 render_events=render_events,
                 config_overrides=config_overrides,
-                runtime_builder=build_runtime_for_config,
+                runtime_builder=build_session_runtime,
                 outbound_frame_limit=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes,
             )
             send, receive = anyio.create_memory_object_stream[_RpcControlEvent](

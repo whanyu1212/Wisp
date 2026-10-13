@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import anyio
@@ -58,6 +58,9 @@ from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
 from wisp.trust.permissions import load_permission_mode, save_permission_mode
 from wisp.trust.records import is_trusted, record_trust, trust_override_from_env
+
+if TYPE_CHECKING:
+    from wisp.providers.anthropic import AnthropicCacheTtl
 
 type RpcEventWriter = Callable[[WispEvent], None]
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
@@ -509,7 +512,7 @@ class RpcHost:
             tool_approval_policy(options.approve_unsafe_tools), project_path=project_context_root
         )
         configure_overrides = _RpcConfigureOverrides()
-        selected_runtime_builder = runtime_builder or build_runtime_for_config
+        selected_runtime_builder = runtime_builder or build_session_runtime
         project_configuration = RpcProjectConfiguration(
             startup_config=config,
             startup_trusted=options.startup_trusted,
@@ -794,15 +797,49 @@ class RpcHost:
             await self._render_events(events())
 
 
-async def build_runtime_for_config(config: WispConfig) -> WispRuntime:
-    """Build a runtime from the configuration's auth, retry, MCP, and endpoint settings."""
+async def build_runtime_for_config(
+    config: WispConfig,
+    *,
+    anthropic_cache_ttl: AnthropicCacheTtl = "5m",
+) -> WispRuntime:
+    """Build a runtime from the configuration's auth, retry, MCP, and endpoint settings.
+
+    Args:
+        config (WispConfig): Runtime configuration.
+        anthropic_cache_ttl (AnthropicCacheTtl, optional): Anthropic prompt-cache
+            lifetime. Sessions hosted by `RpcHost` use `build_session_runtime`,
+            which passes "1h". Defaults to "5m" for one-off runs.
+
+    Returns:
+        WispRuntime: Runtime with built-in extensions and configured MCP servers.
+    """
 
     return await build_runtime(
         auth_path=config.auth_path,
         retry_policy=config.retry_policy,
         mcp_servers=config.mcp_servers,
         openai_compatible=config.openai_compatible,
+        anthropic_cache_ttl=anthropic_cache_ttl,
     )
 
 
-__all__ = ["InProcessOptions", "RpcHost", "build_runtime_for_config"]
+async def build_session_runtime(config: WispConfig) -> WispRuntime:
+    """Build the runtime for a session hosted by `RpcHost`, with a 1-hour Anthropic cache.
+
+    Hosted sessions (the JSONL-RPC backend, which the TUI drives, and the
+    in-process SDK) stay open between prompts, and the next prompt often arrives
+    more than five minutes later, after a 5-minute cache entry would have
+    expired. `RpcHost` uses this builder by default for trust-time and
+    configuration rebuilds, so they keep the same lifetime.
+
+    Args:
+        config (WispConfig): Runtime configuration.
+
+    Returns:
+        WispRuntime: Runtime with built-in extensions and configured MCP servers.
+    """
+
+    return await build_runtime_for_config(config, anthropic_cache_ttl="1h")
+
+
+__all__ = ["InProcessOptions", "RpcHost", "build_runtime_for_config", "build_session_runtime"]

@@ -26,7 +26,7 @@ from wisp.rpc.client import RpcController, RpcTransport
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommand
 from wisp.rpc.configuration import _ConfigOverrides
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcInputClosed, _RpcInputCommand
-from wisp.rpc.host import InProcessOptions, RpcHost, build_runtime_for_config
+from wisp.rpc.host import InProcessOptions, RpcHost, build_session_runtime
 from wisp.runtime.api import WispRuntime
 from wisp.trust.records import trusted_noninteractive
 
@@ -125,7 +125,7 @@ class InProcessWisp(RpcController):
         config_overrides: _ConfigOverrides | None = None,
     ) -> Self:
         _require_asyncio_backend()
-        runtime = await build_runtime_for_config(config)
+        runtime = await build_session_runtime(config)
         try:
             transport = await _InProcessTransport.start(
                 config,

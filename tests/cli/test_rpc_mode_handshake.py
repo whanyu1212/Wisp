@@ -39,7 +39,7 @@ def test_rpc_mode_requires_handshake_before_ordinary_commands(
     async def fail_build_runtime(_config: object) -> object:
         raise AssertionError("runtime must not start before negotiation")
 
-    monkeypatch.setattr(cli_rpc_module, "build_runtime_for_config", fail_build_runtime)
+    monkeypatch.setattr(cli_rpc_module, "build_session_runtime", fail_build_runtime)
     result = _BaseCliRunner().invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],

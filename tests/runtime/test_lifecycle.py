@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
@@ -12,9 +13,13 @@ from typer.testing import CliRunner
 import wisp.cli.application as cli_module
 import wisp.cli.native_tui.launch as tui_launch
 import wisp.cli.rpc as rpc_module
+import wisp.rpc.host as host_module
 import wisp.runtime.extensions as runtime_extensions
+import wisp.sdk as sdk_module
 from wisp.cli.native_tui.launch import TuiOptions
 from wisp.config.runtime import WispConfig
+from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
+from wisp.rpc.host import InProcessOptions
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError
@@ -103,7 +108,7 @@ def test_cli_frontends_close_runtime_when_execution_fails(
         async def accept_handshake() -> bool:
             return True
 
-        monkeypatch.setattr(rpc_module, "build_runtime_for_config", fake_build)
+        monkeypatch.setattr(rpc_module, "build_session_runtime", fake_build)
         monkeypatch.setattr(rpc_module, "_negotiate_rpc_connection", accept_handshake)
         monkeypatch.setattr(rpc_module, "_run_rpc_with_runtime", fail)
 
@@ -241,3 +246,134 @@ def test_runtime_build_failure_closes_allocated_supervisor(
 
     with pytest.raises(RuntimeError, match="ProcessSupervisor is closed"):
         anyio.run(start_after_close)
+
+
+@pytest.mark.parametrize("cache_ttl", ["5m", "1h"])
+def test_build_runtime_passes_anthropic_cache_ttl_to_provider(
+    tmp_path: Path, cache_ttl: AnthropicCacheTtl
+) -> None:
+    async def run() -> AnthropicCacheTtl:
+        runtime = await build_runtime(
+            auth_path=tmp_path / "auth.json", anthropic_cache_ttl=cache_ttl
+        )
+        try:
+            provider = runtime.providers.get("anthropic")
+            assert isinstance(provider, AnthropicProvider)
+            return provider._cache_ttl  # noqa: SLF001
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(run) == cache_ttl
+
+
+def test_build_runtime_defaults_anthropic_cache_ttl_to_five_minutes(tmp_path: Path) -> None:
+    async def run() -> AnthropicCacheTtl:
+        runtime = await build_runtime(auth_path=tmp_path / "auth.json")
+        try:
+            provider = runtime.providers.get("anthropic")
+            assert isinstance(provider, AnthropicProvider)
+            return provider._cache_ttl  # noqa: SLF001
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(run) == "5m"
+
+
+def test_session_runtime_uses_one_hour_anthropic_cache(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Hosted sessions stay open between prompts, so they use the 1-hour lifetime."""
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    build_kwargs: list[dict[str, object]] = []
+
+    async def record_build(_config: WispConfig, **kwargs: object) -> Any:
+        build_kwargs.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(host_module, "build_runtime_for_config", record_build)
+
+    anyio.run(host_module.build_session_runtime, config)
+
+    assert build_kwargs == [{"anthropic_cache_ttl": "1h"}]
+
+
+def test_rpc_backend_and_sdk_build_session_runtimes(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The RPC backend, the in-process SDK, and host rebuilds share one session builder."""
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    cli_host_builders: list[object] = []
+    sdk_builds: list[WispConfig] = []
+
+    async def stop_create(*_args: object, **kwargs: object) -> Any:
+        cli_host_builders.append(kwargs["runtime_builder"])
+        raise RuntimeError("stop after host creation")
+
+    async def record_sdk_build(selected: WispConfig) -> Any:
+        sdk_builds.append(selected)
+        raise RuntimeError("stop after SDK runtime build")
+
+    monkeypatch.setattr(rpc_module.RpcHost, "create", stop_create)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", record_sdk_build)
+
+    with pytest.raises(RuntimeError, match="stop after host creation"):
+        anyio.run(rpc_module._run_rpc_with_runtime, config, cast(WispRuntime, object()))
+    with pytest.raises(RuntimeError, match="stop after SDK runtime build"):
+        anyio.run(
+            partial(sdk_module.InProcessWisp._start, config, options=InProcessOptions()),
+            backend="asyncio",
+        )
+
+    assert cli_host_builders == [host_module.build_session_runtime]
+    assert sdk_builds == [config]
+
+
+def test_rpc_host_rebuilds_with_session_runtime_by_default(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """Without an explicit builder (the in-process SDK), host rebuilds keep the 1-hour cache."""
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    rebuild_builders: list[object] = []
+
+    def stop_configuration(*_args: object, **kwargs: object) -> Any:
+        rebuild_builders.append(kwargs["runtime_builder"])
+        raise RuntimeError("stop after project configuration")
+
+    monkeypatch.setattr(host_module, "RpcProjectConfiguration", stop_configuration)
+
+    with pytest.raises(RuntimeError, match="stop after project configuration"):
+        anyio.run(
+            partial(
+                host_module.RpcHost.create,
+                config,
+                cast(WispRuntime, object()),
+                options=InProcessOptions(cwd=tmp_path, project_context_root=tmp_path),
+                write_event=lambda _event: None,
+                render_events=lambda _events: anyio.sleep(0),
+            )
+        )
+
+    assert rebuild_builders == [host_module.build_session_runtime]
+
+
+def test_print_mode_builds_runtime_with_default_anthropic_cache(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A one-off print run gains nothing from the 1-hour lifetime's higher write price."""
+
+    config = WispConfig(session_dir=tmp_path / "sessions", auth_path=tmp_path / "auth.json")
+    build_kwargs: list[dict[str, object]] = []
+
+    async def record_build(_config: WispConfig, **kwargs: object) -> Any:
+        build_kwargs.append(kwargs)
+        raise RuntimeError("stop after runtime build")
+
+    monkeypatch.setattr(cli_module, "build_runtime_for_config", record_build)
+
+    with pytest.raises(RuntimeError, match="stop after runtime build"):
+        anyio.run(cli_module._run_print, "hello", config)
+
+    assert build_kwargs == [{}]

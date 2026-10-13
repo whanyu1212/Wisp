@@ -198,7 +198,7 @@ def test_in_process_sdk_reports_prompt_final_state_refresh_errors(
     ) -> tuple[int, tuple[Message, ...]]:
         raise OSError("session state unavailable")
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
     monkeypatch.setattr(rpc_session_run_module, "updated_rpc_session_state", failed_updated_state)
 
     async def scenario() -> None:

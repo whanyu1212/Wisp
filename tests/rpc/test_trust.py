@@ -109,7 +109,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
         models=_test_model_registry(),
     )
 
-    async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
+    async def build_session_runtime(_config: WispConfig) -> WispRuntime:
         return runtime
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
@@ -121,7 +121,7 @@ def test_rpc_first_trust_applies_project_context_without_setting_changes(
             )
             await send.send(rpc._RpcInputClosed())
 
-    monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "build_session_runtime", build_session_runtime)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
     monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
@@ -182,7 +182,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
         models=_test_model_registry(),
     )
 
-    async def build_runtime_for_config(_config: WispConfig) -> WispRuntime:
+    async def build_session_runtime(_config: WispConfig) -> WispRuntime:
         return runtime
 
     async def fake_read_rpc_stdin(send: Any, _stop_reader: Any, _write_event: Any) -> None:
@@ -192,7 +192,7 @@ def test_rpc_first_trust_refreshes_project_skills_before_provider_request(
             )
             await send.send(rpc._RpcInputClosed())
 
-    monkeypatch.setattr(rpc, "build_runtime_for_config", build_runtime_for_config)
+    monkeypatch.setattr(rpc, "build_session_runtime", build_session_runtime)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", fake_read_rpc_stdin)
     monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
 
