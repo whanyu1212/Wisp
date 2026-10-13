@@ -797,7 +797,7 @@ def test_unrecovered_overflow_keeps_events_and_raises(
     assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
 
 
-def test_cancel_after_turn_start_opens_no_provider_request() -> None:
+def test_cancel_at_turn_start_skips_provider_request() -> None:
     """Cancelling as soon as a turn starts must not open a provider request.
 
     Opening the request would start a billed call that the run then discards.

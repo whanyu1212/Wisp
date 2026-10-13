@@ -327,7 +327,7 @@ def test_anthropic_provider_replay_preserves_thinking_blocks_alongside_tool_use(
     }
 
 
-def test_anthropic_provider_requests_automatic_prompt_caching_on_every_request() -> None:
+def test_every_request_asks_for_prompt_caching() -> None:
     """Every request asks for top-level caching and sets no block-level breakpoints.
 
     Anthropic caches only when asked. A block-level breakpoint would also take

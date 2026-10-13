@@ -266,7 +266,7 @@ def test_build_runtime_passes_anthropic_cache_ttl_to_provider(
     assert anyio.run(run) == cache_ttl
 
 
-def test_build_runtime_defaults_anthropic_cache_ttl_to_five_minutes(tmp_path: Path) -> None:
+def test_runtime_defaults_to_five_minute_anthropic_cache(tmp_path: Path) -> None:
     async def run() -> AnthropicCacheTtl:
         runtime = await build_runtime(auth_path=tmp_path / "auth.json")
         try:

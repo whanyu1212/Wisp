@@ -205,7 +205,7 @@ def test_operation_tool_names_block_other_registry_tools(tmp_path: Path) -> None
     )
 
 
-def test_operation_tool_names_cannot_enable_policy_blocked_tools(tmp_path: Path) -> None:
+def test_operation_cannot_enable_blocked_tools(tmp_path: Path) -> None:
     """An operation's tool names cannot re-enable a tool the session policy blocks.
 
     Explicit `tools=` specs are not filtered by `tool_policy`, so the operation's
