@@ -280,7 +280,7 @@ def test_queued_skill_invocation_uses_same_expansion_policy(tmp_path: Path) -> N
     assert persisted.skill_invocation == injected.skill_invocation
 
 
-def test_preflight_steering_skill_invocation_reaches_first_request(tmp_path: Path) -> None:
+def test_preflight_steering_announces_its_skill(tmp_path: Path) -> None:
     """Steering drained before the first request announces its skill invocation."""
 
     provider = ScriptedProvider(

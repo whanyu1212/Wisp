@@ -241,7 +241,7 @@ def test_does_not_retry_a_second_overflow(tmp_path: Path) -> None:
     assert emitted[-1].outcome == "failed"
 
 
-def test_recovers_only_one_overflow_per_run_with_compactable_history(tmp_path: Path) -> None:
+def test_recovers_at_most_one_overflow_per_run(tmp_path: Path) -> None:
     """A later overflow stays terminal even when completed turns could be compacted."""
 
     overflow = [

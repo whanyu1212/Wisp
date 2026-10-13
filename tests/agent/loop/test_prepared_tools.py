@@ -707,6 +707,55 @@ def test_publishes_sibling_after_malformed_result() -> None:
     assert completed[-1].outcome == "failed"
 
 
+def test_rejects_result_emitted_during_preparation() -> None:
+    """A result during preparation is a protocol error and never reaches the consumer.
+
+    Preparation may only request approval. Publishing an early result would emit a
+    terminal without its provider-facing result, before any side effect was scheduled.
+    """
+
+    call = ToolCall(call_id="call-1", name="read", arguments={})
+    provider = _scripted_tool_batch_provider((call,))
+    ran: list[str] = []
+
+    class EarlyResultExecutor:
+        async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+            yield ToolExecutionEnded(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                output="early",
+                is_error=False,
+            )
+
+            async def run() -> ToolExecutionEnded:
+                ran.append(tool_call.call_id)
+                raise AssertionError("prepared runner must not start")
+
+            yield PreparedToolExecution(call_id=tool_call.call_id, name=tool_call.name, runner=run)
+
+        async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+            raise AssertionError("a prepared executor is not driven through execute")
+            yield  # pragma: no cover
+
+    async def run() -> list[object]:
+        events: list[object] = []
+        with pytest.raises(ToolExecutionProtocolError, match="terminal result during preparation"):
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=EarlyResultExecutor()),
+                messages=(Message(role="user", content="hi"),),
+            ):
+                events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    assert not any(isinstance(event, ToolExecutionEnded | ToolResultReady) for event in events)
+    assert ran == []
+    assert_turn_terminals(events)
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert completed[-1].outcome == "failed"
+
+
 def test_one_sequential_call_makes_whole_batch_serial() -> None:
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="tool", arguments={}) for index in range(1, 4)

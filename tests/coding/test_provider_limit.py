@@ -290,7 +290,7 @@ def test_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
     assert provider.calls[0][0].content.startswith("Create a concise")
 
 
-def test_preflight_steering_compacts_history_before_first_request(tmp_path: Path) -> None:
+def test_preflight_steering_can_trigger_compaction(tmp_path: Path) -> None:
     """Steering drained before the first request can push resumed history over the limit."""
 
     provider = ScriptedProvider(

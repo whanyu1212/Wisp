@@ -797,6 +797,45 @@ def test_unrecovered_overflow_keeps_events_and_raises(
     assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
 
 
+def test_cancel_at_turn_start_skips_provider_request() -> None:
+    """Cancelling as soon as a turn starts must not open a provider request.
+
+    Opening the request would start a billed call that the run then discards.
+    """
+
+    class Token:
+        cancelled = False
+
+        def is_cancelled(self) -> bool:
+            return self.cancelled
+
+    token = Token()
+    provider = ScriptedProvider([completed_stream("unused")])
+
+    async def run() -> list[agent_loop_module.AgentLoopEvent]:
+        events: list[agent_loop_module.AgentLoopEvent] = []
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=NeverToolExecutor(),
+                cancellation_token=token,
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+            if event.type == "turn.started":
+                token.cancelled = True
+        return events
+
+    events = anyio.run(run)
+
+    assert provider.calls == []
+    assert [event.type for event in events] == ["turn.started", "error", "turn.completed"]
+    assert_turn_terminals(events)
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert completed[-1].outcome == "cancelled"
+
+
 @pytest.mark.parametrize("had_tool_calls", [False, True])
 def test_cancel_after_completed_turn_keeps_boundary_behavior(
     had_tool_calls: bool,
