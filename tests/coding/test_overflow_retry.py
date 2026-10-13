@@ -14,6 +14,7 @@ from tests.coding.compaction_support import (
 from wisp.agent.messages import Message
 from wisp.coding.session import CodingSession
 from wisp.events import (
+    AgentStarted,
     CompactionCompleted,
     CompactionStarted,
     ErrorEvent,
@@ -133,6 +134,18 @@ def test_recovers_one_overflow_with_compaction_retry(
     assert overflow.turn == 1
     assert failed_turn.turn == 1
     assert failed_turn.outcome == "failed"
+    # The overflow hook's compaction events are published after the overflow and
+    # before the loop closes the rejected turn and opens the retry.
+    types = [event.type for event in events]
+    overflow_index = types.index("context.overflow")
+    assert types[overflow_index : types.index("turn.started", overflow_index) + 1] == [
+        "context.overflow",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "turn.completed",
+        "turn.started",
+    ]
     assert completed.outcome == "completed"
     assert completed.will_retry is True
     assert completed.compaction_id is not None
@@ -228,6 +241,72 @@ def test_does_not_retry_a_second_overflow(tmp_path: Path) -> None:
     assert emitted[-1].outcome == "failed"
 
 
+def test_recovers_only_one_overflow_per_run_with_compactable_history(tmp_path: Path) -> None:
+    """A later overflow stays terminal even when completed turns could be compacted."""
+
+    overflow = [
+        ProviderResponseStarted(model="model"),
+        ProviderResponseFailed(message="maximum context length exceeded"),
+    ]
+    provider = ScriptedProvider(
+        [
+            overflow,
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer three"),
+            ],
+            # The follow-up turn overflows after a completed turn exists to compact.
+            overflow,
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer four"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    events: list[WispEvent] = []
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=build_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+        with pytest.raises(ContextOverflowError, match="maximum context length exceeded"):
+            async for event in agent.run("question three", session=session):
+                if isinstance(event, AgentStarted):
+                    await agent.follow_up("question four")
+                events.append(event)
+
+    anyio.run(run)
+
+    assert sum(event.type == "context.overflow" for event in events) == 2
+    assert [event.reason for event in events if isinstance(event, CompactionStarted)] == [
+        "overflow"
+    ]
+    assert len(provider.calls) == 4
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [(1, "failed"), (2, "completed"), (3, "failed")]
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "failed"
+
+
 def test_overflow_without_compactable_prefix_is_terminal(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [
@@ -321,6 +400,73 @@ def test_overflow_summary_failure_is_terminal(tmp_path: Path) -> None:
         (event.turn, event.outcome) for event in emitted if isinstance(event, TurnCompleted)
     ] == [(1, "failed")]
     assert [event.type for event in emitted][-3:] == ["error", "turn.completed", "agent.completed"]
+
+
+def test_overflow_replay_failure_is_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="maximum context length exceeded"),
+            ]
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    events: list[WispEvent] = []
+
+    async def run() -> None:
+        await _append_turn(session, "one")
+        await _append_turn(session, "two")
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            model="model",
+            models=build_model_registry(),
+            prompt_messages=(Message(role="system", content="system"),),
+            context_reserve_tokens=20,
+        )
+
+        async def fail_prepare(session: object) -> object:
+            del session
+            raise RuntimeError("replay unavailable")
+
+        monkeypatch.setattr(agent, "_prepare_compaction_replay", fail_prepare)
+        with pytest.raises(
+            ContextOverflowError,
+            match="Context overflow recovery failed: replay unavailable",
+        ):
+            async for event in agent.run("question three", session=session):
+                events.append(event)
+
+    anyio.run(run)
+
+    types = [event.type for event in events]
+    assert types[types.index("context.overflow") :] == [
+        "context.overflow",
+        "compaction.started",
+        "compaction.completed",
+        "error",
+        "turn.completed",
+        "agent.completed",
+    ]
+    started = next(event for event in events if isinstance(event, CompactionStarted))
+    completed = next(event for event in events if isinstance(event, CompactionCompleted))
+    assert (started.reason, started.source_entry_count) == ("overflow", 0)
+    assert (completed.reason, completed.outcome) == ("overflow", "failed")
+    assert completed.error == "replay unavailable"
+    error = next(event for event in events if isinstance(event, ErrorEvent))
+    assert error.message == "Context overflow recovery failed: replay unavailable"
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [(1, "failed")]
+    assert events[-1].outcome == "failed"
+    assert len(provider.calls) == 1
+    assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
 def test_retry_setup_failure_does_not_claim_retry(
@@ -425,13 +571,22 @@ def test_overflow_recovery_allows_unknown_context_window(tmp_path: Path) -> None
     assert len(provider.calls) == 3
 
 
-@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("enabled", "streamed_delta", "reserve_tokens"),
+    [
+        pytest.param(False, False, 20, id="auto-compaction-off"),
+        pytest.param(True, True, 20, id="streamed-delta"),
+        pytest.param(True, False, 100, id="reserve-fills-window"),
+    ],
+)
 def test_skips_overflow_retry_when_ineligible(
     tmp_path: Path,
     enabled: bool,
+    streamed_delta: bool,
+    reserve_tokens: int,
 ) -> None:
     overflow_stream: list[ProviderEvent] = [ProviderResponseStarted(model="model")]
-    if enabled:
+    if streamed_delta:
         overflow_stream.append(ProviderTextDelta(delta="partial"))
     overflow_stream.append(ProviderResponseFailed(message="maximum context length exceeded"))
     provider = ScriptedProvider(
@@ -450,7 +605,7 @@ def test_skips_overflow_retry_when_ineligible(
             model="model",
             models=build_model_registry(),
             prompt_messages=(Message(role="system", content="system"),),
-            context_reserve_tokens=20,
+            context_reserve_tokens=reserve_tokens,
             auto_compaction_enabled=enabled,
         )
         _events = [event async for event in agent.run("question three", session=session)]

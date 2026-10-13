@@ -20,6 +20,7 @@ from wisp.coding.compaction import (
 )
 from wisp.coding.session import CodingSession
 from wisp.events import (
+    AgentStarted,
     CompactionCompleted,
     CompactionStarted,
     ErrorEvent,
@@ -813,12 +814,14 @@ def test_threshold_compaction_rebases_tools_with_steering(
         context_reserve_tokens=100,
     )
     events: list[WispEvent] = []
+    first_turn_ids: tuple[str, str] | None = None
 
     async def consume() -> None:
         events.extend([event async for event in agent.run("question two", session=session)])
 
     async def run() -> None:
-        await _append_turn(session, "one")
+        nonlocal first_turn_ids
+        first_turn_ids = await _append_turn(session, "one")
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(consume)
             await started.wait()
@@ -837,6 +840,91 @@ def test_threshold_compaction_rebases_tools_with_steering(
     assert provider.calls[2].previous_response_id == "tool-response"
     assert provider.calls[2].tool_results[0].call_id == "call-1"
     assert [message.content for message in provider.calls[2].extra_messages] == ["change direction"]
+    # Steering injected after a tool round joins the running turn, so the prompt
+    # stays the active turn and only the earlier completed turn is summarized.
+    record = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
+    assert record.replaced_entry_ids == first_turn_ids
+
+
+def test_boundary_compaction_keeps_injected_follow_ups_active(tmp_path: Path) -> None:
+    """Follow-ups that start a new turn become its active entries at the boundary."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer one " + "b" * 6_000),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ],
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseCompleted(content="answer two"),
+            ],
+        ],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        models=build_model_registry(context_window=10_000, auto_compact_token_limit=1_000),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+    )
+
+    async def run() -> list[WispEvent]:
+        events: list[WispEvent] = []
+        async for event in agent.run("question one", session=session):
+            if isinstance(event, AgentStarted):
+                # Both follow-ups are injected together at the first completed-turn
+                # boundary; the first one starts the new turn.
+                agent.set_queue_mode("follow_up", "all")
+                await agent.follow_up("follow up one")
+                await agent.follow_up("follow up two")
+            events.append(event)
+        return events
+
+    events = anyio.run(run)
+
+    types = [event.type for event in events]
+    first_turn_end = types.index("turn.completed")
+    assert types[first_turn_end : types.index("turn.started", first_turn_end) + 1] == [
+        "turn.completed",
+        "queue.message.injected",
+        "queue.message.injected",
+        "queue.updated",
+        "compaction.started",
+        "session.saved",
+        "compaction.completed",
+        "turn.started",
+    ]
+    started = next(event for event in events if isinstance(event, AgentStarted))
+    first_answer = next(event for event in events if isinstance(event, MessageCompleted))
+    record = next(
+        entry.compaction
+        for entry in session.read_entries()
+        if isinstance(entry, CompactionSessionEntry)
+    )
+    # Only the completed first turn is summarized; neither follow-up is replaced.
+    assert record.replaced_entry_ids == (started.message_entry_id, first_answer.message_entry_id)
+    final_request = provider.calls[2]
+    assert [(message.role, message.content) for message in final_request.messages[-2:]] == [
+        ("user", "follow up one"),
+        ("user", "follow up two"),
+    ]
+    assert "question one" not in {message.content for message in final_request.messages}
+    assert not any(isinstance(event, ErrorEvent) for event in events)
+    assert events[-1].type == "agent.completed"
+    assert events[-1].outcome == "completed"
 
 
 def test_recovers_when_active_tool_turn_stays_over_limit(
