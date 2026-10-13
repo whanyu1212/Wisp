@@ -16,6 +16,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    reap,
     run_settled,
     welcome_ready,
 )
@@ -48,6 +49,21 @@ def test_run_settled_respects_offset() -> None:
 
     assert not run_settled(output, len(output), b"response")
     assert run_settled(output, 0, b"response")
+
+
+def test_reap_kills_and_reaps_a_pty_child() -> None:
+    """Cleanup returns promptly even when the child would never exit by itself."""
+
+    child_pid, terminal_fd = pty.fork()
+    if child_pid == 0:
+        os.execvp(sys.executable, [sys.executable, "-c", "import time; time.sleep(60)"])
+    started = time.monotonic()
+
+    reap(child_pid, terminal_fd, timeout=10)
+
+    assert time.monotonic() - started < 10
+    with pytest.raises(ChildProcessError):
+        os.waitpid(child_pid, os.WNOHANG)
 
 
 def test_command_log_ignores_incomplete_records(tmp_path: Path) -> None:

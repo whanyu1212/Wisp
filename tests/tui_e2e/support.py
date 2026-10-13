@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import signal
+import time
+import unicodedata
 from pathlib import Path
 
 # Shared by the deliberately small inline backends in the PTY tests; use real event
@@ -62,6 +66,89 @@ def complete_frames(output: bytes | bytearray) -> bytes:
     """
     end = output.rfind(_FRAME_END)
     return bytes(output[: end + len(_FRAME_END)]) if end >= 0 else b""
+
+
+_CURSOR_MOVE = re.compile(rb"\x1b\[(\d+);(\d+)H")
+_FRAME_START = b"\x1b[?2026h"
+
+
+def frame_cursor(output: bytes | bytearray) -> tuple[int, int] | None:
+    """Return where the last complete frame left the cursor, as 1-based (row, column).
+
+    Each frame ends by placing the cursor, so a frame whose cursor sits where the
+    composer's text ends proves the TUI has processed and painted every keystroke
+    up to that point. Unlike matching painted text, this does not depend on which
+    cells a frame happened to repaint.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output so far.
+
+    Returns:
+        tuple[int, int] | None: The cursor position, or None if no frame was received
+        whole (start and end marker) or the frame placed no cursor.
+    """
+    frames = complete_frames(output)
+    start = frames.rfind(_FRAME_START)
+    if start < 0:
+        # The frame began before the buffer was last cleared; its cursor may
+        # predate input the test has sent since.
+        return None
+    moves = _CURSOR_MOVE.findall(frames[start:])
+    if not moves:
+        return None
+    row, column = moves[-1]
+    return int(row), int(column)
+
+
+def display_width(text: str) -> int:
+    """Return the terminal cells ``text`` occupies, counting wide East Asian characters as two."""
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def reap(child_pid: int, terminal_fd: int, *, timeout: float = 10.0) -> None:
+    """Kill a PTY child's process group, close the PTY, and reap the child within a deadline.
+
+    Closing the controlling PTY matters on macOS: a dying process can block while
+    its terminal output drains, so an unbounded ``waitpid`` after SIGKILL can hang
+    until the per-test timeout and hide the original failure.
+
+    Args:
+        child_pid (int): Child process from ``pty.fork``.
+        terminal_fd (int): The child's controlling PTY.
+        timeout (float, optional): Seconds to wait for the child to exit. Defaults to 10.
+
+    Raises:
+        AssertionError: The child did not exit within ``timeout``.
+    """
+    try:
+        foreground_group = os.tcgetpgrp(terminal_fd)
+    except OSError:
+        foreground_group = None
+    # Right after the fork the PTY reports 0, and killpg(0) would signal the test's
+    # own process group; only signal a real group other than ours.
+    if foreground_group is not None and 0 < foreground_group != os.getpgrp():
+        try:
+            os.killpg(foreground_group, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        os.kill(child_pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        os.close(terminal_fd)
+    except OSError:
+        pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            waited_pid, _status = os.waitpid(child_pid, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if waited_pid == child_pid:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"PTY child {child_pid} did not exit within {timeout}s of SIGKILL")
 
 
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
