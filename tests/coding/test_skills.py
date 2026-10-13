@@ -4,8 +4,16 @@ from pathlib import Path
 
 import anyio
 
+from tests.coding.compaction_support import build_model_registry
 from wisp.coding.session import CodingSession
-from wisp.events import QueueMessageInjected, SkillInvoked, ToolExecutionEnded, wisp_event_from_json
+from wisp.events import (
+    AgentStarted,
+    QueueMessageInjected,
+    SkillInvoked,
+    ToolExecutionEnded,
+    WispEvent,
+    wisp_event_from_json,
+)
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
@@ -270,3 +278,52 @@ def test_queued_skill_invocation_uses_same_expansion_policy(tmp_path: Path) -> N
     persisted = session.read_context_messages()[-2]
     assert persisted.content == injected.content
     assert persisted.skill_invocation == injected.skill_invocation
+
+
+def test_preflight_steering_skill_invocation_reaches_first_request(tmp_path: Path) -> None:
+    """Steering drained before the first request announces its skill invocation."""
+
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="model"), ProviderResponseCompleted(content="done")]],
+        default_model="model",
+    )
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        model="model",
+        # A provider auto-compaction limit makes the run drain steering before
+        # its first request.
+        models=build_model_registry(context_window=100_000, auto_compact_token_limit=50_000),
+        tool_context=ToolContext(cwd=tmp_path),
+        skill_catalog=SkillCatalog(entries=(_skill(tmp_path),)),
+    )
+
+    async def scenario() -> list[WispEvent]:
+        events: list[WispEvent] = []
+        async for event in agent.run("start", session=session):
+            if isinstance(event, AgentStarted):
+                await agent.steer("/skill:demo use this first")
+            events.append(event)
+        return events
+
+    events = anyio.run(scenario)
+
+    injected_index, injected = next(
+        (index, event)
+        for index, event in enumerate(events)
+        if isinstance(event, QueueMessageInjected)
+    )
+    skill_index, skill_event = next(
+        (index, event)
+        for index, event in enumerate(events)
+        if isinstance(event, SkillInvoked) and event.queue_kind == "steering"
+    )
+    turn_index = next(index for index, event in enumerate(events) if event.type == "turn.started")
+    assert skill_index < injected_index < turn_index
+    assert injected.kind == "steering"
+    assert injected.message_entry_id is not None
+    assert skill_event.message_entry_id == injected.message_entry_id
+    assert skill_event.provider_content == injected.content
+    assert provider.calls[0].messages[-1].content == injected.content

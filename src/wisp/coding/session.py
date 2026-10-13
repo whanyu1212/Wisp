@@ -471,6 +471,50 @@ class CodingSession:
         operation_tool_names: frozenset[str] | None = None,
         operation_ready: Callable[[], Awaitable[None]] | None = None,
     ) -> AsyncIterator[WispEvent]:
+        """Run one prompt to completion and stream its events.
+
+        Runs are serialized: the session's operation lock is held until the stream
+        ends, so a second call waits for the first. Steering and follow-up
+        messages are accepted while the run is active. When the stream ends for
+        any reason (completion, failure, cancellation, or the caller closing it),
+        the run's generator is closed first, then any messages still queued are
+        retained for the next run on the same session, and the active run state
+        is cleared.
+
+        Args:
+            prompt (str): User prompt for this run.
+            session (JsonlSession | None, optional): Session to append to. A new
+                session is created when omitted. Defaults to None.
+            history (Sequence[Message], optional): History to resume when the
+                session has no persisted entries. Persisted history takes
+                precedence. Defaults to ().
+            operation_id (str | None, optional): Operation owning the run's
+                entries; also enables operation-scoped rollback. Defaults to None.
+            tool_context (ToolContext | None, optional): Tool context for this run
+                instead of the session's. Defaults to None.
+            operation_instructions (str | None, optional): Extra system
+                instructions appended after the prompt messages. Defaults to None.
+            operation_tool_names (frozenset[str] | None, optional): Restrict the
+                run to these tools, still subject to the session tool policy.
+                Defaults to None.
+            operation_ready (Callable[[], Awaitable[None]] | None, optional):
+                Awaited once the run accepts queued messages, before prompt
+                construction. Defaults to None.
+
+        Yields:
+            WispEvent: The run's events in publication order. A `QueueUpdated`
+            for restored queues may precede `AgentStarted`; a run that reaches
+            its agent loop ends with `AgentCompleted`.
+
+        Raises:
+            ContextOverflowError: The prompt cannot fit the provider's context, or
+                overflow recovery failed; raised after `AgentCompleted(failed)`.
+            Exception: A failure inside the agent loop propagates after the open
+                turn is completed as failed and `AgentCompleted(failed)` is
+                published. A failure while preparing the run propagates without
+                a terminal event.
+        """
+
         async with self._operation_lock:
             self._operation_active = True
             events = self._run(
@@ -539,69 +583,25 @@ class CodingSession:
             return await self._emit(event, session=session, operation_id=operation_id)
 
         operation_registry = self._operation_tool_registry()
-        effective_tools = self._effective_tools(operation_registry)
-        operation_policy: ToolPolicy | None = None
-        if operation_tool_names is not None:
-            effective_tools = tuple(
-                tool for tool in effective_tools if tool.name in operation_tool_names
-            )
-            allowed_names = {tool.name for tool in effective_tools}
-            if operation_registry is not None:
-                policy_allowed_names: set[str] = set()
-                for name in allowed_names:
-                    try:
-                        operation_tool = operation_registry.get(name)
-                    except UnknownToolError:
-                        continue
-                    if self.tool_policy.allows(operation_tool):
-                        policy_allowed_names.add(name)
-                allowed_names = policy_allowed_names
-                effective_tools = tuple(
-                    tool for tool in effective_tools if tool.name in allowed_names
-                )
-            operation_policy = ToolPolicy.allow_tool_names(allowed_names)
-        executor = ConfiguredToolExecutor(
-            registry=operation_registry,
+        effective_tools, executor = self._run_tools(
+            operation_registry,
+            operation_tool_names,
             context=operation_context,
-            policy=(
-                operation_policy
-                if operation_policy is not None
-                else self._effective_tool_policy(effective_tools)
-            ),
-            approval_policy=self.tool_approval_policy,
         )
-        harness = AgentHarness(
-            AgentHarnessConfig(
-                provider=self.provider,
-                tool_executor=executor,
-                model=self.model,
-                tools=effective_tools,
-                max_tool_iterations=self.max_tool_iterations,
-                effort=self.effort,
-                prompt_cache_key=_prompt_cache_key(session.session_id),
-                context_window=self._context_window(),
-                context_reserve_tokens=self._effective_context_reserve_tokens(),
-                cost_estimator=self._cost_estimator,
-            ),
-            # Publish the operation-owned harness before project-context I/O so
-            # steering, follow-ups, queue inspection, and cancellation remain
-            # responsive while prompt construction runs in its worker thread.
-            messages=self._conversation_history(history),
+        harness, restored_queues = self._start_run_harness(
+            session,
+            history,
+            tools=effective_tools,
+            executor=executor,
         )
-        retained = self._retained_queues.pop(session.session_id, None)
-        if retained is not None:
-            harness.set_steering_mode(retained.steering_mode)
-            harness.set_follow_up_mode(retained.follow_up_mode)
-        retained_messages = retained.messages if retained is not None else QueuedMessages()
-        for message in retained_messages.steering:
-            harness.steer_message(message)
-        for message in retained_messages.follow_up:
-            harness.follow_up_message(message)
+        # Publish the operation-owned harness before project-context I/O so
+        # steering, follow-ups, queue inspection, and cancellation remain
+        # responsive while prompt construction runs in its worker thread.
         self._active_harness = harness
         self._accepting_queued_messages = True
         if operation_ready is not None:
             await operation_ready()
-        if retained is not None:
+        if restored_queues:
             # The replacement owner gives retained items a new guard token.
             # Publish it before prompt preparation so the first queue mutation
             # need not fail against the previous run's displayed snapshot.
@@ -670,29 +670,12 @@ class CodingSession:
             run_start_leaf_id=run_start_leaf_id,
             provider_auto_compaction=provider_auto_compaction,
             status=auto_compaction_status,
-            active_entry_id=user_entry.id,
+            prompt_entry_id=user_entry.id,
         )
         if provider_auto_compaction:
             if history:
-                prompt_compacted = False
-                async for compaction_event in self._maybe_auto_compact(
-                    session,
-                    harness,
-                    status=auto_compaction_status,
-                    operation_id=operation_id,
-                    preflight_active_entry_id=user_entry.id,
-                ):
-                    if (
-                        isinstance(compaction_event, CompactionCompleted)
-                        and compaction_event.outcome == "completed"
-                    ):
-                        prompt_compacted = True
+                async for compaction_event in compaction.compact_before_first_request():
                     yield compaction_event
-                if prompt_compacted:
-                    active_history = await anyio.to_thread.run_sync(session.read_context_messages)
-                    harness.replace_messages(
-                        (*prompt_messages, *self._conversation_history(active_history))
-                    )
             remaining_budget = self._harness_context_budget(harness)
             if exceeds_provider_auto_compaction_limit(
                 remaining_budget
@@ -729,52 +712,21 @@ class CodingSession:
                 for queue_event in harness.drain_steering():
                     if isinstance(queue_event, QueueMessageInjected):
                         steering_injected = True
-                        queue_entry_id = self._queue_message(
-                            session,
-                            Message(
-                                role="user",
-                                content=queue_event.content,
-                                skill_invocation=queue_event.skill_invocation,
-                                created_at=queue_event.timestamp,
-                            ),
-                            operation_id=operation_id,
+                        queue_entry_id = self._persist_queue_injection(
+                            session, queue_event, operation_id=operation_id
                         )
                         queue_event = queue_event.model_copy(
                             update={"message_entry_id": queue_entry_id}
                         )
-                        if queue_event.skill_invocation is not None:
-                            yield await emit(
-                                SkillInvoked(
-                                    session_id=session.session_id,
-                                    message_entry_id=queue_entry_id,
-                                    invocation=queue_event.skill_invocation,
-                                    provider_content=queue_event.content,
-                                    queue_kind=queue_event.kind,
-                                )
-                            )
+                        skill_event = _queued_skill_invoked(
+                            session.session_id, queue_entry_id, queue_event
+                        )
+                        if skill_event is not None:
+                            yield await emit(skill_event)
                     yield await emit(queue_event)
                 if steering_injected:
-                    steering_compacted = False
-                    async for compaction_event in self._maybe_auto_compact(
-                        session,
-                        harness,
-                        status=auto_compaction_status,
-                        operation_id=operation_id,
-                        preflight_active_entry_id=user_entry.id,
-                    ):
-                        if (
-                            isinstance(compaction_event, CompactionCompleted)
-                            and compaction_event.outcome == "completed"
-                        ):
-                            steering_compacted = True
+                    async for compaction_event in compaction.compact_before_first_request():
                         yield compaction_event
-                    if steering_compacted:
-                        active_history = await anyio.to_thread.run_sync(
-                            session.read_context_messages
-                        )
-                        harness.replace_messages(
-                            (*prompt_messages, *self._conversation_history(active_history))
-                        )
                     remaining_budget = self._harness_context_budget(harness)
                     if exceeds_provider_auto_compaction_limit(remaining_budget):
                         error_message = (
@@ -833,30 +785,18 @@ class CodingSession:
                         tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
                     if isinstance(event, QueueMessageInjected):
-                        queue_entry_id = self._queue_message(
-                            session,
-                            Message(
-                                role="user",
-                                content=event.content,
-                                skill_invocation=event.skill_invocation,
-                                created_at=event.timestamp,
-                            ),
-                            operation_id=operation_id,
+                        queue_entry_id = self._persist_queue_injection(
+                            session, event, operation_id=operation_id
                         )
                         event = event.model_copy(update={"message_entry_id": queue_entry_id})
                         if not turn_lifecycle.had_tool_calls and not queue_batch_started_new_turn:
                             compaction.queued_turn_started(queue_entry_id)
                             queue_batch_started_new_turn = True
-                        if event.skill_invocation is not None:
-                            yield await emit(
-                                SkillInvoked(
-                                    session_id=session.session_id,
-                                    message_entry_id=queue_entry_id,
-                                    invocation=event.skill_invocation,
-                                    provider_content=event.content,
-                                    queue_kind=event.kind,
-                                )
-                            )
+                        skill_event = _queued_skill_invoked(
+                            session.session_id, queue_entry_id, event
+                        )
+                        if skill_event is not None:
+                            yield await emit(skill_event)
                     if isinstance(
                         event, MessageCompleted | ToolExecutionEnded
                     ) and completion_event_has_history(event):
@@ -962,6 +902,137 @@ class CodingSession:
             yield await self._emit_recoverable_event(completed, session=session)
         else:
             yield await emit(completed)
+
+    def _run_tools(
+        self,
+        registry: ToolRegistry | None,
+        operation_tool_names: frozenset[str] | None,
+        *,
+        context: ToolContext,
+    ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
+        """Select the tools one run may use and build the executor that enforces them.
+
+        Args:
+            registry (ToolRegistry | None): The run's tool registry, if any.
+            operation_tool_names (frozenset[str] | None): Names an operation
+                restricts the run to, or None for every tool the mode allows.
+            context (ToolContext): Tool context the executor runs tools with.
+
+        Returns:
+            tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
+            to the provider and an executor whose policy allows the same tools.
+            Operation names are intersected with the session tool policy,
+            because explicit `tools=` specs are not filtered by it.
+        """
+
+        effective_tools = self._effective_tools(registry)
+        operation_policy: ToolPolicy | None = None
+        if operation_tool_names is not None:
+            effective_tools = tuple(
+                tool for tool in effective_tools if tool.name in operation_tool_names
+            )
+            allowed_names = {tool.name for tool in effective_tools}
+            if registry is not None:
+                policy_allowed_names: set[str] = set()
+                for name in allowed_names:
+                    try:
+                        operation_tool = registry.get(name)
+                    except UnknownToolError:
+                        continue
+                    if self.tool_policy.allows(operation_tool):
+                        policy_allowed_names.add(name)
+                allowed_names = policy_allowed_names
+                effective_tools = tuple(
+                    tool for tool in effective_tools if tool.name in allowed_names
+                )
+            operation_policy = ToolPolicy.allow_tool_names(allowed_names)
+        executor = ConfiguredToolExecutor(
+            registry=registry,
+            context=context,
+            policy=(
+                operation_policy
+                if operation_policy is not None
+                else self._effective_tool_policy(effective_tools)
+            ),
+            approval_policy=self.tool_approval_policy,
+        )
+        return effective_tools, executor
+
+    def _start_run_harness(
+        self,
+        session: JsonlSession,
+        history: Sequence[Message],
+        *,
+        tools: tuple[ToolSpec, ...],
+        executor: ConfiguredToolExecutor,
+    ) -> tuple[AgentHarness, bool]:
+        """Create a run's harness and restore queues a previous run left for this session.
+
+        Args:
+            session (JsonlSession): Session the run appends to.
+            history (Sequence[Message]): Conversation history the run resumes.
+            tools (tuple[ToolSpec, ...]): Tool specs offered to the provider.
+            executor (ConfiguredToolExecutor): Executor enforcing the run's tool policy.
+
+        Returns:
+            tuple[AgentHarness, bool]: The harness, and whether retained queue
+            messages and modes were restored into it.
+        """
+
+        harness = AgentHarness(
+            AgentHarnessConfig(
+                provider=self.provider,
+                tool_executor=executor,
+                model=self.model,
+                tools=tools,
+                max_tool_iterations=self.max_tool_iterations,
+                effort=self.effort,
+                prompt_cache_key=_prompt_cache_key(session.session_id),
+                context_window=self._context_window(),
+                context_reserve_tokens=self._effective_context_reserve_tokens(),
+                cost_estimator=self._cost_estimator,
+            ),
+            messages=self._conversation_history(history),
+        )
+        retained = self._retained_queues.pop(session.session_id, None)
+        if retained is None:
+            return harness, False
+        harness.set_steering_mode(retained.steering_mode)
+        harness.set_follow_up_mode(retained.follow_up_mode)
+        for message in retained.messages.steering:
+            harness.steer_message(message)
+        for message in retained.messages.follow_up:
+            harness.follow_up_message(message)
+        return harness, True
+
+    def _persist_queue_injection(
+        self,
+        session: JsonlSession,
+        event: QueueMessageInjected,
+        *,
+        operation_id: str | None,
+    ) -> str:
+        """Queue an injected steering or follow-up message for persistence.
+
+        Args:
+            session (JsonlSession): Session the run appends to.
+            event (QueueMessageInjected): The harness's injection event.
+            operation_id (str | None): Operation owning the entry.
+
+        Returns:
+            str: The entry id the message will be persisted under.
+        """
+
+        return self._queue_message(
+            session,
+            Message(
+                role="user",
+                content=event.content,
+                skill_invocation=event.skill_invocation,
+                created_at=event.timestamp,
+            ),
+            operation_id=operation_id,
+        )
 
     async def compact(
         self,
@@ -1798,7 +1869,7 @@ class _RunCompaction:
         run_start_leaf_id: str | None,
         provider_auto_compaction: bool,
         status: _AutoCompactionStatus,
-        active_entry_id: str,
+        prompt_entry_id: str,
     ) -> None:
         """Bind the policy to one run.
 
@@ -1817,8 +1888,8 @@ class _RunCompaction:
                 enables compaction at request boundaries.
             status (_AutoCompactionStatus): Auto-compaction status shared with
                 the run's preflight and final checks.
-            active_entry_id (str): Entry that starts the active turn, initially
-                the prompt itself.
+            prompt_entry_id (str): Entry of the run's prompt. It starts the
+                active turn until a queued message starts a new one.
         """
         self._owner = owner
         self._session = session
@@ -1830,7 +1901,8 @@ class _RunCompaction:
         self._run_start_leaf_id = run_start_leaf_id
         self._provider_auto_compaction = provider_auto_compaction
         self._status = status
-        self._active_entry_id = active_entry_id
+        self._prompt_entry_id = prompt_entry_id
+        self._active_entry_id = prompt_entry_id
         self._had_unsafe_tool_round = False
         self._overflow_recovery_attempted = False
         self._recovered_from_overflow = False
@@ -1895,6 +1967,37 @@ class _RunCompaction:
                 operation_id=self._operation_id,
             )
             self._persistence.expected_active_leaf_id = self._run_start_leaf_id
+
+    async def compact_before_first_request(self) -> AsyncIterator[WispEvent]:
+        """Compact history before the first request, keeping the prompt's turn active.
+
+        When compaction completes, the harness transcript is rebuilt from the
+        compacted session so the first request uses it. The caller checks the
+        remaining budget afterwards.
+
+        Yields:
+            WispEvent: Compaction events, already published.
+        """
+
+        compacted = False
+        async for compaction_event in self._owner._maybe_auto_compact(
+            self._session,
+            self._harness,
+            status=self._status,
+            operation_id=self._operation_id,
+            preflight_active_entry_id=self._prompt_entry_id,
+        ):
+            if (
+                isinstance(compaction_event, CompactionCompleted)
+                and compaction_event.outcome == "completed"
+            ):
+                compacted = True
+            yield compaction_event
+        if compacted:
+            active_history = await anyio.to_thread.run_sync(self._session.read_context_messages)
+            self._harness.replace_messages(
+                (*self._prompt_messages, *self._owner._conversation_history(active_history))
+            )
 
     async def prepare_boundary(
         self, *, context: HarnessBoundaryContext
@@ -2254,6 +2357,22 @@ def _session_file_created_at(path: Path) -> datetime | None:
         return datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(tzinfo=UTC)
     except ValueError:
         return None
+
+
+def _queued_skill_invoked(
+    session_id: str, entry_id: str, event: QueueMessageInjected
+) -> SkillInvoked | None:
+    """Return the SkillInvoked event announcing an injected queue message's skill, if any."""
+
+    if event.skill_invocation is None:
+        return None
+    return SkillInvoked(
+        session_id=session_id,
+        message_entry_id=entry_id,
+        invocation=event.skill_invocation,
+        provider_content=event.content,
+        queue_kind=event.kind,
+    )
 
 
 def _tool_result_status(event: ToolExecutionEnded) -> ToolPresentationStatus:

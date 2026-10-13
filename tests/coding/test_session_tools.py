@@ -34,6 +34,7 @@ from wisp.events import (
 from wisp.providers.base import (
     ToolCall,
     ToolCallResult,
+    ToolSpec,
 )
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -202,6 +203,54 @@ def test_operation_tool_names_block_other_registry_tools(tmp_path: Path) -> None
             is_error=True,
         ),
     )
+
+
+def test_operation_tool_names_cannot_enable_policy_blocked_tools(tmp_path: Path) -> None:
+    """An operation's tool names cannot re-enable a tool the session policy blocks.
+
+    Explicit `tools=` specs are not filtered by `tool_policy`, so the operation's
+    allow-list is the only place the session policy is reapplied.
+    """
+
+    class CountingMutatingTool(MutatingTool):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            self.calls += 1
+            return await super().run(arguments, context)
+
+    tool = CountingMutatingTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    provider = ToolLoopProvider(
+        [[ToolCall(call_id="call-1", name="mutate", arguments={})], ["done"]]
+    )
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tools=(ToolSpec.from_tool(tool),),
+        tool_policy=ToolPolicy.allow_read_tools(),
+        tool_approval_policy=ToolApprovalPolicy.approve_all(),
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+
+    async def run_agent() -> None:
+        _ = [
+            event
+            async for event in agent.run(
+                "mutate",
+                operation_tool_names=frozenset({"mutate"}),
+            )
+        ]
+
+    anyio.run(run_agent)
+
+    assert provider.calls[1][0] == (
+        ToolCallResult(call_id="call-1", output="Tool mutate is blocked by policy", is_error=True),
+    )
+    assert tool.calls == 0
 
 
 def test_keeps_operation_instructions_out_of_user_prompt(
