@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import sys
+import types
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import anyio
 import pytest
 
+import tests.support.loop_stream_checks as loop_stream_checks
 import wisp.agent.harness.runner as harness_runner
+import wisp.agent.loop as loop_package
 import wisp.agent.loop.runner as loop_runner
+import wisp.coding.compaction as compaction_module
 from tests.agent.invariant_checks_support import completed_turn
 from tests.support.loop_stream_checks import checked_run_agent_loop, is_exempt
 from wisp.events import TurnStarted
@@ -37,7 +40,7 @@ def _consume(run: Any) -> None:
 def test_finished_stream_with_valid_turns_passes() -> None:
     violations: list[str] = []
 
-    _consume(checked_run_agent_loop(_scripted_loop(completed_turn()), violations.append))
+    _consume(checked_run_agent_loop(_scripted_loop(completed_turn()), lambda: violations.append))
 
     assert violations == []
 
@@ -45,7 +48,9 @@ def test_finished_stream_with_valid_turns_passes() -> None:
 def test_finished_stream_with_open_turn_is_reported() -> None:
     violations: list[str] = []
 
-    _consume(checked_run_agent_loop(_scripted_loop((TurnStarted(turn=1),)), violations.append))
+    _consume(
+        checked_run_agent_loop(_scripted_loop((TurnStarted(turn=1),)), lambda: violations.append)
+    )
 
     assert len(violations) == 1
     assert "turn.started" in violations[0]
@@ -55,7 +60,7 @@ def test_raising_stream_is_checked_and_still_raises() -> None:
     violations: list[str] = []
     run = checked_run_agent_loop(
         _scripted_loop((TurnStarted(turn=1),), then_raise=RuntimeError("provider failed")),
-        violations.append,
+        lambda: violations.append,
     )
 
     with pytest.raises(RuntimeError, match="provider failed"):
@@ -66,7 +71,7 @@ def test_raising_stream_is_checked_and_still_raises() -> None:
 
 def test_stream_closed_by_consumer_is_not_checked() -> None:
     violations: list[str] = []
-    run = checked_run_agent_loop(_scripted_loop(completed_turn()), violations.append)
+    run = checked_run_agent_loop(_scripted_loop(completed_turn()), lambda: violations.append)
 
     async def main() -> None:
         stream = run()
@@ -86,7 +91,7 @@ def test_cancelled_stream_is_not_checked() -> None:
         await anyio.sleep_forever()
         yield TurnStarted(turn=2)  # pragma: no cover
 
-    run = checked_run_agent_loop(blocking_loop, violations.append)
+    run = checked_run_agent_loop(blocking_loop, lambda: violations.append)
 
     async def main() -> None:
         with anyio.move_on_after(0.01):
@@ -98,18 +103,49 @@ def test_cancelled_stream_is_not_checked() -> None:
     assert violations == []
 
 
-def test_fixture_wraps_the_loop_callers() -> None:
-    """Production callers of the loop get the checked wrapper during a test."""
+def test_stream_without_a_sink_passes_through_unchecked() -> None:
+    """An exempt test's streams are delivered unchanged and never reported."""
 
-    real = sys.modules["wisp.agent.loop.runner"].run_agent_loop
+    started = TurnStarted(turn=1)
+    run = checked_run_agent_loop(_scripted_loop((started,)), lambda: None)
+    received: list[object] = []
 
-    assert harness_runner.run_agent_loop is not real
-    assert loop_runner.run_agent_loop is real
+    async def main() -> None:
+        async for event in run():
+            received.append(event)
+
+    anyio.run(main)
+
+    assert received == [started]
 
 
-@pytest.mark.loop_invariants_exempt(reason="checks that an exempt test is left unwrapped")
-def test_exempt_test_keeps_the_real_loop() -> None:
-    assert harness_runner.run_agent_loop is loop_runner.run_agent_loop
+def test_loop_is_checked_at_its_source() -> None:
+    """Every caller binds the checked loop, whenever it was imported."""
+
+    checked = loop_runner.run_agent_loop
+    assert getattr(checked, "__wrapped__", None) is not None
+    assert loop_package.run_agent_loop is checked
+    assert harness_runner.run_agent_loop is checked
+    assert compaction_module.run_agent_loop is checked
+
+
+def test_module_imported_during_a_test_binds_the_checked_loop() -> None:
+    """A late import (in a fixture or test body) cannot bypass the checks."""
+
+    late_module = types.ModuleType("late_loop_caller")
+    exec("from wisp.agent.loop import run_agent_loop", late_module.__dict__)
+
+    assert late_module.run_agent_loop is loop_runner.run_agent_loop
+    assert getattr(late_module.run_agent_loop, "__wrapped__", None) is not None
+
+
+def test_checks_route_to_the_running_test() -> None:
+    assert loop_stream_checks._active_sink is not None
+
+
+@pytest.mark.loop_invariants_exempt(reason="checks that an exempt test is not reported")
+def test_exempt_test_has_no_violation_sink() -> None:
+    assert loop_stream_checks._active_sink is None
 
 
 @pytest.mark.parametrize(

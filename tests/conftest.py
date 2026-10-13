@@ -15,7 +15,6 @@ drives; see ``tests/support/loop_stream_checks.py``.
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -46,40 +45,24 @@ def _isolate_test_environment(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Check agent-loop invariants on every loop stream the session drives."""
+
+    del config
+    from tests.support.loop_stream_checks import install_loop_stream_checks
+
+    install_loop_stream_checks()
+
+
 @pytest.fixture(autouse=True)
-def _check_agent_loop_streams(
-    request: pytest.FixtureRequest,
-    monkeypatch: MonkeyPatch,
-) -> Iterator[None]:
-    """Fail the test if any agent-loop stream it drives breaks the loop's invariants.
+def _check_agent_loop_streams(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Fail the test if any agent-loop stream it drives breaks the loop's invariants."""
 
-    Only modules that are already imported are patched, so this fixture never
-    imports Wisp code a test did not load itself.
-    """
+    from tests.support.loop_stream_checks import collecting, is_exempt
 
-    loop_runner = sys.modules.get("wisp.agent.loop.runner")
-    if loop_runner is None:
-        yield
-        return
-
-    from tests.support.loop_stream_checks import (
-        LOOP_CALLER_MODULES,
-        checked_run_agent_loop,
-        is_exempt,
-    )
-
-    if is_exempt(request.node):
-        yield
-        return
-
-    real_run_agent_loop = loop_runner.run_agent_loop
     violations: list[str] = []
-    checked = checked_run_agent_loop(real_run_agent_loop, violations.append)
-    caller_modules = [sys.modules.get(name) for name in LOOP_CALLER_MODULES]
-    for module in (*caller_modules, request.module):
-        if module is not None and getattr(module, "run_agent_loop", None) is real_run_agent_loop:
-            monkeypatch.setattr(module, "run_agent_loop", checked)
-    yield
+    with collecting(None if is_exempt(request.node) else violations.append):
+        yield
     if violations:
         pytest.fail(
             "Agent-loop stream broke loop invariants (mark the test with "
