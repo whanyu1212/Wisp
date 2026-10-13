@@ -123,7 +123,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `turn_lifecycle.py` tracks the open turn: the loop publishes turns through it, and the harness and
   session observe events with it and build any terminal they must publish themselves.
 - For the coding runtime, start with `src/wisp/coding/session.py`: `CodingSession` coordinates one
-  run end to end, including the boundary and overflow hooks it hands to the harness. `compaction.py`
+  run end to end. The boundary and overflow hooks it hands to the harness live in `_RunCompaction`,
+  defined in the same module, which owns the compaction state they share with the run. `compaction.py`
   holds compaction planning, summarization, budget checks, and transcript comparison helpers;
   `persistence.py` holds the branch-pinned writer a run uses to append entries;
   `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
