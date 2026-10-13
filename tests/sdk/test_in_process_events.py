@@ -107,7 +107,7 @@ def test_in_process_sdk_relays_events_when_consumer_falls_behind(
         runtime.providers.register(provider)
         return runtime
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(

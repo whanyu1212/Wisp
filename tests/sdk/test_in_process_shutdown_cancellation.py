@@ -60,7 +60,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_final_state_refresh(
         release.wait(timeout=5)
         return original_updated_state(session, committed_history, entry_start)
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
     monkeypatch.setattr(rpc_session_run_module, "updated_rpc_session_state", blocked_updated_state)
 
     async def scenario() -> None:
@@ -167,7 +167,7 @@ def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
         release.wait(timeout=5)
         return original_updated_state(session, committed_history, entry_start)
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -475,7 +475,7 @@ def test_in_process_sdk_shutdown_cancels_prompt_start_snapshot(
         release.wait(timeout=5)
         return original_run_start(session, entry_start)
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
     monkeypatch.setattr(rpc_session_run_module, "rpc_session_run_start", blocked_run_start)
 
     async def scenario() -> None:
@@ -519,7 +519,7 @@ def test_in_process_sdk_shutdown_cancels_backpressured_stream(
         runtime.providers.register(provider)
         return runtime
 
-    monkeypatch.setattr(sdk_module, "build_runtime_for_config", build_scripted_runtime)
+    monkeypatch.setattr(sdk_module, "build_session_runtime", build_scripted_runtime)
     monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
 
     async def scenario() -> None:
