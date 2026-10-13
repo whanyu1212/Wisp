@@ -95,6 +95,7 @@ markers = [
     "benchmark: deterministic performance and resource-bound scenarios",
     "slow: intentionally long-running tests outside the other categories",
     "production_fault: required deterministic production fault-injection regressions",
+    "loop_invariants_exempt(reason): skip the automatic agent-loop invariant checks for a test that intends to break them",
 ]
 
 [tool.ruff]

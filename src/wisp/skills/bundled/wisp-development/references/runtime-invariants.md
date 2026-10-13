@@ -61,6 +61,10 @@ results.
 Prepared batches do synthesize one terminal result per requested call. Helpers
 split the rules on purpose:
 
+`tests/conftest.py` applies `assert_turn_invariants` (which includes
+`assert_turn_terminals`) and `assert_tool_result_pairing` to every loop stream
+a test drives. Opt out only with `loop_invariants_exempt(reason=...)`.
+
 - `assert_turn_terminals` — every started turn has exactly one terminal.
 - `assert_tool_result_pairing` — Ended/Ready pairing and payload projection
   when a tool terminal is present; requested-but-unsettled calls are allowed.
