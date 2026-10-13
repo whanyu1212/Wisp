@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -624,25 +624,6 @@ class CodingSession:
         run_entry_start = run_snapshot.entry_count
         run_start_leaf_id = run_snapshot.active_leaf_id
 
-        async def rollback_active_prompt() -> None:
-            if operation_id is not None:
-                restored = await session.restore_active_leaf_for_operation(
-                    run_entry_start,
-                    run_start_leaf_id,
-                    operation_id=operation_id,
-                )
-                if restored:
-                    persistence.expected_active_leaf_id = run_start_leaf_id
-                return
-            current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
-            if current_leaf_id != run_start_leaf_id:
-                await session.select_active_leaf(
-                    run_start_leaf_id,
-                    expected_active_leaf_id=current_leaf_id,
-                    operation_id=operation_id,
-                )
-                persistence.expected_active_leaf_id = run_start_leaf_id
-
         # Allocate the prompt's identity before AgentStarted, preserving the
         # existing event order while allowing frontends to identify their echo.
         user_entry = MessageSessionEntry(
@@ -677,6 +658,19 @@ class CodingSession:
         # limits; the existing generic reserve policy remains post-response.
         provider_auto_compaction = (
             self.auto_compaction_enabled and self._has_provider_auto_compaction_limit()
+        )
+        compaction = _RunCompaction(
+            self,
+            session=session,
+            harness=harness,
+            persistence=persistence,
+            operation_id=operation_id,
+            prompt_messages=prompt_messages,
+            run_entry_start=run_entry_start,
+            run_start_leaf_id=run_start_leaf_id,
+            provider_auto_compaction=provider_auto_compaction,
+            status=auto_compaction_status,
+            active_entry_id=user_entry.id,
         )
         if provider_auto_compaction:
             if history:
@@ -715,7 +709,7 @@ class CodingSession:
                     "Active prompt exceeds the provider auto-compaction limit "
                     "after compacting all eligible history"
                 )
-                await rollback_active_prompt()
+                await compaction.rollback_active_prompt()
                 yield await emit(ErrorEvent(message=error_message))
                 yield await emit(
                     AgentCompleted(
@@ -787,7 +781,7 @@ class CodingSession:
                             "Active prompt and steering exceed the provider "
                             "auto-compaction limit after compacting all eligible history"
                         )
-                        await rollback_active_prompt()
+                        await compaction.rollback_active_prompt()
                         yield await emit(ErrorEvent(message=error_message))
                         yield await emit(
                             AgentCompleted(
@@ -801,242 +795,12 @@ class CodingSession:
                 self._accepting_queued_messages = True
 
         turn_lifecycle = TurnLifecycle()
-        had_unsafe_tool_round = False
-        overflow_recovery_attempted = False
-        recovered_from_overflow = False
-        overflow_recovery_failure: ContextOverflowError | None = None
         tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
         started_tool_calls: set[str] = set()
-        boundary_events: deque[WispEvent] = deque()
-        active_compaction_entry_id = user_entry.id
         queue_batch_started_new_turn = False
-
-        async def replacement_after_compaction(
-            continuation_messages: Sequence[Message],
-            *,
-            has_native_continuation: bool,
-            injected_messages: Sequence[Message] = (),
-        ) -> RequestBoundaryDecision:
-            """Rehydrate durable context into the least disruptive loop transition."""
-
-            active_history = await anyio.to_thread.run_sync(session.read_context_messages)
-            replacement = (*prompt_messages, *self._conversation_history(active_history))
-            tail = tuple(continuation_messages)
-            injected = tuple(injected_messages)
-            portable_base = replacement
-            if injected and matches_provider_suffix(replacement, injected):
-                portable_base = replacement[: -len(injected)]
-            tail_matches = bool(tail) and matches_provider_suffix(portable_base, tail)
-            if has_native_continuation and tail_matches:
-                supports_rebase = getattr(self.provider, "supports_context_rebase", False) is True
-                if supports_rebase:
-                    return RequestBoundaryDecision(
-                        context_rebase=RequestContextRebase(
-                            base_messages=self._normalize_provider_messages(
-                                portable_base[: -len(tail)]
-                            ),
-                            expected_continuation_messages=tail,
-                        ),
-                        extra_messages=injected,
-                    )
-            # The loop-owned continuation is the authoritative active boundary.
-            # A later injected user row must not make that same-run tool exchange
-            # look historical during a fresh replacement.
-            replacement_active_from = (
-                len(portable_base) - len(tail) if tail_matches else active_turn_start(replacement)
-            )
-            return RequestBoundaryDecision(
-                messages=self._normalize_provider_messages(
-                    replacement,
-                    active_from=replacement_active_from,
-                )
-            )
-
-        class _SessionBoundaryPreparer:
-            async def prepare_boundary(
-                _self, *, context: HarnessBoundaryContext
-            ) -> RequestBoundaryDecision | None:
-                try:
-                    return await _self._prepare(context)
-                except ContextOverflowError:
-                    # A boundary overflow follows an already-completed tool turn. Roll
-                    # the active branch back to its pre-prompt leaf before the loop
-                    # publishes this error, so the error is recorded on the restored
-                    # branch and an irreducible tool result cannot poison later requests.
-                    await self._flush_pending_entries()
-                    await rollback_active_prompt()
-                    raise
-
-            async def _prepare(
-                _self, context: HarnessBoundaryContext
-            ) -> RequestBoundaryDecision | None:
-                assert session is not None
-                if context.stop_by_default or not provider_auto_compaction:
-                    return None
-                compacted = False
-                async for compaction_event in self._maybe_auto_compact(
-                    session,
-                    harness,
-                    status=auto_compaction_status,
-                    operation_id=operation_id,
-                    preflight_active_entry_id=active_compaction_entry_id,
-                    active_from=context.active_from,
-                ):
-                    boundary_events.append(compaction_event)
-                    if (
-                        isinstance(compaction_event, CompactionCompleted)
-                        and compaction_event.outcome == "completed"
-                    ):
-                        compacted = True
-                if compacted:
-                    return await replacement_after_compaction(
-                        context.snapshot.continuation_messages,
-                        has_native_continuation=context.snapshot.can_append_user_messages,
-                        injected_messages=context.injected_messages,
-                    )
-
-                # A provider catalog limit can leave the active tool result as
-                # the only remaining source of excess. This replacement is
-                # intentionally fresh: truncating a loop-owned tail is not an
-                # additive rebase.
-                remaining_budget = self._harness_context_budget(
-                    harness,
-                    active_from=context.active_from,
-                )
-                if exceeds_provider_auto_compaction_limit(remaining_budget):
-                    excess_tokens = provider_auto_compaction_excess_tokens(remaining_budget)
-                    truncated = (
-                        truncate_active_turn_tool_results(
-                            harness.messages,
-                            excess_tokens=excess_tokens + excess_tokens // 4 + 64,
-                        )
-                        if excess_tokens is not None
-                        else None
-                    )
-                    if truncated is not None:
-                        return RequestBoundaryDecision(
-                            messages=self._normalize_provider_messages(
-                                truncated,
-                                active_from=context.active_from,
-                            )
-                        )
-                    raise ContextOverflowError(
-                        "Active tool result exceeds the provider auto-compaction limit "
-                        "after compacting all eligible history"
-                    )
-                return None
-
-        class _SessionOverflowHook:
-            async def recover_context_overflow(
-                _self, *, snapshot: ContextOverflowSnapshot
-            ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
-                assert session is not None
-                nonlocal overflow_recovery_attempted
-                nonlocal overflow_recovery_failure
-                nonlocal recovered_from_overflow
-                # The hook is the sole recovery authority for this primary
-                # generator. Mark every decision attempt so legacy terminal
-                # handling cannot create a second loop/retry after it returns.
-                if overflow_recovery_attempted:
-                    return None
-                overflow_recovery_attempted = True
-                if (
-                    not self.auto_compaction_enabled
-                    or snapshot.had_streamed_delta
-                    or had_unsafe_tool_round
-                    or (
-                        snapshot.context_budget.context_window is not None
-                        and snapshot.context_budget.reserve_tokens
-                        >= snapshot.context_budget.context_window
-                    )
-                ):
-                    return None
-                replay: SessionReplay | None = None
-                try:
-                    replay = await self._prepare_compaction_replay(session)
-                    plan = plan_manual_compaction(replay)
-                except NothingToCompactError:
-                    return None
-                except Exception as exc:
-                    source_entry_count = len(replay.context_entry_ids) if replay is not None else 0
-                    boundary_events.append(
-                        await self._emit_recoverable_event(
-                            CompactionStarted(
-                                session_id=session.session_id,
-                                reason="overflow",
-                                source_entry_count=source_entry_count,
-                                trigger_budget=snapshot.context_budget,
-                            ),
-                            session=session,
-                            operation_id=operation_id,
-                        )
-                    )
-                    boundary_events.append(
-                        await self._emit_recoverable_event(
-                            CompactionCompleted(
-                                session_id=session.session_id,
-                                reason="overflow",
-                                outcome="failed",
-                                replaced_entry_count=0,
-                                retained_entry_count=source_entry_count,
-                                provider=self.provider.name,
-                                model=self.model or self.provider.default_model,
-                                error=str(exc),
-                            ),
-                            session=session,
-                            operation_id=operation_id,
-                        )
-                    )
-                    overflow_recovery_failure = ContextOverflowError(
-                        f"Context overflow recovery failed: {exc}"
-                    )
-                    return ContextOverflowFailure(str(overflow_recovery_failure))
-
-                retry_decision: RequestBoundaryDecision | None = None
-
-                async def prepare_retry() -> None:
-                    nonlocal retry_decision
-                    retry_decision = await replacement_after_compaction(
-                        snapshot.continuation_messages,
-                        has_native_continuation=snapshot.has_native_continuation,
-                    )
-
-                completed: CompactionCompleted | None = None
-                async for compaction_event in self._compact_locked(
-                    session,
-                    plan,
-                    reason="overflow",
-                    instructions=None,
-                    trigger_budget=snapshot.context_budget,
-                    recover_failure=True,
-                    will_retry=True,
-                    operation_id=operation_id,
-                    retry_setup=prepare_retry,
-                ):
-                    boundary_events.append(compaction_event)
-                    if isinstance(compaction_event, CompactionCompleted):
-                        completed = compaction_event
-                if (
-                    completed is None
-                    or completed.outcome != "completed"
-                    or not completed.will_retry
-                    or retry_decision is None
-                ):
-                    detail = (
-                        completed.error
-                        if completed is not None and completed.error
-                        else "compaction did not complete"
-                    )
-                    overflow_recovery_failure = ContextOverflowError(
-                        f"Context overflow recovery failed: {detail}"
-                    )
-                    return ContextOverflowFailure(str(overflow_recovery_failure))
-                recovered_from_overflow = True
-                return retry_decision
-
         harness_events = harness.continue_(
-            boundary_preparer=_SessionBoundaryPreparer(),
-            context_overflow_hook=_SessionOverflowHook(),
+            boundary_preparer=compaction,
+            context_overflow_hook=compaction,
         )
 
         terminal_outcome: RunOutcome = "completed"
@@ -1045,11 +809,11 @@ class CodingSession:
             overflow_error: ContextOverflowError | None = None
             try:
                 async for event in harness_events:
-                    while boundary_events:
-                        yield boundary_events.popleft()
+                    for compaction_event in compaction.take_events():
+                        yield compaction_event
                     turn_lifecycle.observe(event)
                     if isinstance(event, TurnStarted):
-                        if recovered_from_overflow:
+                        if compaction.recovered_from_overflow:
                             overflow_error = None
                     elif isinstance(event, ErrorEvent):
                         saw_loop_error = True
@@ -1064,7 +828,7 @@ class CodingSession:
                         was_started = event.call_id in started_tool_calls
                         started_tool_calls.discard(event.call_id)
                         if was_started and self._tool_is_unsafe(event.name):
-                            had_unsafe_tool_round = True
+                            compaction.unsafe_tool_ran()
                     elif isinstance(event, ToolApprovalResolved) and not event.approved:
                         tool_presentation_statuses[event.call_id] = "denied"
                     completion_entry_id: str | None = None
@@ -1081,7 +845,7 @@ class CodingSession:
                         )
                         event = event.model_copy(update={"message_entry_id": queue_entry_id})
                         if not turn_lifecycle.had_tool_calls and not queue_batch_started_new_turn:
-                            active_compaction_entry_id = queue_entry_id
+                            compaction.queued_turn_started(queue_entry_id)
                             queue_batch_started_new_turn = True
                         if event.skill_invocation is not None:
                             yield await emit(
@@ -1122,8 +886,8 @@ class CodingSession:
                     if completion_entry_id is not None:
                         event = event.model_copy(update={"message_entry_id": completion_entry_id})
                     yield await emit(event)
-                while boundary_events:
-                    yield boundary_events.popleft()
+                for compaction_event in compaction.take_events():
+                    yield compaction_event
             except ContextOverflowError as exc:
                 overflow_error = exc
             except Exception as exc:
@@ -1160,7 +924,7 @@ class CodingSession:
             # decision. The loop publishes the overflow's error and closes its
             # turn, and a boundary overflow rolled the prompt back before it was
             # raised, so only the run's own terminal remains here.
-            terminal_overflow = overflow_recovery_failure or overflow_error
+            terminal_overflow = compaction.recovery_failure or overflow_error
             if not saw_loop_error:
                 for terminal_event in turn_lifecycle.terminal_events(
                     str(terminal_overflow), outcome="failed"
@@ -1177,7 +941,7 @@ class CodingSession:
 
         self._accepting_queued_messages = False
         auto_compaction_saved = False
-        if not recovered_from_overflow:
+        if not compaction.recovered_from_overflow:
             async for compaction_event in self._maybe_auto_compact(
                 session,
                 harness,
@@ -2008,6 +1772,377 @@ class CodingSession:
                     self._history_refresh_session_ids.add(pending.entry.session_id)
                     raise
                 self._pending_entries.popleft()
+
+
+class _RunCompaction:
+    """Compaction policy for one run, serving as the harness's boundary and overflow hooks.
+
+    `CodingSession._run` creates one per run once the prompt's persisted position
+    is known, passes it to `AgentHarness.continue_` as both the boundary preparer
+    and the context-overflow hook, and reports the run facts this policy depends
+    on through the named methods below. Compaction events produced inside a hook
+    are buffered until `_run` publishes them with `take_events`, so they keep
+    their place in the run's event stream.
+    """
+
+    def __init__(
+        self,
+        owner: CodingSession,
+        *,
+        session: JsonlSession,
+        harness: AgentHarness,
+        persistence: RunPersistence,
+        operation_id: str | None,
+        prompt_messages: Sequence[Message],
+        run_entry_start: int,
+        run_start_leaf_id: str | None,
+        provider_auto_compaction: bool,
+        status: _AutoCompactionStatus,
+        active_entry_id: str,
+    ) -> None:
+        """Bind the policy to one run.
+
+        Args:
+            owner (CodingSession): Session whose compaction operations and
+                configuration the hooks use.
+            session (JsonlSession): Session the run appends to.
+            harness (AgentHarness): Harness executing the run.
+            persistence (RunPersistence): The run's branch-pinned writer.
+            operation_id (str | None): Operation owning the run's entries.
+            prompt_messages (Sequence[Message]): System prompt rows that prefix
+                every rebuilt provider transcript.
+            run_entry_start (int): Session entry count before the prompt was persisted.
+            run_start_leaf_id (str | None): Active leaf before the prompt was persisted.
+            provider_auto_compaction (bool): Whether a provider-catalogued limit
+                enables compaction at request boundaries.
+            status (_AutoCompactionStatus): Auto-compaction status shared with
+                the run's preflight and final checks.
+            active_entry_id (str): Entry that starts the active turn, initially
+                the prompt itself.
+        """
+        self._owner = owner
+        self._session = session
+        self._harness = harness
+        self._persistence = persistence
+        self._operation_id = operation_id
+        self._prompt_messages = tuple(prompt_messages)
+        self._run_entry_start = run_entry_start
+        self._run_start_leaf_id = run_start_leaf_id
+        self._provider_auto_compaction = provider_auto_compaction
+        self._status = status
+        self._active_entry_id = active_entry_id
+        self._had_unsafe_tool_round = False
+        self._overflow_recovery_attempted = False
+        self._recovered_from_overflow = False
+        self._recovery_failure: ContextOverflowError | None = None
+        self._events: deque[WispEvent] = deque()
+
+    @property
+    def recovered_from_overflow(self) -> bool:
+        """Whether the overflow hook compacted and scheduled a retry."""
+
+        return self._recovered_from_overflow
+
+    @property
+    def recovery_failure(self) -> ContextOverflowError | None:
+        """The overflow hook's failure, which replaces the provider's overflow error."""
+
+        return self._recovery_failure
+
+    def queued_turn_started(self, entry_id: str) -> None:
+        """Make an injected queue message the start of the active turn.
+
+        Args:
+            entry_id (str): Persisted entry of the queue message that began a
+                new turn. Boundary compaction keeps it and everything after it.
+        """
+
+        self._active_entry_id = entry_id
+
+    def unsafe_tool_ran(self) -> None:
+        """Record that an unsafe tool executed, which rules out overflow retry."""
+
+        self._had_unsafe_tool_round = True
+
+    def take_events(self) -> Iterator[WispEvent]:
+        """Drain the compaction events the hooks have published so far.
+
+        Yields:
+            WispEvent: Buffered events in the order the hooks produced them.
+        """
+
+        while self._events:
+            yield self._events.popleft()
+
+    async def rollback_active_prompt(self) -> None:
+        """Restore the active branch to its leaf from before the prompt was persisted."""
+
+        session = self._session
+        if self._operation_id is not None:
+            restored = await session.restore_active_leaf_for_operation(
+                self._run_entry_start,
+                self._run_start_leaf_id,
+                operation_id=self._operation_id,
+            )
+            if restored:
+                self._persistence.expected_active_leaf_id = self._run_start_leaf_id
+            return
+        current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
+        if current_leaf_id != self._run_start_leaf_id:
+            await session.select_active_leaf(
+                self._run_start_leaf_id,
+                expected_active_leaf_id=current_leaf_id,
+                operation_id=self._operation_id,
+            )
+            self._persistence.expected_active_leaf_id = self._run_start_leaf_id
+
+    async def prepare_boundary(
+        self, *, context: HarnessBoundaryContext
+    ) -> RequestBoundaryDecision | None:
+        """Compact or truncate before the next request when a provider limit applies.
+
+        Args:
+            context (HarnessBoundaryContext): Transcript snapshot and queue
+                effects of the completed turn.
+
+        Returns:
+            RequestBoundaryDecision | None: A replacement or rebase after
+            compaction or truncation, or None for the harness's default.
+
+        Raises:
+            ContextOverflowError: The active turn stays over the limit after
+                compaction and truncation; the prompt is rolled back first.
+        """
+
+        try:
+            return await self._prepare_boundary(context)
+        except ContextOverflowError:
+            # A boundary overflow follows an already-completed tool turn. Roll
+            # the active branch back to its pre-prompt leaf before the loop
+            # publishes this error, so the error is recorded on the restored
+            # branch and an irreducible tool result cannot poison later requests.
+            await self._owner._flush_pending_entries()
+            await self.rollback_active_prompt()
+            raise
+
+    async def _prepare_boundary(
+        self, context: HarnessBoundaryContext
+    ) -> RequestBoundaryDecision | None:
+        owner = self._owner
+        harness = self._harness
+        if context.stop_by_default or not self._provider_auto_compaction:
+            return None
+        compacted = False
+        async for compaction_event in owner._maybe_auto_compact(
+            self._session,
+            harness,
+            status=self._status,
+            operation_id=self._operation_id,
+            preflight_active_entry_id=self._active_entry_id,
+            active_from=context.active_from,
+        ):
+            self._events.append(compaction_event)
+            if (
+                isinstance(compaction_event, CompactionCompleted)
+                and compaction_event.outcome == "completed"
+            ):
+                compacted = True
+        if compacted:
+            return await self._replacement_after_compaction(
+                context.snapshot.continuation_messages,
+                has_native_continuation=context.snapshot.can_append_user_messages,
+                injected_messages=context.injected_messages,
+            )
+
+        # A provider catalog limit can leave the active tool result as
+        # the only remaining source of excess. This replacement is
+        # intentionally fresh: truncating a loop-owned tail is not an
+        # additive rebase.
+        remaining_budget = owner._harness_context_budget(
+            harness,
+            active_from=context.active_from,
+        )
+        if exceeds_provider_auto_compaction_limit(remaining_budget):
+            excess_tokens = provider_auto_compaction_excess_tokens(remaining_budget)
+            truncated = (
+                truncate_active_turn_tool_results(
+                    harness.messages,
+                    excess_tokens=excess_tokens + excess_tokens // 4 + 64,
+                )
+                if excess_tokens is not None
+                else None
+            )
+            if truncated is not None:
+                return RequestBoundaryDecision(
+                    messages=owner._normalize_provider_messages(
+                        truncated,
+                        active_from=context.active_from,
+                    )
+                )
+            raise ContextOverflowError(
+                "Active tool result exceeds the provider auto-compaction limit "
+                "after compacting all eligible history"
+            )
+        return None
+
+    async def recover_context_overflow(
+        self, *, snapshot: ContextOverflowSnapshot
+    ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
+        """Compact once per run so the loop can retry an overflowed request.
+
+        Args:
+            snapshot (ContextOverflowSnapshot): The rejected request's turn state
+                and context budget.
+
+        Returns:
+            RequestBoundaryDecision | ContextOverflowFailure | None: The retry
+            replacement after compaction, a failure that replaces the provider's
+            message, or None to decline recovery.
+        """
+
+        owner = self._owner
+        session = self._session
+        # The hook is the sole recovery authority for this primary
+        # generator. Mark every decision attempt so legacy terminal
+        # handling cannot create a second loop/retry after it returns.
+        if self._overflow_recovery_attempted:
+            return None
+        self._overflow_recovery_attempted = True
+        if (
+            not owner.auto_compaction_enabled
+            or snapshot.had_streamed_delta
+            or self._had_unsafe_tool_round
+            or (
+                snapshot.context_budget.context_window is not None
+                and snapshot.context_budget.reserve_tokens >= snapshot.context_budget.context_window
+            )
+        ):
+            return None
+        replay: SessionReplay | None = None
+        try:
+            replay = await owner._prepare_compaction_replay(session)
+            plan = plan_manual_compaction(replay)
+        except NothingToCompactError:
+            return None
+        except Exception as exc:
+            source_entry_count = len(replay.context_entry_ids) if replay is not None else 0
+            self._events.append(
+                await owner._emit_recoverable_event(
+                    CompactionStarted(
+                        session_id=session.session_id,
+                        reason="overflow",
+                        source_entry_count=source_entry_count,
+                        trigger_budget=snapshot.context_budget,
+                    ),
+                    session=session,
+                    operation_id=self._operation_id,
+                )
+            )
+            self._events.append(
+                await owner._emit_recoverable_event(
+                    CompactionCompleted(
+                        session_id=session.session_id,
+                        reason="overflow",
+                        outcome="failed",
+                        replaced_entry_count=0,
+                        retained_entry_count=source_entry_count,
+                        provider=owner.provider.name,
+                        model=owner.model or owner.provider.default_model,
+                        error=str(exc),
+                    ),
+                    session=session,
+                    operation_id=self._operation_id,
+                )
+            )
+            self._recovery_failure = ContextOverflowError(
+                f"Context overflow recovery failed: {exc}"
+            )
+            return ContextOverflowFailure(str(self._recovery_failure))
+
+        retry_decision: RequestBoundaryDecision | None = None
+
+        async def prepare_retry() -> None:
+            nonlocal retry_decision
+            retry_decision = await self._replacement_after_compaction(
+                snapshot.continuation_messages,
+                has_native_continuation=snapshot.has_native_continuation,
+            )
+
+        completed: CompactionCompleted | None = None
+        async for compaction_event in owner._compact_locked(
+            session,
+            plan,
+            reason="overflow",
+            instructions=None,
+            trigger_budget=snapshot.context_budget,
+            recover_failure=True,
+            will_retry=True,
+            operation_id=self._operation_id,
+            retry_setup=prepare_retry,
+        ):
+            self._events.append(compaction_event)
+            if isinstance(compaction_event, CompactionCompleted):
+                completed = compaction_event
+        if (
+            completed is None
+            or completed.outcome != "completed"
+            or not completed.will_retry
+            or retry_decision is None
+        ):
+            detail = (
+                completed.error
+                if completed is not None and completed.error
+                else "compaction did not complete"
+            )
+            self._recovery_failure = ContextOverflowError(
+                f"Context overflow recovery failed: {detail}"
+            )
+            return ContextOverflowFailure(str(self._recovery_failure))
+        self._recovered_from_overflow = True
+        return retry_decision
+
+    async def _replacement_after_compaction(
+        self,
+        continuation_messages: Sequence[Message],
+        *,
+        has_native_continuation: bool,
+        injected_messages: Sequence[Message] = (),
+    ) -> RequestBoundaryDecision:
+        """Rehydrate durable context into the least disruptive loop transition."""
+
+        owner = self._owner
+        active_history = await anyio.to_thread.run_sync(self._session.read_context_messages)
+        replacement = (*self._prompt_messages, *owner._conversation_history(active_history))
+        tail = tuple(continuation_messages)
+        injected = tuple(injected_messages)
+        portable_base = replacement
+        if injected and matches_provider_suffix(replacement, injected):
+            portable_base = replacement[: -len(injected)]
+        tail_matches = bool(tail) and matches_provider_suffix(portable_base, tail)
+        if has_native_continuation and tail_matches:
+            supports_rebase = getattr(owner.provider, "supports_context_rebase", False) is True
+            if supports_rebase:
+                return RequestBoundaryDecision(
+                    context_rebase=RequestContextRebase(
+                        base_messages=owner._normalize_provider_messages(
+                            portable_base[: -len(tail)]
+                        ),
+                        expected_continuation_messages=tail,
+                    ),
+                    extra_messages=injected,
+                )
+        # The loop-owned continuation is the authoritative active boundary.
+        # A later injected user row must not make that same-run tool exchange
+        # look historical during a fresh replacement.
+        replacement_active_from = (
+            len(portable_base) - len(tail) if tail_matches else active_turn_start(replacement)
+        )
+        return RequestBoundaryDecision(
+            messages=owner._normalize_provider_messages(
+                replacement,
+                active_from=replacement_active_from,
+            )
+        )
 
 
 def _prompt_cache_key(session_id: str) -> str:
