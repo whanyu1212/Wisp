@@ -48,6 +48,45 @@ def rendered_without_spacing(output: bytes | bytearray) -> bytes:
     return b"".join(emitted.split())
 
 
+# The TUI wraps every frame in a synchronized update (`terminal.rs`). Output up to
+# the last end marker holds only complete frames.
+_FRAME_END = b"\x1b[?2026l"
+
+
+def complete_frames(output: bytes | bytearray) -> bytes:
+    """Return the output up to the end of the last complete frame.
+
+    A PTY read can stop mid-frame. A frame that paints a response and still shows
+    the run as ``working`` may then be seen before its ``working`` cells arrive,
+    which makes a still-running TUI look idle.
+    """
+    end = output.rfind(_FRAME_END)
+    return bytes(output[: end + len(_FRAME_END)]) if end >= 0 else b""
+
+
+def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
+    """Return whether complete frames show the fragments and the run back at idle.
+
+    Ctrl+C cancels while a command runs and quits only when idle, so a test must
+    see a complete idle frame before it sends Ctrl+C to quit.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output so far.
+        offset (int, optional): Position from which the fragments must appear.
+            Defaults to 0.
+        *fragments (bytes): Byte strings that must appear after ``offset``.
+
+    Returns:
+        bool: True when every fragment is in a complete frame after ``offset`` and
+        the last ``idle`` comes after the last ``working``.
+    """
+    frames = complete_frames(output)
+    phase = frames[offset:]
+    if not all(fragment in phase for fragment in fragments):
+        return False
+    return frames.rfind(b"idle") > frames.rfind(b"working")
+
+
 def welcome_ready(output: bytes | bytearray) -> bool:
     """Recognize the hydrated welcome screen with or without a provider."""
     rendered = rendered_without_spacing(output)

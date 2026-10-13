@@ -18,6 +18,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    run_settled,
     welcome_ready,
 )
 
@@ -108,11 +109,7 @@ SKILL_EXPANSION_MARKER
                 os.write(terminal_fd, b"inspect this change\r")
                 phase = "submitted"
                 output.clear()
-            elif (
-                phase == "submitted"
-                and b"SKILL_EXPANSION_MARKER" in output
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ):
+            elif phase == "submitted" and run_settled(output, 0, b"SKILL_EXPANSION_MARKER"):
                 # FakeProvider echoes its expanded input as assistant output.
                 os.write(terminal_fd, b"\x03")
                 phase = "quit"
