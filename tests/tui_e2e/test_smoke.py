@@ -16,6 +16,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    frame_cursor,
     reap,
     run_settled,
     welcome_ready,
@@ -49,6 +50,18 @@ def test_run_settled_respects_offset() -> None:
 
     assert not run_settled(output, len(output), b"response")
     assert run_settled(output, 0, b"response")
+
+
+def test_frame_cursor_reads_only_a_shown_cursor() -> None:
+    """Drawing moves in a frame that hides the cursor are not a cursor position."""
+
+    shown = b"\x1b[?2026h\x1b[5;9Hlogo\x1b[?25h\x1b[26;6H\x1b[?2026l"
+    hidden = b"\x1b[?2026h\x1b[3;40Hlogo\x1b[?25l\x1b[?2026l"
+    straddling = b"\x1b[26;9Htail\x1b[?25h\x1b[26;9H\x1b[?2026l"
+
+    assert frame_cursor(shown) == (26, 6)
+    assert frame_cursor(shown + hidden) is None
+    assert frame_cursor(straddling) is None
 
 
 def test_reap_kills_and_reaps_a_pty_child() -> None:

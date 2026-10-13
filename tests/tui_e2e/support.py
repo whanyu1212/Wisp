@@ -68,7 +68,8 @@ def complete_frames(output: bytes | bytearray) -> bytes:
     return bytes(output[: end + len(_FRAME_END)]) if end >= 0 else b""
 
 
-_CURSOR_MOVE = re.compile(rb"\x1b\[(\d+);(\d+)H")
+# A frame that shows the cursor ends by placing it: show, move, end of frame.
+_FRAME_CURSOR = re.compile(rb"\x1b\[\?25h\x1b\[(\d+);(\d+)H\x1b\[\?2026l$")
 _FRAME_START = b"\x1b[?2026h"
 
 
@@ -84,8 +85,8 @@ def frame_cursor(output: bytes | bytearray) -> tuple[int, int] | None:
         output (bytes | bytearray): Raw PTY output so far.
 
     Returns:
-        tuple[int, int] | None: The cursor position, or None if no frame was received
-        whole (start and end marker) or the frame placed no cursor.
+        tuple[int, int] | None: The cursor position, or None if the last frame was
+        not received whole (start and end marker) or did not show the cursor.
     """
     frames = complete_frames(output)
     start = frames.rfind(_FRAME_START)
@@ -93,11 +94,12 @@ def frame_cursor(output: bytes | bytearray) -> tuple[int, int] | None:
         # The frame began before the buffer was last cleared; its cursor may
         # predate input the test has sent since.
         return None
-    moves = _CURSOR_MOVE.findall(frames[start:])
-    if not moves:
+    placed = _FRAME_CURSOR.search(frames[start:])
+    if placed is None:
+        # Frames that hide the cursor (loading, the animated welcome logo) contain
+        # only drawing moves, which say nothing about the composer.
         return None
-    row, column = moves[-1]
-    return int(row), int(column)
+    return int(placed.group(1)), int(placed.group(2))
 
 
 def display_width(text: str) -> int:
