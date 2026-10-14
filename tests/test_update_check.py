@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 
@@ -200,6 +201,8 @@ def test_install_update_uses_exact_argv_without_a_shell() -> None:
             "--no-sources",
             "--default-index",
             "https://pypi.org/simple",
+            "--python",
+            f"{sys.version_info.major}.{sys.version_info.minor}",
             "wisp-ai==1.2.0",
         )
     ]
@@ -292,6 +295,8 @@ def test_install_update_verifies_the_active_uv_tool_environment(
                 "--no-sources",
                 "--default-index",
                 "https://pypi.org/simple",
+                "--python",
+                f"{sys.version_info.major}.{sys.version_info.minor}",
                 "wisp-ai==1.1.0",
             )
         ]

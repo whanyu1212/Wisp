@@ -132,6 +132,11 @@ async def install_update(
         "--no-sources",
         "--default-index",
         PYPI_INDEX_URL,
+        # Pin the running Python version. Without it, uv resolves for its default
+        # interpreter first; if that is older than Wisp's minimum, it selects the
+        # pure wheel and the update silently drops the bundled Rust TUI.
+        "--python",
+        f"{sys.version_info.major}.{sys.version_info.minor}",
         f"wisp-ai=={latest}",
     )
     # Once uv starts replacing the active tool environment, interruption risks
