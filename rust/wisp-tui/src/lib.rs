@@ -10,6 +10,7 @@ mod commands;
 mod connection_panel;
 mod context_view;
 mod detail_view;
+mod diff_card;
 mod discovery_view;
 mod event_loop;
 mod file_picker;

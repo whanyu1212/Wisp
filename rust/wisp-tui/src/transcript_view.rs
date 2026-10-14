@@ -90,7 +90,6 @@ pub enum TranscriptRowTone {
     Success,
     Warning,
     Error,
-    DiffHeader,
     DiffAddition,
     DiffDeletion,
 }
@@ -278,6 +277,49 @@ struct CardDetailTone {
     tone: TranscriptRowTone,
 }
 
+/// How a card text row styles its source text: the action line's status, name,
+/// argument and summary ranges, or the changed-word ranges of a diff preview.
+#[derive(Clone, Copy)]
+struct CardRowStyle<'a> {
+    label_end: usize,
+    argument_start: usize,
+    argument_style: crate::markdown::InlineStyle,
+    suffix_start: usize,
+    emphasis: &'a [std::ops::Range<usize>],
+}
+
+impl CardRowStyle<'_> {
+    const PLAIN: CardRowStyle<'static> = CardRowStyle {
+        label_end: 0,
+        argument_start: usize::MAX,
+        argument_style: crate::markdown::InlineStyle::Normal,
+        suffix_start: usize::MAX,
+        emphasis: &[],
+    };
+
+    fn inline_at(&self, kind: TranscriptRowKind, offset: usize) -> crate::markdown::InlineStyle {
+        use crate::markdown::InlineStyle;
+        if kind != TranscriptRowKind::CardAction {
+            return if self.emphasis.iter().any(|range| range.contains(&offset)) {
+                InlineStyle::DiffChange
+            } else {
+                InlineStyle::Normal
+            };
+        }
+        if offset < TOOL_CARD_MARKER.len() {
+            InlineStyle::ToolStatus
+        } else if offset < self.label_end {
+            InlineStyle::ToolName
+        } else if offset >= self.suffix_start {
+            InlineStyle::Normal
+        } else if offset >= self.argument_start {
+            self.argument_style
+        } else {
+            InlineStyle::Normal
+        }
+    }
+}
+
 #[derive(Debug)]
 struct CardProjection {
     action: String,
@@ -287,6 +329,10 @@ struct CardProjection {
     detail: String,
     detail_base: usize,
     detail_tones: Vec<CardDetailTone>,
+    /// Byte ranges of `detail` holding changed words in a diff preview.
+    detail_emphasis: Vec<std::ops::Range<usize>>,
+    /// Where a diff's `+N -M` summary starts in `action`; styled like plain text.
+    action_suffix_start: usize,
     inline_detail: bool,
     omission: Option<String>,
     omission_before_detail: bool,
@@ -302,6 +348,11 @@ impl CardProjection {
                 self.detail_tones
                     .len()
                     .saturating_mul(std::mem::size_of::<CardDetailTone>()),
+            )
+            .saturating_add(
+                self.detail_emphasis
+                    .len()
+                    .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
             )
             .saturating_add(self.omission.as_ref().map_or(0, String::len))
             .saturating_add(std::mem::size_of::<Self>())
@@ -1083,9 +1134,13 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
-                    projection.action_label_end,
-                    projection.action_argument_start,
-                    projection.action_argument_style,
+                    CardRowStyle {
+                        label_end: projection.action_label_end,
+                        argument_start: projection.action_argument_start,
+                        argument_style: projection.action_argument_style,
+                        suffix_start: projection.action_suffix_start,
+                        emphasis: &[],
+                    },
                     next,
                 ))
             }
@@ -1116,9 +1171,10 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardDetail,
                     tone,
-                    0,
-                    usize::MAX,
-                    crate::markdown::InlineStyle::Normal,
+                    CardRowStyle {
+                        emphasis: &projection.detail_emphasis,
+                        ..CardRowStyle::PLAIN
+                    },
                     next,
                 ))
             }
@@ -1145,9 +1201,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardOmission,
                     TranscriptRowTone::Warning,
-                    0,
-                    usize::MAX,
-                    crate::markdown::InlineStyle::Normal,
+                    CardRowStyle::PLAIN,
                     next,
                 ))
             }
@@ -1167,9 +1221,7 @@ impl TranscriptRowCache {
         width: usize,
         kind: TranscriptRowKind,
         tone: TranscriptRowTone,
-        label_end: usize,
-        argument_start: usize,
-        argument_style: crate::markdown::InlineStyle,
+        style: CardRowStyle<'_>,
         after_section: Option<RowAnchor>,
     ) -> ProjectedRow {
         let relative_start = absolute_start.saturating_sub(base_offset).min(source.len());
@@ -1207,16 +1259,8 @@ impl TranscriptRowCache {
                 next_offset = Some(relative);
                 break;
             }
-            if kind == TranscriptRowKind::CardAction {
-                let inline = if relative < TOOL_CARD_MARKER.len() {
-                    crate::markdown::InlineStyle::ToolStatus
-                } else if relative < label_end {
-                    crate::markdown::InlineStyle::ToolName
-                } else if relative >= argument_start {
-                    argument_style
-                } else {
-                    crate::markdown::InlineStyle::Normal
-                };
+            if kind == TranscriptRowKind::CardAction || !style.emphasis.is_empty() {
+                let inline = style.inline_at(kind, relative);
                 if let Some(last) = action_spans
                     .last_mut()
                     .filter(|last| last.style.inline == inline)
@@ -2042,7 +2086,38 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let (action, action_label_end, action_argument_start, action_argument_style) =
                 tool_action_projection(card);
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
-                let (preview, detail_tones) = structured_card_preview(detail);
+                let diff = matches!(
+                    detail.kind,
+                    DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
+                );
+                let mut action = action;
+                let mut action_suffix_start = usize::MAX;
+                let (preview, detail_tones, detail_emphasis) = if diff {
+                    // The action line already names the file; carry the change counts
+                    // there instead of a separate `M path +N -M` heading row.
+                    action_suffix_start = action.len();
+                    if detail.kind == DetailPresentationKind::DiffCreate {
+                        action.push_str("  new file");
+                    }
+                    if !detail.summary.is_empty() {
+                        action.push_str("  ");
+                        action.push_str(&detail.summary);
+                    }
+                    let preview = crate::diff_card::preview(detail);
+                    let tones = preview
+                        .tones
+                        .into_iter()
+                        .map(|(range, tone)| CardDetailTone {
+                            start: range.start,
+                            end: range.end,
+                            tone,
+                        })
+                        .collect();
+                    (preview.text, tones, preview.emphasis)
+                } else {
+                    let (preview, tones) = structured_card_preview(detail);
+                    (preview, tones, Vec::new())
+                };
                 return Some(CardProjection {
                     action,
                     action_label_end,
@@ -2051,10 +2126,9 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     detail: preview,
                     detail_base: 0,
                     detail_tones,
-                    inline_detail: matches!(
-                        detail.kind,
-                        DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
-                    ),
+                    detail_emphasis,
+                    action_suffix_start,
+                    inline_detail: diff,
                     omission: None,
                     omission_before_detail: false,
                     action_tone: tool_status_tone(card.status),
@@ -2092,6 +2166,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     0
                 },
                 detail_tones: Vec::new(),
+                detail_emphasis: Vec::new(),
+                action_suffix_start: usize::MAX,
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
@@ -2112,6 +2188,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 detail: preview.text,
                 detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
                 detail_tones: Vec::new(),
+                detail_emphasis: Vec::new(),
+                action_suffix_start: usize::MAX,
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
@@ -2139,10 +2217,7 @@ fn structured_card_preview(detail: &ToolDetailPresentation) -> (String, Vec<Card
         }
     }
 
-    let diff = matches!(
-        detail.kind,
-        DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
-    );
+    // Diff presentations use `diff_card::preview` instead.
     let mut preview = String::new();
     let mut tones = Vec::new();
     let heading = if detail.summary.is_empty() {
@@ -2154,29 +2229,14 @@ fn structured_card_preview(detail: &ToolDetailPresentation) -> (String, Vec<Card
         &mut preview,
         &mut tones,
         &heading,
-        if diff {
-            TranscriptRowTone::DiffHeader
-        } else {
-            TranscriptRowTone::Default
-        },
+        TranscriptRowTone::Default,
     );
     for row in detail.visible_rows(false) {
-        let tone = if diff {
-            match row.kind {
-                DetailRowKind::Addition => TranscriptRowTone::DiffAddition,
-                DetailRowKind::Deletion => TranscriptRowTone::DiffDeletion,
-                DetailRowKind::Hunk | DetailRowKind::Header => TranscriptRowTone::DiffHeader,
-                DetailRowKind::Omission | DetailRowKind::Note => TranscriptRowTone::Warning,
-                _ => TranscriptRowTone::Default,
-            }
-        } else {
-            TranscriptRowTone::Default
-        };
         push_line(
             &mut preview,
             &mut tones,
             &format_structured_detail_row(&row),
-            tone,
+            TranscriptRowTone::Default,
         );
     }
     if detail.truncated {
@@ -3376,9 +3436,12 @@ mod tests {
                     width,
                     TranscriptRowKind::CardAction,
                     TranscriptRowTone::Success,
-                    "● Read".len(),
-                    "● Read  ".len(),
-                    crate::markdown::InlineStyle::ToolPath,
+                    CardRowStyle {
+                        label_end: "● Read".len(),
+                        argument_start: "● Read  ".len(),
+                        argument_style: crate::markdown::InlineStyle::ToolPath,
+                        ..CardRowStyle::PLAIN
+                    },
                     None,
                 );
                 for span in &projected.row.spans {

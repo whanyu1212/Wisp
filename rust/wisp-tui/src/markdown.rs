@@ -51,6 +51,8 @@ pub enum InlineStyle {
     ToolPath,
     ToolArgument,
     ToolStatus,
+    /// Words that differ between a deleted diff line and its replacement.
+    DiffChange,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
