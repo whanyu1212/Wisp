@@ -5,7 +5,7 @@ license: MIT
 compatibility: Git repositories hosted on GitHub; adapts to the GitHub tools and CLI available in the active Wisp runtime.
 metadata:
   author: Wisp
-  version: "1.2"
+  version: "1.3"
 ---
 
 # GitHub PR Delivery
