@@ -2669,6 +2669,9 @@ fn commit_session_and_hydrate(
     state.context.invalidate();
     state.selected_session = Some(selected.clone());
     state.last_session = Some(selected.session_id.clone());
+    // Committing to another session (resume, clone, fork, tree navigation) drops the
+    // previous session's failure; same-session history syncs keep it.
+    state.last_command_error = None;
     state.transcript = SharedTranscript::default();
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
@@ -3080,6 +3083,7 @@ fn handle_session_backend_event(
                 .as_ref()
                 .map(|session| session.session_id.clone());
             clear_queue_cache(state);
+            state.last_command_error = None;
             install_history_snapshot(state, report);
             state.context.invalidate();
             state.input_ready = true;
@@ -3375,6 +3379,8 @@ fn handle_session_backend_event(
         SessionOperation::CreatingSession { command_id } => match event {
             BackendEvent::CommandFinished { ok: true, .. } => {
                 state.context.invalidate();
+                // A failure belongs to the session that produced it.
+                state.last_command_error = None;
                 state.transcript = SharedTranscript::default();
                 state.selected_session = None;
                 state.last_session = None;
@@ -8168,6 +8174,7 @@ mod tests {
         let mut state = UiState::unconfigured();
         state.selected_session = Some(session("old"));
         state.transcript.append_prompt("old content".into());
+        state.last_command_error = Some("old session's failure".into());
         let before = state.clone();
         let mut ids = DeterministicIds::default();
         reduce(
@@ -8195,6 +8202,10 @@ mod tests {
         .unwrap();
         assert_eq!(state.selected_session, before.selected_session);
         assert_eq!(state.transcript, before.transcript);
+        assert!(
+            state.last_command_error.is_some(),
+            "a failed switch keeps it"
+        );
 
         reduce(
             &mut state,
@@ -8226,6 +8237,10 @@ mod tests {
         );
         assert_eq!(state.selected_session, Some(session("new")));
         assert!(state.transcript.entries().is_empty());
+        assert_eq!(
+            state.last_command_error, None,
+            "the resumed session starts clean"
+        );
         reduce(
             &mut state,
             UiAction::BackendEvent(finished("get_messages-1", "get_messages", false)),
@@ -8291,6 +8306,7 @@ mod tests {
         let mut state = UiState::unconfigured();
         state.selected_session = Some(session("old"));
         state.transcript.append_prompt("old content".into());
+        state.last_command_error = Some("old session's failure".into());
         let before = state.clone();
         let mut ids = DeterministicIds::default();
         reduce(&mut state, UiAction::NewSession, &mut ids).unwrap();
@@ -8302,6 +8318,8 @@ mod tests {
         .unwrap();
         assert_eq!(state.selected_session, before.selected_session);
         assert_eq!(state.transcript, before.transcript);
+        // A failed `/new` keeps the old session, and its failure with it.
+        assert!(state.last_command_error.is_some());
         assert!(
             effects
                 .iter()
@@ -8317,6 +8335,10 @@ mod tests {
         .unwrap();
         assert!(state.selected_session.is_none());
         assert!(state.transcript.entries().is_empty());
+        assert_eq!(
+            state.last_command_error, None,
+            "the new session starts clean"
+        );
         assert!(effects.iter().any(|effect| {
             command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
         }));
