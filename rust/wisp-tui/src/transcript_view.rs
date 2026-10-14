@@ -29,7 +29,20 @@ const MARKDOWN_SOURCE_MAX_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 const ENTRY_PRESENTATION_CHUNK_BYTES: usize = 4 * 1024;
 const OVERSCAN_ROWS: usize = 8;
-const TOOL_CARD_MARKER: &str = "● ";
+/// The marker that opens a tool or process card's action line. Its shape carries
+/// the state, so it reads without colour: `✓` done, `✗` failed, `⊘` denied or
+/// cancelled, `?` awaiting approval. In-progress cards keep a steady `●`, which the
+/// renderer animates as a spinner while the run is active (a resumed session's
+/// stale in-progress card stays a steady dot). Every glyph is one column wide.
+pub(crate) fn status_marker(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Done => "✓ ",
+        ToolStatus::Error => "✗ ",
+        ToolStatus::Denied | ToolStatus::Cancelled => "⊘ ",
+        ToolStatus::AwaitingApproval => "? ",
+        ToolStatus::Requested | ToolStatus::Running => "● ",
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RowPosition {
@@ -281,6 +294,7 @@ struct CardDetailTone {
 /// argument and summary ranges, or the changed-word ranges of a diff preview.
 #[derive(Clone, Copy)]
 struct CardRowStyle<'a> {
+    marker_end: usize,
     label_end: usize,
     argument_start: usize,
     argument_style: crate::markdown::InlineStyle,
@@ -290,6 +304,7 @@ struct CardRowStyle<'a> {
 
 impl CardRowStyle<'_> {
     const PLAIN: CardRowStyle<'static> = CardRowStyle {
+        marker_end: 0,
         label_end: 0,
         argument_start: usize::MAX,
         argument_style: crate::markdown::InlineStyle::Normal,
@@ -306,7 +321,7 @@ impl CardRowStyle<'_> {
                 InlineStyle::Normal
             };
         }
-        if offset < TOOL_CARD_MARKER.len() {
+        if offset < self.marker_end {
             InlineStyle::ToolStatus
         } else if offset < self.label_end {
             InlineStyle::ToolName
@@ -323,6 +338,7 @@ impl CardRowStyle<'_> {
 #[derive(Debug)]
 struct CardProjection {
     action: String,
+    action_marker_end: usize,
     action_label_end: usize,
     action_argument_start: usize,
     action_argument_style: crate::markdown::InlineStyle,
@@ -1124,6 +1140,14 @@ impl TranscriptRowCache {
                 } else {
                     separator_after(transcript, entry)
                 };
+                let style = CardRowStyle {
+                    marker_end: projection.action_marker_end,
+                    label_end: projection.action_label_end,
+                    argument_start: projection.action_argument_start,
+                    argument_style: projection.action_argument_style,
+                    suffix_start: projection.action_suffix_start,
+                    emphasis: &[],
+                };
                 Some(self.build_card_text_row(
                     entry,
                     anchor,
@@ -1134,13 +1158,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
-                    CardRowStyle {
-                        label_end: projection.action_label_end,
-                        argument_start: projection.action_argument_start,
-                        argument_style: projection.action_argument_style,
-                        suffix_start: projection.action_suffix_start,
-                        emphasis: &[],
-                    },
+                    style,
                     next,
                 ))
             }
@@ -2057,10 +2075,15 @@ impl TranscriptRowCache {
     }
 }
 
+fn process_marker(card: &crate::tool_cards::ProcessCardSnapshot) -> &'static str {
+    status_marker(card.display_state.status())
+}
+
 fn tool_action_projection(
     card: &crate::tool_cards::ToolCardSnapshot,
-) -> (String, usize, usize, crate::markdown::InlineStyle) {
-    let label_end = TOOL_CARD_MARKER.len() + card.action_label().len();
+) -> (String, usize, usize, usize, crate::markdown::InlineStyle) {
+    let marker = status_marker(card.status);
+    let label_end = marker.len() + card.action_label().len();
     let argument_start = if card.arguments_available && !card.action_arguments.is_empty() {
         label_end.saturating_add(2)
     } else {
@@ -2072,7 +2095,8 @@ fn tool_action_projection(
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
     (
-        format!("{TOOL_CARD_MARKER}{}", card.action()),
+        format!("{marker}{}", card.action()),
+        marker.len(),
         label_end,
         argument_start,
         argument_style,
@@ -2083,8 +2107,13 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
-            let (action, action_label_end, action_argument_start, action_argument_style) =
-                tool_action_projection(card);
+            let (
+                action,
+                action_marker_end,
+                action_label_end,
+                action_argument_start,
+                action_argument_style,
+            ) = tool_action_projection(card);
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
                     detail.kind,
@@ -2120,6 +2149,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 };
                 return Some(CardProjection {
                     action,
+                    action_marker_end,
                     action_label_end,
                     action_argument_start,
                     action_argument_style,
@@ -2156,6 +2186,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
             Some(CardProjection {
                 action,
+                action_marker_end,
                 action_label_end,
                 action_argument_start,
                 action_argument_style,
@@ -2181,8 +2212,9 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .saturating_add(card.backend_dropped_bytes);
             let omission = card_omission(omitted, card.backend_truncated, true);
             Some(CardProjection {
-                action: format!("{TOOL_CARD_MARKER}{}", card.action()),
-                action_label_end: TOOL_CARD_MARKER.len() + card.action_label().len(),
+                action: format!("{}{}", process_marker(card), card.action()),
+                action_marker_end: process_marker(card).len(),
+                action_label_end: process_marker(card).len() + card.action_label().len(),
                 action_argument_start: usize::MAX,
                 action_argument_style: crate::markdown::InlineStyle::Normal,
                 detail: preview.text,
@@ -3437,6 +3469,7 @@ mod tests {
                     TranscriptRowKind::CardAction,
                     TranscriptRowTone::Success,
                     CardRowStyle {
+                        marker_end: "● ".len(),
                         label_end: "● Read".len(),
                         argument_start: "● Read  ".len(),
                         argument_style: crate::markdown::InlineStyle::ToolPath,

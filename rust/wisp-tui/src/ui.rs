@@ -17,7 +17,7 @@ use crate::transcript_view::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -881,8 +881,9 @@ fn render_transcript_row(
         _ if row.tone == TranscriptRowTone::Muted => base.fg(palette.muted),
         _ => base,
     };
-    let marker_style =
-        |style: Style| pulse.map_or(style, |frame| tool_pulse_style(style, palette, frame));
+    // While the run is active, an in-progress marker animates as a spinner. The
+    // shape changes rather than the brightness, so it reads the same in monochrome.
+    let spinner = pulse.map(|frame| format!("{} ", spinner_frame(frame)));
     let mut spans = row
         .spans
         .into_iter()
@@ -895,11 +896,12 @@ fn render_transcript_row(
             if selected {
                 semantic = semantic.patch(palette.selection());
             }
-            // Pulse within the selected colors so keyboard focus cannot hide activity.
-            if span.style.inline == InlineStyle::ToolStatus {
-                semantic = marker_style(semantic);
+            match &spinner {
+                Some(spinner) if span.style.inline == InlineStyle::ToolStatus => {
+                    Span::styled(spinner.clone(), semantic)
+                }
+                _ => Span::styled(span.text, semantic),
             }
-            Span::styled(span.text, semantic)
         })
         .collect::<Vec<_>>();
     if row.kind == TranscriptRowKind::CardGroup {
@@ -907,34 +909,26 @@ fn render_transcript_row(
         if selected {
             marker = marker.patch(palette.selection());
         }
-        spans.insert(0, Span::styled("● ", marker_style(marker)));
+        let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
+        spans.insert(0, Span::styled(glyph, marker));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
 
-fn tool_pulse_style(style: Style, palette: Palette, frame: u8) -> Style {
-    // Eight 125 ms frames give a gentle one-second brightness cycle. The dot
-    // never disappears, and completed cards never enter this animation path.
-    const STRENGTH: [u16; 8] = [100, 91, 70, 49, 40, 49, 70, 91];
-    let strength = STRENGTH[usize::from(frame) % STRENGTH.len()];
-    if palette.is_monochrome() {
-        return if strength < 70 {
-            style.add_modifier(Modifier::DIM)
-        } else {
-            style
-        };
-    }
-    let background = style.bg.unwrap_or(palette.background);
-    match (style.fg, background) {
-        (Some(Color::Rgb(r, g, b)), Color::Rgb(br, bg, bb)) => {
-            let blend = |foreground: u8, background: u8| {
-                ((u16::from(foreground) * strength + u16::from(background) * (100 - strength))
-                    / 100) as u8
-            };
-            style.fg(Color::Rgb(blend(r, br), blend(g, bg), blend(b, bb)))
-        }
-        _ if strength < 70 => style.add_modifier(Modifier::DIM),
-        _ => style,
+/// Braille spinner frames, one per 125 ms activity tick.
+pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) fn spinner_frame(frame: u8) -> &'static str {
+    SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
+}
+
+/// The marker of an `explored N files` group, which summarizes its members' tone.
+fn group_marker(tone: TranscriptRowTone) -> &'static str {
+    match tone {
+        TranscriptRowTone::Success => "✓ ",
+        TranscriptRowTone::Error => "✗ ",
+        TranscriptRowTone::Warning => "⊘ ",
+        _ => "● ",
     }
 }
 
@@ -2580,6 +2574,7 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
 
@@ -4142,8 +4137,9 @@ mod tests {
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
         assert_eq!(pending_fg, Palette::default().accent);
+        // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
-            style_at_text(pending.backend(), "●").unwrap().0,
+            style_at_text(pending.backend(), "? Awaiting").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
@@ -4161,7 +4157,7 @@ mod tests {
             style_at_text(complete.backend(), "Read  README.md").unwrap();
         assert_eq!(success_fg, Palette::default().accent);
         assert_eq!(
-            style_at_text(complete.backend(), "●").unwrap().0,
+            style_at_text(complete.backend(), "✓ Read").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
@@ -4891,7 +4887,38 @@ mod tests {
         assert!(rendered.contains("TAIL"));
     }
     #[test]
-    fn only_active_tool_markers_pulse_and_terminal_results_stay_steady() {
+    fn status_markers_are_distinct_single_column_shapes() {
+        use crate::tool_cards::ToolStatus;
+        let marker = |status| crate::transcript_view::status_marker(status).trim_end();
+        for status in [
+            ToolStatus::Requested,
+            ToolStatus::AwaitingApproval,
+            ToolStatus::Running,
+            ToolStatus::Done,
+            ToolStatus::Error,
+            ToolStatus::Denied,
+            ToolStatus::Cancelled,
+        ] {
+            // A double-width or emoji glyph would shift the whole action line.
+            assert_eq!(marker(status).width(), 1, "{status:?}");
+        }
+        for frame in SPINNER_FRAMES {
+            assert_eq!(frame.width(), 1);
+        }
+        let outcomes = [
+            marker(ToolStatus::Done),
+            marker(ToolStatus::Error),
+            marker(ToolStatus::Denied),
+            marker(ToolStatus::AwaitingApproval),
+            marker(ToolStatus::Running),
+        ];
+        let distinct: std::collections::HashSet<_> = outcomes.iter().collect();
+        assert_eq!(distinct.len(), outcomes.len());
+        assert_eq!(marker(ToolStatus::Denied), marker(ToolStatus::Cancelled));
+    }
+
+    #[test]
+    fn only_active_tool_markers_spin_and_terminal_results_stay_steady() {
         use crate::tool_cards::ToolCallInput;
         let draw = |state: &UiState, tick, palette, selected| {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -4964,9 +4991,9 @@ mod tests {
                         state
                             .transcript
                             .observe_approval_resolved("pulse", true, None);
-                        let bright = draw(&state, 0, palette, None);
-                        let dim = draw(&state, 4, palette, None);
-                        assert_ne!(bright, dim);
+                        let first = draw(&state, 0, palette, None);
+                        let later = draw(&state, 4, palette, None);
+                        assert_ne!(first, later);
                         let selected = state
                             .transcript
                             .entries()
@@ -4977,20 +5004,19 @@ mod tests {
                             draw(&state, 0, palette, selected),
                             draw(&state, 4, palette, selected)
                         );
-                        if palette.is_monochrome() {
-                            let dot = dim
-                                .content
-                                .iter()
-                                .find(|cell| cell.symbol() == "●")
-                                .unwrap();
-                            assert!(dot.modifier.contains(Modifier::DIM));
-                        }
-                        for (a, b) in bright.content.iter().zip(&dim.content) {
-                            assert_eq!(a.symbol(), b.symbol());
-                            if a != b {
-                                assert!(matches!(a.symbol(), "●" | " "));
-                            }
-                        }
+                        // Only the marker changes between ticks, and it changes shape, so
+                        // the activity also reads in monochrome.
+                        let changed: Vec<_> = first
+                            .content
+                            .iter()
+                            .zip(&later.content)
+                            .filter(|(a, b)| a != b)
+                            .collect();
+                        assert_eq!(changed.len(), 1, "{outcome}");
+                        let (a, b) = changed[0];
+                        assert!(SPINNER_FRAMES.contains(&a.symbol()));
+                        assert!(SPINNER_FRAMES.contains(&b.symbol()));
+                        assert_ne!(a.symbol(), b.symbol());
                         let mut result = tool_result("pulse", "finished");
                         result.is_error = outcome == "error";
                         if outcome == "cancelled" {
@@ -4998,9 +5024,15 @@ mod tests {
                         }
                         state.transcript.observe_tool_result(result);
                     }
-                    assert_eq!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None),
+                    let settled = draw(&state, 0, palette, None);
+                    assert_eq!(settled, draw(&state, 4, palette, None), "{outcome}");
+                    let marker = match outcome {
+                        "success" => "✓",
+                        "error" => "✗",
+                        _ => "⊘",
+                    };
+                    assert!(
+                        settled.content.iter().any(|cell| cell.symbol() == marker),
                         "{outcome}"
                     );
                 }
