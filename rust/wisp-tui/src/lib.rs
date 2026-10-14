@@ -1604,18 +1604,31 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            let permissions = overlay == Some(OverlayKind::Discovery)
-                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)));
-            let area = if permissions {
-                ui::docked_popup_area(
+            // `/permissions` and API-key entry dock above the composer; other popups
+            // are centered.
+            let docked_height = if overlay == Some(OverlayKind::Discovery)
+                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)))
+            {
+                Some(discovery_view::permissions_panel_height(&self.state))
+            } else if overlay == Some(OverlayKind::Connection)
+                && self
+                    .connection_panel
+                    .as_ref()
+                    .is_some_and(ConnectionPanel::api_key_entry_active)
+            {
+                Some(connection_panel::API_KEY_PANEL_HEIGHT)
+            } else {
+                None
+            };
+            let area = match docked_height {
+                Some(height) => ui::docked_popup_area(
                     frame.area(),
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
-                    discovery_view::permissions_panel_height(&self.state),
-                )
-            } else {
-                ui::overlay_area(frame.area())
+                    height,
+                ),
+                None => ui::overlay_area(frame.area()),
             };
             let Some((kind, area)) = overlay.zip(area) else {
                 return;

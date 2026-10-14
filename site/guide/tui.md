@@ -132,7 +132,10 @@ plain text. Very large sessions therefore require more startup time and memory.
 
 `/connect` opens a provider connection panel. Use arrow keys to select a provider,
 `Enter` to start its available API-key or device-code flow, `d` to disconnect stored credentials,
-`r` to refresh, and `Escape` to close or cancel. API-key entry is masked. Device login displays the
+`r` to refresh, and `Escape` to close or cancel. API-key entry docks above the composer, shows a
+cursor after the masked key and a character count so a paste visibly lands, and says when an
+environment variable such as `OPENAI_API_KEY` is set, because that variable takes precedence over a
+saved key. Device login displays the
 short-lived user code and verification URL but never stores them in prompt or session history.
 
 The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and

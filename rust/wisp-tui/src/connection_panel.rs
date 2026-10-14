@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot};
@@ -16,6 +16,8 @@ use crate::session_picker::terminal_row;
 use crate::theme::Palette;
 
 const PAGE_STEP: usize = 10;
+/// Rows the docked API-key entry needs: borders, the masked input, a gap, and a note.
+pub const API_KEY_PANEL_HEIGHT: u16 = 5;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ConnectionPanelAction {
@@ -63,6 +65,11 @@ impl std::fmt::Debug for ApiKeyInput {
 }
 
 impl ConnectionPanel {
+    /// Whether the panel is taking an API key, which docks above the composer.
+    pub fn api_key_entry_active(&self) -> bool {
+        matches!(self.mode, ConnectionPanelMode::ApiKey { .. })
+    }
+
     pub fn new(catalog: ConnectionCatalogSnapshot) -> Self {
         let selected = (!methods(&catalog).is_empty()).then_some(0);
         Self {
@@ -317,6 +324,7 @@ impl ApiKeyInput {
         ApiKey::new(self.0)
     }
 
+    #[cfg(test)]
     fn masked(&self) -> String {
         "•".repeat(self.0.chars().count())
     }
@@ -337,7 +345,10 @@ pub fn render(
             render_picker(frame, area, &panel.catalog, *selected, palette)
         }
         ConnectionPanelMode::ApiKey { provider, value } => {
-            render_api_key(frame, area, provider, value, palette);
+            let method = methods(&panel.catalog)
+                .into_iter()
+                .find(|method| method.provider == *provider && method.kind == "api_key");
+            render_api_key(frame, area, provider, value, method, palette);
             Rows::default()
         }
         ConnectionPanelMode::DeviceCode {
@@ -469,40 +480,89 @@ fn method_line(
     Line::from(Span::styled(content, style))
 }
 
+/// Draw the masked API-key entry with a terminal cursor after the last character, so
+/// typing and pasting visibly land. The count in the corner confirms a paste arrived;
+/// when an environment variable already supplies this provider's key, the note says it
+/// takes precedence over a saved one.
 fn render_api_key(
     frame: &mut Frame<'_>,
     area: Rect,
     provider: &str,
     value: &ApiKeyInput,
+    method: Option<&ConnectionMethodSnapshot>,
     palette: Palette,
 ) {
-    let title = terminal_row(
-        &format!(" API key: {provider} "),
-        usize::from(area.width.saturating_sub(2)),
-    );
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Length(1)])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(terminal_row(
-            &value.masked(),
-            usize::from(chunks[0].width.saturating_sub(2)),
-        ))
-        .block(
-            Block::default()
-                .title(title)
-                .border_style(palette.border())
-                .borders(Borders::ALL),
-        ),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new("Enter save · Backspace edit · Esc cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(palette.muted)),
-        chunks[1],
-    );
+    let muted = Style::default().fg(palette.muted);
+    let count = value.0.chars().count();
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(palette.border())
+        .padding(Padding::horizontal(1))
+        .style(palette.composer())
+        .title(terminal_row(
+            &format!(" API key: {provider} "),
+            usize::from(area.width.saturating_sub(16)),
+        ));
+    if count > 0 {
+        block = block.title_top(
+            Line::from(format!(" {count} chars "))
+                .style(muted)
+                .right_aligned(),
+        );
+    }
+    let hint = if area.width >= 48 {
+        " Enter save · Backspace edit · Esc cancel "
+    } else {
+        " Enter save · Esc cancel "
+    };
+    if hint.width() + 2 <= usize::from(area.width) {
+        block = block.title_bottom(Line::from(hint).style(muted).right_aligned());
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    // Keep the end of a long key in view, where the cursor is.
+    const PROMPT: &str = "› ";
+    let room = usize::from(inner.width).saturating_sub(PROMPT.width() + 1);
+    let masked = if count > room {
+        format!("…{}", "•".repeat(room.saturating_sub(1)))
+    } else {
+        "•".repeat(count)
+    };
+    let cursor_x = inner.x + u16::try_from(PROMPT.width() + masked.width()).unwrap_or(0);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(PROMPT, Style::default().fg(palette.primary)),
+        Span::raw(masked),
+    ])];
+    if inner.height >= 3 {
+        let environment = method
+            .filter(|method| method.source == "environment")
+            .and_then(|method| method.environment_variable.as_deref());
+        let note = match environment {
+            Some(variable) => Line::styled(
+                terminal_row(
+                    &format!("{variable} is set and takes precedence over a saved key."),
+                    usize::from(inner.width),
+                ),
+                Style::default().fg(palette.warning),
+            ),
+            None => Line::styled(
+                terminal_row(
+                    "Paste or type the key. It stays masked and is saved to Wisp's auth file.",
+                    usize::from(inner.width),
+                ),
+                muted,
+            ),
+        };
+        lines.push(Line::default());
+        lines.push(note);
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    frame.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), inner.y));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -636,6 +696,44 @@ mod tests {
                 provider: "openai-codex".into()
             }
         );
+    }
+
+    #[test]
+    fn api_key_entry_shows_a_cursor_count_and_environment_precedence() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let mut panel = ConnectionPanel::new(catalog());
+        assert!(!panel.api_key_entry_active());
+        panel.handle_key(key(KeyCode::Enter));
+        assert!(panel.api_key_entry_active());
+        panel.handle_paste("sk-test-123");
+        let mut terminal = Terminal::new(TestBackend::new(70, API_KEY_PANEL_HEIGHT)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(frame, frame.area(), &mut panel, Palette::default());
+            })
+            .unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("API key: openai"), "{rendered}");
+        assert!(rendered.contains("› •••••••••••"), "{rendered}");
+        assert!(!rendered.contains("sk-test"), "{rendered}");
+        assert!(rendered.contains("11 chars"), "{rendered}");
+        // The catalog says OPENAI_API_KEY currently supplies the key.
+        assert!(rendered.contains("OPENAI_API_KEY is set"), "{rendered}");
+        // The cursor sits right after the eleventh mask character.
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!((cursor.x, cursor.y), (2 + 2 + 11, 1));
+
+        // A key longer than the row keeps its end, where the cursor is, in view.
+        panel.handle_paste(&"x".repeat(200));
+        let mut narrow = Terminal::new(TestBackend::new(40, API_KEY_PANEL_HEIGHT)).unwrap();
+        narrow
+            .draw(|frame| {
+                render(frame, frame.area(), &mut panel, Palette::default());
+            })
+            .unwrap();
+        let narrow_text = narrow.backend().to_string();
+        assert!(narrow_text.contains("› …•"), "{narrow_text}");
+        assert!(narrow.get_cursor_position().unwrap().x < 40 - 2);
     }
 
     #[test]
