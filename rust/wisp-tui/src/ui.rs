@@ -2169,7 +2169,7 @@ fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
     DecisionPanel {
         title: format!("Allow {name}?"),
         tag: Some(bounded_decision_preview(&pending.safety)),
-        detail: DecisionDetail::Wrapped(approval_detail(&pending.arguments)),
+        detail: DecisionDetail::Wrapped(approval_detail(&pending.name, &pending.arguments)),
         choices: approval_choices(
             fitting(
                 format!("Allow {name} for this session"),
@@ -2195,11 +2195,17 @@ fn approval_choices(
     ]
 }
 
-/// Show a shell command as `$ command`; every other argument stays visible,
-/// because an approval must never hide what it approves.
-fn approval_detail(arguments: &serde_json::Value) -> String {
-    let command = arguments
-        .as_object()
+/// The built-in shell tool (`src/wisp/tools/shell/tool.py`). Other tools may take a
+/// `command` argument without running a shell, e.g. MCP tools with arbitrary schemas.
+const SHELL_TOOL_NAME: &str = "bash";
+
+/// Show the built-in shell tool's command as `$ command`, followed by every other
+/// argument, because an approval must never hide what it approves. Every other
+/// tool shows its complete argument object.
+fn approval_detail(name: &str, arguments: &serde_json::Value) -> String {
+    let command = (name == SHELL_TOOL_NAME)
+        .then(|| arguments.as_object())
+        .flatten()
         .and_then(|object| object.get("command"))
         .and_then(serde_json::Value::as_str);
     let Some(command) = command else {
@@ -3300,18 +3306,18 @@ mod tests {
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
-            name: "shell".into(),
+            name: "bash".into(),
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approval"));
-        assert!(approval.contains("Allow shell?"));
+        assert!(approval.contains("Allow bash?"));
         assert!(approval.contains(" ask "));
         assert!(approval.contains("$ rm -rf /tmp/example"));
         assert!(approval.contains("1  Allow once"));
-        assert!(approval.contains("2  Allow shell for this session"));
+        assert!(approval.contains("2  Allow bash for this session"));
         assert!(approval.contains("3  YOLO for this project"));
         assert!(approval.contains("4  Deny"));
         assert!(approval.contains("Enter confirm"));
@@ -3319,13 +3325,13 @@ mod tests {
         // The panel docks in place of the composer instead of covering the transcript.
         let panel_top = approval
             .lines()
-            .position(|line| line.contains("Allow shell?"))
+            .position(|line| line.contains("Allow bash?"))
             .unwrap();
         assert!(panel_top > 2, "{approval}");
 
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1b".into(),
-            name: "shell".into(),
+            name: "bash".into(),
             arguments: json!({"command": "ls", "cwd": "/tmp/elsewhere"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
@@ -3335,6 +3341,22 @@ mod tests {
         assert!(
             with_other_arguments.contains("/tmp/elsewhere"),
             "arguments besides the command stay visible: {with_other_arguments}"
+        );
+
+        // Only the built-in shell tool gets the `$` form; an MCP tool's `command`
+        // argument keeps its name, since that tool may not run a shell.
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1c".into(),
+            name: "mcp__deploy__run".into(),
+            arguments: json!({"command": "promote", "target": "prod"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+        });
+        let mcp = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(!mcp.contains("$ promote"), "{mcp}");
+        assert!(
+            mcp.contains(r#"args: {"command":"promote","target":"prod"}"#),
+            "{mcp}"
         );
 
         state.pending_approval = Some(PendingApproval {
@@ -3359,7 +3381,7 @@ mod tests {
             safety: "ask".into(),
         });
         let bounded = wrapped_decision_rows(
-            &approval_detail(&state.pending_approval.as_ref().unwrap().arguments),
+            &approval_detail("bash", &state.pending_approval.as_ref().unwrap().arguments),
             usize::MAX,
             usize::MAX,
         )
@@ -3377,7 +3399,7 @@ mod tests {
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
         assert!(narrow.contains("3  YOLO (saved)"));
         assert!(narrow.contains("2  Allow for session"));
-        assert!(narrow.contains("$ rm -rf"));
+        assert!(narrow.contains("rm -rf"));
         let minimum_approval = render_to_string(30, 8, &state, &PromptEditor::default());
         for choice in [
             "1  Allow once",
@@ -3387,7 +3409,11 @@ mod tests {
         ] {
             assert!(minimum_approval.contains(choice), "{minimum_approval}");
         }
-        assert!(minimum_approval.contains("$ rm -rf"));
+        // One detail row fits; a non-shell tool keeps its argument names.
+        assert!(
+            minimum_approval.contains("args: {\"command\""),
+            "{minimum_approval}"
+        );
         for height in 8..=10 {
             let compact_notice = render_to_string_with_notice(
                 30,
@@ -3402,7 +3428,7 @@ mod tests {
             assert!(compact_notice.contains("again exits"));
             assert!(!compact_notice.contains("3  YOLO (saved)"));
             assert!(compact_notice.contains("Allow very"));
-            assert!(compact_notice.contains("$ rm -rf"));
+            assert!(compact_notice.contains("args:"));
         }
 
         let mut writer = DecisionPreviewWriter::default();
@@ -3550,7 +3576,7 @@ mod tests {
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
-            name: "shell".into(),
+            name: "bash".into(),
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
@@ -3561,11 +3587,11 @@ mod tests {
 
         for height in [8, 10, 11, 12] {
             let rendered = render_to_string(80, height, &state, &PromptEditor::default());
-            assert!(rendered.contains("Allow shell?"), "{rendered}");
+            assert!(rendered.contains("Allow bash?"), "{rendered}");
             assert!(rendered.contains("$ rm -rf /tmp/example"), "{rendered}");
             for choice in [
                 "1  Allow once",
-                "2  Allow shell for this session",
+                "2  Allow bash for this session",
                 "3  YOLO for this project",
                 "4  Deny",
             ] {

@@ -86,8 +86,9 @@ the approximate position in retained history without laying out every offscreen 
 scrolling and wheel/trackpad scrolling update it.
 A pending tool approval docks a panel above the footer in place of the composer, so the
 conversation that led to it stays visible; your draft is kept. The title names the tool, the
-safety category sits at the top right, and the body shows a shell command as `$ command`, with any
-other arguments after it (other tools show their arguments). It offers four choices: `1` allow
+safety category sits at the top right, and the body shows the built-in `bash` tool's command as
+`$ command`, with any other arguments after it. Every other tool, including MCP tools with a
+`command` argument, shows its complete arguments. It offers four choices: `1` allow
 once, `2` allow that tool for this session, `3` YOLO for this project, or `4` deny. The
 `y`/`t`/`a`/`n` aliases also work, or highlight a choice with `↑`/`↓` and press `Enter`. There is
 no default choice: `Enter` only confirms a highlighted choice that has been drawn, so an `Enter`
