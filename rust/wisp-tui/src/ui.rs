@@ -1951,6 +1951,16 @@ fn empty_transcript_lines(
     center_welcome_panel(panel, height)
 }
 
+/// The browse hint, shown once in the footer instead of under every card. It needs a
+/// transcript to browse; checking for any entry keeps this O(1) per frame.
+fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
+    if state.transcript.entries().is_empty() {
+        String::new()
+    } else {
+        format!("{} browse", primary_label(bindings, KeyAction::Browse))
+    }
+}
+
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
     let parts = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
@@ -1981,13 +1991,20 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
-        vec!["Esc/Ctrl-C cancels".into(), "Ctrl+G help".into()]
+        vec![
+            "Esc/Ctrl-C cancels".into(),
+            "Ctrl+G help".into(),
+            browse_hint(state, bindings),
+        ]
     } else {
         vec![
             format!("{} send", primary_label(bindings, KeyAction::Submit)),
             "/ commands".into(),
-            "@ files".into(),
             "Ctrl+G help".into(),
+            // Ahead of `@ files` so it still fits the 56-column cap of narrower
+            // terminals once there is something to browse.
+            browse_hint(state, bindings),
+            "@ files".into(),
             format!("{} history", primary_label(bindings, KeyAction::History)),
             format!("{} newline", primary_label(bindings, KeyAction::Newline)),
         ]
@@ -4377,7 +4394,9 @@ mod tests {
         assert!(!collapsed.contains("No newline"));
         assert!(collapsed.contains("- old�[2J"));
         assert!(collapsed.contains("+ new value"));
-        assert!(collapsed.contains("F6 browse · Enter details"));
+        // The browse hint lives once in the footer, not under each card.
+        assert!(!collapsed.contains("Enter details"), "{collapsed}");
+        assert!(collapsed.contains("Ctrl+G help · F6 browse"), "{collapsed}");
         assert!(collapsed.contains("Ctrl+G help"));
         assert!(!collapsed.contains('\u{1b}'));
 
@@ -4886,6 +4905,16 @@ mod tests {
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
     }
+    #[test]
+    fn footer_offers_browse_only_when_there_is_something_to_browse() {
+        let mut state = UiState::unconfigured();
+        assert!(!footer_hints(&state, &Bindings::default(), 120).contains("browse"));
+        state.transcript.append_prompt("hello".into());
+        assert!(footer_hints(&state, &Bindings::default(), 120).contains("F6 browse"));
+        // It survives the 56-column cap that narrower terminals apply.
+        assert!(footer_hints(&state, &Bindings::default(), 56).contains("F6 browse"));
+    }
+
     #[test]
     fn status_markers_are_distinct_single_column_shapes() {
         use crate::tool_cards::ToolStatus;

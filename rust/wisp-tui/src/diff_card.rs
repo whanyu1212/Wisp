@@ -77,7 +77,6 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
             TranscriptRowTone::Warning,
         );
     }
-    preview.push_line("F6 browse · Enter details", TranscriptRowTone::Muted);
     preview
 }
 

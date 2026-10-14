@@ -2279,12 +2279,6 @@ fn structured_card_preview(detail: &ToolDetailPresentation) -> (String, Vec<Card
             TranscriptRowTone::Warning,
         );
     }
-    push_line(
-        &mut preview,
-        &mut tones,
-        "F6 browse · Enter details",
-        TranscriptRowTone::Muted,
-    );
     (preview, tones)
 }
 
