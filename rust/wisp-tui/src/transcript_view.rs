@@ -29,7 +29,20 @@ const MARKDOWN_SOURCE_MAX_BYTES: usize = 64 * 1024;
 #[cfg(test)]
 const ENTRY_PRESENTATION_CHUNK_BYTES: usize = 4 * 1024;
 const OVERSCAN_ROWS: usize = 8;
-const TOOL_CARD_MARKER: &str = "● ";
+/// The marker that opens a tool or process card's action line. Its shape carries
+/// the state, so it reads without colour: `✓` done, `✗` failed, `⊘` denied or
+/// cancelled, `?` awaiting approval. In-progress cards keep a steady `●`, which the
+/// renderer animates as a spinner while the run is active (a resumed session's
+/// stale in-progress card stays a steady dot). Every glyph is one column wide.
+pub(crate) fn status_marker(status: ToolStatus) -> &'static str {
+    match status {
+        ToolStatus::Done => "✓ ",
+        ToolStatus::Error => "✗ ",
+        ToolStatus::Denied | ToolStatus::Cancelled => "⊘ ",
+        ToolStatus::AwaitingApproval => "? ",
+        ToolStatus::Requested | ToolStatus::Running => "● ",
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RowPosition {
@@ -281,6 +294,7 @@ struct CardDetailTone {
 /// argument and summary ranges, or the changed-word ranges of a diff preview.
 #[derive(Clone, Copy)]
 struct CardRowStyle<'a> {
+    marker_end: usize,
     label_end: usize,
     argument_start: usize,
     argument_style: crate::markdown::InlineStyle,
@@ -290,6 +304,7 @@ struct CardRowStyle<'a> {
 
 impl CardRowStyle<'_> {
     const PLAIN: CardRowStyle<'static> = CardRowStyle {
+        marker_end: 0,
         label_end: 0,
         argument_start: usize::MAX,
         argument_style: crate::markdown::InlineStyle::Normal,
@@ -306,7 +321,7 @@ impl CardRowStyle<'_> {
                 InlineStyle::Normal
             };
         }
-        if offset < TOOL_CARD_MARKER.len() {
+        if offset < self.marker_end {
             InlineStyle::ToolStatus
         } else if offset < self.label_end {
             InlineStyle::ToolName
@@ -323,6 +338,7 @@ impl CardRowStyle<'_> {
 #[derive(Debug)]
 struct CardProjection {
     action: String,
+    action_marker_end: usize,
     action_label_end: usize,
     action_argument_start: usize,
     action_argument_style: crate::markdown::InlineStyle,
@@ -1124,6 +1140,29 @@ impl TranscriptRowCache {
                 } else {
                     separator_after(transcript, entry)
                 };
+                let style = CardRowStyle {
+                    marker_end: projection.action_marker_end,
+                    label_end: projection.action_label_end,
+                    argument_start: projection.action_argument_start,
+                    argument_style: projection.action_argument_style,
+                    suffix_start: projection.action_suffix_start,
+                    emphasis: &[],
+                };
+                // A collapsed card keeps its action on one row; expanding it (Right in
+                // browse) wraps the full command or path instead.
+                if absolute_offset == 0 && !self.fold.is_expanded(entry.id) {
+                    if let Some(row) = self.build_truncated_action_row(
+                        entry,
+                        anchor,
+                        &projection.action,
+                        width,
+                        projection.action_tone,
+                        style,
+                        next,
+                    ) {
+                        return Some(row);
+                    }
+                }
                 Some(self.build_card_text_row(
                     entry,
                     anchor,
@@ -1134,13 +1173,7 @@ impl TranscriptRowCache {
                     width,
                     TranscriptRowKind::CardAction,
                     projection.action_tone,
-                    CardRowStyle {
-                        label_end: projection.action_label_end,
-                        argument_start: projection.action_argument_start,
-                        argument_style: projection.action_argument_style,
-                        suffix_start: projection.action_suffix_start,
-                        emphasis: &[],
-                    },
+                    style,
                     next,
                 ))
             }
@@ -1207,6 +1240,116 @@ impl TranscriptRowCache {
             }
             CardSection::Detail => None,
         }
+    }
+
+    /// Fit an action line into one row ending in `…`, or return `None` when it
+    /// already fits. A diff's change-count suffix is kept whole and the text before
+    /// it is cut, at a `/` or space when that keeps at least half the room.
+    #[allow(clippy::too_many_arguments)]
+    fn build_truncated_action_row(
+        &mut self,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        source: &str,
+        width: usize,
+        tone: TranscriptRowTone,
+        style: CardRowStyle<'_>,
+        next: Option<RowAnchor>,
+    ) -> Option<ProjectedRow> {
+        let display = |text: &str, work: &mut LayoutWork| {
+            let mut column = 0_usize;
+            for grapheme in text.graphemes(true) {
+                work.graphemes_scanned = work.graphemes_scanned.saturating_add(1);
+                work.bytes_scanned = work.bytes_scanned.saturating_add(grapheme.len());
+                if is_line_break(grapheme) {
+                    return usize::MAX;
+                }
+                column += UnicodeWidthStr::width(sanitize_grapheme(grapheme, column).as_str());
+            }
+            column
+        };
+        if display(source, &mut self.work) <= width {
+            return None;
+        }
+        let split = style.suffix_start.min(source.len());
+        let (head, mut tail) = source.split_at(split);
+        let mut tail_width = display(tail, &mut self.work);
+        if tail_width.saturating_add(2) > width {
+            tail = "";
+            tail_width = 0;
+        }
+        let budget = width.saturating_sub(tail_width + 1);
+
+        let mut kept = 0;
+        let mut column = 0;
+        let mut separator = None;
+        for (offset, grapheme) in head.grapheme_indices(true) {
+            let grapheme_width =
+                UnicodeWidthStr::width(sanitize_grapheme(grapheme, column).as_str());
+            if is_line_break(grapheme) || column + grapheme_width > budget {
+                break;
+            }
+            column += grapheme_width;
+            kept = offset + grapheme.len();
+            if offset >= style.argument_start && matches!(grapheme, "/" | " ") {
+                separator = Some((kept, column));
+            }
+        }
+        if let Some((end, separator_column)) = separator {
+            if separator_column * 2 >= budget && end < kept {
+                kept = end;
+            }
+        }
+
+        let mut spans: Vec<TranscriptSpan> = Vec::new();
+        let mut push = |text: &str, inline, start: usize, end: usize| {
+            if let Some(last) = spans.last_mut().filter(|last| last.style.inline == inline) {
+                last.text.push_str(text);
+                last.affinity.source_end = end;
+                return;
+            }
+            spans.push(TranscriptSpan {
+                text: text.to_owned(),
+                style: TranscriptSpanStyle {
+                    inline,
+                    ..TranscriptSpanStyle::default()
+                },
+                affinity: SourceAffinity {
+                    source_offset: start,
+                    source_end: end,
+                    output_offset: 0,
+                },
+            });
+        };
+        let mut column = 0;
+        for (offset, grapheme) in head[..kept].grapheme_indices(true) {
+            let safe = sanitize_grapheme(grapheme, column);
+            column += UnicodeWidthStr::width(safe.as_str());
+            push(
+                &safe,
+                style.inline_at(TranscriptRowKind::CardAction, offset),
+                offset,
+                offset + grapheme.len(),
+            );
+        }
+        // The ellipsis stands for the omitted source, so the row's spans stay contiguous.
+        push("…", crate::markdown::InlineStyle::Normal, kept, split);
+        for (offset, grapheme) in tail.grapheme_indices(true) {
+            let safe = sanitize_grapheme(grapheme, column);
+            column += UnicodeWidthStr::width(safe.as_str());
+            push(
+                &safe,
+                crate::markdown::InlineStyle::Normal,
+                split + offset,
+                split + offset + grapheme.len(),
+            );
+        }
+        let text = spans.iter().map(|span| span.text.as_str()).collect();
+        let mut row =
+            TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::CardAction, text, 0);
+        row.tone = tone;
+        row.spans = spans;
+        Some(ProjectedRow { row, next })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2057,10 +2200,15 @@ impl TranscriptRowCache {
     }
 }
 
+fn process_marker(card: &crate::tool_cards::ProcessCardSnapshot) -> &'static str {
+    status_marker(card.display_state.status())
+}
+
 fn tool_action_projection(
     card: &crate::tool_cards::ToolCardSnapshot,
-) -> (String, usize, usize, crate::markdown::InlineStyle) {
-    let label_end = TOOL_CARD_MARKER.len() + card.action_label().len();
+) -> (String, usize, usize, usize, crate::markdown::InlineStyle) {
+    let marker = status_marker(card.status);
+    let label_end = marker.len() + card.action_label().len();
     let argument_start = if card.arguments_available && !card.action_arguments.is_empty() {
         label_end.saturating_add(2)
     } else {
@@ -2072,7 +2220,8 @@ fn tool_action_projection(
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
     (
-        format!("{TOOL_CARD_MARKER}{}", card.action()),
+        format!("{marker}{}", card.action()),
+        marker.len(),
         label_end,
         argument_start,
         argument_style,
@@ -2083,8 +2232,13 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
-            let (action, action_label_end, action_argument_start, action_argument_style) =
-                tool_action_projection(card);
+            let (
+                action,
+                action_marker_end,
+                action_label_end,
+                action_argument_start,
+                action_argument_style,
+            ) = tool_action_projection(card);
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
                     detail.kind,
@@ -2120,6 +2274,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 };
                 return Some(CardProjection {
                     action,
+                    action_marker_end,
                     action_label_end,
                     action_argument_start,
                     action_argument_style,
@@ -2156,6 +2311,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
             Some(CardProjection {
                 action,
+                action_marker_end,
                 action_label_end,
                 action_argument_start,
                 action_argument_style,
@@ -2181,8 +2337,9 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .saturating_add(card.backend_dropped_bytes);
             let omission = card_omission(omitted, card.backend_truncated, true);
             Some(CardProjection {
-                action: format!("{TOOL_CARD_MARKER}{}", card.action()),
-                action_label_end: TOOL_CARD_MARKER.len() + card.action_label().len(),
+                action: format!("{}{}", process_marker(card), card.action()),
+                action_marker_end: process_marker(card).len(),
+                action_label_end: process_marker(card).len() + card.action_label().len(),
                 action_argument_start: usize::MAX,
                 action_argument_style: crate::markdown::InlineStyle::Normal,
                 detail: preview.text,
@@ -2247,12 +2404,6 @@ fn structured_card_preview(detail: &ToolDetailPresentation) -> (String, Vec<Card
             TranscriptRowTone::Warning,
         );
     }
-    push_line(
-        &mut preview,
-        &mut tones,
-        "F6 browse · Enter details",
-        TranscriptRowTone::Muted,
-    );
     (preview, tones)
 }
 
@@ -3437,6 +3588,7 @@ mod tests {
                     TranscriptRowKind::CardAction,
                     TranscriptRowTone::Success,
                     CardRowStyle {
+                        marker_end: "● ".len(),
                         label_end: "● Read".len(),
                         argument_start: "● Read  ".len(),
                         argument_style: crate::markdown::InlineStyle::ToolPath,

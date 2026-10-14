@@ -73,9 +73,12 @@ Rows keep stable `+`/`-` signs and themed changed-row bands; `write` diffs add a
 deleted line and its replacement share words, the words that differ are bold and underlined, so a
 rewrap or a one-word change stands out without colour. Enter opens the full unified diff. Other tool
 and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
-cards group as `explored N files`. Thinking streams as a collapsed `thought` row. F6 browses visible
-card rows: Right expands, Left collapses, Enter opens retained
-detail. While following the tail, the latest user prompt stays pinned at the top of the conversation
+cards group as `explored N files`. Thinking streams as a collapsed `thought` row. A collapsed
+card keeps its action line to one row, ending in `…` when the command or path is too long (paths
+are cut at a `/` or space, and a diff's change counts stay visible). F6 browses visible card rows:
+Right expands (showing the full action line), Left collapses, Enter opens retained detail. The
+footer shows the browse key once (`F6 browse`) whenever the transcript has rows, instead of a hint
+under every card. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
 Before reply text arrives, a working row animates below the transcript. Once text starts
@@ -83,10 +86,12 @@ streaming, the working row and spinner disappear. The `wisp` label stays visible
 during intervening tool calls, and the working row returns after the final result while another
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.
-Compaction keeps its separate activity row. Active tool cards use a prominent solid-dot marker that
-pulses gently in brightness and active shell calls say `Running`;
-completed, failed, denied, cancelled, and approval-waiting calls stay steady. In monochrome mode,
-active markers alternate normal and dim intensity. The footer keeps a static status label. A scrollbar on the right shows
+Compaction keeps its separate activity row. Each tool card's marker shows its state by shape as well
+as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. While the
+run is active, an in-progress card's marker is an animated braille spinner and active shell calls
+say `Running`; finished and approval-waiting cards stay steady. Because the spinner changes shape
+rather than brightness, it reads the same in monochrome mode. An in-progress card from a resumed
+session shows a steady `●`. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard
 scrolling and wheel/trackpad scrolling update it.
 A pending tool approval docks a panel above the footer in place of the composer, so the
@@ -223,8 +228,8 @@ Random.
 Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
 The conversion uses Rec.709 grayscale and minimally adjusts native foregrounds when
 needed to retain a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse
-video as well as a marker; status labels, approval action words, and diff `+`/`-` signs remain visible
-without hue. The theme choice can still be changed and remembered while monochrome is active.
+video as well as a marker; status labels, approval action words, shape-coded tool markers, and diff
+`+`/`-` signs remain visible without hue. The theme choice can still be changed and remembered while monochrome is active.
 
 Rust mouse navigation is **on by default**, so wheel and trackpad scrolling can reach earlier
 turns even though the live view starts at the current prompt. Disable it for a launch with:

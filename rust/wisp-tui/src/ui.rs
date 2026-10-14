@@ -17,7 +17,7 @@ use crate::transcript_view::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -881,8 +881,9 @@ fn render_transcript_row(
         _ if row.tone == TranscriptRowTone::Muted => base.fg(palette.muted),
         _ => base,
     };
-    let marker_style =
-        |style: Style| pulse.map_or(style, |frame| tool_pulse_style(style, palette, frame));
+    // While the run is active, an in-progress marker animates as a spinner. The
+    // shape changes rather than the brightness, so it reads the same in monochrome.
+    let spinner = pulse.map(|frame| format!("{} ", spinner_frame(frame)));
     let mut spans = row
         .spans
         .into_iter()
@@ -895,11 +896,12 @@ fn render_transcript_row(
             if selected {
                 semantic = semantic.patch(palette.selection());
             }
-            // Pulse within the selected colors so keyboard focus cannot hide activity.
-            if span.style.inline == InlineStyle::ToolStatus {
-                semantic = marker_style(semantic);
+            match &spinner {
+                Some(spinner) if span.style.inline == InlineStyle::ToolStatus => {
+                    Span::styled(spinner.clone(), semantic)
+                }
+                _ => Span::styled(span.text, semantic),
             }
-            Span::styled(span.text, semantic)
         })
         .collect::<Vec<_>>();
     if row.kind == TranscriptRowKind::CardGroup {
@@ -907,34 +909,26 @@ fn render_transcript_row(
         if selected {
             marker = marker.patch(palette.selection());
         }
-        spans.insert(0, Span::styled("● ", marker_style(marker)));
+        let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
+        spans.insert(0, Span::styled(glyph, marker));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
 
-fn tool_pulse_style(style: Style, palette: Palette, frame: u8) -> Style {
-    // Eight 125 ms frames give a gentle one-second brightness cycle. The dot
-    // never disappears, and completed cards never enter this animation path.
-    const STRENGTH: [u16; 8] = [100, 91, 70, 49, 40, 49, 70, 91];
-    let strength = STRENGTH[usize::from(frame) % STRENGTH.len()];
-    if palette.is_monochrome() {
-        return if strength < 70 {
-            style.add_modifier(Modifier::DIM)
-        } else {
-            style
-        };
-    }
-    let background = style.bg.unwrap_or(palette.background);
-    match (style.fg, background) {
-        (Some(Color::Rgb(r, g, b)), Color::Rgb(br, bg, bb)) => {
-            let blend = |foreground: u8, background: u8| {
-                ((u16::from(foreground) * strength + u16::from(background) * (100 - strength))
-                    / 100) as u8
-            };
-            style.fg(Color::Rgb(blend(r, br), blend(g, bg), blend(b, bb)))
-        }
-        _ if strength < 70 => style.add_modifier(Modifier::DIM),
-        _ => style,
+/// Braille spinner frames, one per 125 ms activity tick.
+pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+pub(crate) fn spinner_frame(frame: u8) -> &'static str {
+    SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
+}
+
+/// The marker of an `explored N files` group, which summarizes its members' tone.
+fn group_marker(tone: TranscriptRowTone) -> &'static str {
+    match tone {
+        TranscriptRowTone::Success => "✓ ",
+        TranscriptRowTone::Error => "✗ ",
+        TranscriptRowTone::Warning => "⊘ ",
+        _ => "● ",
     }
 }
 
@@ -1957,6 +1951,16 @@ fn empty_transcript_lines(
     center_welcome_panel(panel, height)
 }
 
+/// The browse hint, shown once in the footer instead of under every card. It needs a
+/// transcript to browse; checking for any entry keeps this O(1) per frame.
+fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
+    if state.transcript.entries().is_empty() {
+        String::new()
+    } else {
+        format!("{} browse", primary_label(bindings, KeyAction::Browse))
+    }
+}
+
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
     let parts = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
@@ -1981,19 +1985,27 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
                 primary_label(bindings, KeyAction::RestoreQueue)
             ),
             "Ctrl+G help".into(),
+            browse_hint(state, bindings),
         ]
     } else if state.cancel_requested {
         vec!["Ctrl+G help".into()]
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
-        vec!["Esc/Ctrl-C cancels".into(), "Ctrl+G help".into()]
+        vec![
+            "Esc/Ctrl-C cancels".into(),
+            "Ctrl+G help".into(),
+            browse_hint(state, bindings),
+        ]
     } else {
         vec![
             format!("{} send", primary_label(bindings, KeyAction::Submit)),
             "/ commands".into(),
-            "@ files".into(),
             "Ctrl+G help".into(),
+            // Ahead of `@ files` so it still fits the 56-column cap of narrower
+            // terminals once there is something to browse.
+            browse_hint(state, bindings),
+            "@ files".into(),
             format!("{} history", primary_label(bindings, KeyAction::History)),
             format!("{} newline", primary_label(bindings, KeyAction::Newline)),
         ]
@@ -2580,6 +2592,7 @@ mod tests {
     };
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
 
@@ -4142,8 +4155,9 @@ mod tests {
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
         assert_eq!(pending_fg, Palette::default().accent);
+        // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
-            style_at_text(pending.backend(), "●").unwrap().0,
+            style_at_text(pending.backend(), "? Awaiting").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
@@ -4161,7 +4175,7 @@ mod tests {
             style_at_text(complete.backend(), "Read  README.md").unwrap();
         assert_eq!(success_fg, Palette::default().accent);
         assert_eq!(
-            style_at_text(complete.backend(), "●").unwrap().0,
+            style_at_text(complete.backend(), "✓ Read").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
@@ -4381,7 +4395,9 @@ mod tests {
         assert!(!collapsed.contains("No newline"));
         assert!(collapsed.contains("- old�[2J"));
         assert!(collapsed.contains("+ new value"));
-        assert!(collapsed.contains("F6 browse · Enter details"));
+        // The browse hint lives once in the footer, not under each card.
+        assert!(!collapsed.contains("Enter details"), "{collapsed}");
+        assert!(collapsed.contains("Ctrl+G help · F6 browse"), "{collapsed}");
         assert!(collapsed.contains("Ctrl+G help"));
         assert!(!collapsed.contains('\u{1b}'));
 
@@ -4890,8 +4906,172 @@ mod tests {
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
     }
+    fn render_bash_card(
+        command: &str,
+        result: Option<(bool, Option<&str>)>,
+        width: u16,
+        expanded: bool,
+    ) -> String {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("run it".into());
+        let card = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "bash-card".into(),
+                name: "bash".into(),
+                arguments: json!({"command": command}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        if let Some((is_error, process_state)) = result {
+            let mut completed = tool_result("bash-card", "done");
+            completed.name = "bash".into();
+            completed.is_error = is_error;
+            completed.process_state = process_state.map(str::to_owned);
+            state.transcript.observe_tool_result(completed);
+        }
+        let mut cache = TranscriptRowCache::default();
+        if expanded {
+            cache.fold_mut().expand(card);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut cache,
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                );
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
     #[test]
-    fn only_active_tool_markers_pulse_and_terminal_results_stay_steady() {
+    fn long_actions_stay_on_one_row_until_the_card_is_expanded() {
+        let command =
+            "cargo test --workspace --all-features -- --nocapture tests::a_very_long_test_name";
+        let collapsed = render_bash_card(command, Some((false, None)), 40, false);
+        let action = collapsed
+            .lines()
+            .find(|line| line.contains("✓ Ran"))
+            .expect("action row");
+        assert!(action.contains('…'), "{collapsed}");
+        assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
+
+        let expanded = render_bash_card(command, Some((false, None)), 40, true);
+        let action = expanded
+            .lines()
+            .find(|line| line.contains("✓ Ran"))
+            .expect("action row");
+        assert!(!action.contains('…'), "{expanded}");
+        assert!(expanded.contains("y_long_test_name"), "{expanded}");
+
+        // A diff's change counts stay visible when its path is cut.
+        let (diff, _) = render_file_card(
+            "edit",
+            json!({
+                "path": "src/wisp/providers/a/deeply/nested/module/with/a/long/name.py",
+                "edits": [{"oldText": "a\n", "newText": "b\n"}]
+            }),
+            None,
+            false,
+            40,
+        );
+        let diff_action = diff
+            .lines()
+            .find(|line| line.contains("Edited"))
+            .expect("diff action row");
+        assert!(diff_action.contains('…'), "{diff}");
+        assert!(diff_action.contains("+1 -1"), "{diff}");
+    }
+
+    #[test]
+    fn each_tool_state_renders_its_marker_at_thirty_columns() {
+        for (result, marker) in [
+            (None, "●"),
+            (Some((false, None)), "✓"),
+            (Some((true, None)), "✗"),
+            (Some((false, Some("cancelled"))), "⊘"),
+        ] {
+            let rendered = render_bash_card("echo a long enough command to cut", result, 30, false);
+            let action = rendered
+                .lines()
+                .find(|line| line.contains(marker))
+                .unwrap_or_else(|| panic!("{marker}: {rendered}"));
+            assert!(action.contains('…'), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn footer_offers_browse_only_when_there_is_something_to_browse() {
+        let mut state = UiState::unconfigured();
+        assert!(!footer_hints(&state, &Bindings::default(), 120).contains("browse"));
+        state.transcript.append_prompt("hello".into());
+        assert!(footer_hints(&state, &Bindings::default(), 120).contains("F6 browse"));
+        // It survives the 56-column cap that narrower terminals apply.
+        assert!(footer_hints(&state, &Bindings::default(), 56).contains("F6 browse"));
+
+        // A prompt run with input ready (steering) offers it too, since cards arrive then.
+        let mut running = UiState::new("fake".into(), None, None);
+        running.view_status = ViewStatus::Running;
+        running.interaction_status = crate::reducer::InteractionStatus::Running;
+        running.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        running.transcript.append_prompt("hello".into());
+        assert!(running.active_prompt_editable());
+        let hints = footer_hints(&running, &Bindings::default(), 200);
+        assert!(hints.contains("steer"), "{hints}");
+        assert!(hints.contains("F6 browse"), "{hints}");
+    }
+
+    #[test]
+    fn status_markers_are_distinct_single_column_shapes() {
+        use crate::tool_cards::ToolStatus;
+        let marker = |status| crate::transcript_view::status_marker(status).trim_end();
+        for status in [
+            ToolStatus::Requested,
+            ToolStatus::AwaitingApproval,
+            ToolStatus::Running,
+            ToolStatus::Done,
+            ToolStatus::Error,
+            ToolStatus::Denied,
+            ToolStatus::Cancelled,
+        ] {
+            // A double-width or emoji glyph would shift the whole action line.
+            assert_eq!(marker(status).width(), 1, "{status:?}");
+        }
+        for frame in SPINNER_FRAMES {
+            assert_eq!(frame.width(), 1);
+        }
+        let outcomes = [
+            marker(ToolStatus::Done),
+            marker(ToolStatus::Error),
+            marker(ToolStatus::Denied),
+            marker(ToolStatus::AwaitingApproval),
+            marker(ToolStatus::Running),
+        ];
+        let distinct: std::collections::HashSet<_> = outcomes.iter().collect();
+        assert_eq!(distinct.len(), outcomes.len());
+        assert_eq!(marker(ToolStatus::Denied), marker(ToolStatus::Cancelled));
+    }
+
+    #[test]
+    fn only_active_tool_markers_spin_and_terminal_results_stay_steady() {
         use crate::tool_cards::ToolCallInput;
         let draw = |state: &UiState, tick, palette, selected| {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
@@ -4964,9 +5144,9 @@ mod tests {
                         state
                             .transcript
                             .observe_approval_resolved("pulse", true, None);
-                        let bright = draw(&state, 0, palette, None);
-                        let dim = draw(&state, 4, palette, None);
-                        assert_ne!(bright, dim);
+                        let first = draw(&state, 0, palette, None);
+                        let later = draw(&state, 4, palette, None);
+                        assert_ne!(first, later);
                         let selected = state
                             .transcript
                             .entries()
@@ -4977,20 +5157,19 @@ mod tests {
                             draw(&state, 0, palette, selected),
                             draw(&state, 4, palette, selected)
                         );
-                        if palette.is_monochrome() {
-                            let dot = dim
-                                .content
-                                .iter()
-                                .find(|cell| cell.symbol() == "●")
-                                .unwrap();
-                            assert!(dot.modifier.contains(Modifier::DIM));
-                        }
-                        for (a, b) in bright.content.iter().zip(&dim.content) {
-                            assert_eq!(a.symbol(), b.symbol());
-                            if a != b {
-                                assert!(matches!(a.symbol(), "●" | " "));
-                            }
-                        }
+                        // Only the marker changes between ticks, and it changes shape, so
+                        // the activity also reads in monochrome.
+                        let changed: Vec<_> = first
+                            .content
+                            .iter()
+                            .zip(&later.content)
+                            .filter(|(a, b)| a != b)
+                            .collect();
+                        assert_eq!(changed.len(), 1, "{outcome}");
+                        let (a, b) = changed[0];
+                        assert!(SPINNER_FRAMES.contains(&a.symbol()));
+                        assert!(SPINNER_FRAMES.contains(&b.symbol()));
+                        assert_ne!(a.symbol(), b.symbol());
                         let mut result = tool_result("pulse", "finished");
                         result.is_error = outcome == "error";
                         if outcome == "cancelled" {
@@ -4998,9 +5177,15 @@ mod tests {
                         }
                         state.transcript.observe_tool_result(result);
                     }
-                    assert_eq!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None),
+                    let settled = draw(&state, 0, palette, None);
+                    assert_eq!(settled, draw(&state, 4, palette, None), "{outcome}");
+                    let marker = match outcome {
+                        "success" => "✓",
+                        "error" => "✗",
+                        _ => "⊘",
+                    };
+                    assert!(
+                        settled.content.iter().any(|cell| cell.symbol() == marker),
                         "{outcome}"
                     );
                 }
