@@ -796,7 +796,11 @@ fn activity_label(
         activity_phase(state)
     );
     let mut details: Vec<String> = elapsed.map(format_elapsed).into_iter().collect();
-    details.push("Esc to interrupt".to_owned());
+    // Once Esc has requested cancellation, another Esc cannot start one; the footer
+    // already says the prompt is cancelling.
+    if !state.cancel_requested {
+        details.push("Esc to interrupt".to_owned());
+    }
     while !details.is_empty()
         && lead.width() + details.iter().map(|part| part.width() + 3).sum::<usize>() > width
     {
@@ -3283,6 +3287,9 @@ mod tests {
         // Short rows drop the hint, then the elapsed time, but never clip mid-word.
         assert_eq!(text(&state, 0, twelve, 20), "⠋ Working · 12s");
         assert_eq!(text(&state, 0, twelve, 12), "⠋ Working");
+        state.cancel_requested = true;
+        assert_eq!(text(&state, 0, twelve, 80), "⠋ Working · 12s");
+        state.cancel_requested = false;
 
         state.transcript.append_prompt("think".into());
         state.transcript.append_thinking_delta(1, "considering");
