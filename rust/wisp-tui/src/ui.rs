@@ -1985,6 +1985,7 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
                 primary_label(bindings, KeyAction::RestoreQueue)
             ),
             "Ctrl+G help".into(),
+            browse_hint(state, bindings),
         ]
     } else if state.cancel_requested {
         vec!["Ctrl+G help".into()]
@@ -5022,6 +5023,20 @@ mod tests {
         assert!(footer_hints(&state, &Bindings::default(), 120).contains("F6 browse"));
         // It survives the 56-column cap that narrower terminals apply.
         assert!(footer_hints(&state, &Bindings::default(), 56).contains("F6 browse"));
+
+        // A prompt run with input ready (steering) offers it too, since cards arrive then.
+        let mut running = UiState::new("fake".into(), None, None);
+        running.view_status = ViewStatus::Running;
+        running.interaction_status = crate::reducer::InteractionStatus::Running;
+        running.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        running.transcript.append_prompt("hello".into());
+        assert!(running.active_prompt_editable());
+        let hints = footer_hints(&running, &Bindings::default(), 200);
+        assert!(hints.contains("steer"), "{hints}");
+        assert!(hints.contains("F6 browse"), "{hints}");
     }
 
     #[test]
