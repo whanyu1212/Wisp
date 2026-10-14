@@ -95,17 +95,19 @@ impl DiffCardPreview {
 /// Rows worth showing in a card: the first hunk header is dropped and later ones
 /// become separators; "no newline" notes are dropped unless the trailing newline
 /// changed within that hunk, which becomes one `⏎` row.
+///
+/// A note marks the final line of one side as unterminated ("either" marks both),
+/// so a hunk changes the trailing newline when exactly one side is unterminated,
+/// whether that side's final line was changed or kept as context. An empty side
+/// (a created file, or a file emptied completely) has no final line to compare.
 fn card_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
-    fn flush(hunk: &mut Vec<DetailRow>, card: &mut Vec<DetailRow>) {
-        let old = hunk.iter().any(|row| is_note(row, "old file"));
-        let new = hunk.iter().any(|row| is_note(row, "new file"));
-        // Only a replacement can add or remove a final newline. In a pure insertion
-        // (a created file) or deletion, a lone note describes one side only.
-        let replaced = hunk.iter().any(|row| row.kind == DetailRowKind::Deletion)
-            && hunk.iter().any(|row| row.kind == DetailRowKind::Addition);
-        let marker = match (old && replaced, new && replaced) {
-            (true, false) => Some("⏎ trailing newline added"),
-            (false, true) => Some("⏎ trailing newline removed"),
+    fn flush(hunk: &mut Vec<DetailRow>, card: &mut Vec<DetailRow>, compare: bool) {
+        let either = hunk.iter().any(|row| is_note(row, "either file"));
+        let old = either || hunk.iter().any(|row| is_note(row, "old file"));
+        let new = either || hunk.iter().any(|row| is_note(row, "new file"));
+        let marker = match (compare, old, new) {
+            (true, true, false) => Some("⏎ trailing newline added"),
+            (true, false, true) => Some("⏎ trailing newline removed"),
             _ => None,
         };
         let template = hunk
@@ -119,12 +121,15 @@ fn card_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
         }
     }
 
+    let has = |kinds: [DetailRowKind; 2]| rows.iter().any(|row| kinds.contains(&row.kind));
+    let compare = has([DetailRowKind::Deletion, DetailRowKind::Context])
+        && has([DetailRowKind::Addition, DetailRowKind::Context]);
     let mut card = Vec::with_capacity(rows.len());
     let mut hunk: Vec<DetailRow> = Vec::new();
     let mut started = false;
     for row in rows {
         if row.kind == DetailRowKind::Hunk {
-            flush(&mut hunk, &mut card);
+            flush(&mut hunk, &mut card, compare);
             if started {
                 let mut separator = row.clone();
                 separator.text = HUNK_SEPARATOR.into();
@@ -135,7 +140,7 @@ fn card_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
         }
         hunk.push(row.clone());
     }
-    flush(&mut hunk, &mut card);
+    flush(&mut hunk, &mut card, compare);
     card
 }
 
@@ -370,6 +375,24 @@ mod tests {
                 note("new file"),
             ]),
             ["old", "old", "⏎ trailing newline removed"]
+        );
+        // Only one side changed, with the other side's final line kept as context:
+        // writing "a\nb" over "a\n" removes it; dropping an unterminated "b" adds it.
+        assert_eq!(
+            texts(vec![
+                row(DetailRowKind::Context, "a"),
+                row(DetailRowKind::Addition, "b"),
+                note("new file"),
+            ]),
+            ["a", "b", "⏎ trailing newline removed"]
+        );
+        assert_eq!(
+            texts(vec![
+                row(DetailRowKind::Context, "a"),
+                row(DetailRowKind::Deletion, "b"),
+                note("old file"),
+            ]),
+            ["a", "b", "⏎ trailing newline added"]
         );
         // A created file without a final newline had no newline to remove.
         assert_eq!(

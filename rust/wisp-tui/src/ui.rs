@@ -4336,6 +4336,19 @@ mod tests {
         );
         assert!(unterminated.contains("   2 │ + second"), "{unterminated}");
         assert!(!unterminated.contains('⏎'), "{unterminated}");
+
+        // Appending an unterminated line keeps the old final line as context.
+        let (appended, _) = render_file_card(
+            "write",
+            json!({"path": "notes.txt", "content": "a\nb"}),
+            Some("a\n"),
+            false,
+            100,
+        );
+        assert!(
+            appended.contains("⏎ trailing newline removed"),
+            "{appended}"
+        );
     }
 
     #[test]
