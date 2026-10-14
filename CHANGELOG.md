@@ -10,12 +10,40 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc5 — release preparation
+## 0.2.0rc6 — release preparation
+
+RC6 refreshes how the Rust TUI presents approvals, diffs, tool progress, and work in progress, and
+fixes dropped trackpad scrolling found while dogfooding RC5. It changes no session, event, or
+protocol format, so RC4, RC5, and RC6 read each other's sessions. This section describes the
+candidate under preparation; publication requires a separate tagged release.
+
+- Fixed trackpad and wheel scrolling being silently dropped while the agent was working: tool output
+  queued ahead of the gesture invalidated it, so earlier turns looked unreachable. Scrolling while
+  idle was unaffected. (#685)
+- Tool approval and project-trust requests now dock as one panel above the footer in place of the
+  composer instead of a centered box, keeping the conversation visible and the draft intact.
+  Choices can be picked with `↑`/`↓` and `Enter` as well as the existing keys; there is no default
+  choice, so an `Enter` meant for the composer cannot answer a request. The built-in `bash` tool's
+  command shows as `$ command` with its other arguments; other tools show all arguments.
+  `/permissions` docks above the composer with the same selection rules. (#686)
+- `edit` and `write` cards show a quieter diff: change counts on the action line, `⋯` between
+  hunks, no "No newline" notes unless the final newline changed, a line-number gutter for `write`,
+  and the changed words of a replaced line in bold and underline. The Enter-details view still shows
+  the full unified diff. (#687)
+- Tool cards mark their state by shape (`✓` done, `✗` failed, `⊘` denied or cancelled, `?` awaiting
+  approval) and running cards show a braille spinner. A collapsed card keeps its action line to one
+  row, ending in `…`. The browse hint moved from every card to the footer. (#689)
+- The working row reads like `⠹ Thinking · 12s · Esc to interrupt`: the phase, how long the current
+  command has run, and the interrupt key. (#690)
+- Refreshed the provider model catalog with current OpenAI, Codex, Claude 5.5, Gemini 4 Argon,
+  DeepSeek V4.1 Flash, and Grok 4.7 models and prices. (#684)
+- Redrew the Braille startup logo for terminal legibility. (#688)
+
+## 0.2.0rc5 — 2026-10-14
 
 RC5 fixes two problems found in the published RC4: stdio MCP servers failing to start in public
 installs, and `wisp update` dropping the Rust TUI. It changes no session, event, or protocol format,
-so RC4 and RC5 read each other's sessions. This section describes the candidate under preparation;
-publication requires a separate tagged release.
+so RC4 and RC5 read each other's sessions.
 
 - Fixed stdio MCP servers failing to start in public installs ("MCP server … is unavailable", with
   a `coroutine '_get_executable_command' was never awaited` warning). Wisp called a private `mcp`
