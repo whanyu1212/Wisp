@@ -554,6 +554,8 @@ struct LiveUi {
     notice: Option<String>,
     render_pending: bool,
     activity_frame: u8,
+    /// The command whose run the working row times, and when it was first drawn.
+    activity_clock: Option<(String, std::time::Instant)>,
     rendered_decision_context: Option<RenderedDecisionContext>,
     /// The highlighted choice of the pending decision; reset when the decision changes.
     decision_choice: Option<usize>,
@@ -606,6 +608,7 @@ impl Default for LiveUi {
             notice: None,
             render_pending: true,
             activity_frame: 0,
+            activity_clock: None,
             rendered_decision_context: None,
             decision_choice: None,
             rendered_decision_choice: None,
@@ -1539,6 +1542,7 @@ impl LiveUi {
         if let Some(view) = &mut self.prompt_history_view {
             view.invalidate_selection();
         }
+        let activity_elapsed = self.activity_elapsed();
         terminal::draw_frame(terminal, |frame| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
@@ -1566,6 +1570,7 @@ impl LiveUi {
                 &self.bindings,
                 self.startup_logo,
                 self.decision_choice,
+                activity_elapsed,
             );
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
@@ -1739,6 +1744,25 @@ impl LiveUi {
         !self.state.configuration_active()
             && (self.state.view_status == ViewStatus::Running
                 || self.state.interaction_status == InteractionStatus::Compacting)
+    }
+
+    /// How long the current command has run, for the working row. The clock restarts
+    /// when a new command starts and clears when none is active.
+    fn activity_elapsed(&mut self) -> Option<std::time::Duration> {
+        let Some(current) = self.state.current_command.as_ref() else {
+            self.activity_clock = None;
+            return None;
+        };
+        if self
+            .activity_clock
+            .as_ref()
+            .is_none_or(|(id, _)| id != &current.id)
+        {
+            self.activity_clock = Some((current.id.clone(), std::time::Instant::now()));
+        }
+        self.activity_clock
+            .as_ref()
+            .map(|(_, started)| started.elapsed())
     }
 
     fn advance_activity_animation(&mut self) -> bool {
@@ -4768,6 +4792,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn working_row_clock_follows_the_current_command() {
+        let mut ui = LiveUi::default();
+        assert_eq!(ui.activity_elapsed(), None);
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        assert!(ui.activity_elapsed().is_some());
+        let first = ui.activity_clock.clone().unwrap();
+        ui.activity_elapsed();
+        assert_eq!(
+            ui.activity_clock.as_ref().unwrap().1,
+            first.1,
+            "same command keeps its clock"
+        );
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-2".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        ui.activity_elapsed();
+        assert_eq!(ui.activity_clock.as_ref().unwrap().0, "prompt-2");
+        ui.state.current_command = None;
+        assert_eq!(ui.activity_elapsed(), None);
+        assert!(ui.activity_clock.is_none());
+    }
     #[test]
     fn scroll_input_coalesces_one_bounded_directional_run() {
         use crossterm::event::MouseEventKind::{ScrollDown, ScrollUp};

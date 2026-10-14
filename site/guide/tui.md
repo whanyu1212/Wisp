@@ -81,8 +81,11 @@ footer shows the browse key once (`F6 browse`) whenever the transcript has rows,
 under every card. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
 follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
-Before reply text arrives, a working row animates below the transcript. Once text starts
-streaming, the working row and spinner disappear. The `wisp` label stays visible at the live tail
+Before reply text arrives, a working row animates below the transcript, for example
+`⠹ Thinking · 12s · Esc to interrupt`. It shows a braille spinner, what the agent is waiting on
+(`Thinking` while reasoning streams, `Working` otherwise, or `Compacting context`), how long the
+current command has run, and the interrupt key; on a narrow row the interrupt hint and then the
+time are dropped rather than clipped. Once text starts streaming, the working row disappears. The `wisp` label stays visible at the live tail
 during intervening tool calls, and the working row returns after the final result while another
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.

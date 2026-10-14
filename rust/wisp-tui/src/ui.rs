@@ -44,7 +44,6 @@ pub(crate) const APPROVAL_CHOICES: usize = 4;
 pub(crate) const TRUST_CHOICES: usize = 2;
 const COMPOSER_PREFIX: &str = "› ";
 const CONTENT_PADDING: u16 = 1;
-const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -210,6 +209,7 @@ pub fn render(
         &Bindings::default(),
         LogoChoice::AdalBraille,
         None,
+        None,
     );
 }
 
@@ -231,6 +231,7 @@ pub fn render_interactive(
     bindings: &Bindings,
     startup_logo: LogoChoice,
     decision_choice: Option<usize>,
+    activity_elapsed: Option<std::time::Duration>,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -271,6 +272,7 @@ pub fn render_interactive(
             browse_selected,
             connection,
             activity_frame,
+            activity_elapsed,
             palette,
             bindings,
             startup_logo,
@@ -314,6 +316,7 @@ pub fn render_interactive(
         browse_selected,
         connection,
         activity_frame,
+        activity_elapsed,
         palette,
         bindings,
         startup_logo,
@@ -515,6 +518,7 @@ fn render_transcript(
     browse_selected: Option<TranscriptEntryId>,
     connection: &ConnectionInfo,
     activity_frame: u8,
+    activity_elapsed: Option<std::time::Duration>,
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
@@ -541,7 +545,15 @@ fn render_transcript(
     let conversation = area;
     let active_reply = active_reply(state);
     let activity = waiting_for_output(state)
-        .then(|| activity_label(state, activity_frame))
+        .then(|| {
+            activity_label(
+                state,
+                activity_frame,
+                activity_elapsed,
+                usize::from(content_area(conversation).width),
+                palette,
+            )
+        })
         .flatten();
     let activity_height = if activity.is_some() {
         conversation
@@ -681,7 +693,7 @@ fn render_transcript(
         let y = (conversation.y + painted_rows as u16 + u16::from(painted_rows > 0))
             .min(conversation.bottom().saturating_sub(1));
         frame.render_widget(
-            Paragraph::new(label).style(Style::default().fg(palette.primary)),
+            Paragraph::new(label),
             Rect::new(content.x, y, content.width, 1),
         );
     }
@@ -761,17 +773,76 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
     }
 }
 
-fn activity_label(state: &UiState, activity_frame: u8) -> Option<String> {
-    (!state.configuration_active()
-        && (state.view_status == ViewStatus::Running
-            || state.interaction_status == crate::reducer::InteractionStatus::Compacting))
-        .then(|| {
-            format!(
-                "{} {}",
-                status_label(state),
-                ACTIVITY_FRAMES[usize::from(activity_frame) % ACTIVITY_FRAMES.len()]
-            )
-        })
+/// The working row: a spinner, what the agent is doing, how long the current command
+/// has run, and how to interrupt it. The spinner is one column wide, so only the
+/// elapsed time changes the row's width. When `width` is short, the interrupt hint
+/// goes first and then the elapsed time, rather than clipping mid-word.
+fn activity_label(
+    state: &UiState,
+    activity_frame: u8,
+    elapsed: Option<std::time::Duration>,
+    width: usize,
+    palette: Palette,
+) -> Option<Line<'static>> {
+    if state.configuration_active()
+        || !(state.view_status == ViewStatus::Running
+            || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
+    {
+        return None;
+    }
+    let lead = format!(
+        "{} {}",
+        spinner_frame(activity_frame),
+        activity_phase(state)
+    );
+    let mut details: Vec<String> = elapsed.map(format_elapsed).into_iter().collect();
+    // Once Esc has requested cancellation, another Esc cannot start one; the footer
+    // already says the prompt is cancelling.
+    if !state.cancel_requested {
+        details.push("Esc to interrupt".to_owned());
+    }
+    while !details.is_empty()
+        && lead.width() + details.iter().map(|part| part.width() + 3).sum::<usize>() > width
+    {
+        details.pop();
+    }
+    let mut spans = vec![Span::styled(lead, Style::default().fg(palette.primary))];
+    if !details.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {}", details.join(" · ")),
+            Style::default().fg(palette.muted),
+        ));
+    }
+    Some(Line::from(spans))
+}
+
+/// What the agent is waiting on while no reply text or tool card shows progress.
+fn activity_phase(state: &UiState) -> &'static str {
+    if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
+        return "Compacting context";
+    }
+    let thinking = state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .take_while(|entry| entry.role != TranscriptRole::User)
+        .any(|entry| {
+            entry.role == TranscriptRole::Assistant
+                && entry.state == crate::transcript::TranscriptEntryState::Streaming
+                && !entry.thinking().is_empty()
+        });
+    if thinking { "Thinking" } else { "Working" }
+}
+
+/// `9s`, `1m 05s` or `1h 02m`.
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
+    }
 }
 
 fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, palette: Palette) {
@@ -2738,6 +2809,7 @@ mod tests {
                     bindings,
                     LogoChoice::AdalBraille,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -2773,6 +2845,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                 );
             })
@@ -3192,18 +3265,59 @@ mod tests {
     }
 
     #[test]
+    fn working_row_shows_phase_elapsed_time_and_fits_narrow_rows() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        let text = |state: &UiState, frame, elapsed, width| {
+            activity_label(state, frame, elapsed, width, Palette::default())
+                .unwrap()
+                .to_string()
+        };
+        let twelve = Some(std::time::Duration::from_secs(12));
+        assert_eq!(
+            text(&state, 0, twelve, 80),
+            "⠋ Working · 12s · Esc to interrupt"
+        );
+        // The spinner is one column, so the row never jitters between frames.
+        let widths: std::collections::HashSet<_> = (0..20)
+            .map(|frame| text(&state, frame, twelve, 80).width())
+            .collect();
+        assert_eq!(widths.len(), 1);
+        // Short rows drop the hint, then the elapsed time, but never clip mid-word.
+        assert_eq!(text(&state, 0, twelve, 20), "⠋ Working · 12s");
+        assert_eq!(text(&state, 0, twelve, 12), "⠋ Working");
+        state.cancel_requested = true;
+        assert_eq!(text(&state, 0, twelve, 80), "⠋ Working · 12s");
+        state.cancel_requested = false;
+
+        state.transcript.append_prompt("think".into());
+        state.transcript.append_thinking_delta(1, "considering");
+        assert!(text(&state, 0, None, 80).starts_with("⠋ Thinking"));
+        state.interaction_status = InteractionStatus::Compacting;
+        assert!(text(&state, 0, None, 80).starts_with("⠋ Compacting context"));
+
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(9)), "9s");
+        assert_eq!(format_elapsed(std::time::Duration::from_secs(65)), "1m 05s");
+        assert_eq!(
+            format_elapsed(std::time::Duration::from_secs(3720)),
+            "1h 02m"
+        );
+    }
+
+    #[test]
     fn activity_indicator_changes_only_for_active_work() {
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
         let first = render_to_string_with_activity(80, 18, &state, 0);
         let second = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(first.contains("working ◐"), "{first}");
-        assert!(second.contains("working ◓"), "{second}");
+        assert!(first.contains("⠋ Working · Esc to interrupt"), "{first}");
+        assert!(second.contains("⠙ Working"), "{second}");
 
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(compacting.contains("compacting ◑"), "{compacting}");
+        assert!(compacting.contains("⠹ Compacting context"), "{compacting}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -3219,8 +3333,8 @@ mod tests {
         state.view_status = ViewStatus::Running;
         for width in [30, 60] {
             for (interaction, label) in [
-                (InteractionStatus::Running, "working ◐"),
-                (InteractionStatus::Compacting, "compacting ◐"),
+                (InteractionStatus::Running, "⠋ Working"),
+                (InteractionStatus::Compacting, "⠋ Compacting context"),
             ] {
                 state.interaction_status = interaction;
                 let rendered = render_to_string_with_notice(
@@ -3817,6 +3931,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -3863,6 +3978,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                 );
             })
@@ -4257,6 +4373,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -4425,6 +4542,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -4480,6 +4598,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                 );
                 let area = overlay_area(frame.area()).unwrap();
@@ -4953,6 +5072,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -5097,6 +5217,7 @@ mod tests {
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
                         None,
+                        None,
                     );
                 })
                 .unwrap();
@@ -5177,8 +5298,10 @@ mod tests {
                         }
                         state.transcript.observe_tool_result(result);
                     }
+                    // The working row may return once the tool settles; ticks 0 and 10
+                    // show the same spinner frame, so only the card marker is compared.
                     let settled = draw(&state, 0, palette, None);
-                    assert_eq!(settled, draw(&state, 4, palette, None), "{outcome}");
+                    assert_eq!(settled, draw(&state, 10, palette, None), "{outcome}");
                     let marker = match outcome {
                         "success" => "✓",
                         "error" => "✗",
@@ -5200,7 +5323,7 @@ mod tests {
         state.interaction_status = crate::reducer::InteractionStatus::Running;
         state.transcript.append_prompt("check this".into());
         let waiting = render_to_string_with_activity(80, 18, &state, 0);
-        assert!(waiting.contains("working ◐"));
+        assert!(waiting.contains("⠋ Working"));
         state
             .transcript
             .append_message_delta(1, "I will check that.");
@@ -5220,8 +5343,8 @@ mod tests {
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
             assert!(running.contains("check 19"), "{running}");
-            assert!(!running.contains("working ◓"), "{running}");
-            assert!(!running.contains('◓'), "{running}");
+            assert!(!running.contains("Working"), "{running}");
+            assert!(!running.contains("Esc to interrupt"), "{running}");
         }
         for index in 0..20 {
             state
@@ -5229,7 +5352,7 @@ mod tests {
                 .observe_tool_result(tool_result(&format!("tool-{index}"), "done"));
         }
         let between_steps = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(between_steps.contains("working ◑"), "{between_steps}");
+        assert!(between_steps.contains("⠹ Working"), "{between_steps}");
 
         state
             .transcript
@@ -5240,7 +5363,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
             });
         let polling = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(!polling.contains("working ◒"), "{polling}");
+        assert!(!polling.contains("Working"), "{polling}");
         let mut process_result = tool_result("process-poll", "still running");
         process_result.name = "bash".into();
         process_result.process_id = Some("process-1".into());
@@ -5252,7 +5375,7 @@ mod tests {
             "{process_between_steps}"
         );
         assert!(
-            process_between_steps.contains("working ◒"),
+            process_between_steps.contains("⠸ Working"),
             "{process_between_steps}"
         );
 
