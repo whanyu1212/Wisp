@@ -4905,6 +4905,115 @@ mod tests {
         let rendered = render_to_string(40, 14, &state, &PromptEditor::default());
         assert!(rendered.contains("TAIL"));
     }
+    fn render_bash_card(
+        command: &str,
+        result: Option<(bool, Option<&str>)>,
+        width: u16,
+        expanded: bool,
+    ) -> String {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("run it".into());
+        let card = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "bash-card".into(),
+                name: "bash".into(),
+                arguments: json!({"command": command}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        if let Some((is_error, process_state)) = result {
+            let mut completed = tool_result("bash-card", "done");
+            completed.name = "bash".into();
+            completed.is_error = is_error;
+            completed.process_state = process_state.map(str::to_owned);
+            state.transcript.observe_tool_result(completed);
+        }
+        let mut cache = TranscriptRowCache::default();
+        if expanded {
+            cache.fold_mut().expand(card);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut cache,
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                );
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn long_actions_stay_on_one_row_until_the_card_is_expanded() {
+        let command =
+            "cargo test --workspace --all-features -- --nocapture tests::a_very_long_test_name";
+        let collapsed = render_bash_card(command, Some((false, None)), 40, false);
+        let action = collapsed
+            .lines()
+            .find(|line| line.contains("✓ Ran"))
+            .expect("action row");
+        assert!(action.contains('…'), "{collapsed}");
+        assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
+
+        let expanded = render_bash_card(command, Some((false, None)), 40, true);
+        let action = expanded
+            .lines()
+            .find(|line| line.contains("✓ Ran"))
+            .expect("action row");
+        assert!(!action.contains('…'), "{expanded}");
+        assert!(expanded.contains("y_long_test_name"), "{expanded}");
+
+        // A diff's change counts stay visible when its path is cut.
+        let (diff, _) = render_file_card(
+            "edit",
+            json!({
+                "path": "src/wisp/providers/a/deeply/nested/module/with/a/long/name.py",
+                "edits": [{"oldText": "a\n", "newText": "b\n"}]
+            }),
+            None,
+            false,
+            40,
+        );
+        let diff_action = diff
+            .lines()
+            .find(|line| line.contains("Edited"))
+            .expect("diff action row");
+        assert!(diff_action.contains('…'), "{diff}");
+        assert!(diff_action.contains("+1 -1"), "{diff}");
+    }
+
+    #[test]
+    fn each_tool_state_renders_its_marker_at_thirty_columns() {
+        for (result, marker) in [
+            (None, "●"),
+            (Some((false, None)), "✓"),
+            (Some((true, None)), "✗"),
+            (Some((false, Some("cancelled"))), "⊘"),
+        ] {
+            let rendered = render_bash_card("echo a long enough command to cut", result, 30, false);
+            let action = rendered
+                .lines()
+                .find(|line| line.contains(marker))
+                .unwrap_or_else(|| panic!("{marker}: {rendered}"));
+            assert!(action.contains('…'), "{rendered}");
+        }
+    }
+
     #[test]
     fn footer_offers_browse_only_when_there_is_something_to_browse() {
         let mut state = UiState::unconfigured();

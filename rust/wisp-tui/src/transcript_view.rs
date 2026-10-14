@@ -1148,6 +1148,21 @@ impl TranscriptRowCache {
                     suffix_start: projection.action_suffix_start,
                     emphasis: &[],
                 };
+                // A collapsed card keeps its action on one row; expanding it (Right in
+                // browse) wraps the full command or path instead.
+                if absolute_offset == 0 && !self.fold.is_expanded(entry.id) {
+                    if let Some(row) = self.build_truncated_action_row(
+                        entry,
+                        anchor,
+                        &projection.action,
+                        width,
+                        projection.action_tone,
+                        style,
+                        next,
+                    ) {
+                        return Some(row);
+                    }
+                }
                 Some(self.build_card_text_row(
                     entry,
                     anchor,
@@ -1225,6 +1240,116 @@ impl TranscriptRowCache {
             }
             CardSection::Detail => None,
         }
+    }
+
+    /// Fit an action line into one row ending in `…`, or return `None` when it
+    /// already fits. A diff's change-count suffix is kept whole and the text before
+    /// it is cut, at a `/` or space when that keeps at least half the room.
+    #[allow(clippy::too_many_arguments)]
+    fn build_truncated_action_row(
+        &mut self,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        source: &str,
+        width: usize,
+        tone: TranscriptRowTone,
+        style: CardRowStyle<'_>,
+        next: Option<RowAnchor>,
+    ) -> Option<ProjectedRow> {
+        let display = |text: &str, work: &mut LayoutWork| {
+            let mut column = 0_usize;
+            for grapheme in text.graphemes(true) {
+                work.graphemes_scanned = work.graphemes_scanned.saturating_add(1);
+                work.bytes_scanned = work.bytes_scanned.saturating_add(grapheme.len());
+                if is_line_break(grapheme) {
+                    return usize::MAX;
+                }
+                column += UnicodeWidthStr::width(sanitize_grapheme(grapheme, column).as_str());
+            }
+            column
+        };
+        if display(source, &mut self.work) <= width {
+            return None;
+        }
+        let split = style.suffix_start.min(source.len());
+        let (head, mut tail) = source.split_at(split);
+        let mut tail_width = display(tail, &mut self.work);
+        if tail_width.saturating_add(2) > width {
+            tail = "";
+            tail_width = 0;
+        }
+        let budget = width.saturating_sub(tail_width + 1);
+
+        let mut kept = 0;
+        let mut column = 0;
+        let mut separator = None;
+        for (offset, grapheme) in head.grapheme_indices(true) {
+            let grapheme_width =
+                UnicodeWidthStr::width(sanitize_grapheme(grapheme, column).as_str());
+            if is_line_break(grapheme) || column + grapheme_width > budget {
+                break;
+            }
+            column += grapheme_width;
+            kept = offset + grapheme.len();
+            if offset >= style.argument_start && matches!(grapheme, "/" | " ") {
+                separator = Some((kept, column));
+            }
+        }
+        if let Some((end, separator_column)) = separator {
+            if separator_column * 2 >= budget && end < kept {
+                kept = end;
+            }
+        }
+
+        let mut spans: Vec<TranscriptSpan> = Vec::new();
+        let mut push = |text: &str, inline, start: usize, end: usize| {
+            if let Some(last) = spans.last_mut().filter(|last| last.style.inline == inline) {
+                last.text.push_str(text);
+                last.affinity.source_end = end;
+                return;
+            }
+            spans.push(TranscriptSpan {
+                text: text.to_owned(),
+                style: TranscriptSpanStyle {
+                    inline,
+                    ..TranscriptSpanStyle::default()
+                },
+                affinity: SourceAffinity {
+                    source_offset: start,
+                    source_end: end,
+                    output_offset: 0,
+                },
+            });
+        };
+        let mut column = 0;
+        for (offset, grapheme) in head[..kept].grapheme_indices(true) {
+            let safe = sanitize_grapheme(grapheme, column);
+            column += UnicodeWidthStr::width(safe.as_str());
+            push(
+                &safe,
+                style.inline_at(TranscriptRowKind::CardAction, offset),
+                offset,
+                offset + grapheme.len(),
+            );
+        }
+        // The ellipsis stands for the omitted source, so the row's spans stay contiguous.
+        push("…", crate::markdown::InlineStyle::Normal, kept, split);
+        for (offset, grapheme) in tail.grapheme_indices(true) {
+            let safe = sanitize_grapheme(grapheme, column);
+            column += UnicodeWidthStr::width(safe.as_str());
+            push(
+                &safe,
+                crate::markdown::InlineStyle::Normal,
+                split + offset,
+                split + offset + grapheme.len(),
+            );
+        }
+        let text = spans.iter().map(|span| span.text.as_str()).collect();
+        let mut row =
+            TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::CardAction, text, 0);
+        row.tone = tone;
+        row.spans = spans;
+        Some(ProjectedRow { row, next })
     }
 
     #[allow(clippy::too_many_arguments)]
