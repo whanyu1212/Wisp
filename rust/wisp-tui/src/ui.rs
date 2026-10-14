@@ -544,24 +544,29 @@ fn render_transcript(
     }
     let conversation = area;
     let active_reply = active_reply(state);
-    let activity = waiting_for_output(state)
+    let status_width = usize::from(content_area(conversation).width);
+    // The working row while waiting for output, or why the last prompt failed.
+    let status_lines: Vec<Line<'static>> = match waiting_for_output(state)
         .then(|| {
             activity_label(
                 state,
                 activity_frame,
                 activity_elapsed,
-                usize::from(content_area(conversation).width),
+                status_width,
                 palette,
             )
         })
-        .flatten();
-    let activity_height = if activity.is_some() {
-        conversation
-            .height
-            .saturating_sub(1)
-            .min(if conversation.height >= 8 { 2 } else { 1 })
-    } else {
+        .flatten()
+    {
+        Some(activity) => vec![activity],
+        None => failure_lines(state, status_width, palette),
+    };
+    let activity_height = if status_lines.is_empty() {
         0
+    } else {
+        let gap = u16::from(conversation.height >= 8);
+        let lines = u16::try_from(status_lines.len()).unwrap_or(u16::MAX);
+        conversation.height.saturating_sub(1).min(lines + gap)
     };
     let rows_area = Rect {
         height: conversation.height.saturating_sub(activity_height),
@@ -645,7 +650,7 @@ fn render_transcript(
             })
             .map(|row| row.anchor)
     });
-    if rows.is_empty() && activity.is_none() {
+    if rows.is_empty() && status_lines.is_empty() {
         let lines = empty_transcript_lines(
             state,
             connection,
@@ -689,13 +694,19 @@ fn render_transcript(
             );
         }
     }
-    if let Some(label) = activity.filter(|_| activity_height > 0) {
-        let y = (conversation.y + painted_rows as u16 + u16::from(painted_rows > 0))
+    if activity_height > 0 {
+        let first = (conversation.y + painted_rows as u16 + u16::from(painted_rows > 0))
             .min(conversation.bottom().saturating_sub(1));
-        frame.render_widget(
-            Paragraph::new(label),
-            Rect::new(content.x, y, content.width, 1),
-        );
+        for (offset, line) in (0_u16..).zip(status_lines) {
+            let y = first + offset;
+            if y >= conversation.bottom() {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(content.x, y, content.width, 1),
+            );
+        }
     }
     if let Some((start, end)) = scroll {
         render_scrollbar(frame, rows_area, start, end, palette);
@@ -814,6 +825,22 @@ fn activity_label(
         ));
     }
     Some(Line::from(spans))
+}
+
+/// Why the last prompt failed, as up to three rows starting with `✗`, while nothing is
+/// running. The backend's message already names the fix, such as `/connect` for
+/// missing credentials, so it is shown as sent (sanitized and bounded).
+fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+    if state.current_command.is_some() || state.view_status != ViewStatus::Idle {
+        return Vec::new();
+    }
+    let Some(error) = state.last_command_error.as_deref() else {
+        return Vec::new();
+    };
+    wrapped_decision_rows(&format!("✗ Prompt failed: {error}"), width, 3)
+        .into_iter()
+        .map(|row| Line::styled(row, Style::default().fg(palette.error)))
+        .collect()
 }
 
 /// What the agent is waiting on while no reply text or tool card shows progress.
@@ -1336,7 +1363,7 @@ fn render_composer(
             ViewStatus::Running => {
                 "Prompt in progress. Esc/Ctrl-C cancels; steering arrives in #466.".into()
             }
-            ViewStatus::Error => "The prompt failed. Ctrl-C exits.".into(),
+            ViewStatus::Error => "Wisp's backend stopped. Ctrl-C exits.".into(),
             ViewStatus::Idle | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
                 String::new()
             }

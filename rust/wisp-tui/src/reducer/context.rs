@@ -208,6 +208,7 @@ pub(super) fn compact(
     let id = ids.next_id(CommandKind::Compact);
     let command = WispTypedClientRpcCommands::compact(&id, instructions.as_deref())?;
     state.context.operation_started();
+    state.last_command_error = None;
     state.view_status = ViewStatus::Running;
     state.interaction_status = InteractionStatus::Compacting;
     state.current_command = Some(ActiveCommand {

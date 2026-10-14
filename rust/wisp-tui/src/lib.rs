@@ -1604,18 +1604,31 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            let permissions = overlay == Some(OverlayKind::Discovery)
-                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)));
-            let area = if permissions {
-                ui::docked_popup_area(
+            // `/permissions` and API-key entry dock above the composer; other popups
+            // are centered.
+            let docked_height = if overlay == Some(OverlayKind::Discovery)
+                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)))
+            {
+                Some(discovery_view::permissions_panel_height(&self.state))
+            } else if overlay == Some(OverlayKind::Connection)
+                && self
+                    .connection_panel
+                    .as_ref()
+                    .is_some_and(ConnectionPanel::api_key_entry_active)
+            {
+                Some(connection_panel::API_KEY_PANEL_HEIGHT)
+            } else {
+                None
+            };
+            let area = match docked_height {
+                Some(height) => ui::docked_popup_area(
                     frame.area(),
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
-                    discovery_view::permissions_panel_height(&self.state),
-                )
-            } else {
-                ui::overlay_area(frame.area())
+                    height,
+                ),
+                None => ui::overlay_area(frame.area()),
             };
             let Some((kind, area)) = overlay.zip(area) else {
                 return;
@@ -6507,8 +6520,75 @@ mod tests {
         assert!(!live_ui.render_pending);
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("final queued fragment"));
-        assert!(rendered.contains("prompt failed"));
+        // A closed transport stays terminal.
+        assert!(rendered.contains("backend stopped"), "{rendered}");
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn a_failed_prompt_leaves_the_composer_usable_for_connect() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        // The finished prompt queues follow-up refreshes; keep the writer drained.
+        tokio::spawn(async move { while writer_rx.recv().await.is_some() {} });
+        let mut live_ui = LiveUi::default();
+        live_ui
+            .handle_input(
+                Input::Paste("hello".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "prompt-1".into(),
+                    command_type: "prompt".into(),
+                    ok: false,
+                    error: Some(
+                        "anthropic credentials are required; run `/connect` in the TUI".into(),
+                    ),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        for character in "/connect".chars() {
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(live_ui.editor.text(), "/connect");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "test".into(),
+                },
+            )
+            .unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("✗ Prompt failed: anthropic credentials"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/connect"), "{rendered}");
+        assert!(!rendered.contains("Ctrl-C exits"), "{rendered}");
     }
 
     #[tokio::test]

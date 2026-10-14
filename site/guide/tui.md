@@ -85,7 +85,10 @@ Before reply text arrives, a working row animates below the transcript, for exam
 `⠹ Thinking · 12s · Esc to interrupt`. It shows a braille spinner, what the agent is waiting on
 (`Thinking` while reasoning streams, `Working` otherwise, or `Compacting context`), how long the
 current command has run, and the interrupt key; on a narrow row the interrupt hint and then the
-time are dropped rather than clipped. Once text starts streaming, the working row disappears. The `wisp` label stays visible at the live tail
+time are dropped rather than clipped. Once text starts streaming, the working row disappears. If a
+prompt fails, the reason stays as a red `✗ Prompt failed: …` row under the transcript until the next
+command starts, and the composer stays usable, so you can fix the cause and retry; for missing
+credentials the message names `/connect`. Only a lost connection to the backend ends the session. The `wisp` label stays visible at the live tail
 during intervening tool calls, and the working row returns after the final result while another
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.
@@ -129,7 +132,10 @@ plain text. Very large sessions therefore require more startup time and memory.
 
 `/connect` opens a provider connection panel. Use arrow keys to select a provider,
 `Enter` to start its available API-key or device-code flow, `d` to disconnect stored credentials,
-`r` to refresh, and `Escape` to close or cancel. API-key entry is masked. Device login displays the
+`r` to refresh, and `Escape` to close or cancel. API-key entry docks above the composer, shows a
+cursor after the masked key and a character count so a paste visibly lands, and says when an
+environment variable such as `OPENAI_API_KEY` is set, because that variable takes precedence over a
+saved key. Device login displays the
 short-lived user code and verification URL but never stores them in prompt or session history.
 
 The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and

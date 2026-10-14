@@ -868,3 +868,45 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
         }
     }
 }
+
+#[tokio::test]
+async fn api_key_entry_docks_above_the_composer_and_shows_its_cursor() {
+    let mut ui = base();
+    ui.connection_panel = Some(ConnectionPanel::new(catalog("anthropic")));
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(Input::Paste("sk-ant-1".into()), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, &mut terminal);
+    let buffer = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let top = rows
+        .iter()
+        .position(|row| row.contains("API key: anthropic"))
+        .expect("API key panel");
+    let composer = rows
+        .iter()
+        .rposition(|row| row.contains('╭'))
+        .expect("composer border");
+    // Docked: the panel's bottom border sits directly above the composer.
+    assert_eq!(
+        top + usize::from(connection_panel::API_KEY_PANEL_HEIGHT),
+        composer,
+        "{}",
+        rows.join("\n")
+    );
+    let cursor = terminal.get_cursor_position().unwrap();
+    assert_eq!(usize::from(cursor.y), top + 1);
+    assert!(rows[top + 1].contains("› ••••••••"), "{}", rows.join("\n"));
+}
