@@ -242,10 +242,13 @@ main()
         # Idle status (or statistics alone) does not mean both have completed.
         for kind, count in metadata_before_cancel.items():
             wait_report(f"finished:{kind}", count + 1)
-        offset = len(tui.output)
         tui.send(b"replacement run\r")
-        tui.wait_for(
-            b"blocked-provider-ready", since=offset, failure="replacement run did not start"
+        # The new reply can land in the same cells as the cancelled run's reply, and
+        # an incremental frame skips unchanged cells, so check a full repaint. The
+        # live view shows only the latest prompt and what follows it.
+        wait_for_full_repaint(
+            lambda frame: b"replacement run" in frame and b"blocked-provider-ready" in frame,
+            failure="replacement run did not start",
         )
         tui.send(b"\x1b[1;3A")
         wait_report("pop_queue", 1)
