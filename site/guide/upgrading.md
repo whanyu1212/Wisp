@@ -73,9 +73,13 @@ checkout; native wheels are built and published in lockstep with the Python rele
 After RC4's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --from "wisp-ai==0.2.0rc4" wisp --version
-uvx --from "wisp-ai==0.2.0rc4" wisp
+uvx --python 3.12 --from "wisp-ai==0.2.0rc4" wisp --version
+uvx --python 3.12 --from "wisp-ai==0.2.0rc4" wisp
 ```
+
+Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
+if that is older than 3.12, uv selects the pure wheel and the install has no Rust TUI. See
+[Installation](./installation#the-tui-does-not-start-after-installing-a-02-candidate).
 
 This avoids replacing an existing persistent `uv tool` installation, but the running application
 still uses normal Wisp configuration and session locations. Use a disposable project and back up
@@ -86,7 +90,7 @@ To return a persistent `uv tool` installation to the published RC3 after an RC4 
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force "wisp-ai==0.2.0rc3"
+uv tool install --force --python 3.12 "wisp-ai==0.2.0rc3"
 wisp --version
 ```
 

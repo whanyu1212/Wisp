@@ -30,6 +30,24 @@ separately; see
 [release page](https://github.com/whanyu1212/Wisp/releases) for the behavior and availability of a
 specific prerelease. The commands above continue to install the published stable release.
 
+## The TUI does not start after installing a 0.2 candidate
+
+The 0.2 candidates publish native wheels (with the Rust TUI) for macOS arm64 and Linux glibc 2.28+
+x86_64, plus a pure wheel without it. When uv's default Python is older than 3.12, `uv tool install`
+and `uvx` can select the pure wheel even on a supported platform: uv resolves for its default
+interpreter first, where the native wheels don't apply, and keeps that choice after switching to a
+Python that meets Wisp's minimum. `wisp --version` and print, JSON, RPC, and SDK use still work, but
+`wisp-tui` is missing and interactive `wisp` reports that no Rust binary is available.
+
+Name the Python version when installing:
+
+```bash
+uv tool install --force --python 3.12 "wisp-ai==0.2.0rc4"
+wisp-tui --version
+```
+
+`wisp update` pins the running Python version for the same reason.
+
 ## Updates
 
 ```bash

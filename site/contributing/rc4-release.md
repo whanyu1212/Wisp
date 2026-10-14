@@ -76,7 +76,9 @@ existing release workflow. Do not manually upload a partial set of distributions
   2.28+ x86_64. Verify the GitHub release has those distributions plus the expected hashes, SBOMs,
   schema bundle, and per-target install evidence; verify provenance attestations.
 - [ ] Outside the source checkout, install `wisp-ai==0.2.0rc4` from the public index without Cargo
-  on each claimed native target. Check `wisp --version`, an interactive fake-provider prompt, session
+  on each claimed native target, with `--python 3.12` (see HY-235: without it, uv can select the pure
+  wheel when its default interpreter is older than 3.12). Confirm `wisp-tui --version` reports
+  `0.2.0-rc.4`. Check `wisp --version`, an interactive fake-provider prompt, session
   resume, and clean exit with terminal attributes restored.
 - [ ] Install the public pure wheel in a forced pure-wheel environment. Check print, JSON, RPC, SDK,
   and the actionable interactive error.
@@ -86,10 +88,10 @@ existing release workflow. Do not manually upload a partial set of distributions
 ## Rollback
 
 If RC4 regresses, exit Wisp and install the published RC3 package with
-`uv tool install --force "wisp-ai==0.2.0rc3"`. Restore the session backup taken before trying RC4:
+`uv tool install --force --python 3.12 "wisp-ai==0.2.0rc3"`. Restore the session backup taken before trying RC4:
 RC3 cannot open sessions in which RC4 saved a response with a prompt-cache key (see
 [Candidate decision](#candidate-decision)). Check `wisp --version` and session resume before relying
 on the downgraded install. On the claimed native targets, the package replacement also replaces the
 paired Rust binary; do not copy only one component between versions. Never delete or hand-edit
 sessions as a rollback step. For an isolated comparison that does not replace a persistent tool, use
-`uvx --from "wisp-ai==0.2.0rc3" wisp` outside the source checkout.
+`uvx --python 3.12 --from "wisp-ai==0.2.0rc3" wisp` outside the source checkout.
