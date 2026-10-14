@@ -18,6 +18,10 @@ this policy.
   SDK's public Windows helper. Affects 0.2.0rc3 and 0.2.0rc4 installs that resolved `mcp` 2.3.0.
 - Fixed a stalled HTTP MCP session termination no longer being bounded with `mcp` 2.2+, which sends
   the DELETE through a different client path. The shutdown deadline now applies to every send path.
+- Fixed `wisp update` installing the pure wheel, and dropping the Rust TUI, when uv's default Python
+  is older than 3.12: it now passes the running Python version to `uv tool install`. The 0.2
+  install and rollback instructions add `--python 3.12` for the same reason, and the installation
+  guide explains how to recover an install that has no `wisp-tui`.
 - Added a scheduled CI workflow that runs the test suite against the newest dependency versions
   `pyproject.toml` allows, since `uv.lock` pins older versions than public installs receive.
 
