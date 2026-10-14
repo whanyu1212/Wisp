@@ -66,7 +66,12 @@ complete, pipe-enclosed rows with the same number of columns renders as a table 
 Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
 Ctrl+G lists every resolved binding. Successful `edit` and `write` cards show a bounded inline diff
-preview with the file, change counts, stable `+`/`-` gutters, and themed changed-row bands. Other tool
+preview under the action line, which carries the change counts (and `new file` for a created file).
+Rows keep stable `+`/`-` signs and themed changed-row bands; `write` diffs add a line-number gutter
+(`edit` arguments carry no line numbers). Separate hunks or edits are divided by `⋯`, and a
+`⏎ trailing newline added/removed` row appears only when the final newline actually changed. When a
+deleted line and its replacement share words, the words that differ are bold and underlined, so a
+rewrap or a one-word change stands out without colour. Enter opens the full unified diff. Other tool
 and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
 cards group as `explored N files`. Thinking streams as a collapsed `thought` row. F6 browses visible
 card rows: Right expands, Left collapses, Enter opens retained
