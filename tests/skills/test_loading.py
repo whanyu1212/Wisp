@@ -117,8 +117,8 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
     delivery_entry = catalog.get("github-pr-delivery")
     assert development_entry is not None
     assert delivery_entry is not None
-    assert dict(development_entry.metadata)["version"] == "1.3"
-    assert dict(delivery_entry.metadata)["version"] == "1.2"
+    assert dict(development_entry.metadata)["version"] == "1.4"
+    assert dict(delivery_entry.metadata)["version"] == "1.3"
     for method in (
         "register_provider",
         "register_provider_factory",
@@ -138,6 +138,50 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
     assert "already-merged feature branch" in delivery
     assert "`wisp-development`" in skills_guide
     assert "`github-pr-delivery`" in skills_guide
+
+
+def test_bundled_architecture_guidance_tracks_protocol_and_cancellation_contracts() -> None:
+    architecture = " ".join(
+        (bundled_skills_root() / "wisp-development/references/architecture.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "Events carry no per-event version" in architecture
+    assert "frontend must be the same release" in architecture
+    assert "regenerate `schemas/live-rpc/`" in architecture
+    assert "uv run python -m wisp.rpc.protocol_schema --check" in architecture
+    assert "tests/fixtures/event_decoding_conformance.json" in architecture
+    assert "a new optional field does not require a bump" in architecture
+    assert "Readers accept only the current schema versions" in architecture
+    assert "do not upgrade older files" in architecture
+    assert "run's cancellation token cancels a tool batch" in architecture
+    assert "sequential and prepared execution settle every requested call" in architecture
+    assert "interrupted result for unfinished calls" in architecture
+    assert "Caller-scope cancellation and executor errors can leave calls unsettled" in architecture
+    assert "historical durable formats" not in architecture
+    assert (
+        "Sequential execute cancellation is not a synthetic tool-result contract"
+        not in architecture
+    )
+
+
+def test_bundled_review_guidance_rejects_timing_only_exact_head_evidence() -> None:
+    review = " ".join(
+        (bundled_skills_root() / "github-pr-delivery/references/review.md")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "accept clean only from the expected reviewer or automation" in review
+    assert (
+        "an explicit reviewed commit or a reliable association with the tracked trigger" in review
+    )
+    assert "whose review target is that SHA" in review
+    assert "Arrival after the trigger and an unchanged PR head are not sufficient" in review
+    assert "delayed verdict from an earlier review" in review
+    assert "report that verification gap instead of declaring exact-head review clean" in review
+    assert "or arrives after the trigger and the PR head has not changed" not in review
 
 
 def test_loads_nested_relative_resource(tmp_path: Path) -> None:

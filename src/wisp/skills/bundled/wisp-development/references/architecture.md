@@ -21,18 +21,27 @@ loop or move runtime behavior into an adapter.
 
 ## Events and persistence
 
-`wisp.events` defines the typed, versioned event contract. Provider streams and tool executors have
-strict terminal-event ordering. When an event field or meaning changes, inspect both transport and
-persistence paths, bump the relevant schema version, and test serialization through
-`model_dump_json()` and `wisp_event_from_json()`.
+`wisp.events` defines the typed event contract. Events carry no per-event version, and backend and
+frontend must be the same release. Provider streams and tool executors have strict terminal-event
+ordering. After any event, command, or handshake model change, regenerate `schemas/live-rpc/` and
+run `uv run python -m wisp.rpc.protocol_schema --check`. After an event-model change, also regenerate
+`tests/fixtures/event_decoding_conformance.json` and check Python/Rust decoding conformance. Inspect
+both transport and persistence paths and test serialization through `model_dump_json()` and
+`wisp_event_from_json()`.
 
 Agent-loop and harness lifecycle rules that later refactors must preserve — one terminal per started
 turn, Ended/Ready pairing, request-boundary decisions, queue FIFO — are listed in
-`references/runtime-invariants.md`. Sequential execute cancellation is not a synthetic tool-result
-contract; named assertions live in `tests/support/agent_runtime.py`.
+`references/runtime-invariants.md`. When the run's cancellation token cancels a tool batch, both
+sequential and prepared execution settle every requested call with a terminal/result pair, using an
+interrupted result for unfinished calls. Caller-scope cancellation and executor errors can leave
+calls unsettled; the harness repairs them before the next provider request. Named assertions live
+in `tests/support/agent_runtime.py`.
 
 Sessions persist messages and selected raw event types through independent paths. Check
-`PERSISTED_SESSION_EVENT_TYPES` before deciding whether a session schema also changes.
+`PERSISTED_SESSION_EVENT_TYPES` before deciding whether a session schema also changes. Bump a session
+entry or persisted-event-envelope schema version only when older files would be misread or rejected;
+a new optional field does not require a bump. Readers accept only the current schema versions and do
+not upgrade older files.
 
 ## Frontend boundary
 
@@ -43,7 +52,7 @@ paths, configuration, authentication, sessions, compaction, cancellation, and du
 Rust may own terminal input, frame scheduling, rendering, scrolling, overlays, pickers, frontend
 command correlation, and disposable presentation preferences. It must use typed, bounded,
 JSON-serializable commands and events; it does not read session JSONL, credential files, or project
-policy directly. Python loads historical durable formats and emits current live snapshots. Protocol
+policy directly. Python reads current-format session history and emits current live snapshots. Protocol
 types are generated from Python rather than maintained as a handwritten Rust schema.
 
 The Python launcher remains an external supervisor for a Rust invocation. Rust owns graceful RPC

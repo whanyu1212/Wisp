@@ -27,8 +27,10 @@ requires it:
 3. post a fresh repository-appropriate review trigger and record its ID/time;
 4. treat acknowledgement reactions as queued signals, not verdicts;
 5. inspect reviews, comments, reactions, and threads created after the trigger;
-6. accept clean only when the verdict identifies the recorded commit, or arrives after the trigger and
-   the PR head has not changed;
+6. accept clean only from the expected reviewer or automation, with evidence that the verdict covers
+   the recorded head SHA: an explicit reviewed commit or a reliable association with the tracked
+   trigger whose review target is that SHA. Arrival after the trigger and an unchanged PR head are
+   not sufficient; a delayed verdict from an earlier review can meet both conditions;
 7. require both a current-head clean result and zero unresolved actionable threads; revalidate outdated unresolved findings before classifying them as non-actionable;
 8. if findings require a push, wait for replacement CI and trigger a new review for the new head;
 9. keep polling until that exact-head review is clean and all actionable threads are resolved, or a
@@ -36,7 +38,9 @@ requires it:
 
 Use bounded polling, commonly around 30 seconds. Follow repository precedent for stall timing; absent
 one, about ten minutes is a reasonable point to post one fresh independently tracked trigger. Silence,
-a vanished reaction, an empty transient result, or a stale clean review is not success.
+a vanished reaction, an empty transient result, or a stale clean review is not success. If the
+available interface cannot establish the reviewed SHA or reliable trigger association, report that
+verification gap instead of declaring exact-head review clean.
 
 ### Compact review monitor
 
