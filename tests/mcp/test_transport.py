@@ -61,3 +61,32 @@ def test_write_failure_reports_disconnect_once(monkeypatch: MonkeyPatch) -> None
     anyio.run(scenario)
 
     assert notifications == 1
+
+
+def test_platform_command_passes_posix_commands_through(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(transport_module.sys, "platform", "linux")
+
+    assert anyio.run(transport_module._platform_command, "npx") == "npx"
+
+
+def test_platform_command_resolves_windows_commands_with_the_public_helper(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    """Windows resolution uses the SDK's public helper, never its private one.
+
+    The private ``_get_executable_command`` turned async in mcp 2.3.0; calling it
+    synchronously passed a coroutine as the command and broke every stdio server.
+    """
+
+    resolved: list[str] = []
+
+    def resolve(command: str) -> str:
+        resolved.append(command)
+        return f"{command}.cmd"
+
+    monkeypatch.setattr(transport_module.sys, "platform", "win32")
+    monkeypatch.setattr(transport_module, "get_windows_executable_command", resolve)
+
+    assert anyio.run(transport_module._platform_command, "npx") == "npx.cmd"
+    assert resolved == ["npx"]
+    assert not hasattr(transport_module, "_get_executable_command")

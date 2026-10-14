@@ -10,12 +10,22 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc4 — release preparation
+## Unreleased
+
+- Fixed stdio MCP servers failing to start in public installs ("MCP server … is unavailable", with
+  a `coroutine '_get_executable_command' was never awaited` warning). Wisp called a private `mcp`
+  helper that became async in `mcp` 2.3.0; it now resolves the server command itself, using the
+  SDK's public Windows helper. Affects 0.2.0rc3 and 0.2.0rc4 installs that resolved `mcp` 2.3.0.
+- Fixed a stalled HTTP MCP session termination no longer being bounded with `mcp` 2.2+, which sends
+  the DELETE through a different client path. The shutdown deadline now applies to every send path.
+- Added a scheduled CI workflow that runs the test suite against the newest dependency versions
+  `pyproject.toml` allows, since `uv.lock` pins older versions than public installs receive.
+
+## 0.2.0rc4 — 2026-10-14
 
 RC4 collects the changes since RC3: the live event contract without per-event versions, removal of
 the remaining compatibility shims, prompt-cache improvements for Codex, xAI, and Anthropic, and
-fixes found while dogfooding RC3. This section describes the candidate under preparation;
-publication requires a separate tagged release.
+fixes found while dogfooding RC3.
 
 **Rolling back to RC3:** RC3 cannot open a session in which RC4 saved a response with a
 `prompt_cache_key` (responses from providers that send cache keys, such as Codex and OpenAI); it

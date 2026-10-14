@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import TextIO
@@ -16,10 +17,10 @@ from mcp.client.stdio import (
     _aclose_all,
     _create_platform_compatible_process,
     _drain_stdout,
-    _get_executable_command,
     _stop_server_process,
     get_default_environment,
 )
+from mcp.os.win32.utilities import get_windows_executable_command
 from mcp.shared.message import SessionMessage
 
 MAX_MCP_FRAME_BYTES = 2_097_152
@@ -29,6 +30,29 @@ _INVALID_SERVER_FRAME = "MCP server returned an invalid protocol frame"
 
 class McpServerFrameError(ValueError):
     """Raised without retaining the invalid server-controlled frame."""
+
+
+async def _platform_command(command: str) -> str:
+    """Return the executable to launch for a stdio MCP server command.
+
+    Mirrors the official stdio client: POSIX commands are used as given, and
+    Windows resolves the command (for example to its ``.cmd`` shim) off the event
+    loop. This uses the public ``get_windows_executable_command`` instead of the
+    SDK's private ``_get_executable_command``, which changed from sync to async in
+    ``mcp`` 2.3.0 and silently broke stdio servers when called synchronously.
+
+    Args:
+        command (str): The configured server command.
+
+    Returns:
+        str: The command to pass to the process launcher.
+    """
+
+    if sys.platform != "win32":
+        return command
+    return await anyio.to_thread.run_sync(
+        get_windows_executable_command, command, abandon_on_cancel=True
+    )
 
 
 @asynccontextmanager
@@ -42,7 +66,7 @@ async def bounded_stdio_client(
     """Connect over official SDK streams while bounding frames before parsing."""
 
     process = await _create_platform_compatible_process(
-        command=_get_executable_command(server.command),
+        command=await _platform_command(server.command),
         args=server.args,
         env=get_default_environment() | (server.env or {}),
         errlog=errlog,
