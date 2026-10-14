@@ -809,9 +809,6 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
         TranscriptRowTone::Success => Style::default().fg(palette.success),
         TranscriptRowTone::Warning => Style::default().fg(palette.warning),
         TranscriptRowTone::Error => Style::default().fg(palette.error),
-        TranscriptRowTone::DiffHeader => Style::default()
-            .fg(palette.primary)
-            .add_modifier(Modifier::BOLD),
         TranscriptRowTone::DiffAddition => Style::default()
             .fg(palette.addition)
             .bg(palette.addition_background),
@@ -875,7 +872,6 @@ fn render_transcript_row(
                 | TranscriptRowTone::Success
                 | TranscriptRowTone::Warning
                 | TranscriptRowTone::Error
-                | TranscriptRowTone::DiffHeader
                 | TranscriptRowTone::DiffAddition
                 | TranscriptRowTone::DiffDeletion
         ) =>
@@ -1079,6 +1075,8 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         InlineStyle::ToolPath => style.patch(palette.tool_path()),
         InlineStyle::ToolArgument => style.patch(palette.tool_argument()),
         InlineStyle::ToolStatus => style,
+        // Modifiers, not colour, so the changed words stay visible in monochrome.
+        InlineStyle::DiffChange => style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     };
     style = match semantic.syntax {
         SyntaxClass::Plain => style,
@@ -4197,6 +4195,149 @@ mod tests {
         assert!(command.2.contains(Modifier::BOLD));
     }
 
+    fn render_edit_card(arguments: serde_json::Value, width: u16) -> (String, TestBackend) {
+        render_file_card("edit", arguments, None, false, width)
+    }
+
+    fn render_file_card(
+        name: &str,
+        arguments: serde_json::Value,
+        before_text: Option<&str>,
+        created: bool,
+        width: u16,
+    ) -> (String, TestBackend) {
+        let mut state = UiState::unconfigured();
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "file-card".into(),
+                name: name.into(),
+                detail_source: crate::tool_detail::project_tool_detail_source(
+                    name,
+                    arguments.as_object().unwrap(),
+                ),
+                arguments: crate::tool_cards::bounded_tool_arguments(name, &arguments),
+            });
+        let mut completed = tool_result("file-card", "Done");
+        completed.name = name.into();
+        completed.before_text = before_text.map(str::to_owned);
+        completed.created = created;
+        state.transcript.observe_tool_result(completed);
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                );
+            })
+            .unwrap();
+        let backend = terminal.backend().clone();
+        (backend.to_string(), backend)
+    }
+
+    #[test]
+    fn edit_card_marks_rewrapped_words_and_separates_edits() {
+        let (rendered, backend) = render_edit_card(
+            json!({
+                "path": "src/wisp/providers/google.py",
+                "edits": [
+                    {
+                        "oldText": "retain portable text and calls, not the provider-native ``Part`` payload, so they\ncannot safely rebuild an active tool exchange as fresh context.",
+                        "newText": "retain portable text and calls, not the provider-native ``Part`` payload,\nso they cannot safely rebuild an active tool exchange as fresh context."
+                    },
+                    {"oldText": "wait 30 seconds", "newText": "wait 60 seconds"}
+                ]
+            }),
+            110,
+        );
+        assert!(
+            rendered.contains("Edited  src/wisp/providers/google.py  +3 -3"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("- retain portable"), "{rendered}");
+        assert!(rendered.contains("+ so they cannot"), "{rendered}");
+        assert!(
+            rendered.contains("⋯"),
+            "the second edit is separated: {rendered}"
+        );
+        assert!(!rendered.contains("@@") && !rendered.contains("No newline"));
+        let (_, _, moved) = style_at_text(&backend, "so they").unwrap();
+        assert!(moved.contains(Modifier::UNDERLINED), "{moved:?}");
+        let (_, _, unchanged) = style_at_text(&backend, "retain portable").unwrap();
+        assert!(!unchanged.contains(Modifier::UNDERLINED));
+        let (_, _, changed_number) = style_at_text(&backend, "30").unwrap();
+        assert!(changed_number.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn monochrome_diff_emphasis_does_not_rely_on_colour() {
+        let style = markdown_span_style(
+            Style::default(),
+            TranscriptSpanStyle {
+                inline: InlineStyle::DiffChange,
+                ..TranscriptSpanStyle::default()
+            },
+            crate::theme::resolve("glass").unwrap().palette(true),
+        );
+        assert!(
+            style
+                .add_modifier
+                .contains(Modifier::UNDERLINED | Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn write_card_numbers_lines_and_shows_a_changed_trailing_newline() {
+        let (rendered, _) = render_file_card(
+            "write",
+            json!({"path": "notes.txt", "content": "a\nB\nc"}),
+            Some("a\nb\nc\n"),
+            false,
+            100,
+        );
+        assert!(rendered.contains("   2 │ - b"), "{rendered}");
+        assert!(rendered.contains("   2 │ + B"), "{rendered}");
+        assert!(
+            rendered.contains("⏎ trailing newline removed"),
+            "{rendered}"
+        );
+
+        let (created, _) = render_file_card(
+            "write",
+            json!({"path": "new.txt", "content": "first\nsecond\n"}),
+            None,
+            true,
+            100,
+        );
+        assert!(created.contains("new.txt  new file"), "{created}");
+        assert!(created.contains("   1 │ + first"), "{created}");
+
+        let (unterminated, _) = render_file_card(
+            "write",
+            json!({"path": "new.txt", "content": "first\nsecond"}),
+            None,
+            true,
+            100,
+        );
+        assert!(unterminated.contains("   2 │ + second"), "{unterminated}");
+        assert!(!unterminated.contains('⏎'), "{unterminated}");
+    }
+
     #[test]
     fn structured_diff_preview_and_detail_reach_terminal_cells_safely() {
         let mut state = UiState::unconfigured();
@@ -4220,7 +4361,11 @@ mod tests {
         state.transcript.observe_tool_result(completed);
 
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
-        assert!(collapsed.contains("M file.txt  +1 -1"));
+        // Counts sit on the action line; the card has no `M path` heading or `@@` rows.
+        assert!(collapsed.contains("Edited  file.txt  +1 -1"), "{collapsed}");
+        assert!(!collapsed.contains("M file.txt"));
+        assert!(!collapsed.contains("@@"));
+        assert!(!collapsed.contains("No newline"));
         assert!(collapsed.contains("- old�[2J"));
         assert!(collapsed.contains("+ new value"));
         assert!(collapsed.contains("F6 browse · Enter details"));
