@@ -328,6 +328,89 @@ async fn ordinary_typing_and_paste_survive_unrelated_workflow_revision_changes()
 }
 
 #[tokio::test]
+async fn wheel_scroll_survives_workflow_revision_changes_during_a_run() {
+    for raw in [false, true] {
+        let (writer, _commands) = mpsc::channel(16);
+        let mut ui = active_ui();
+        ui.mouse_enabled = true;
+        ui.state.transcript.start_message(1);
+        ui.state
+            .transcript
+            .append_message_delta(1, &"earlier turn line\n".repeat(120));
+        draw(&mut ui);
+        assert!(ui.transcript_viewport.follows_tail());
+        let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+        let event = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: area.x + 2,
+            row: area.y + 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        let input = if raw {
+            Input::Mouse(event)
+        } else {
+            Input::Scroll(mouse::Scroll { event, lines: -3 })
+        };
+        let pending = PendingInput::capture(input, &ui, 16);
+        // Tool and turn events change the activation target; a wheel gesture
+        // activates nothing and must still move the conversation.
+        let revision = ui.activation_revision;
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageCompleted {
+                turn: 2,
+                content: "tool output".into(),
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw(&mut ui);
+        assert_ne!(ui.activation_revision, revision);
+        pending.apply(&mut ui, &writer, 8192).await.unwrap();
+        assert!(
+            !ui.transcript_viewport.follows_tail(),
+            "wheel input was dropped (raw mouse event: {raw})"
+        );
+    }
+}
+
+#[tokio::test]
+async fn wheel_captured_before_an_approval_does_not_reach_the_decision() {
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.mouse_enabled = true;
+    ui.state.transcript.start_message(1);
+    ui.state
+        .transcript
+        .append_message_delta(1, &"earlier turn line\n".repeat(120));
+    draw(&mut ui);
+    let area = ui.mouse_frame.as_ref().unwrap().conversation.transcript;
+    let pending = PendingInput::capture(
+        Input::Scroll(mouse::Scroll {
+            event: crossterm::event::MouseEvent {
+                kind: crossterm::event::MouseEventKind::ScrollUp,
+                column: area.x + 2,
+                row: area.y + 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            lines: -3,
+        }),
+        &ui,
+        16,
+    );
+    ui.dispatch(approval("call-1"), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
+    pending.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert!(ui.transcript_viewport.follows_tail());
+    assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn selection_with_file_completion_survives_workflow_revision_changes() {
     let (writer, _commands) = mpsc::channel(16);
     let mut ui = active_ui();

@@ -122,6 +122,7 @@ pub(super) struct PendingInput {
     remaining: usize,
     editor_input: bool,
     catalog_input: bool,
+    wheel_input: bool,
 }
 
 impl PendingInput {
@@ -177,12 +178,20 @@ impl PendingInput {
                 }
                 _ => false,
             };
+        // A wheel gesture activates nothing. Routing it against the current
+        // frame at apply time is safe, so tool output must not swallow it.
+        let wheel_input = match &input {
+            Input::Scroll(_) => true,
+            Input::Mouse(event) => mouse::Scroll::from_event(*event).is_some(),
+            _ => false,
+        };
         Self {
             input,
             target,
             remaining,
             editor_input,
             catalog_input,
+            wheel_input,
         }
     }
 
@@ -219,6 +228,7 @@ impl PendingInput {
             || same_catalog
             || matches!(self.input, Input::Redraw | Input::Error(_))
             || same_editor
+            || self.wheel_input
             || self.target == current
         {
             ui.handle_input(self.input, writer, limit).await
