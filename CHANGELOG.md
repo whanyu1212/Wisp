@@ -10,32 +10,18 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc3 — release preparation
+## 0.2.0rc4 — release preparation
 
-RC3 makes Rust the sole terminal interface. This section describes the candidate under preparation;
-publication requires a separate tagged release. The Python runtime remains authoritative for agent
-behavior, providers, tools, permissions, and saved sessions.
+RC4 collects the changes since RC3: the live event contract without per-event versions, removal of
+the remaining compatibility shims, prompt-cache improvements for Codex, xAI, and Anthropic, and
+fixes found while dogfooding RC3. This section describes the candidate under preparation;
+publication requires a separate tagged release.
 
-- Removed the Textual and Python fullscreen renderers and their `prompt-toolkit` dependency. `wisp`,
-  `wisp tui`, and `wisp --mode tui` now select Rust. Native wheels for macOS arm64 and Linux glibc
-  2.28+ x86_64 bundle the TUI; pure/source installs retain print, JSON, RPC, and SDK, while
-  interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
-  `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
-  drops RC2's Intel macOS native wheel.
-- The Codex adapter resends each earlier response's own output items (including encrypted
-  reasoning) when a new prompt rebuilds history, and sessions save those items on the response's
-  row in a new optional `Message.native_output` field. The prompt cache now reaches the end of the
-  previous run, including after a restart or `/resume`. The field is not sent over RPC.
-- The xAI adapter does the same: fresh requests replay each earlier response's output items and
-  request encrypted reasoning (`include: ["reasoning.encrypted_content"]`). The OpenAI adapter keeps
-  the portable rebuild until its backend has been checked.
-- Fixed the RPC backend aborting at shutdown (`Fatal Python error: _enter_buffered_busy`, exit
-  code -6) whenever the frontend kept stdin open, as the Rust TUI does. The handshake is now read
-  from the stdin descriptor without buffering later commands, so POSIX backends read stdin without
-  a thread and the Windows reader thread no longer holds the stdin buffer lock.
-- Fixed the Rust TUI on Linux occasionally ignoring a key pressed at the same moment the
-  terminal was resized until the next keypress. crossterm now reads input through its poll-based
-  `/dev/tty` source (`use-dev-tty`) instead of edge-triggered mio.
+**Rolling back to RC3:** RC3 cannot open a session in which RC4 saved a response with a
+`prompt_cache_key` (responses from providers that send cache keys, such as Codex and OpenAI); it
+reports a malformed session entry. Back up sessions before trying RC4, and restore the backup rather
+than opening RC4-touched sessions with RC3.
+
 - **Breaking:** the live RPC handshake no longer carries a protocol version. Requests drop
   `min_protocol_version`/`max_protocol_version`, accepted responses drop `protocol_version` and the
   range, and the `protocol_version_mismatch` rejection code is gone; frontends rely on the
@@ -56,9 +42,73 @@ behavior, providers, tools, permissions, and saved sessions.
 - **Breaking:** session files are read only in the current format (entry schema v6, compaction
   record v4). Unversioned and v1–v5 session files, and events stamped with a pre-v9
   `schema_version`, now fail to load instead of being upgraded in memory.
+- **Breaking:** `WispEvent` payloads no longer carry a per-event `schema_version`. The current
+  `schemas/live-rpc/` bundle is the single event contract, and a backend and frontend must be the
+  same Wisp release.
+- **Breaking (SDK):** the Python SDK now rejects a backend from a different Wisp release at connect
+  time with `RpcHandshakeError` (code `"backend_version_mismatch"`), as the Rust TUI already did.
+  Previously a mismatched backend failed mid-stream on the first event it could not decode.
+- The Anthropic adapter now requests prompt caching. Every Messages request sends top-level
+  `cache_control`, so tools, system prompt, and resent history are read from cache on the next
+  request. Before, nothing was cached and every request was billed as uncached input. In a live
+  check, follow-up prompts went from 0% to 88–98% of input read from cache.
+- Sessions hosted by `RpcHost` (the TUI's backend, `wisp --mode rpc`, and the in-process SDK) ask
+  Anthropic for a 1-hour cache lifetime, so a pause of more than five minutes between prompts no
+  longer re-writes the whole conversation to cache. One-off print and JSON runs keep the 5-minute
+  default. Cache writes cost 2× input at 1 hour (1.25× at 5 minutes).
+- The Codex adapter sends Wisp's prompt-cache key as a `session_id` header, which the Codex
+  backend needs before it reliably reuses cached prompt prefixes.
+- The project-context git status is read once per session and reused when a session resumes, so
+  the system prompt stays byte-identical across prompts and restarts and the provider's prompt
+  cache keeps matching.
+- Each response's `ContextObservation` records the `prompt_cache_key` its request carried (a new
+  optional field; the schema bundle is regenerated in place).
+- The Rust TUI's session picker searches and pages the full saved-session catalog (debounced
+  name/ID search, newest first, refresh and retry) instead of showing a fixed 50 sessions.
+  `get_sessions` accepts optional `query` and `cursor` parameters over RPC and the SDK.
+- The Rust TUI adds `/queue` and a configurable `queue.manage` action to review, restore, and clear
+  queued steering and follow-up messages. Mutations are guarded against stale queue snapshots.
+- Fixed clone and fork failing with `Projected session validation failed` for any session that
+  had run a prompt in the current process.
+- Fixed a caller's own cancellation (an asyncio `task.cancel()` or an anyio timeout) being swallowed
+  while a tool batch ran and reported as an ordinary cancelled turn. It now propagates; only the
+  run's own cancellation token settles the batch.
+- The Rust event decoder fills omitted fields that have a schema default, exactly as the Python
+  reader does, so both frontends accept the same live events.
+- The Codex adapter resends each earlier response's own output items (including encrypted
+  reasoning) when a new prompt rebuilds history, and sessions save those items on the response's
+  row in a new optional `Message.native_output` field. The prompt cache now reaches the end of the
+  previous run, including after a restart or `/resume`. The field is not sent over RPC.
+- The xAI adapter does the same: fresh requests replay each earlier response's output items and
+  request encrypted reasoning (`include: ["reasoning.encrypted_content"]`). The OpenAI adapter keeps
+  the portable rebuild until its backend has been checked.
+- Fixed the RPC backend aborting at shutdown (`Fatal Python error: _enter_buffered_busy`, exit
+  code -6) whenever the frontend kept stdin open, as the Rust TUI does. The handshake is now read
+  from the stdin descriptor without buffering later commands, so POSIX backends read stdin without
+  a thread and the Windows reader thread no longer holds the stdin buffer lock.
+- Fixed the Rust TUI on Linux occasionally ignoring a key pressed at the same moment the
+  terminal was resized until the next keypress. crossterm now reads input through its poll-based
+  `/dev/tty` source (`use-dev-tty`) instead of edge-triggered mio.
 - Dropped live RPC version history: the historical `schemas/live-rpc/v1`–`v8` bundles, their
   immutability checks, and the pre-v9 handshake rejection shape. The current bundle now lives
   directly in `schemas/live-rpc/`, and the release asset is `wisp-live-rpc.tar.gz`.
+- Removed the compatibility alias modules `wisp.tools.process`, `wisp.tools.file_ops`,
+  `wisp.tools.paths`, `wisp.tools.process_manager`, `wisp.tools.secure_fs`, and
+  `wisp.providers.retry`. Import from the defining modules instead: `wisp.tools.shell.process`,
+  `wisp.tools.files.operations`, `wisp.tools.files.paths`, `wisp.tools.shell.supervisor`,
+  `wisp.tools.files.secure_fs`, and `wisp.retry` respectively.
+
+## 0.2.0rc3 — 2026-09-17
+
+RC3 makes Rust the sole terminal interface. The Python runtime remains authoritative for agent
+behavior, providers, tools, permissions, and saved sessions.
+
+- Removed the Textual and Python fullscreen renderers and their `prompt-toolkit` dependency. `wisp`,
+  `wisp tui`, and `wisp --mode tui` now select Rust. Native wheels for macOS arm64 and Linux glibc
+  2.28+ x86_64 bundle the TUI; pure/source installs retain print, JSON, RPC, and SDK, while
+  interactive startup explains how to obtain or build a matching binary. The legacy `textual`,
+  `fullscreen`, and `line` renderer choices and `--line` flag are no longer available. RC3 also
+  drops RC2's Intel macOS native wheel.
 - Moved native TUI launch and binary resolution into the Python CLI, retaining the `auto` and `rust`
   selector spellings for compatibility and exact Python/Rust version checks.
 - Added selectable Rust startup logos and native Rust pending-text handling in packaged wheels.
@@ -81,11 +131,6 @@ behavior, providers, tools, permissions, and saved sessions.
   startup, fake-provider streaming, visible response progress, clean shutdown, and terminal restore.
 - Extended matched TUI evidence to paced streaming and long saved sessions, with interactive input
   latency and sampled process-tree CPU and memory observations for both renderers.
-- Removed the compatibility alias modules `wisp.tools.process`, `wisp.tools.file_ops`,
-  `wisp.tools.paths`, `wisp.tools.process_manager`, `wisp.tools.secure_fs`, and
-  `wisp.providers.retry`. Import from the defining modules instead: `wisp.tools.shell.process`,
-  `wisp.tools.files.operations`, `wisp.tools.files.paths`, `wisp.tools.shell.supervisor`,
-  `wisp.tools.files.secure_fs`, and `wisp.retry` respectively.
 
 ## 0.2.0rc2 — 2026-09-16
 
