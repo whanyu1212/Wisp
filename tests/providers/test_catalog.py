@@ -371,6 +371,9 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
     assert {name: entry.models for name, entry in providers.items()} == {
         "openai": (
             "gpt-6-astra",
+            "gpt-6.1-sol",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
@@ -380,16 +383,19 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "gpt-5.4-mini",
         ),
         "openai-codex": (
+            "gpt-6.1-sol",
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
         ),
         "anthropic": (
             "claude-fable-5-1",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
             "claude-opus-5",
             "claude-fable-5",
             "claude-sonnet-5",
@@ -401,13 +407,12 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
         ),
         "deepseek": (
             "deepseek-v4-pro",
-            "deepseek-v4-flash",
+            "deepseek-flash",
         ),
         "google": (
+            "gemini-4-argon",
             "gemini-3.8-flash",
-            "gemini-3.7-flash",
             "gemini-3.6-flash",
-            "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
             "gemini-2.5-pro",
@@ -417,6 +422,7 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "gemini-3-flash-preview",
         ),
         "xai": (
+            "grok-4.7",
             "grok-4.6",
             "grok-4.5",
             "grok-4.3",
@@ -433,31 +439,56 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
     assert providers["openai"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
     assert providers["openai-codex"].model_aliases == {"gpt-5.6": "gpt-5.6-sol"}
     assert providers["google"].default_model == "gemini-3.6-flash"
-    assert providers["google"].model_aliases == {"gemini-flash-latest": "gemini-3.6-flash"}
-    assert providers["openai"].context_windows["gpt-5.6-sol"] == 1_050_000
+    assert providers["google"].model_aliases == {
+        "gemini-flash-latest": "gemini-3.8-flash",
+        "gemini-3.7-flash": "gemini-3.8-flash",
+        "gemini-3.5-flash": "gemini-3.6-flash",
+    }
+    assert providers["deepseek"].model_aliases == {
+        "deepseek-v4-flash": "deepseek-flash",
+        "deepseek-v4-flash-vision-exp": "deepseek-flash",
+    }
+    assert providers["openai"].context_windows["gpt-6.1-sol"] == 1_050_000
     assert set(providers["openai"].auto_compact_token_limits) == set()
-    assert set(providers["openai-codex"].context_windows.values()) == {272_000}
+    assert providers["openai-codex"].context_windows == {
+        "gpt-6.1-sol": 500_000,
+        **{model: 272_000 for model in providers["openai-codex"].models[1:]},
+    }
     assert providers["openai-codex"].auto_compact_token_limits == {
-        model: 244_800 for model in providers["openai-codex"].models
+        "gpt-6.1-sol": 475_000,
+        **{model: 258_400 for model in providers["openai-codex"].models[1:]},
     }
 
 
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-5.6-sol"])
-def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(model: str) -> None:
+@pytest.mark.parametrize(
+    ("model", "codex_window", "compact_limit", "effective_reserve"),
+    [
+        ("gpt-6.1-sol", 500_000, 475_000, 25_000),
+        ("gpt-6-astra", 272_000, 258_400, 16_384),
+        ("gpt-6-luna", 272_000, 258_400, 16_384),
+    ],
+)
+def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
+    model: str,
+    codex_window: int,
+    compact_limit: int,
+    effective_reserve: int,
+) -> None:
     registry = ModelRegistry(builtin_catalog())
 
     assert registry.context_window("openai", model) == 1_050_000
-    assert registry.context_window("openai-codex", model) == 272_000
+    assert registry.context_window("openai-codex", model) == codex_window
     assert registry.context_window("openai-codex", "gpt-5.6") == 272_000
     assert registry.auto_compact_token_limit("openai", model) is None
-    assert registry.auto_compact_token_limit("openai-codex", "gpt-5.6") == 244_800
+    assert registry.auto_compact_token_limit("openai-codex", model) == compact_limit
+    assert registry.auto_compact_token_limit("openai-codex", "gpt-5.6") == 258_400
     assert (
         registry.effective_context_reserve_tokens(
             "openai-codex",
             model,
             reserve_tokens=16_384,
         )
-        == 27_200
+        == effective_reserve
     )
     assert (
         registry.effective_context_reserve_tokens(
@@ -497,27 +528,20 @@ def test_builtin_codex_models_expose_documented_reasoning_effort_levels() -> Non
     registry = ModelRegistry(catalog)
     codex = next(entry for entry in catalog.providers if entry.name == "openai-codex")
 
-    assert codex.effort_levels == {
-        "gpt-6-astra": ("low", "medium", "high", "xhigh", "max"),
-        "gpt-5.6-sol": ("low", "medium", "high", "xhigh", "max"),
-        "gpt-5.6-terra": ("low", "medium", "high", "xhigh", "max"),
-        "gpt-5.6-luna": ("low", "medium", "high", "xhigh", "max"),
-        "gpt-5.5": ("low", "medium", "high", "xhigh"),
-        "gpt-5.4": ("low", "medium", "high", "xhigh"),
-        "gpt-5.4-mini": ("low", "medium", "high", "xhigh"),
-    }
-    assert set(codex.effort_levels) == set(codex.models)
+    all_efforts = ("low", "medium", "high", "xhigh", "max")
+    assert codex.effort_levels == {model: all_efforts for model in codex.models}
+    assert registry.supports_effort("openai-codex", "gpt-6.1-sol", "max") is True
     assert registry.supports_effort("openai-codex", "gpt-5.6-terra", "max") is True
-    assert registry.supports_effort("openai-codex", "gpt-5.4", "xhigh") is True
-    assert registry.supports_effort("openai-codex", "gpt-5.4", "max") is False
-    assert registry.supports_effort("openai-codex", "gpt-5.6-sol", "ultra") is False
+    assert registry.supports_effort("openai-codex", "gpt-6.1-sol", "ultra") is False
 
 
 def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels() -> None:
     registry = ModelRegistry(builtin_catalog())
 
-    assert registry.supports_effort("anthropic", "claude-fable-5", "xhigh") is True
-    assert registry.supports_effort("anthropic", "claude-fable-5", "max") is True
+    assert registry.supports_effort("anthropic", "claude-opus-5-5", "xhigh") is True
+    assert registry.supports_effort("anthropic", "claude-haiku-5-5", "max") is True
+    assert registry.supports_effort("google", "gemini-4-argon", "LOW") is True
+    assert registry.supports_effort("google", "gemini-4-argon", "MINIMAL") is False
     assert registry.supports_effort("google", "gemini-3.6-flash", "MINIMAL") is True
     assert registry.supports_effort("google", "gemini-3.5-flash-lite", "HIGH") is True
     assert registry.supports_effort("google", "gemini-3.1-pro-preview", "MINIMAL") is False
@@ -527,11 +551,13 @@ def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels()
 @pytest.mark.parametrize(
     ("provider", "model", "levels"),
     [
-        ("openai", "gpt-6-astra", ("low", "medium", "high", "xhigh", "max")),
-        ("anthropic", "claude-fable-5-1", ("low", "medium", "high", "xhigh", "max")),
-        ("anthropic", "claude-opus-5", ("low", "medium", "high", "xhigh", "max")),
-        ("google", "gemini-3.8-flash", ("LOW", "MEDIUM", "HIGH")),
-        ("google", "gemini-3.7-flash", ("LOW", "MEDIUM", "HIGH")),
+        ("openai", "gpt-6.1-sol", ("low", "medium", "high", "xhigh", "max")),
+        ("openai", "gpt-6-luna", ("none", "low", "medium", "high", "xhigh", "max")),
+        ("anthropic", "claude-opus-5-5", ("low", "medium", "high", "xhigh", "max")),
+        ("anthropic", "claude-sonnet-5-5", ("low", "medium", "high", "xhigh", "max")),
+        ("anthropic", "claude-haiku-5-5", ("low", "medium", "high", "xhigh", "max")),
+        ("google", "gemini-4-argon", ("LOW", "MEDIUM", "HIGH")),
+        ("xai", "grok-4.7", ("low", "medium", "high", "xhigh")),
     ],
 )
 def test_new_models_expose_only_supported_effort_levels(

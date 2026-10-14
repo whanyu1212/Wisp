@@ -294,6 +294,12 @@ def test_registry_selects_effective_dated_anthropic_rates() -> None:
     [
         ("gpt-6-astra", 272_000, ("10", "1", "12.5", "50")),
         ("gpt-6-astra", 272_001, ("20", "2", "25", "75")),
+        ("gpt-6.1-sol", 272_000, ("2", "0.1", "2.5", "10")),
+        ("gpt-6.1-sol", 272_001, ("4", "0.2", "5", "15")),
+        ("gpt-6-sol", 272_000, ("2", "0.2", "2.5", "10")),
+        ("gpt-6-sol", 272_001, ("4", "0.4", "5", "15")),
+        ("gpt-6-luna", 272_000, ("0.1", "0.01", "0.125", "0.5")),
+        ("gpt-6-luna", 272_001, ("0.2", "0.02", "0.25", "0.75")),
         ("gpt-5.6-sol", 272_000, ("4", "0.4", "5", "20")),
         ("gpt-5.6-sol", 272_001, ("8", "0.8", "10", "30")),
         ("gpt-5.6-terra", 272_000, ("2", "0.2", "2.5", "12")),
@@ -306,7 +312,7 @@ def test_builtin_openai_prices_at_long_context_boundary(
     model: str, input_tokens: int, rates: tuple[str, str, str, str]
 ) -> None:
     registry = ModelRegistry(builtin_catalog())
-    selected = registry.pricing("openai", model, input_tokens=input_tokens, at=date(2026, 9, 9))
+    selected = registry.pricing("openai", model, input_tokens=input_tokens, at=date(2026, 10, 13))
 
     assert selected is not None
     band = selected[1]
@@ -327,7 +333,7 @@ def test_builtin_openai_prices_at_long_context_boundary(
         (date(2027, 1, 1), ("1.5", "0.15", "7.5")),
     ],
 )
-def test_builtin_gemini_prices_change_after_introductory_period(
+def test_builtin_gemini_flash_prices_change_after_introductory_period(
     model: str, at: date, rates: tuple[str, str, str]
 ) -> None:
     selected = ModelRegistry(builtin_catalog()).pricing(
@@ -344,9 +350,34 @@ def test_builtin_gemini_prices_change_after_introductory_period(
 
 
 @pytest.mark.parametrize(
+    ("at", "rates"),
+    [
+        (date(2026, 11, 30), ("2", "0.1", "10")),
+        (date(2026, 12, 1), ("4", "0.2", "20")),
+    ],
+)
+def test_builtin_gemini_argon_prices_change_after_introductory_period(
+    at: date, rates: tuple[str, str, str]
+) -> None:
+    selected = ModelRegistry(builtin_catalog()).pricing(
+        "google", "gemini-4-argon", input_tokens=500_000, at=at
+    )
+
+    assert selected is not None
+    band = selected[1]
+    assert (
+        band.input_usd_per_million,
+        band.cache_read_usd_per_million,
+        band.output_usd_per_million,
+    ) == tuple(Decimal(rate) for rate in rates)
+
+
+@pytest.mark.parametrize(
     ("model", "rates"),
     [
         ("claude-fable-5-1", ("10", "0.25", "12.5", "50")),
+        ("claude-opus-5-5", ("4", "0.2", "5", "20")),
+        ("claude-sonnet-5-5", ("2", "0.1", "2.5", "10")),
         ("claude-opus-5", ("5", "0.5", "6.25", "25")),
         ("claude-sonnet-5", ("2", "0.2", "2.5", "10")),
     ],
@@ -355,7 +386,31 @@ def test_builtin_anthropic_prices_discount_cache_reads(
     model: str, rates: tuple[str, str, str, str]
 ) -> None:
     selected = ModelRegistry(builtin_catalog()).pricing(
-        "anthropic", model, input_tokens=500_000, at=date(2026, 9, 9)
+        "anthropic", model, input_tokens=500_000, at=date(2026, 10, 13)
+    )
+
+    assert selected is not None
+    band = selected[1]
+    assert (
+        band.input_usd_per_million,
+        band.cache_read_usd_per_million,
+        band.cache_write_usd_per_million,
+        band.output_usd_per_million,
+    ) == tuple(Decimal(rate) for rate in rates)
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "rates"),
+    [
+        (100_000, ("0.1", "0.01", "0.125", "0.5")),
+        (100_001, ("0.5", "0.05", "0.625", "2.5")),
+    ],
+)
+def test_builtin_haiku_5_5_prices_at_long_prompt_boundary(
+    input_tokens: int, rates: tuple[str, str, str, str]
+) -> None:
+    selected = ModelRegistry(builtin_catalog()).pricing(
+        "anthropic", "claude-haiku-5-5", input_tokens=input_tokens, at=date(2026, 10, 13)
     )
 
     assert selected is not None
