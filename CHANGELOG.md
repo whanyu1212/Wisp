@@ -10,7 +10,12 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.2.0rc5 — release preparation
+
+RC5 fixes two problems found in the published RC4: stdio MCP servers failing to start in public
+installs, and `wisp update` dropping the Rust TUI. It changes no session, event, or protocol format,
+so RC4 and RC5 read each other's sessions. This section describes the candidate under preparation;
+publication requires a separate tagged release.
 
 - Fixed stdio MCP servers failing to start in public installs ("MCP server … is unavailable", with
   a `coroutine '_get_executable_command' was never awaited` warning). Wisp called a private `mcp`
