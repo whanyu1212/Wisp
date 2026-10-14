@@ -377,7 +377,7 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
             .unwrap();
         let composer_top = editor.area.y - u16::from(height >= 16);
         assert!(reply < composer_top);
-        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "◐"));
+        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
         if height >= 16 {
             for x in 0..width {
                 assert_eq!(buffer[(x, 0)].symbol(), " ");
@@ -388,12 +388,12 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
         assert!(screen_text(&next).contains("wisp"));
-        assert!(!screen_text(&next).contains("working ◓"));
-        assert!(!screen_text(&next).contains('◓'));
+        assert!(!screen_text(&next).contains("Working"));
+        assert!(!screen_text(&next).contains("Esc to interrupt"));
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
-        assert!(!screen_text(&draw(&mut ui, width, height)).contains("wisp ◓"));
+        assert!(!screen_text(&draw(&mut ui, width, height)).contains("Working"));
     }
 }
 
@@ -405,7 +405,7 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     assert!(text.contains("Now check the remaining edge cases."));
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
-    assert!(text.contains("working ◐"));
+    assert!(text.contains("⠋ Working"));
     let thumb = |buffer: &ratatui::buffer::Buffer| {
         (0..buffer.area.height)
             .filter(|&y| buffer[(79, y)].symbol() == "┃")
@@ -432,8 +432,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
     assert!(streaming.contains("wisp"));
-    assert!(!streaming.contains("working ◐"));
-    assert!(!streaming.contains('◐'));
+    assert!(!streaming.contains("Working"));
+    assert!(!streaming.contains("Esc to interrupt"));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript
@@ -453,7 +453,7 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
         .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃'))
         .collect();
     assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
-    assert!(text.contains("working ◐"), "{text}");
+    assert!(text.contains("⠋ Working"), "{text}");
     assert!(!text.contains("Startup review"));
 }
 
