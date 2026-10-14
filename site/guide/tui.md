@@ -84,11 +84,16 @@ completed, failed, denied, cancelled, and approval-waiting calls stay steady. In
 active markers alternate normal and dim intensity. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard
 scrolling and wheel/trackpad scrolling update it.
-A pending tool approval opens a rounded dialog with four choices: `1` allow once, `2` allow
-that tool for this session, `3` YOLO for this project, or `4` deny. The `y`/`t`/`a`/`n`
-aliases also work. Project trust remains a compact card at the bottom of the pane
-with `y`/`n` choices; the composer stays a short waiting
-strip instead of a five-row args panel.
+A pending tool approval docks a panel above the footer in place of the composer, so the
+conversation that led to it stays visible; your draft is kept. The title names the tool, the
+safety category sits at the top right, and the body shows a shell command as `$ command`, with any
+other arguments after it (other tools show their arguments). It offers four choices: `1` allow
+once, `2` allow that tool for this session, `3` YOLO for this project, or `4` deny. The
+`y`/`t`/`a`/`n` aliases also work, or highlight a choice with `↑`/`↓` and press `Enter`. There is
+no default choice: `Enter` only confirms a highlighted choice that has been drawn, so an `Enter`
+meant for the composer cannot answer a request. `Esc` denies. Project trust uses the same panel
+with `y` trust and `n` deny. Below 11 rows the panel fills the screen so every choice stays
+visible down to 30×8.
 
 The Rust TUI validates the live RPC handshake and events, supports prompts, approvals,
 project trust, cancellation, steering and follow-up queues, a virtual Markdown/tool/diff transcript,
@@ -155,7 +160,8 @@ closes logo, theme, help, history, context, discovery, model and connection view
 session/tree/detail views retain the normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
-drawn before it can be activated. Popups are centered and capped at 100×28; at the minimum 30×8
+drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`,
+which docks above the composer; at the minimum 30×8
 terminal size they can fill the screen. Short decision layouts prioritize readable controls while
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
 read longer challenges. Pointer navigation requires the opt-in described below.
@@ -378,7 +384,9 @@ command tools still pause for approval: approve once, allow that tool for the se
 project YOLO default, or deny.
 
 Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
-`/permissions yolo`. Saved defaults apply to subsequent launches in the same canonical
+`/permissions yolo`. The panel docks above the composer and marks the current mode; choose with
+`1`/`2`, or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
+saving a mode also clears temporary grants). Saved defaults apply to subsequent launches in the same canonical
 project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
