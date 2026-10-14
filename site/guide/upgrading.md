@@ -3,7 +3,8 @@
 This guide describes the 0.2 candidate series and the checks required before stable promotion.
 RC2 introduced the Rust-default trial on native wheels; RC3 removes the Python terminal renderers.
 RC4 adds prompt-cache improvements, removes the remaining compatibility shims, and requires the
-backend and frontend to be the same Wisp release.
+backend and frontend to be the same Wisp release. RC5 fixes stdio MCP servers and `wisp update` in
+public installs.
 Check the
 [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
@@ -70,11 +71,11 @@ checkout; native wheels are built and published in lockstep with the Python rele
 
 ## Trying a published candidate
 
-After RC4's artifacts are published and verified, use its exact version in an explicit pin:
+After RC5's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --python 3.12 --from "wisp-ai==0.2.0rc4" wisp --version
-uvx --python 3.12 --from "wisp-ai==0.2.0rc4" wisp
+uvx --python 3.12 --from "wisp-ai==0.2.0rc5" wisp --version
+uvx --python 3.12 --from "wisp-ai==0.2.0rc5" wisp
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
@@ -86,24 +87,26 @@ still uses normal Wisp configuration and session locations. Use a disposable pro
 important state when testing. Continue using [0.1.0 installation instructions](./installation)
 if you do not want to opt into prerelease testing.
 
-To return a persistent `uv tool` installation to the published RC3 after an RC4 regression, exit
+To return a persistent `uv tool` installation to the published RC4 after an RC5 regression, exit
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.2.0rc3"
+uv tool install --force --python 3.12 --with "mcp==2.0.0" "wisp-ai==0.2.0rc4"
 wisp --version
 ```
 
+RC4 and RC5 read each other's sessions. `--with "mcp==2.0.0"` keeps stdio MCP servers working in
+RC4, which RC5 fixes for newer `mcp` releases.
+
 This replaces the installed package and its paired native binary on supported platforms. Do not
 delete session files. Older versions may not understand records written by newer versions. In
-particular, RC3 cannot open a session in which RC4 saved a response from a provider that sends a
-prompt-cache key (such as Codex or OpenAI); it reports a malformed session entry. Back up sessions
-before trying RC4, restore that backup after rolling back, and test session resume before relying on
-the downgraded install.
+particular, RC3 cannot open a session in which RC4 or RC5 saved a response from a provider that
+sends a prompt-cache key (such as Codex or OpenAI); it reports a malformed session entry. Back up
+sessions before going back to RC3, and test session resume before relying on a downgraded install.
 
 ## Before promoting to 0.2.0
 
-Use the [RC4 release checklist](../contributing/rc4-release) for candidate publication, platform
+Use the [RC5 release checklist](../contributing/rc5-release) for candidate publication, platform
 installation, long-session measurements, and rollback gates.
 
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.

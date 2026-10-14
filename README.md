@@ -59,7 +59,7 @@ To run it without installing: `uvx --from "wisp-ai==0.1.0" wisp`. If `wisp` is n
 See [Installation](https://whanyu1212.github.io/Wisp/guide/installation) for the update policy and
 troubleshooting.
 
-The RC4 candidate is the latest 0.2 prerelease. Once published, use an exact `wisp-ai==0.2.0rc4` pin
+The RC5 candidate is the latest 0.2 prerelease. Once published, use an exact `wisp-ai==0.2.0rc5` pin
 to try it; the stable command above remains pinned to 0.1.0. See the
 [0.2 upgrade guide](https://whanyu1212.github.io/Wisp/guide/upgrading) for availability, platform
 support, and rollback.
