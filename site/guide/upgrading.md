@@ -2,6 +2,8 @@
 
 This guide describes the 0.2 candidate series and the checks required before stable promotion.
 RC2 introduced the Rust-default trial on native wheels; RC3 removes the Python terminal renderers.
+RC4 adds prompt-cache improvements, removes the remaining compatibility shims, and requires the
+backend and frontend to be the same Wisp release.
 Check the
 [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
@@ -68,11 +70,11 @@ checkout; native wheels are built and published in lockstep with the Python rele
 
 ## Trying a published candidate
 
-After RC3's artifacts are published and verified, use its exact version in an explicit pin:
+After RC4's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --from "wisp-ai==0.2.0rc3" wisp --version
-uvx --from "wisp-ai==0.2.0rc3" wisp
+uvx --from "wisp-ai==0.2.0rc4" wisp --version
+uvx --from "wisp-ai==0.2.0rc4" wisp
 ```
 
 This avoids replacing an existing persistent `uv tool` installation, but the running application
@@ -80,23 +82,24 @@ still uses normal Wisp configuration and session locations. Use a disposable pro
 important state when testing. Continue using [0.1.0 installation instructions](./installation)
 if you do not want to opt into prerelease testing.
 
-To return a persistent `uv tool` installation to the published RC2 after an RC3 regression, exit
+To return a persistent `uv tool` installation to the published RC3 after an RC4 regression, exit
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force "wisp-ai==0.2.0rc2"
+uv tool install --force "wisp-ai==0.2.0rc3"
 wisp --version
 ```
 
 This replaces the installed package and its paired native binary on supported platforms. Do not
-delete session files. Older versions may not understand records written by newer versions, so keep
-the backup and test session resume before relying on a downgraded install. On a platform without a
-native wheel, RC2's frontend behavior differs; check its historical
-[release notes](../contributing/rc2-release) before choosing it as a rollback.
+delete session files. Older versions may not understand records written by newer versions. In
+particular, RC3 cannot open a session in which RC4 saved a response from a provider that sends a
+prompt-cache key (such as Codex or OpenAI); it reports a malformed session entry. Back up sessions
+before trying RC4, restore that backup after rolling back, and test session resume before relying on
+the downgraded install.
 
 ## Before promoting to 0.2.0
 
-Use the [RC3 release checklist](../contributing/rc3-release) for candidate publication, platform
+Use the [RC4 release checklist](../contributing/rc4-release) for candidate publication, platform
 installation, long-session measurements, and rollback gates.
 
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.
