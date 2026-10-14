@@ -45,6 +45,77 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight() {
+    use wisp_protocol::{commands::PermissionMode, events::PermissionState};
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let request = frame(&mut receiver);
+    let id = request["id"].as_str().unwrap().to_string();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::PermissionsReported {
+            command_id: id.clone(),
+            permissions: Ok(Arc::new(PermissionState {
+                mode: PermissionMode::Yolo,
+                saved_mode: Some(PermissionMode::Yolo),
+                project_path: Some("/project".into()),
+            })),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: id,
+            command_type: "get_permissions".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let painted = draw(&mut ui, 80, 24);
+    let cells: Vec<char> = painted.chars().collect();
+    let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
+    let yolo = rows
+        .iter()
+        .find(|row| row.contains("2  YOLO"))
+        .expect("YOLO choice");
+    assert!(yolo.contains("current"), "{painted}");
+    // Docked: the panel's bottom border sits just above the composer and footer.
+    let bottom = rows
+        .iter()
+        .position(|row| row.contains("Enter apply"))
+        .expect("panel hint");
+    assert!(bottom >= rows.len() - 5, "{painted}");
+
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err(), "no default choice");
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err(), "highlight not painted yet");
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let change = frame(&mut receiver);
+    assert_eq!(change["type"], "set_permissions");
+    assert_eq!(change["mode"], "ask");
+}
+
+#[tokio::test]
 async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     use wisp_protocol::{commands::PermissionMode, events::PermissionState};
     let (writer, mut receiver) = mpsc::channel(16);

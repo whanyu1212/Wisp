@@ -128,6 +128,29 @@ pub(crate) fn file_picker_area(
     ))
 }
 
+/// Dock a popup of up to `height` rows directly above the composer, spanning the
+/// conversation's width, like the `/` command suggestions.
+pub(crate) fn docked_popup_area(
+    area: Rect,
+    state: &UiState,
+    editor: &PromptEditor,
+    layout_cache: &mut ComposerLayoutCache,
+    height: u16,
+) -> Option<Rect> {
+    if !decision_context_visible(area) {
+        return None;
+    }
+    let surface = conversation_surface(area);
+    let editor_width = composer_editor_width(surface.width);
+    let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
+    let bottom = surface
+        .bottom()
+        .saturating_sub(composer_height(surface, state, layout) + 1)
+        .max(surface.y + 4);
+    let height = (bottom - surface.y).min(height);
+    Some(Rect::new(surface.x, bottom - height, surface.width, height))
+}
+
 /// Center a bounded popup within supported terminal sizes.
 pub fn overlay_area(area: Rect) -> Option<Rect> {
     if !decision_context_visible(area) {
@@ -2398,6 +2421,11 @@ fn decision_row(content: &str, width: usize) -> String {
     let mut row = source_display_column_window(&safe, 0, width - 1).text;
     row.push('…');
     row
+}
+
+/// Fit sanitized text to `width`, keeping its end (for paths) behind a leading `…`.
+pub(crate) fn tail_row(content: &str, width: usize) -> String {
+    decision_tail_row(&bounded_decision_tail_preview(content), width)
 }
 
 fn decision_tail_row(content: &str, width: usize) -> String {

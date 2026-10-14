@@ -1598,16 +1598,22 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            let Some((kind, mut area)) = overlay.zip(ui::overlay_area(frame.area())) else {
+            let permissions = overlay == Some(OverlayKind::Discovery)
+                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)));
+            let area = if permissions {
+                ui::docked_popup_area(
+                    frame.area(),
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                    discovery_view::permissions_panel_height(&self.state),
+                )
+            } else {
+                ui::overlay_area(frame.area())
+            };
+            let Some((kind, area)) = overlay.zip(area) else {
                 return;
             };
-            if kind == OverlayKind::Discovery
-                && matches!(self.discovery_view, Some(DiscoveryView::Permissions { .. }))
-            {
-                let height = area.height.min(11);
-                area.y += (area.height - height) / 2;
-                area.height = height;
-            }
             ui::clear_overlay(frame, area, palette);
             painted.popup = Some(area);
             painted.rows = match kind {
