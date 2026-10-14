@@ -554,6 +554,10 @@ struct LiveUi {
     render_pending: bool,
     activity_frame: u8,
     rendered_decision_context: Option<RenderedDecisionContext>,
+    /// The highlighted choice of the pending decision; reset when the decision changes.
+    decision_choice: Option<usize>,
+    /// `decision_choice` as last painted. Enter only confirms a choice the user saw.
+    rendered_decision_choice: Option<usize>,
     activation_revision: u64,
     unsendable_response_context: Option<UnsendableResponseContext>,
     deferred_queue_recovery: Vec<DeferredQueueRecovery>,
@@ -602,6 +606,8 @@ impl Default for LiveUi {
             render_pending: true,
             activity_frame: 0,
             rendered_decision_context: None,
+            decision_choice: None,
+            rendered_decision_choice: None,
             activation_revision: 0,
             unsendable_response_context: None,
             deferred_queue_recovery: Vec::new(),
@@ -1190,6 +1196,8 @@ impl LiveUi {
         if previous_decision != self.current_decision_context() {
             self.rendered_overlay = None;
             self.rendered_decision_context = None;
+            self.decision_choice = None;
+            self.rendered_decision_choice = None;
             self.key_help = None;
         }
         for effect in &effects {
@@ -1366,6 +1374,55 @@ impl LiveUi {
         Ok(None)
     }
 
+    /// Move or confirm the highlighted choice of the pending decision.
+    ///
+    /// Up and Down move the highlight; the first press picks the first (Down) or
+    /// last (Up) choice. Enter confirms only a choice the user highlighted and that
+    /// has been painted. There is no default choice, so an Enter typed for the
+    /// composer just before the panel appeared cannot answer the decision.
+    /// `Confirm` carries the chosen choice's own key (`choice_keys` is in panel
+    /// order); `None` leaves the key to the decision's existing key handling.
+    fn decision_choice_key(
+        &mut self,
+        key: KeyEvent,
+        choice_keys: &[char],
+    ) -> Option<DecisionChoiceKey> {
+        if key.modifiers != KeyModifiers::NONE || choice_keys.is_empty() {
+            return None;
+        }
+        let count = choice_keys.len();
+        match key.code {
+            KeyCode::Up | KeyCode::Down => {
+                let next = match (self.decision_choice, key.code) {
+                    (None, KeyCode::Down) => 0,
+                    (None, _) => count - 1,
+                    (Some(index), KeyCode::Down) => (index + 1) % count,
+                    (Some(index), _) => (index + count - 1) % count,
+                };
+                self.decision_choice = Some(next);
+                self.render_pending = true;
+                Some(DecisionChoiceKey::Handled)
+            }
+            KeyCode::Enter => {
+                let painted = self
+                    .decision_choice
+                    .filter(|choice| self.rendered_decision_choice == Some(*choice));
+                if let Some(choice) = painted {
+                    return Some(DecisionChoiceKey::Confirm(KeyEvent::new(
+                        KeyCode::Char(choice_keys[choice.min(count - 1)]),
+                        KeyModifiers::NONE,
+                    )));
+                }
+                if !self.unsendable_current_response() {
+                    self.notice = Some("Choose with ↑↓, then press Enter.".into());
+                }
+                self.render_pending = true;
+                Some(DecisionChoiceKey::Handled)
+            }
+            _ => None,
+        }
+    }
+
     async fn dispatch_decision(
         &mut self,
         action: UiAction,
@@ -1463,6 +1520,7 @@ impl LiveUi {
             rows: mouse::Rows::default(),
         };
         let mut rendered_decision_context = None;
+        let mut rendered_decision_choice = None;
         let mut rendered_model_picker = false;
         let mut rendered_overlay = None;
         let mut rendered_completion = None;
@@ -1506,6 +1564,7 @@ impl LiveUi {
                 palette,
                 &self.bindings,
                 self.startup_logo,
+                self.decision_choice,
             );
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
@@ -1515,6 +1574,7 @@ impl LiveUi {
             }
             if ui::decision_context_visible(frame.area()) {
                 rendered_decision_context = self.current_decision_context();
+                rendered_decision_choice = self.decision_choice;
             }
             if overlay.is_none() && painted.conversation.completion_visible {
                 if let Some(view) = completion_view {
@@ -1538,16 +1598,22 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            let Some((kind, mut area)) = overlay.zip(ui::overlay_area(frame.area())) else {
+            let permissions = overlay == Some(OverlayKind::Discovery)
+                && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)));
+            let area = if permissions {
+                ui::docked_popup_area(
+                    frame.area(),
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                    discovery_view::permissions_panel_height(&self.state),
+                )
+            } else {
+                ui::overlay_area(frame.area())
+            };
+            let Some((kind, area)) = overlay.zip(area) else {
                 return;
             };
-            if kind == OverlayKind::Discovery
-                && matches!(self.discovery_view, Some(DiscoveryView::Permissions { .. }))
-            {
-                let height = area.height.min(11);
-                area.y += (area.height - height) / 2;
-                area.height = height;
-            }
             ui::clear_overlay(frame, area, palette);
             painted.popup = Some(area);
             painted.rows = match kind {
@@ -1646,6 +1712,7 @@ impl LiveUi {
             rendered_overlay = Some(kind);
         })?;
         self.rendered_decision_context = rendered_decision_context;
+        self.rendered_decision_choice = rendered_decision_choice;
         self.rendered_model_picker = rendered_model_picker;
         self.rendered_overlay = rendered_overlay;
         if rendered_overlay == Some(OverlayKind::Session) && !painted.rows.is_empty() {
@@ -3252,6 +3319,7 @@ impl LiveUi {
             };
             self.rendered_overlay = None;
             self.rendered_decision_context = None;
+            self.rendered_decision_choice = None;
             self.mouse_frame = None;
             self.render_pending = true;
             return Ok(LoopControl::Continue);
@@ -3407,6 +3475,7 @@ impl LiveUi {
     fn invalidate_theme_presentation(&mut self) {
         self.rendered_overlay = None;
         self.rendered_decision_context = None;
+        self.rendered_decision_choice = None;
         self.rendered_model_picker = false;
         self.completion.invalidate();
         self.file_picker.invalidate();
@@ -3810,6 +3879,11 @@ impl LiveUi {
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
                 let context_visible =
                     self.rendered_approval_matches(self.state.pending_approval.as_ref());
+                let key = match self.decision_choice_key(key, &APPROVAL_CHOICE_KEYS) {
+                    Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
+                    Some(DecisionChoiceKey::Confirm(choice)) => choice,
+                    None => key,
+                };
                 match approval_decision(key, self.state.pending_approval.as_ref()) {
                     Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
                         Ok(LoopControl::Continue)
@@ -3830,6 +3904,11 @@ impl LiveUi {
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForTrust => {
                 let context_visible =
                     self.rendered_trust_matches(self.state.pending_trust_request_id.as_deref());
+                let key = match self.decision_choice_key(key, &TRUST_CHOICE_KEYS) {
+                    Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
+                    Some(DecisionChoiceKey::Confirm(choice)) => choice,
+                    None => key,
+                };
                 match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
                     Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
                         Ok(LoopControl::Continue)
@@ -3956,6 +4035,7 @@ impl LiveUi {
                     view.invalidate_selection();
                 }
                 self.rendered_decision_context = None;
+                self.rendered_decision_choice = None;
                 self.rendered_model_picker = false;
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
@@ -4024,6 +4104,16 @@ fn printable_char(key: KeyEvent) -> Option<char> {
         }
         _ => None,
     }
+}
+
+/// Keys of the approval panel's choices, in panel order.
+const APPROVAL_CHOICE_KEYS: [char; ui::APPROVAL_CHOICES] = ['1', '2', '3', '4'];
+/// Keys of the trust panel's choices, in panel order.
+const TRUST_CHOICE_KEYS: [char; ui::TRUST_CHOICES] = ['y', 'n'];
+
+enum DecisionChoiceKey {
+    Handled,
+    Confirm(KeyEvent),
 }
 
 fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option<UiAction> {

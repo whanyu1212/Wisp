@@ -34,9 +34,14 @@ pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.
 const EMPTY_TRANSCRIPT_TAGLINE: &str = "A coding agent that stays in sync";
 const EMPTY_TRANSCRIPT_PANEL_WIDTH: usize = 40;
 const PINNED_USER_ROWS: usize = 4;
-const PARKED_DECISION_HEIGHT: u16 = 5;
-const PARKED_CONVERSATION_MIN_HEIGHT: u16 = 3;
-const PARKED_DECISION_LAYOUT_MIN_HEIGHT: u16 = 12;
+/// Below this surface height the decision panel owns the whole surface, with no
+/// transcript or footer, so its choices stay visible down to the 30x8 minimum.
+const DECISION_PANEL_SHARED_MIN_HEIGHT: u16 = 11;
+/// Rows a docked decision panel leaves for the transcript and footer above and below it.
+const DECISION_PANEL_RESERVED_ROWS: u16 = 3;
+const DECISION_DETAIL_MAX_ROWS: usize = 3;
+pub(crate) const APPROVAL_CHOICES: usize = 4;
+pub(crate) const TRUST_CHOICES: usize = 2;
 const COMPOSER_PREFIX: &str = "› ";
 const CONTENT_PADDING: u16 = 1;
 const ACTIVITY_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
@@ -69,12 +74,6 @@ fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>)
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
-    } else if decision_pending(state) {
-        if area.height >= PARKED_DECISION_LAYOUT_MIN_HEIGHT {
-            2
-        } else {
-            5
-        }
     } else {
         2
     }
@@ -99,46 +98,6 @@ fn decision_pending(state: &UiState) -> bool {
         state.view_status,
         ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
     )
-}
-
-fn inner_composer_shows_decision(area: Rect, state: &UiState) -> bool {
-    decision_pending(state) && area.height >= PARKED_DECISION_HEIGHT
-}
-
-fn parked_decision_area(state: &UiState, area: Rect) -> Option<Rect> {
-    if state.view_status == ViewStatus::WaitingForApproval {
-        return None;
-    }
-    if !decision_pending(state)
-        || area.height < PARKED_DECISION_HEIGHT + PARKED_CONVERSATION_MIN_HEIGHT
-    {
-        return None;
-    }
-    Some(Rect {
-        x: area.x,
-        y: area.bottom().saturating_sub(PARKED_DECISION_HEIGHT),
-        width: area.width,
-        height: PARKED_DECISION_HEIGHT,
-    })
-}
-
-fn render_parked_decision(frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
-    let title = match state.view_status {
-        ViewStatus::WaitingForApproval => " approval required ",
-        ViewStatus::WaitingForTrust => " trust required ",
-        _ => return,
-    };
-    let inner_width = usize::from(area.width.saturating_sub(2)).max(1);
-    frame.render_widget(
-        Paragraph::new(Text::from(decision_detail_lines(state, inner_width))).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .style(palette.composer())
-                .border_style(Style::default().fg(palette.warning)),
-        ),
-        area,
-    );
 }
 
 /// Anchor suggestions above the composer without changing transcript geometry.
@@ -167,6 +126,29 @@ pub(crate) fn file_picker_area(
         area.width.min(100),
         height,
     ))
+}
+
+/// Dock a popup of up to `height` rows directly above the composer, spanning the
+/// conversation's width, like the `/` command suggestions.
+pub(crate) fn docked_popup_area(
+    area: Rect,
+    state: &UiState,
+    editor: &PromptEditor,
+    layout_cache: &mut ComposerLayoutCache,
+    height: u16,
+) -> Option<Rect> {
+    if !decision_context_visible(area) {
+        return None;
+    }
+    let surface = conversation_surface(area);
+    let editor_width = composer_editor_width(surface.width);
+    let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
+    let bottom = surface
+        .bottom()
+        .saturating_sub(composer_height(surface, state, layout) + 1)
+        .max(surface.y + 4);
+    let height = (bottom - surface.y).min(height);
+    Some(Rect::new(surface.x, bottom - height, surface.width, height))
 }
 
 /// Center a bounded popup within supported terminal sizes.
@@ -227,6 +209,7 @@ pub fn render(
         Palette::default(),
         &Bindings::default(),
         LogoChoice::AdalBraille,
+        None,
     );
 }
 
@@ -247,6 +230,7 @@ pub fn render_interactive(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
+    decision_choice: Option<usize>,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -262,28 +246,39 @@ pub fn render_interactive(
 
     let area = conversation_surface(area);
 
-    if state.view_status == ViewStatus::WaitingForApproval && area.height < 11 {
-        render_permission_gate(frame, area, state, notice, palette);
-        return mouse::Conversation::default();
-    }
-
-    if decision_pending(state) && area.height < 11 {
+    // A pending approval or trust decision docks above the footer in place of the
+    // composer (the draft is kept). Decisions are keyboard-only, so no mouse regions.
+    if decision_pending(state) {
+        if area.height < DECISION_PANEL_SHARED_MIN_HEIGHT {
+            render_decision_panel(frame, area, state, notice, decision_choice, palette);
+            return mouse::Conversation::default();
+        }
+        let panel_height = decision_panel_height(state, area);
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(1)])
+            .constraints([
+                Constraint::Min(2),
+                Constraint::Length(panel_height),
+                Constraint::Length(1),
+            ])
             .split(area);
-        render_composer(
+        render_transcript(
             frame,
             chunks[0],
             state,
-            None,
-            composer_focused,
-            false,
+            viewport,
+            row_cache,
+            browse_selected,
+            connection,
+            activity_frame,
             palette,
+            bindings,
+            startup_logo,
         );
+        render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
         render_footer(
             frame,
-            content_area(chunks[1]),
+            content_area(chunks[2]),
             state,
             viewport,
             notice,
@@ -345,10 +340,6 @@ pub fn render_interactive(
         palette,
         bindings,
     );
-    if state.view_status == ViewStatus::WaitingForApproval {
-        render_permission_gate(frame, area, state, notice, palette);
-        return mouse::Conversation::default();
-    }
     mouse::Conversation {
         transcript: Rect {
             width: frame.area().right().saturating_sub(chunks[0].x),
@@ -547,13 +538,7 @@ fn render_transcript(
         area.y += 1;
         area.height = area.height.saturating_sub(1);
     }
-    let parked_area = parked_decision_area(state, area);
-    let conversation = parked_area.map_or(area, |parked| Rect {
-        x: area.x,
-        y: area.y,
-        width: area.width,
-        height: area.height.saturating_sub(parked.height),
-    });
+    let conversation = area;
     let active_reply = active_reply(state);
     let activity = waiting_for_output(state)
         .then(|| activity_label(state, activity_frame))
@@ -702,9 +687,6 @@ fn render_transcript(
     }
     if let Some((start, end)) = scroll {
         render_scrollbar(frame, rows_area, start, end, palette);
-    }
-    if let Some(parked) = parked_area {
-        render_parked_decision(frame, parked, state, palette);
     }
 }
 
@@ -1135,25 +1117,11 @@ fn render_composer(
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
     let border_style = match state.view_status {
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => {
-            Style::default().fg(palette.warning)
-        }
         ViewStatus::Error => Style::default().fg(palette.error),
         _ => palette.border(),
     };
-    let full_box = inner_composer_shows_decision(area, state);
     let framed_input = editable(state) && padded && area.height >= 3;
-    let block = if full_box {
-        let title = match state.view_status {
-            ViewStatus::WaitingForApproval => " approval required ",
-            ViewStatus::WaitingForTrust => " trust required ",
-            _ => "",
-        };
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(border_style)
-    } else if framed_input {
+    let block = if framed_input {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -1295,26 +1263,6 @@ fn render_composer(
                 })
                 .collect(),
         });
-    }
-
-    if matches!(
-        state.view_status,
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-    ) {
-        let lines = if inner_composer_shows_decision(area, state) {
-            decision_detail_lines(state, usize::from(inner.width))
-        } else {
-            vec![Line::from(decision_row(
-                match state.view_status {
-                    ViewStatus::WaitingForApproval => "Waiting for permission…",
-                    ViewStatus::WaitingForTrust => "Trust the parked project, or n/Esc to deny.",
-                    _ => unreachable!("decision rows require a decision view"),
-                },
-                usize::from(inner.width),
-            ))]
-        };
-        frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
-        return None;
     }
 
     let message = if let Some(operation) = state.session_operation.as_ref() {
@@ -2174,129 +2122,298 @@ fn editable(state: &UiState) -> bool {
     state.editor_editable()
 }
 
-fn decision_detail_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
+/// What a pending decision shows, before it is fitted to the panel's height.
+struct DecisionPanel {
+    title: String,
+    tag: Option<String>,
+    detail: DecisionDetail,
+    choices: Vec<(&'static str, String)>,
+    footnote: Option<&'static str>,
+}
+
+enum DecisionDetail {
+    /// Wrapped over as many rows as fit; the last kept row ends in `…` when cut.
+    Wrapped(String),
+    /// One row that keeps the end of the text, for paths.
+    Tail(String),
+}
+
+fn decision_panel(state: &UiState, width: usize) -> Option<DecisionPanel> {
     match state.view_status {
-        ViewStatus::WaitingForApproval => approval_composer_lines(state, width),
-        ViewStatus::WaitingForTrust => trust_composer_lines(state, width),
-        _ => Vec::new(),
+        ViewStatus::WaitingForApproval => Some(approval_panel(state, width)),
+        ViewStatus::WaitingForTrust => Some(trust_panel(state)),
+        _ => None,
     }
 }
 
-fn render_permission_gate(
+fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
+    // Room for the selection marker, key and gap in front of each label.
+    let label_width = width.saturating_sub(5);
+    let fitting = |preferred: String, fallback: &str| {
+        if preferred.width() <= label_width {
+            preferred
+        } else {
+            fallback.to_owned()
+        }
+    };
+    let Some(pending) = state.pending_approval.as_ref() else {
+        return DecisionPanel {
+            title: "Allow tool?".into(),
+            tag: None,
+            detail: DecisionDetail::Wrapped("Tool details unavailable · args: unavailable".into()),
+            choices: approval_choices("Allow for session".into(), &fitting),
+            footnote: Some(APPROVAL_FOOTNOTE),
+        };
+    };
+    let name = bounded_decision_preview(&pending.name);
+    DecisionPanel {
+        title: format!("Allow {name}?"),
+        tag: Some(bounded_decision_preview(&pending.safety)),
+        detail: DecisionDetail::Wrapped(approval_detail(&pending.name, &pending.arguments)),
+        choices: approval_choices(
+            fitting(
+                format!("Allow {name} for this session"),
+                "Allow for session",
+            ),
+            &fitting,
+        ),
+        footnote: Some(APPROVAL_FOOTNOTE),
+    }
+}
+
+const APPROVAL_FOOTNOTE: &str = "YOLO is saved for this project. Change with /permissions.";
+
+fn approval_choices(
+    tool_session: String,
+    fitting: &dyn Fn(String, &str) -> String,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("1", "Allow once".into()),
+        ("2", tool_session),
+        ("3", fitting("YOLO for this project".into(), "YOLO (saved)")),
+        ("4", "Deny".into()),
+    ]
+}
+
+/// The built-in shell tool (`src/wisp/tools/shell/tool.py`). Other tools may take a
+/// `command` argument without running a shell, e.g. MCP tools with arbitrary schemas.
+const SHELL_TOOL_NAME: &str = "bash";
+
+/// Show the built-in shell tool's command as `$ command`, followed by every other
+/// argument, because an approval must never hide what it approves. Every other
+/// tool shows its complete argument object.
+fn approval_detail(name: &str, arguments: &serde_json::Value) -> String {
+    let command = (name == SHELL_TOOL_NAME)
+        .then(|| arguments.as_object())
+        .flatten()
+        .and_then(|object| object.get("command"))
+        .and_then(serde_json::Value::as_str);
+    let Some(command) = command else {
+        return format!("args: {}", bounded_json_preview(arguments));
+    };
+    let mut rest = arguments.as_object().cloned().unwrap_or_default();
+    rest.remove("command");
+    if rest.is_empty() {
+        format!("$ {command}")
+    } else {
+        format!(
+            "$ {command} · args: {}",
+            bounded_json_preview(&serde_json::Value::Object(rest))
+        )
+    }
+}
+
+fn trust_panel(state: &UiState) -> DecisionPanel {
+    let path = state
+        .pending_trust_project_path
+        .as_deref()
+        .map(bounded_decision_tail_preview)
+        .unwrap_or_else(|| "unknown project".into());
+    DecisionPanel {
+        title: "Trust this project?".into(),
+        tag: None,
+        detail: DecisionDetail::Tail(path),
+        choices: vec![("y", "Trust project".into()), ("n", "Deny".into())],
+        footnote: None,
+    }
+}
+
+/// Split sanitized text into rows of at most `width` columns, keeping at most
+/// `max_rows` and marking a cut with `…`.
+fn wrapped_decision_rows(content: &str, width: usize, max_rows: usize) -> Vec<String> {
+    let safe = bounded_decision_preview(content);
+    if width == 0 || max_rows == 0 {
+        return Vec::new();
+    }
+    let mut rows = vec![String::new()];
+    let mut row_width = 0;
+    for grapheme in safe.graphemes(true) {
+        let grapheme_width = grapheme.width();
+        if row_width + grapheme_width > width {
+            rows.push(String::new());
+            row_width = 0;
+        }
+        rows.last_mut().expect("one row").push_str(grapheme);
+        row_width += grapheme_width;
+    }
+    if rows.len() > max_rows {
+        rows.truncate(max_rows);
+        let last = rows.last_mut().expect("kept row");
+        *last = decision_row(&format!("{last}…"), width);
+    }
+    rows
+}
+
+fn decision_detail_rows(detail: &DecisionDetail, width: usize, max_rows: usize) -> Vec<String> {
+    match detail {
+        DecisionDetail::Wrapped(content) => wrapped_decision_rows(content, width, max_rows),
+        DecisionDetail::Tail(content) => vec![decision_tail_row(content, width)],
+    }
+}
+
+/// Columns inside the panel's borders and padding.
+fn decision_panel_width(area: Rect) -> usize {
+    usize::from(area.width.saturating_sub(4)).max(1)
+}
+
+/// The panel's preferred height: borders, every detail row, a separator, the
+/// choices, and the footnote with its gap.
+fn decision_panel_height(state: &UiState, area: Rect) -> u16 {
+    let width = decision_panel_width(area);
+    let Some(panel) = decision_panel(state, width) else {
+        return 0;
+    };
+    let details = decision_detail_rows(&panel.detail, width, DECISION_DETAIL_MAX_ROWS).len();
+    let footnote = if panel.footnote.is_some() { 2 } else { 0 };
+    let preferred = 2 + details + 1 + panel.choices.len() + footnote;
+    u16::try_from(preferred)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(DECISION_PANEL_RESERVED_ROWS))
+}
+
+pub(crate) fn choice_line(
+    key: &str,
+    label: &str,
+    selected: bool,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let label = decision_row(label, width.saturating_sub(key.width() + 4));
+    // The selected row is drawn in the selection style, so its key keeps that
+    // style's colours instead of the primary accent.
+    let key_style = if selected {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.primary)
+            .add_modifier(Modifier::BOLD)
+    };
+    let line = Line::from(vec![
+        Span::raw(if selected { "› " } else { "  " }),
+        Span::styled(key.to_owned(), key_style),
+        Span::raw("  "),
+        Span::raw(label),
+    ]);
+    if selected {
+        line.style(palette.selection())
+    } else {
+        line
+    }
+}
+
+/// Draw the pending approval or trust decision as a panel docked at the bottom
+/// of `area`. Rows are kept in priority order as the panel shrinks: the first
+/// detail row and the choices always, then a separator, further detail rows,
+/// and the footnote. A pending exit or skipped-response warning replaces the
+/// choices so it is never hidden.
+fn render_decision_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     notice: Option<&str>,
+    choice: Option<usize>,
     palette: Palette,
 ) {
-    let width = area.width.min(80);
-    let height = area.height.min(11);
-    let area = Rect::new(
-        area.x + (area.width - width) / 2,
-        area.y + (area.height - height) / 2,
-        width,
-        height,
-    );
-    frame.render_widget(Clear, area);
-    let block = Block::default()
+    let width = decision_panel_width(area);
+    let Some(panel) = decision_panel(state, width) else {
+        return;
+    };
+    let tag_width = panel.tag.as_ref().map_or(0, |tag| tag.width() + 3);
+    let title = decision_row(&panel.title, width.saturating_sub(tag_width + 2));
+    let hint = if width >= 40 {
+        " ↑↓ select · Enter confirm · Esc deny "
+    } else {
+        " ↑↓ Enter · Esc deny "
+    };
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(palette.border())
-        .style(palette.overlay())
-        .title(" Permission required ");
+        .border_style(Style::default().fg(palette.warning))
+        .padding(Padding::horizontal(1))
+        .style(palette.composer())
+        .title(
+            Line::from(format!(" {title} ")).style(Style::default().add_modifier(Modifier::BOLD)),
+        );
+    if let Some(tag) = &panel.tag {
+        block = block.title_top(
+            Line::from(format!(" {tag} "))
+                .style(Style::default().fg(palette.muted))
+                .right_aligned(),
+        );
+    }
+    if hint.width() + 2 <= usize::from(area.width) {
+        block = block.title_bottom(
+            Line::from(hint)
+                .style(Style::default().fg(palette.muted))
+                .right_aligned(),
+        );
+    }
     let inner = block.inner(area);
+    frame.render_widget(Clear, area);
     frame.render_widget(block, area);
-    let width = usize::from(inner.width);
-    let mut lines = approval_composer_lines(state, width);
-    for line in lines.iter_mut().skip(2) {
-        let text = line.to_string();
-        *line = Line::from(vec![
-            Span::styled(
-                text[..1].to_string(),
-                Style::default()
-                    .fg(palette.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(text[1..].to_string()),
-        ]);
-    }
-    if let Some(notice) = notice.filter(|notice| {
+
+    let alert = notice.filter(|notice| {
         notice.contains("Skipped approval response") || notice.contains("again exits")
-    }) {
-        frame.render_widget(
-            Paragraph::new(lines[..2].to_vec()),
-            Rect { height: 2, ..inner },
-        );
-        frame.render_widget(
-            Paragraph::new(sanitize_for_terminal(notice))
-                .style(Style::default().fg(palette.warning))
-                .wrap(Wrap { trim: false }),
-            Rect {
-                y: inner.y + 2,
-                height: inner.height.saturating_sub(2),
-                ..inner
-            },
-        );
-        return;
+    });
+    let bottom: Vec<Line<'static>> = match alert {
+        Some(alert) => wrapped_decision_rows(alert, width, usize::from(inner.height))
+            .into_iter()
+            .map(|row| Line::styled(row, Style::default().fg(palette.warning)))
+            .collect(),
+        None => panel
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(index, (key, label))| {
+                choice_line(key, label, choice == Some(index), width, palette)
+            })
+            .collect(),
+    };
+    let height = usize::from(inner.height);
+    let mut spare = height.saturating_sub(1 + bottom.len());
+    let separator = spare > 0;
+    spare = spare.saturating_sub(usize::from(separator));
+    let details = decision_detail_rows(
+        &panel.detail,
+        width,
+        (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
+    );
+    spare = spare.saturating_sub(details.len().saturating_sub(1));
+    let footnote = panel.footnote.filter(|_| alert.is_none() && spare >= 2);
+
+    let mut lines: Vec<Line<'static>> = details.into_iter().map(Line::from).collect();
+    if separator {
+        lines.push(Line::default());
     }
-    if inner.height >= 8 {
-        lines.insert(2, Line::default());
+    lines.extend(bottom);
+    if let Some(footnote) = footnote {
+        lines.push(Line::default());
         lines.push(Line::styled(
-            decision_row(
-                "YOLO is saved for this project. Change with /permissions.",
-                width,
-            ),
+            decision_row(footnote, width),
             Style::default().fg(palette.muted),
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
-}
-
-fn approval_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
-    let Some(pending) = state.pending_approval.as_ref() else {
-        return vec![
-            Line::from(decision_row("Tool details unavailable", width)),
-            Line::from(decision_row("args: unavailable", width)),
-            Line::from("1 Allow once"),
-            Line::from(decision_row("2 Allow tool this session", width)),
-            Line::from("3 YOLO (saved)"),
-            Line::from("4 Deny"),
-        ];
-    };
-    vec![
-        Line::from(decision_row(
-            &format!(
-                "tool: {} ({})",
-                bounded_decision_preview(&pending.name),
-                bounded_decision_preview(&pending.safety)
-            ),
-            width,
-        )),
-        Line::from(decision_row(
-            &format!("args: {}", bounded_json_preview(&pending.arguments)),
-            width,
-        )),
-        Line::from("1 Allow once"),
-        Line::from(decision_row(
-            &if format!(
-                "2 Allow {} for this session",
-                bounded_decision_preview(&pending.name)
-            )
-            .width()
-                <= width
-            {
-                format!(
-                    "2 Allow {} for this session",
-                    bounded_decision_preview(&pending.name)
-                )
-            } else {
-                "2 Allow tool this session".into()
-            },
-            width,
-        )),
-        Line::from("3 YOLO (saved)"),
-        Line::from("4 Deny"),
-    ]
 }
 
 fn decision_row(content: &str, width: usize) -> String {
@@ -2312,17 +2429,9 @@ fn decision_row(content: &str, width: usize) -> String {
     row
 }
 
-fn trust_composer_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
-    let path = state
-        .pending_trust_project_path
-        .as_deref()
-        .map(bounded_decision_tail_preview)
-        .unwrap_or_else(|| "unknown project".into());
-    vec![
-        Line::from(decision_row("[y trust/N deny]", width)),
-        Line::from(decision_row("trust project:", width)),
-        Line::from(decision_tail_row(&path, width)),
-    ]
+/// Fit sanitized text to `width`, keeping its end (for paths) behind a leading `…`.
+pub(crate) fn tail_row(content: &str, width: usize) -> String {
+    decision_tail_row(&bounded_decision_tail_preview(content), width)
 }
 
 fn decision_tail_row(content: &str, width: usize) -> String {
@@ -2617,6 +2726,7 @@ mod tests {
                     Palette::default(),
                     bindings,
                     LogoChoice::AdalBraille,
+                    None,
                 );
             })
             .unwrap();
@@ -2652,6 +2762,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                 );
             })
             .unwrap();
@@ -3195,22 +3306,58 @@ mod tests {
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
-            name: "shell".into(),
+            name: "bash".into(),
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approval"));
-        assert!(approval.contains("Permission required"));
-        assert!(approval.contains("tool: shell (ask)"));
-        assert!(approval.contains("args:"));
-        assert!(approval.contains("rm -rf /tmp/example"));
-        assert!(approval.contains("1 Allow once"));
-        assert!(approval.contains("2 Allow shell for this session"));
-        assert!(approval.contains("3 YOLO (saved)"));
-        assert!(approval.contains("4 Deny"));
+        assert!(approval.contains("Allow bash?"));
+        assert!(approval.contains(" ask "));
+        assert!(approval.contains("$ rm -rf /tmp/example"));
+        assert!(approval.contains("1  Allow once"));
+        assert!(approval.contains("2  Allow bash for this session"));
+        assert!(approval.contains("3  YOLO for this project"));
+        assert!(approval.contains("4  Deny"));
+        assert!(approval.contains("Enter confirm"));
         assert!(approval.contains("y once"));
+        // The panel docks in place of the composer instead of covering the transcript.
+        let panel_top = approval
+            .lines()
+            .position(|line| line.contains("Allow bash?"))
+            .unwrap();
+        assert!(panel_top > 2, "{approval}");
+
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1b".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls", "cwd": "/tmp/elsewhere"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+        });
+        let with_other_arguments = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(with_other_arguments.contains("$ ls"));
+        assert!(
+            with_other_arguments.contains("/tmp/elsewhere"),
+            "arguments besides the command stay visible: {with_other_arguments}"
+        );
+
+        // Only the built-in shell tool gets the `$` form; an MCP tool's `command`
+        // argument keeps its name, since that tool may not run a shell.
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1c".into(),
+            name: "mcp__deploy__run".into(),
+            arguments: json!({"command": "promote", "target": "prod"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+        });
+        let mcp = render_to_string(80, 18, &state, &PromptEditor::default());
+        assert!(!mcp.contains("$ promote"), "{mcp}");
+        assert!(
+            mcp.contains(r#"args: {"command":"promote","target":"prod"}"#),
+            "{mcp}"
+        );
 
         state.pending_approval = Some(PendingApproval {
             call_id: "call-2".into(),
@@ -3233,11 +3380,12 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
         });
-        let bounded = approval_composer_lines(&state, usize::MAX)
-            .into_iter()
-            .map(|line| line.to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let bounded = wrapped_decision_rows(
+            &approval_detail("bash", &state.pending_approval.as_ref().unwrap().arguments),
+            usize::MAX,
+            usize::MAX,
+        )
+        .join("\n");
         assert!(bounded.contains('…'));
         assert!(bounded.len() < DECISION_PREVIEW_GRAPHEMES + 180);
 
@@ -3249,13 +3397,23 @@ mod tests {
             safety: "command".into(),
         });
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
-        assert!(narrow.contains("3 YOLO (saved)"));
-        assert!(narrow.contains("args:"));
+        assert!(narrow.contains("3  YOLO (saved)"));
+        assert!(narrow.contains("2  Allow for session"));
         assert!(narrow.contains("rm -rf"));
         let minimum_approval = render_to_string(30, 8, &state, &PromptEditor::default());
-        assert!(minimum_approval.contains("3 YOLO (saved)"));
-        assert!(minimum_approval.contains("args:"));
-        assert!(minimum_approval.contains("rm -rf"));
+        for choice in [
+            "1  Allow once",
+            "2  Allow for session",
+            "3  YOLO (saved)",
+            "4  Deny",
+        ] {
+            assert!(minimum_approval.contains(choice), "{minimum_approval}");
+        }
+        // One detail row fits; a non-shell tool keeps its argument names.
+        assert!(
+            minimum_approval.contains("args: {\"command\""),
+            "{minimum_approval}"
+        );
         for height in 8..=10 {
             let compact_notice = render_to_string_with_notice(
                 30,
@@ -3268,8 +3426,8 @@ mod tests {
             );
             assert!(compact_notice.contains("Esc/Ctrl-C"));
             assert!(compact_notice.contains("again exits"));
-            assert!(!compact_notice.contains("3 YOLO (saved)"));
-            assert!(compact_notice.contains("tool:"));
+            assert!(!compact_notice.contains("3  YOLO (saved)"));
+            assert!(compact_notice.contains("Allow very"));
             assert!(compact_notice.contains("args:"));
         }
 
@@ -3287,9 +3445,9 @@ mod tests {
             Some("/workspace/project\u{1b}[2J\u{202e}spoof\nnext".into());
         let trust = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(trust.contains("trust"));
-        assert!(trust.contains("Trust the parked project"));
-        assert!(trust.contains("[y trust/N deny]"));
-        assert!(trust.contains("trust project:"));
+        assert!(trust.contains("Trust this project?"));
+        assert!(trust.contains("y  Trust project"));
+        assert!(trust.contains("n  Deny"));
         assert!(trust.contains("/workspace/project�[2J�spoof next"));
         assert!(!trust.contains('\u{1b}'));
         assert!(!trust.contains('\u{202e}'));
@@ -3299,11 +3457,12 @@ mod tests {
             "nested/".repeat(30)
         ));
         let narrow_trust = render_to_string(30, 14, &state, &PromptEditor::default());
-        assert!(narrow_trust.contains("[y trust/N deny]"));
+        assert!(narrow_trust.contains("y  Trust project"));
         assert!(narrow_trust.contains("distinct-project"));
         assert!(!narrow_trust.contains("/very/long/shared/prefix"));
         let minimum_trust = render_to_string(30, 8, &state, &PromptEditor::default());
-        assert!(minimum_trust.contains("[y trust/N deny]"));
+        assert!(minimum_trust.contains("y  Trust project"));
+        assert!(minimum_trust.contains("n  Deny"));
         assert!(minimum_trust.contains("distinct-project"));
         assert!(!minimum_trust.contains("/very/long/shared/prefix"));
         for height in 8..=10 {
@@ -3318,8 +3477,7 @@ mod tests {
             );
             assert!(compact_notice.contains("Esc/Ctrl-C"));
             assert!(compact_notice.contains("again exits"));
-            assert!(compact_notice.contains("[y trust/N deny]"));
-            assert!(compact_notice.contains("trust project:"));
+            assert!(compact_notice.contains("Trust this project?"));
             assert!(compact_notice.contains("distinct-project"));
         }
     }
@@ -3418,7 +3576,7 @@ mod tests {
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
-            name: "shell".into(),
+            name: "bash".into(),
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
@@ -3427,18 +3585,56 @@ mod tests {
             .transcript
             .append_prompt("context-for-approval".into());
 
-        let compact = render_to_string(80, 11, &state, &PromptEditor::default());
-        assert!(compact.contains("Permission required"));
-        assert!(compact.contains("3 YOLO (saved)"));
-        assert!(compact.contains("args:"));
-        assert!(compact.contains("rm -rf /tmp/example"));
-        assert!(!compact.contains("Approve the parked request"));
+        for height in [8, 10, 11, 12] {
+            let rendered = render_to_string(80, height, &state, &PromptEditor::default());
+            assert!(rendered.contains("Allow bash?"), "{rendered}");
+            assert!(rendered.contains("$ rm -rf /tmp/example"), "{rendered}");
+            for choice in [
+                "1  Allow once",
+                "2  Allow bash for this session",
+                "3  YOLO for this project",
+                "4  Deny",
+            ] {
+                assert!(rendered.contains(choice), "{rendered}");
+            }
+        }
+        // From 11 rows the panel docks below the transcript instead of replacing it.
+        let docked = render_to_string(80, 14, &state, &PromptEditor::default());
+        assert!(docked.contains("context-for-approval"), "{docked}");
+    }
 
-        let parked = render_to_string(80, 12, &state, &PromptEditor::default());
-        assert!(parked.contains("Permission required"));
-        assert!(parked.contains("4 Deny"));
-        assert!(parked.contains("3 YOLO (saved)"));
-        assert!(parked.contains("args:"));
+    #[test]
+    fn monochrome_decision_panel_marks_the_highlight_without_colour() {
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "shell".into(),
+            arguments: json!({"command": "ls"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+        });
+        let palette = crate::theme::resolve("glass").unwrap().palette(true);
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_decision_panel(frame, frame.area(), &state, None, Some(1), palette);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..10)
+            .find(|y| {
+                (0..60)
+                    .map(|x| buffer[(x, *y)].symbol())
+                    .collect::<String>()
+                    .contains("› 2")
+            })
+            .expect("highlighted row");
+        let marker = (0..60).find(|x| buffer[(*x, row)].symbol() == "›").unwrap();
+        assert!(
+            buffer[(marker, row)].modifier.contains(Modifier::REVERSED),
+            "the monochrome highlight must not rely on colour"
+        );
     }
 
     #[test]
@@ -3458,7 +3654,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
         terminal
             .draw(|frame| {
-                render_permission_gate(frame, frame.area(), &state, None, palette);
+                render_decision_panel(frame, frame.area(), &state, None, None, palette);
             })
             .unwrap();
 
@@ -3609,6 +3805,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                 );
             })
             .unwrap();
@@ -3655,6 +3852,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                 );
             })
             .unwrap();
@@ -4052,6 +4250,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                 );
             })
             .unwrap();
@@ -4107,6 +4306,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                 );
                 let area = overlay_area(frame.area()).unwrap();
                 clear_overlay(frame, area, Palette::default());
@@ -4558,6 +4758,7 @@ mod tests {
                         palette,
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
+                        None,
                     );
                 })
                 .unwrap();

@@ -45,6 +45,77 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight() {
+    use wisp_protocol::{commands::PermissionMode, events::PermissionState};
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let request = frame(&mut receiver);
+    let id = request["id"].as_str().unwrap().to_string();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::PermissionsReported {
+            command_id: id.clone(),
+            permissions: Ok(Arc::new(PermissionState {
+                mode: PermissionMode::Yolo,
+                saved_mode: Some(PermissionMode::Yolo),
+                project_path: Some("/project".into()),
+            })),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: id,
+            command_type: "get_permissions".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let painted = draw(&mut ui, 80, 24);
+    let cells: Vec<char> = painted.chars().collect();
+    let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
+    let yolo = rows
+        .iter()
+        .find(|row| row.contains("2  YOLO"))
+        .expect("YOLO choice");
+    assert!(yolo.contains("current"), "{painted}");
+    // Docked: the panel's bottom border sits just above the composer and footer.
+    let bottom = rows
+        .iter()
+        .position(|row| row.contains("Enter apply"))
+        .expect("panel hint");
+    assert!(bottom >= rows.len() - 5, "{painted}");
+
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err(), "no default choice");
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err(), "highlight not painted yet");
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let change = frame(&mut receiver);
+    assert_eq!(change["type"], "set_permissions");
+    assert_eq!(change["mode"], "ask");
+}
+
+#[tokio::test]
 async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     use wisp_protocol::{commands::PermissionMode, events::PermissionState};
     let (writer, mut receiver) = mpsc::channel(16);
@@ -148,10 +219,10 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
         }
         let painted = draw(&mut ui, 30, 8);
         for label in [
-            "1 Allow once",
-            "2 Allow tool this session",
-            "3 YOLO (saved)",
-            "4 Deny",
+            "1  Allow once",
+            "2  Allow for session",
+            "3  YOLO (saved)",
+            "4  Deny",
         ] {
             assert!(painted.contains(label), "{painted}");
         }
@@ -166,6 +237,101 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
             scope
         );
     }
+}
+
+fn approval_ui() -> LiveUi {
+    let mut ui = ui("", true);
+    ui.state.view_status = ViewStatus::WaitingForApproval;
+    ui.state.pending_approval = Some(PendingApproval {
+        call_id: "call".into(),
+        name: "bash".into(),
+        arguments: serde_json::json!({"command":"echo hi"}),
+        safety: "command".into(),
+        detail_source: tool_detail::ToolDetailSource::None,
+    });
+    ui
+}
+
+#[tokio::test]
+async fn enter_without_a_highlighted_choice_cannot_answer_a_decision() {
+    // An Enter meant for the composer can arrive just after the panel appears.
+    for trust in [false, true] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = approval_ui();
+        if trust {
+            ui.state.view_status = ViewStatus::WaitingForTrust;
+            ui.state.pending_approval = None;
+            ui.state.pending_trust_request_id = Some("trust-1".into());
+            ui.state.pending_trust_project_path = Some("/project".into());
+        }
+        draw(&mut ui, 80, 24);
+        ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(
+            ui.notice.as_deref(),
+            Some("Choose with ↑↓, then press Enter.")
+        );
+    }
+}
+
+#[tokio::test]
+async fn arrow_keys_pick_a_painted_choice_and_enter_sends_its_scope() {
+    for (presses, approved, scope) in [
+        (vec![KeyCode::Down], true, None),
+        (
+            vec![KeyCode::Down, KeyCode::Down],
+            true,
+            Some("tool_session"),
+        ),
+        (vec![KeyCode::Up, KeyCode::Up], true, Some("all_project")),
+        (vec![KeyCode::Up], false, None),
+    ] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = approval_ui();
+        draw(&mut ui, 80, 24);
+        for code in presses {
+            ui.handle_input(key(code), &writer, 8192).await.unwrap();
+        }
+        // The highlight has moved but is not painted yet.
+        ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(receiver.try_recv().is_err());
+        let painted = draw(&mut ui, 80, 24);
+        assert!(painted.contains("› "), "{painted}");
+        ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+            .await
+            .unwrap();
+        let response = frame(&mut receiver);
+        assert_eq!(response["type"], "approval");
+        assert_eq!(response["approved"], approved);
+        assert_eq!(
+            response.get("scope").and_then(serde_json::Value::as_str),
+            scope
+        );
+    }
+}
+
+#[tokio::test]
+async fn trust_choice_is_confirmed_with_arrows_and_enter() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("", true);
+    ui.state.view_status = ViewStatus::WaitingForTrust;
+    ui.state.pending_trust_request_id = Some("trust-1".into());
+    ui.state.pending_trust_project_path = Some("/project".into());
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let response = frame(&mut receiver);
+    assert_eq!(response["type"], "trust");
+    assert_eq!(response["trusted"], true);
 }
 
 #[tokio::test]

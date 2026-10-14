@@ -11,11 +11,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    text::Line,
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph},
+    style::Style,
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph},
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use wisp_protocol::commands::PermissionMode;
 use wisp_protocol::events::SkillCatalogSnapshot;
 
 pub(crate) enum DiscoveryAction {
@@ -28,15 +30,35 @@ pub(crate) enum DiscoveryAction {
 pub(crate) enum DiscoveryView {
     Skills(SkillsView),
     Mcp(ReportView),
-    Permissions { painted: bool },
+    Permissions(PermissionsView),
 }
+
+/// The `/permissions` picker. Like a pending decision, it has no default choice:
+/// Enter applies only a mode the user highlighted and that has been painted,
+/// because saving a mode also clears temporary grants.
+#[derive(Default)]
+pub(crate) struct PermissionsView {
+    painted: bool,
+    selected: Option<usize>,
+    rendered: Option<usize>,
+}
+
+const PERMISSION_CHOICES: [(char, &str, PermissionMode); 2] = [
+    ('1', "Ask before changes", PermissionMode::Ask),
+    (
+        '2',
+        "YOLO — allow tools without asking",
+        PermissionMode::Yolo,
+    ),
+];
 
 impl DiscoveryView {
     // The scheduler preserves this painted choice while draining a finite event prefix.
     pub fn rendered_selection(&self) -> Option<&str> {
         match self {
             Self::Skills(view) => view.rendered.as_deref(),
-            Self::Mcp(_) | Self::Permissions { .. } => None,
+            Self::Permissions(view) => view.rendered.map(|index| PERMISSION_CHOICES[index].1),
+            Self::Mcp(_) => None,
         }
     }
 
@@ -51,18 +73,19 @@ impl DiscoveryView {
     }
 
     pub fn permissions() -> Self {
-        Self::Permissions { painted: false }
+        Self::Permissions(PermissionsView::default())
     }
 
     pub fn key_activates(&self, key: KeyEvent) -> bool {
         key.code == KeyCode::Enter
-            || (matches!(self, Self::Permissions { .. })
+            || (matches!(self, Self::Permissions(_))
                 && matches!(key.code, KeyCode::Char('1' | '2')))
     }
 
     pub fn invalidate_selection(&mut self) {
-        if let Self::Permissions { painted } = self {
-            *painted = false;
+        if let Self::Permissions(view) = self {
+            view.painted = false;
+            view.rendered = None;
         }
         if let Self::Skills(view) = self {
             view.rendered = None;
@@ -109,22 +132,40 @@ impl DiscoveryView {
             return DiscoveryAction::Refresh(match self {
                 Self::Skills(_) => UiAction::LoadSkills,
                 Self::Mcp(_) => UiAction::LoadMcpStatus,
-                Self::Permissions { .. } => UiAction::Permissions(None),
+                Self::Permissions(_) => UiAction::Permissions(None),
             });
         }
         match self {
-            Self::Permissions { painted } => {
-                if !*painted || state.permissions.loading() || state.permissions.snapshot.is_none()
+            Self::Permissions(view) => {
+                if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                    let count = PERMISSION_CHOICES.len();
+                    view.selected = Some(match (view.selected, key.code) {
+                        (None, KeyCode::Down) => 0,
+                        (None, _) => count - 1,
+                        (Some(index), KeyCode::Down) => (index + 1) % count,
+                        (Some(index), _) => (index + count - 1) % count,
+                    });
+                    return DiscoveryAction::None;
+                }
+                if !view.painted
+                    || state.permissions.loading()
+                    || state.permissions.snapshot.is_none()
                 {
                     return DiscoveryAction::None;
                 }
-                let mode = match key.code {
-                    KeyCode::Char('1') => wisp_protocol::commands::PermissionMode::Ask,
-                    KeyCode::Char('2') => wisp_protocol::commands::PermissionMode::Yolo,
-                    _ => return DiscoveryAction::None,
+                let choice = match key.code {
+                    KeyCode::Enter => view.selected.filter(|index| view.rendered == Some(*index)),
+                    KeyCode::Char(key) => PERMISSION_CHOICES
+                        .iter()
+                        .position(|(choice_key, ..)| *choice_key == key),
+                    _ => None,
                 };
-                *painted = false;
-                DiscoveryAction::Refresh(UiAction::Permissions(Some(mode)))
+                let Some(choice) = choice else {
+                    return DiscoveryAction::None;
+                };
+                view.painted = false;
+                view.rendered = None;
+                DiscoveryAction::Refresh(UiAction::Permissions(Some(PERMISSION_CHOICES[choice].2)))
             }
             Self::Skills(view) => view.handle_key(key.code, state.skills.snapshot.as_deref()),
             Self::Mcp(view) => {
@@ -143,59 +184,7 @@ impl DiscoveryView {
         palette: Palette,
     ) -> Rows {
         match self {
-            Self::Permissions { painted } => {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
-                    .style(palette.base())
-                    .border_style(palette.border())
-                    .title(" Project permissions ")
-                    .title_bottom(" Esc close ");
-                let inner = block.inner(area);
-                frame.render_widget(block, area);
-                let mode = state
-                    .permissions
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.mode);
-                let current = match mode {
-                    Some(wisp_protocol::commands::PermissionMode::Yolo) => "Current: YOLO",
-                    Some(wisp_protocol::commands::PermissionMode::Ask) => {
-                        "Current: Ask before changes"
-                    }
-                    None => "Loading permissions…",
-                };
-                let mut lines = vec![
-                    current.to_string(),
-                    "1  Ask before changes".into(),
-                    "2  YOLO — allow tools".into(),
-                    "Saved for this project.".into(),
-                    "Changing mode clears temporary grants.".into(),
-                ];
-                if let Some(error) = &state.permissions.error {
-                    lines.push(format!("Error: {error}"));
-                } else if state.permissions.loading() {
-                    lines.push("Updating permissions…".into());
-                } else if let Some(snapshot) = &state.permissions.snapshot {
-                    if snapshot.saved_mode != Some(snapshot.mode) {
-                        lines.push("Current mode is not saved; choose 1 or 2 to save it.".into());
-                    }
-                    if let Some(project) = &snapshot.project_path {
-                        lines.push(format!("Project: {project}"));
-                    }
-                }
-                frame.render_widget(
-                    Paragraph::new(
-                        lines
-                            .into_iter()
-                            .map(|line| Line::from(terminal_row(&line, usize::from(inner.width))))
-                            .collect::<Vec<_>>(),
-                    ),
-                    inner,
-                );
-                *painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
-                Rows::default()
-            }
+            Self::Permissions(view) => view.render(frame, area, state, palette),
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
                 let block = Block::default()
@@ -488,6 +477,108 @@ impl ReportView {
             .join("\n");
         frame.render_widget(Paragraph::new(text), area);
     }
+}
+
+impl PermissionsView {
+    fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        state: &UiState,
+        palette: Palette,
+    ) -> Rows {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .padding(Padding::horizontal(1))
+            .style(palette.composer())
+            .border_style(palette.border())
+            .title(" Project permissions ")
+            .title_bottom(
+                Line::from(" ↑↓ select · Enter apply · Esc close ")
+                    .style(Style::default().fg(palette.muted))
+                    .right_aligned(),
+            );
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let width = usize::from(inner.width);
+        let snapshot = state.permissions.snapshot.as_ref();
+        let muted = Style::default().fg(palette.muted);
+        let mut lines: Vec<Line<'static>> = PERMISSION_CHOICES
+            .iter()
+            .enumerate()
+            .map(|(index, (key, label, mode))| {
+                let current = snapshot.is_some_and(|snapshot| snapshot.mode == *mode);
+                let suffix = if current { "  current" } else { "" };
+                let mut line = crate::ui::choice_line(
+                    &key.to_string(),
+                    label,
+                    self.selected == Some(index),
+                    width.saturating_sub(suffix.width()),
+                    palette,
+                );
+                line.spans.push(Span::styled(suffix, muted));
+                line
+            })
+            .collect();
+        lines.push(Line::default());
+        let status = if let Some(error) = &state.permissions.error {
+            Some(Line::styled(
+                terminal_row(&format!("Error: {error}"), width),
+                Style::default().fg(palette.warning),
+            ))
+        } else if state.permissions.loading() {
+            Some(Line::styled(
+                terminal_row(
+                    if snapshot.is_some() {
+                        "Updating permissions…"
+                    } else {
+                        "Loading permissions…"
+                    },
+                    width,
+                ),
+                muted,
+            ))
+        } else {
+            snapshot
+                .filter(|snapshot| snapshot.saved_mode != Some(snapshot.mode))
+                .map(|_| {
+                    Line::styled(
+                        terminal_row("Current mode is not saved; choose one to save it.", width),
+                        Style::default().fg(palette.warning),
+                    )
+                })
+        };
+        lines.extend(status);
+        lines.push(Line::styled(
+            terminal_row(
+                "Saved for this project. Changing mode clears temporary grants.",
+                width,
+            ),
+            muted,
+        ));
+        if let Some(project) = snapshot.and_then(|snapshot| snapshot.project_path.as_deref()) {
+            lines.push(Line::styled(
+                crate::ui::tail_row(&format!("Project: {project}"), width),
+                muted,
+            ));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+        self.painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
+        self.rendered = if self.painted { self.selected } else { None };
+        Rows::default()
+    }
+}
+
+/// Rows the docked `/permissions` panel needs for `state`, borders included.
+pub(crate) fn permissions_panel_height(state: &UiState) -> u16 {
+    let snapshot = state.permissions.snapshot.as_ref();
+    let status = state.permissions.error.is_some()
+        || state.permissions.loading()
+        || snapshot.is_some_and(|snapshot| snapshot.saved_mode != Some(snapshot.mode));
+    let project = snapshot.is_some_and(|snapshot| snapshot.project_path.is_some());
+    // Borders, two choices, a gap and the grants note, then the optional rows.
+    6 + u16::from(status) + u16::from(project)
 }
 
 #[cfg(test)]
