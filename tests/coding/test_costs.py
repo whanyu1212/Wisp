@@ -423,6 +423,31 @@ def test_builtin_haiku_5_5_prices_at_long_prompt_boundary(
     ) == tuple(Decimal(rate) for rate in rates)
 
 
+# xAI bills the long-context rate once a prompt reaches 200K tokens, unlike
+# OpenAI's and Anthropic's bands, which start above their thresholds.
+@pytest.mark.parametrize(
+    ("input_tokens", "rates"),
+    [
+        (199_999, ("2", "0.5", "6")),
+        (200_000, ("4", "1", "12")),
+    ],
+)
+def test_builtin_grok_4_7_prices_at_long_context_boundary(
+    input_tokens: int, rates: tuple[str, str, str]
+) -> None:
+    selected = ModelRegistry(builtin_catalog()).pricing(
+        "xai", "grok-4.7", input_tokens=input_tokens, at=date(2026, 10, 13)
+    )
+
+    assert selected is not None
+    band = selected[1]
+    assert (
+        band.input_usd_per_million,
+        band.cache_read_usd_per_million,
+        band.output_usd_per_million,
+    ) == tuple(Decimal(rate) for rate in rates)
+
+
 def test_catalog_rejects_overlapping_bands_and_shows_tiny_costs() -> None:
     with pytest.raises(ValidationError, match="overlapping price bands"):
         ModelCatalogProviderEntry(

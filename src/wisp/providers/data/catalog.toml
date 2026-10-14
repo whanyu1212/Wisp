@@ -595,6 +595,9 @@ models = [
 # reasoning depth; Wisp forwards the provider-native value unchanged.
 "grok-4.20-multi-agent-0309" = ["low", "medium", "high", "xhigh"]
 
+# xAI bills every token at the long-context rate once a prompt reaches 200K
+# tokens ("≥ 200k" on the model pages), so these bands start at 200000, not
+# 200001 like the ">272K" OpenAI bands above.
 [[providers.pricing."grok-4.7"]]
 input_usd_per_million = "2"
 cache_read_usd_per_million = "0.5"
