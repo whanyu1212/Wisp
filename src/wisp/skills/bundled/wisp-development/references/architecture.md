@@ -32,8 +32,12 @@ both transport and persistence paths and test serialization through `model_dump_
 Agent-loop and harness lifecycle rules that later refactors must preserve — one terminal per started
 turn, Ended/Ready pairing, request-boundary decisions, queue FIFO — are listed in
 `references/runtime-invariants.md`. When the run's cancellation token cancels a tool batch, both
-sequential and prepared execution settle every requested call with a terminal/result pair, using an
-interrupted result for unfinished calls. Caller-scope cancellation and executor errors can leave
+sequential and prepared execution settle unfinished calls by distinct `call_id` within the batch,
+using an interrupted result when no real terminal is available. Duplicate IDs within one response
+are deduplicated during settlement: a published result for an ID suppresses settlement of later
+occurrences, even if a later occurrence was requested. This is not a per-occurrence guarantee for
+duplicate IDs. Reusing an ID across separate batches does not share settlement state.
+Caller-scope cancellation and executor errors can leave
 calls unsettled; the harness repairs them before the next provider request. Named assertions live
 in `tests/support/agent_runtime.py`.
 

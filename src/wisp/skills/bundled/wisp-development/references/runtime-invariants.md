@@ -53,15 +53,22 @@ Do not freeze these as compatibility contracts:
 
 ## When tool calls are settled
 
-When the run's cancellation token cancels a tool batch, every requested call
-ends with exactly one terminal/result pair, whichever executor ran it
-(sequential or prepared): its real result, or an interrupted result.
-`ToolBatchSettlement` closes whatever the execution path left open
-(`test_sequential_cancellation_settles_every_requested_call`,
-`test_cancel_settles_blocked_sequential_batch`).
+When the run's cancellation token cancels a tool batch, sequential and prepared
+execution settle unfinished calls by distinct `call_id` within the batch:
+a real result when available, or an interrupted result. `ToolBatchSettlement`
+tracks requested and published IDs, not occurrences. Duplicate IDs within one
+response are deduplicated during settlement: a published result for an ID
+suppresses settlement of later occurrences, even if a later occurrence was
+requested. This is not a per-occurrence guarantee for duplicate IDs. Reusing an
+ID across separate batches does not share settlement state.
 
-Calls can still be left unsettled in two cases: a cancellation the run did not
-request (the caller's own scope, timeout, or task cancellation) propagates
+Focused coverage includes `test_sequential_cancellation_settles_every_requested_call`,
+`test_cancel_settles_blocked_sequential_batch`, and
+`test_cancel_skips_already_settled_duplicate`.
+
+Apart from the duplicate-ID qualification above, calls can still be left
+unsettled in two cases: a cancellation the run did not request (the caller's
+own scope, timeout, or task cancellation) propagates
 without settlement, and an executor error propagates after earlier calls were
 requested. The harness repairs those interrupted calls before the next provider
 request.

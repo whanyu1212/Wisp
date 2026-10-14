@@ -156,14 +156,29 @@ def test_bundled_architecture_guidance_tracks_protocol_and_cancellation_contract
     assert "Readers accept only the current schema versions" in architecture
     assert "do not upgrade older files" in architecture
     assert "run's cancellation token cancels a tool batch" in architecture
-    assert "sequential and prepared execution settle every requested call" in architecture
-    assert "interrupted result for unfinished calls" in architecture
+    assert "using an interrupted result when no real terminal is available" in architecture
     assert "Caller-scope cancellation and executor errors can leave calls unsettled" in architecture
     assert "historical durable formats" not in architecture
     assert (
         "Sequential execute cancellation is not a synthetic tool-result contract"
         not in architecture
     )
+
+
+@pytest.mark.parametrize("resource", ["architecture.md", "runtime-invariants.md"])
+def test_bundled_cancellation_guidance_qualifies_duplicate_ids(resource: str) -> None:
+    guidance = " ".join(
+        (bundled_skills_root() / "wisp-development/references" / resource)
+        .read_text(encoding="utf-8")
+        .split()
+    )
+
+    assert "settle unfinished calls by distinct `call_id` within the batch" in guidance
+    assert "deduplicated during settlement" in guidance
+    assert "a published result for an ID suppresses settlement of later occurrences" in guidance
+    assert "even if a later occurrence was requested" in guidance
+    assert "not a per-occurrence guarantee for duplicate IDs" in guidance
+    assert "Reusing an ID across separate batches does not share settlement state" in guidance
 
 
 def test_bundled_review_guidance_rejects_timing_only_exact_head_evidence() -> None:
