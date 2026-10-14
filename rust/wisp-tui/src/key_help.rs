@@ -66,12 +66,12 @@ impl KeyHelp {
         )];
         let fixed: &[&str] = match &self.owner {
             Owner::Decision(RenderedDecisionContext::Approval(_)) => &[
-                "Approval: y once, t tool/session, a all/session; n denies.",
+                "Approval: 1/y once, 2/t tool for session, 3/a YOLO for project, 4/n deny; or ↑↓ then Enter.",
                 "Positive decisions are disabled while this help covers the request.",
                 "n denies immediately; close help to read and approve the request.",
             ],
             Owner::Decision(RenderedDecisionContext::Trust(_)) => &[
-                "Project trust: y trusts, n denies. Close help before trusting.",
+                "Project trust: y trusts, n denies, or ↑↓ then Enter. Close help before trusting.",
                 "n denies immediately; Ctrl+C cancels the waiting operation.",
             ],
             Owner::Files => &[

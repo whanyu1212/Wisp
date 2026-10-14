@@ -506,9 +506,9 @@ async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
                 assert_eq!(ui.editor, draft);
                 draw(&mut ui, &mut terminal);
                 assert!(text(terminal.backend().buffer()).contains(if trust {
-                    "trust required"
+                    "Trust this project?"
                 } else {
-                    "Permission required"
+                    "Allow read?"
                 }));
                 ui.handle_input(key(KeyCode::Char('y')), &writer, 8192)
                     .await

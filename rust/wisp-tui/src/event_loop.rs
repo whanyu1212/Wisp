@@ -50,6 +50,7 @@ struct ActivationTarget {
     browse_entry: Option<crate::TranscriptEntryId>,
     detail_entry: Option<crate::TranscriptEntryId>,
     rendered_decision: Option<RenderedDecisionContext>,
+    rendered_decision_choice: Option<usize>,
     rendered_overlay: Option<OverlayKind>,
     rendered_model: bool,
     rendered_file: Option<usize>,
@@ -76,6 +77,7 @@ impl ActivationTarget {
             browse_entry: ui.browse_selected,
             detail_entry: ui.detail_view.selected_entry(),
             rendered_decision: ui.rendered_decision_context.clone(),
+            rendered_decision_choice: ui.rendered_decision_choice,
             rendered_overlay: ui.rendered_overlay,
             rendered_model: ui.rendered_model_picker,
             rendered_file: ui.file_picker.rendered_selection(),
@@ -123,6 +125,7 @@ pub(super) struct PendingInput {
     editor_input: bool,
     catalog_input: bool,
     wheel_input: bool,
+    decision_highlight: bool,
 }
 
 impl PendingInput {
@@ -185,6 +188,11 @@ impl PendingInput {
             Input::Mouse(event) => mouse::Scroll::from_event(*event).is_some(),
             _ => false,
         };
+        // Up/Down only move a decision's highlight; Enter is guarded separately by
+        // the painted highlight, so tool output must not swallow the arrow keys.
+        let decision_highlight = target.decision.is_some()
+            && matches!(&input, Input::Key(key) if key.modifiers == crossterm::event::KeyModifiers::NONE
+                && matches!(key.code, crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down));
         Self {
             input,
             target,
@@ -192,6 +200,7 @@ impl PendingInput {
             editor_input,
             catalog_input,
             wheel_input,
+            decision_highlight,
         }
     }
 
@@ -229,6 +238,7 @@ impl PendingInput {
             || matches!(self.input, Input::Redraw | Input::Error(_))
             || same_editor
             || self.wheel_input
+            || (self.decision_highlight && self.target.decision == current.decision)
             || self.target == current
         {
             ui.handle_input(self.input, writer, limit).await

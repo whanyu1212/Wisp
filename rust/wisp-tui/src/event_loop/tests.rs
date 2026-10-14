@@ -277,6 +277,57 @@ async fn replacement_approval_cannot_use_a_key_captured_before_redraw() {
 }
 
 #[tokio::test]
+async fn enter_captured_for_one_approval_cannot_confirm_its_replacement() {
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.dispatch(approval("old"), &writer, 8192).await.unwrap();
+    draw(&mut ui);
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    let pending = PendingInput::capture(key(KeyCode::Enter), &ui, 16);
+    ui.dispatch(approval("replacement"), &writer, 8192)
+        .await
+        .unwrap();
+    // Even with the same row highlighted and painted again for the replacement,
+    // the captured Enter belongs to the old request.
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    pending.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn decision_arrow_keys_survive_tool_output_during_the_same_decision() {
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.dispatch(approval("call-1"), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    let pending = PendingInput::capture(key(KeyCode::Down), &ui, 16);
+    let revision = ui.activation_revision;
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::MessageCompleted {
+            turn: 2,
+            content: "parallel tool output".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_ne!(ui.activation_revision, revision);
+    draw(&mut ui);
+    pending.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert_eq!(ui.decision_choice, Some(0));
+    assert!(commands.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn first_paint_does_not_authorize_an_already_captured_decision_or_picker_key() {
     let (writer, mut commands) = mpsc::channel(16);
     let mut ui = active_ui();
