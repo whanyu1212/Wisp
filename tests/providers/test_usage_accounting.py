@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import openai.types.responses.response_usage as openai_usage
 import pytest
 from anthropic.types import (
     Message,
@@ -247,17 +248,16 @@ def test_token_usage_rejects_negative_counts() -> None:
 
 
 def test_openai_usage_ignores_malformed_cache_write_details() -> None:
-    usage = ResponseUsage.model_validate(
-        {
-            "input_tokens": 12,
-            "input_tokens_details": {
-                "cached_tokens": 4,
-                "cache_write_tokens": "not-a-count",
-            },
-            "output_tokens": 7,
-            "output_tokens_details": {"reasoning_tokens": 0},
-            "total_tokens": 19,
-        }
+    # Built without validation: openai 3.x types cache_write_tokens as an int and
+    # would reject the malformed value before Wisp's projection sees it.
+    usage = ResponseUsage.model_construct(
+        input_tokens=12,
+        input_tokens_details=openai_usage.InputTokensDetails.model_construct(
+            cached_tokens=4, cache_write_tokens="not-a-count"
+        ),
+        output_tokens=7,
+        output_tokens_details=openai_usage.OutputTokensDetails.model_construct(reasoning_tokens=0),
+        total_tokens=19,
     )
     response = Response.model_construct(usage=usage)
 

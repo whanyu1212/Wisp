@@ -75,10 +75,37 @@ async def _bound_response(response: httpx2.Response) -> None:
 
 
 class _HttpClient(httpx2.AsyncClient):
-    async def delete(self, url: httpx2.URL | str, **kwargs: Any) -> httpx2.Response:
-        # A server that stalls session termination must not stall TUI shutdown.
+    async def send(self, request: httpx2.Request, **kwargs: Any) -> httpx2.Response:
+        """Send a request, bounding session termination (DELETE) by a deadline.
+
+        A server that stalls session termination must not stall TUI shutdown. The
+        deadline is applied here because every client method ends in ``send``: the
+        SDK's DELETE went through ``delete()`` up to mcp 2.2 and through a streamed
+        ``request_within_origin`` from 2.3. A streamed DELETE body is read within
+        the same deadline; it is already size-bounded by ``_bound_response``.
+
+        Args:
+            request (httpx2.Request): The request to send.
+            **kwargs (Any): ``httpx2.AsyncClient.send`` options, such as ``stream``.
+
+        Returns:
+            httpx2.Response: The response. A DELETE response's body has been read.
+
+        Raises:
+            TimeoutError: A DELETE did not complete within the shutdown deadline.
+        """
+
+        if request.method != "DELETE":
+            return await super().send(request, **kwargs)
         async with asyncio.timeout(_HTTP_SHUTDOWN_SECONDS):
-            return await super().delete(url, **kwargs)
+            response = await super().send(request, **kwargs)
+            if kwargs.get("stream"):
+                try:
+                    await response.aread()
+                except BaseException:
+                    await response.aclose()
+                    raise
+            return response
 
 
 @asynccontextmanager

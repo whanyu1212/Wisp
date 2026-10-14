@@ -187,6 +187,45 @@ def test_http_stalled_termination_has_a_deadline(monkeypatch: MonkeyPatch) -> No
     anyio.run(scenario)
 
 
+@pytest.mark.parametrize(
+    "stall", ["headers", "body"], ids=["stalls-before-headers", "stalls-in-body"]
+)
+@pytest.mark.parametrize("streamed", [False, True], ids=["delete", "streamed-delete"])
+def test_http_termination_deadline_covers_every_send_path(
+    monkeypatch: MonkeyPatch, stall: str, streamed: bool
+) -> None:
+    """A stalled DELETE hits the shutdown deadline however the SDK sends it.
+
+    mcp 2.0-2.1 calls ``client.delete()``; 2.2+ streams the DELETE through
+    ``client.send(..., stream=True)``. Both end in ``send``, which applies the
+    deadline and reads a streamed DELETE body within it.
+    """
+
+    class _StalledBody(httpx2.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            yield b"{"
+            await anyio.sleep_forever()
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        assert request.method == "DELETE"
+        if stall == "headers":
+            await anyio.sleep_forever()
+        return httpx2.Response(
+            200, headers={"content-type": "application/json"}, stream=_StalledBody()
+        )
+
+    monkeypatch.setattr(http_transport, "_HTTP_SHUTDOWN_SECONDS", 0.05)
+
+    async def scenario() -> None:
+        async with http_transport._HttpClient(transport=httpx2.MockTransport(handle)) as client:
+            request = client.build_request("DELETE", "https://example.com/mcp")
+            with anyio.fail_after(1):
+                with pytest.raises(TimeoutError):
+                    await client.send(request, stream=streamed)
+
+    anyio.run(scenario, backend="asyncio")
+
+
 def test_http_termination_body_is_bounded_even_when_labelled_sse(monkeypatch: MonkeyPatch) -> None:
     body = _Body(b"x" * (MAX_MCP_FRAME_BYTES * 2))
 
