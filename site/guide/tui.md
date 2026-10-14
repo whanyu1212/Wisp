@@ -85,7 +85,10 @@ Before reply text arrives, a working row animates below the transcript, for exam
 `⠹ Thinking · 12s · Esc to interrupt`. It shows a braille spinner, what the agent is waiting on
 (`Thinking` while reasoning streams, `Working` otherwise, or `Compacting context`), how long the
 current command has run, and the interrupt key; on a narrow row the interrupt hint and then the
-time are dropped rather than clipped. Once text starts streaming, the working row disappears. The `wisp` label stays visible at the live tail
+time are dropped rather than clipped. Once text starts streaming, the working row disappears. If a
+prompt fails, the reason stays as a red `✗ Prompt failed: …` row under the transcript until the next
+command starts, and the composer stays usable, so you can fix the cause and retry; for missing
+credentials the message names `/connect`. Only a lost connection to the backend ends the session. The `wisp` label stays visible at the live tail
 during intervening tool calls, and the working row returns after the final result while another
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.

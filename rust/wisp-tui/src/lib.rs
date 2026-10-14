@@ -6507,8 +6507,75 @@ mod tests {
         assert!(!live_ui.render_pending);
         let rendered = terminal.backend().to_string();
         assert!(rendered.contains("final queued fragment"));
-        assert!(rendered.contains("prompt failed"));
+        // A closed transport stays terminal.
+        assert!(rendered.contains("backend stopped"), "{rendered}");
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn a_failed_prompt_leaves_the_composer_usable_for_connect() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        // The finished prompt queues follow-up refreshes; keep the writer drained.
+        tokio::spawn(async move { while writer_rx.recv().await.is_some() {} });
+        let mut live_ui = LiveUi::default();
+        live_ui
+            .handle_input(
+                Input::Paste("hello".into()),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "prompt-1".into(),
+                    command_type: "prompt".into(),
+                    ok: false,
+                    error: Some(
+                        "anthropic credentials are required; run `/connect` in the TUI".into(),
+                    ),
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        for character in "/connect".chars() {
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(live_ui.editor.text(), "/connect");
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "test".into(),
+                },
+            )
+            .unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(
+            rendered.contains("✗ Prompt failed: anthropic credentials"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("/connect"), "{rendered}");
+        assert!(!rendered.contains("Ctrl-C exits"), "{rendered}");
     }
 
     #[tokio::test]

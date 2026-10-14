@@ -675,6 +675,10 @@ pub struct UiState {
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
+    /// Why the last prompt failed, shown under the transcript until another command
+    /// starts. A failed prompt returns to `Idle` so the user can fix the cause (for
+    /// example with `/connect`) and retry; only a closed transport is terminal.
+    pub(crate) last_command_error: Option<String>,
     pub(crate) context: context::ContextState,
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
@@ -739,6 +743,7 @@ impl UiState {
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
+            last_command_error: None,
             context: context::ContextState::default(),
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
@@ -1496,6 +1501,7 @@ fn submit(
     }
     let id = ids.next_id(CommandKind::Prompt);
     let command = WispTypedClientRpcCommands::prompt(&id, &content)?;
+    state.last_command_error = None;
     state.view_status = ViewStatus::Running;
     state.interaction_status = InteractionStatus::Running;
     state.current_command = Some(ActiveCommand {
@@ -1529,6 +1535,7 @@ fn init_project(
     }
     let id = ids.next_id(CommandKind::Init);
     let command = WispTypedClientRpcCommands::init(&id)?;
+    state.last_command_error = None;
     state.view_status = ViewStatus::Running;
     state.interaction_status = InteractionStatus::Running;
     state.current_command = Some(ActiveCommand {
@@ -4591,12 +4598,15 @@ fn handle_backend_event(
                     SESSION_NOTICE_MAX_BYTES,
                 )
             });
-            state.view_status =
-                if ok || was_cancelled || matches!(command_type.as_str(), "compact" | "init") {
-                    ViewStatus::Idle
-                } else {
-                    ViewStatus::Error
-                };
+            // A failed prompt is recoverable: keep the composer usable and show why it
+            // failed. Compaction and init report through their own notices.
+            state.view_status = ViewStatus::Idle;
+            if !ok && !was_cancelled && !matches!(command_type.as_str(), "compact" | "init") {
+                state.last_command_error = Some(bounded_session_text(
+                    error.as_deref().unwrap_or("The prompt failed."),
+                    SESSION_NOTICE_MAX_BYTES,
+                ));
+            }
             let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
             if let Some(message) = init_failure {
                 effects.push(UiEffect::Notice(message));
@@ -4823,8 +4833,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_matching_completion_clears_the_command_and_sets_error_view() {
+    fn failed_prompt_returns_to_an_editable_idle_view_and_keeps_its_error() {
         let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
         state.current_command = Some(ActiveCommand {
@@ -4838,14 +4849,28 @@ mod tests {
                 command_id: "prompt-1".into(),
                 command_type: "prompt".into(),
                 ok: false,
-                error: Some("provider failed".into()),
+                error: Some("anthropic credentials are required; run `/connect`".into()),
             }),
             &mut ids,
         )
         .unwrap();
-        assert_eq!(state.view_status, ViewStatus::Error);
+        // Recoverable: the composer works again so the user can `/connect` and retry.
+        assert_eq!(state.view_status, ViewStatus::Idle);
         assert_eq!(state.interaction_status, InteractionStatus::Idle);
         assert!(state.current_command.is_none());
+        assert!(state.editor_editable());
+        assert_eq!(
+            state.last_command_error.as_deref(),
+            Some("anthropic credentials are required; run `/connect`")
+        );
+
+        // The next prompt clears it.
+        let mut retry = UiState::new("fake".into(), None, None);
+        retry.input_ready = true;
+        retry.last_command_error = Some("earlier failure".into());
+        reduce(&mut retry, UiAction::Submit("retry".into()), &mut ids).unwrap();
+        assert_eq!(retry.view_status, ViewStatus::Running);
+        assert_eq!(retry.last_command_error, None);
         assert_eq!(
             command_value(&effects[0]).unwrap()["type"],
             "get_session_stats"
