@@ -209,6 +209,7 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
             name: "bash".into(),
             arguments: serde_json::json!({"command":"echo hi"}),
             safety: "command".into(),
+            grants_allowed: true,
             detail_source: tool_detail::ToolDetailSource::None,
         });
         if approved {
@@ -247,6 +248,7 @@ fn approval_ui() -> LiveUi {
         name: "bash".into(),
         arguments: serde_json::json!({"command":"echo hi"}),
         safety: "command".into(),
+        grants_allowed: true,
         detail_source: tool_detail::ToolDetailSource::None,
     });
     ui

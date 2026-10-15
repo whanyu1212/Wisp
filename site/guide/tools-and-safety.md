@@ -152,6 +152,35 @@ Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded
 Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, custom HTTP authentication, OAuth, and
 interactive authentication are not yet supported.
 
+### Asking Wisp to set up a server
+
+You can ask Wisp to add, remove, or disable an MCP server, for example "set up the GitHub MCP
+server". Saving a server means running its command every time Wisp starts, so Wisp proposes the
+change instead of making it: `~/.wisp/settings.json` is protected from its file tools, and it calls
+one of these tools. (Shell commands are not checked against protected paths, so under YOLO or an
+"allow bash for this session" grant a shell command could still edit the file, as it could any of
+your files. Keep `bash` on ask when that matters.)
+
+| Tool | Safety | What it does |
+|---|---|---|
+| `list_mcp_servers` | read | Lists saved servers: the executable or URL origin and the environment variable names; never arguments, URL paths, or values |
+| `propose_mcp_server` | command | Proposes adding (or replacing) a server: name, command and arguments or URL, and `env_from` names |
+| `propose_mcp_server_change` | command | Proposes removing or disabling a saved server |
+
+Every proposal opens a confirmation that shows exactly what the server would run or connect to and
+which variables it forwards. Only **Confirm** or **Deny** is offered: no permission mode, `--yes`,
+or "allow for this session" answer ever approves a proposal, and a confirmation cannot be accepted
+while part of it is hidden. In print and JSON modes a proposal is always refused. Confirming saves
+the change from exactly the arguments you were shown; MCP servers then restart when the reply ends,
+so a new server's tools are available from your next message.
+
+Secrets never pass through the model. A proposal forwards environment variables by name with
+`env_from`. Arguments or URLs that look like they carry a secret (known token formats,
+`--api-key VALUE`, `TOKEN=…`, `scheme://user:password@…`, an `Authorization` header, an opaque
+token in a URL path) are rejected before you are asked, as are line breaks and control characters.
+This is a heuristic, so read every proposal before confirming. To store a value in the settings file instead, add the server from
+`/mcp` or with `wisp mcp add --env`.
+
 ## Saved project permissions
 
 The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,

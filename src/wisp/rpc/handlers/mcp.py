@@ -12,7 +12,7 @@ MCP startup is already bounded by its own timeout.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 import anyio
@@ -22,6 +22,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.agent.messages import Message
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import (
+    McpServerExistsError,
     McpSettingsError,
     add_user_mcp_servers,
     load_user_mcp_servers,
@@ -58,6 +59,14 @@ from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import restart_mcp_servers
 from wisp.runtime.registry import ToolRegistry
+from wisp.tools.mcp_servers import (
+    PROPOSE_MCP_SERVER,
+    PROPOSE_MCP_SERVER_CHANGE,
+    control_characters,
+    proposed_change,
+    proposed_server,
+    secret_like_argument,
+)
 from wisp.tools.selection import select_tools
 
 type McpServerCommand = (
@@ -116,6 +125,80 @@ class RpcMcpServers:
         self._agent = agent
         self._tool_selection = tool_selection
         self._revoke_session_tool_grants = revoke_session_tool_grants
+        # A confirmed proposal saved settings during a run; servers restart once
+        # the run ends, because a run's tools cannot change while it uses them.
+        self._restart_after_run = False
+
+    def confirm_proposal(self, tool_name: str, arguments: Mapping[str, object]) -> str | None:
+        """Apply a proposal the user confirmed, from the arguments they were shown.
+
+        The settings change is saved now; servers restart when the current run
+        ends (see :meth:`restart_after_run`).
+
+        Args:
+            tool_name (str): `propose_mcp_server` or `propose_mcp_server_change`.
+            arguments (Mapping[str, object]): The confirmed tool call's arguments.
+
+        Returns:
+            str | None: Why the proposal could not be applied, or None once saved.
+        """
+
+        try:
+            if tool_name == PROPOSE_MCP_SERVER:
+                server = proposed_server(arguments)
+                # Checked again here: the confirmation must never save a secret or
+                # a command whose display could have been disguised.
+                if control_characters(server):
+                    return "The proposal contains control characters; it was not saved."
+                if secret_like_argument(server) is not None:
+                    return "The proposal seems to contain a secret value; it was not saved."
+                add_user_mcp_servers((server,), replace=arguments.get("replace") is True)
+            elif tool_name == PROPOSE_MCP_SERVER_CHANGE:
+                name, action = proposed_change(arguments)
+                if action == "remove":
+                    remove_user_mcp_server(name)
+                else:
+                    set_user_mcp_server_enabled(name, False)
+            else:
+                return f"Unknown MCP proposal tool {tool_name}"
+        except McpServerExistsError as exc:
+            return f"{exc}. Propose it again with replace set to true to overwrite it."
+        except McpSettingsError as exc:
+            return str(exc)
+        self._restart_after_run = True
+        return None
+
+    async def restart_after_run(self) -> str | None:
+        """Restart servers if a confirmed proposal changed them during the run.
+
+        Call only once the run has ended and before the next one starts.
+
+        Returns:
+            str | None: A sanitized error if the servers could not be restarted.
+        """
+
+        if not self._restart_after_run:
+            return None
+        if self._agent.busy:
+            # The run did not release the session; keep the change pending so the
+            # session never ends up with tools from closed connections.
+            return "MCP servers restart after the next reply, once the session is idle."
+        self._restart_after_run = False
+        try:
+            servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
+        except McpSettingsError as exc:
+            return f"MCP servers were not restarted: {exc}"
+        error = await self._restart(servers)
+        if error is not None:
+            return error
+        # No status request is waiting for this restart, so a server that failed
+        # to start would otherwise go unnoticed after the user confirmed it.
+        failures = [
+            server.error
+            for server in rpc_mcp_status_snapshot(self._runtime).servers
+            if server.status == "unavailable" and server.error is not None
+        ]
+        return "; ".join(failures) or None
 
     def start(
         self,

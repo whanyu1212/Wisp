@@ -4810,6 +4810,11 @@
           "title": "ToolApprovalRequestedCallId",
           "type": "string"
         },
+        "grants_allowed": {
+          "default": true,
+          "title": "ToolApprovalRequestedGrantsAllowed",
+          "type": "boolean"
+        },
         "name": {
           "title": "ToolApprovalRequestedName",
           "type": "string"
@@ -4841,7 +4846,8 @@
         "call_id",
         "name",
         "arguments",
-        "safety"
+        "safety",
+        "grants_allowed"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"

@@ -154,6 +154,7 @@ fn fixture(scenario: &str) -> LiveUi {
             arguments: fixture.tool_arguments,
             detail_source: tool_detail::ToolDetailSource::None,
             safety: "command".into(),
+            grants_allowed: true,
         });
     }
     if scenario == "permissions" {

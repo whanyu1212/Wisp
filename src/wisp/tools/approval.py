@@ -10,6 +10,22 @@ from wisp.tools.base import Tool, ToolSafety
 APPROVAL_REQUIRED_SAFETY: frozenset[ToolSafety] = frozenset({"mutating", "command"})
 
 
+def confirms_every_call(tool: Tool) -> bool:
+    """Return whether every call of ``tool`` needs the user's own confirmation.
+
+    Such a tool sets ``confirm_every_call = True``. No grant approves it: not
+    ``--yes``, a saved YOLO mode, nor an "allow for this session" answer.
+
+    Args:
+        tool (Tool): Tool about to run.
+
+    Returns:
+        bool: True when only an explicit, one-time confirmation may approve it.
+    """
+
+    return getattr(tool, "confirm_every_call", False) is True
+
+
 @dataclass(frozen=True)
 class ToolApprovalDecision:
     """Decision for a tool call that requires approval."""
@@ -46,11 +62,13 @@ class ToolApprovalPolicy:
     def requires_approval(self, tool: Tool) -> bool:
         """Return whether this tool safety class requires approval."""
 
-        return tool.safety in APPROVAL_REQUIRED_SAFETY
+        return tool.safety in APPROVAL_REQUIRED_SAFETY or confirms_every_call(tool)
 
     def approves(self, tool: Tool) -> bool:
         """Return whether this tool is approved for execution."""
 
+        if confirms_every_call(tool):
+            return False
         return (
             not self.requires_approval(tool)
             or tool.name in self.approved_tools
@@ -90,6 +108,11 @@ class ToolApprovalPolicy:
     def block_reason(self, tool: Tool) -> str:
         """Return a model-visible reason for approval denial."""
 
+        if confirms_every_call(tool):
+            return (
+                f"Tool {tool.name} needs the user's confirmation in the interactive TUI or "
+                "an RPC client. --yes and saved permissions never approve it."
+            )
         return (
             f"Tool {tool.name} requires approval before execution. "
             "In non-interactive print mode, rerun with --yes to approve mutating "

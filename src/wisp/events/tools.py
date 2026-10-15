@@ -31,6 +31,9 @@ class ToolApprovalRequested(WispEvent):
     name: str
     arguments: JsonObject
     safety: Literal["read", "mutating", "command"]
+    # False for tools that need the user's confirmation on every call: the
+    # frontend offers only a one-time confirmation or a denial, never a grant.
+    grants_allowed: bool = True
 
 
 class ToolApprovalResolved(WispEvent):

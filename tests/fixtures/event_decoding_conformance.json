@@ -3581,6 +3581,14 @@
    "event": "tool.approval.requested",
    "operation": "remove",
    "path": [
+    "grants_allowed"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
     "name"
    ],
    "accepted": false

@@ -2237,11 +2237,18 @@ struct DecisionPanel {
     detail: DecisionDetail,
     choices: Vec<(&'static str, String)>,
     footnote: Option<&'static str>,
+    /// False when the panel cannot show what confirming would do; it is then
+    /// drawn but never armed.
+    confirmable: bool,
 }
 
 enum DecisionDetail {
     /// Wrapped over as many rows as fit; the last kept row ends in `…` when cut.
     Wrapped(String),
+    /// Shown whole or not at all, one row group per line: what a confirmation
+    /// confirms. When it does not fit, a hint replaces it and the panel cannot
+    /// be confirmed (see [`decision_panel_complete`]).
+    Complete(String),
     /// One row that keeps the end of the text, for paths.
     Tail(String),
 }
@@ -2252,6 +2259,61 @@ fn decision_panel(state: &UiState, width: usize) -> Option<DecisionPanel> {
         ViewStatus::WaitingForTrust => Some(trust_panel(state)),
         _ => None,
     }
+}
+
+/// A pending exit or skipped-response warning, which replaces a decision's choices.
+fn decision_alert(notice: Option<&str>) -> Option<&str> {
+    notice.filter(|notice| {
+        notice.contains("Skipped approval response") || notice.contains("again exits")
+    })
+}
+
+/// Whether the pending decision is shown in full at the terminal size `area`.
+///
+/// Only a [`DecisionDetail::Complete`] detail can be incomplete: a confirmation
+/// must not be accepted while part of what it confirms is hidden. This repeats
+/// [`render_interactive`]'s and [`render_decision_panel`]'s layout.
+pub(crate) fn decision_panel_complete(state: &UiState, area: Rect, notice: Option<&str>) -> bool {
+    if !decision_context_visible(area) {
+        return false;
+    }
+    // An alert takes the choices' place and can push the details out of view.
+    if decision_alert(notice).is_some() {
+        return !matches!(
+            decision_panel(state, decision_panel_width(conversation_surface(area))),
+            Some(DecisionPanel {
+                detail: DecisionDetail::Complete(_),
+                ..
+            })
+        );
+    }
+    let surface = conversation_surface(area);
+    let panel_area = if surface.height < DECISION_PANEL_SHARED_MIN_HEIGHT {
+        surface
+    } else {
+        Rect {
+            height: decision_panel_height(state, surface),
+            ..surface
+        }
+    };
+    let width = decision_panel_width(panel_area);
+    let Some(panel) = decision_panel(state, width) else {
+        return true;
+    };
+    if !panel.confirmable {
+        return false;
+    }
+    let DecisionDetail::Complete(content) = &panel.detail else {
+        return true;
+    };
+    // The title names what is confirmed (the server), so it must not be cut.
+    let tag_width = panel.tag.as_ref().map_or(0, |tag| tag.width() + 3);
+    if bounded_decision_preview(&panel.title).width() > width.saturating_sub(tag_width + 2) {
+        return false;
+    }
+    let inner_height = usize::from(panel_area.height.saturating_sub(2));
+    // Details, the separator, then every choice.
+    complete_detail_rows(content, width).len() + 1 + panel.choices.len() <= inner_height
 }
 
 fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
@@ -2271,8 +2333,12 @@ fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
             detail: DecisionDetail::Wrapped("Tool details unavailable · args: unavailable".into()),
             choices: approval_choices("Allow for session".into(), &fitting),
             footnote: Some(APPROVAL_FOOTNOTE),
+            confirmable: true,
         };
     };
+    if !pending.grants_allowed {
+        return confirmation_panel(pending);
+    }
     let name = bounded_decision_preview(&pending.name);
     DecisionPanel {
         title: format!("Allow {name}?"),
@@ -2286,10 +2352,101 @@ fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
             &fitting,
         ),
         footnote: Some(APPROVAL_FOOTNOTE),
+        confirmable: true,
     }
 }
 
 const APPROVAL_FOOTNOTE: &str = "YOLO is saved for this project. Change with /permissions.";
+
+/// Choices of a tool that needs a confirmation on every call.
+pub(crate) const CONFIRMATION_CHOICES: usize = 2;
+
+/// A confirm-every-call tool's panel: what exactly it would do, then confirm or
+/// deny. No grant is offered, and the detail is shown whole or not at all.
+fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPanel {
+    let unshowable = |title: String| DecisionPanel {
+        title,
+        tag: Some("confirm".into()),
+        detail: DecisionDetail::Complete(
+            "This proposal cannot be shown in full, so it cannot be confirmed. Deny it.".into(),
+        ),
+        choices: vec![("1", "Confirm".into()), ("2", "Deny".into())],
+        footnote: None,
+        confirmable: false,
+    };
+    let Some(arguments) = pending.arguments.as_object() else {
+        return unshowable("Proposal unavailable".into());
+    };
+    let text = |key: &str| arguments.get(key).and_then(serde_json::Value::as_str);
+    // Every listed field must have the shape the backend applies; anything else
+    // could mean the panel shows less than what confirming would save.
+    let strings = |key: &str| -> Option<Vec<String>> {
+        match arguments.get(key) {
+            None => Some(Vec::new()),
+            Some(value) => value
+                .as_array()?
+                .iter()
+                .map(|item| item.as_str().map(str::to_owned))
+                .collect(),
+        }
+    };
+    let Some(server) = text("name").map(bounded_decision_preview) else {
+        return unshowable("Proposal unavailable".into());
+    };
+    let (title, detail) = match pending.name.as_str() {
+        "propose_mcp_server" => {
+            let (Some(args), Some(forwarded)) = (strings("args"), strings("env_from")) else {
+                return unshowable(format!("Add MCP server {server}?"));
+            };
+            let mut rows = Vec::new();
+            match (text("command"), text("url")) {
+                (Some(command), None) => rows.push(format!(
+                    "runs: {}",
+                    crate::mcp_manager::shell_display(command, &args)
+                )),
+                (None, Some(url)) if args.is_empty() => rows.push(format!("connects to: {url}")),
+                _ => return unshowable(format!("Add MCP server {server}?")),
+            }
+            if !forwarded.is_empty() {
+                rows.push(format!(
+                    "forwards from your environment: {}",
+                    forwarded.join(", ")
+                ));
+            }
+            match arguments.get("replace") {
+                None | Some(serde_json::Value::Bool(false)) => {}
+                Some(serde_json::Value::Bool(true)) => rows.push(format!(
+                    "replaces the server saved as {server}, dropping its saved values and settings"
+                )),
+                Some(_) => return unshowable(format!("Add MCP server {server}?")),
+            }
+            if text("command").is_some() {
+                rows.push("Wisp runs this command every time it starts.".into());
+            }
+            (format!("Add MCP server {server}?"), rows.join("\n"))
+        }
+        "propose_mcp_server_change" => match text("action") {
+            Some("remove") => (
+                format!("Remove MCP server {server}?"),
+                format!("Deletes the saved server {server}, including saved values, and stops it."),
+            ),
+            Some("disable") => (
+                format!("Disable MCP server {server}?"),
+                format!("Stops {server}; its settings are kept."),
+            ),
+            _ => return unshowable(format!("Change MCP server {server}?")),
+        },
+        name => return unshowable(format!("Confirm {}?", bounded_decision_preview(name))),
+    };
+    DecisionPanel {
+        title,
+        tag: Some("confirm".into()),
+        detail: DecisionDetail::Complete(detail),
+        choices: vec![("1", "Confirm".into()), ("2", "Deny".into())],
+        footnote: Some("Wisp asks every time; YOLO and session grants never apply."),
+        confirmable: true,
+    }
+}
 
 fn approval_choices(
     tool_session: String,
@@ -2343,6 +2500,7 @@ fn trust_panel(state: &UiState) -> DecisionPanel {
         detail: DecisionDetail::Tail(path),
         choices: vec![("y", "Trust project".into()), ("n", "Deny".into())],
         footnote: None,
+        confirmable: true,
     }
 }
 
@@ -2372,8 +2530,38 @@ fn wrapped_decision_rows(content: &str, width: usize, max_rows: usize) -> Vec<St
     rows
 }
 
+/// Every row of a [`DecisionDetail::Complete`] detail, sanitized and unbounded.
+fn complete_detail_rows(content: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in sanitize_for_terminal(content).split('\n') {
+        let mut row = String::new();
+        let mut row_width = 0;
+        for grapheme in line.graphemes(true) {
+            let grapheme_width = grapheme.width();
+            if row_width + grapheme_width > width && row_width > 0 {
+                rows.push(std::mem::take(&mut row));
+                row_width = 0;
+            }
+            row.push_str(grapheme);
+            row_width += grapheme_width;
+        }
+        rows.push(row);
+    }
+    rows
+}
+
+const COMPLETE_DETAIL_HINT: &str = "Make the terminal larger to see everything before confirming.";
+
 fn decision_detail_rows(detail: &DecisionDetail, width: usize, max_rows: usize) -> Vec<String> {
     match detail {
+        DecisionDetail::Complete(content) => {
+            let rows = complete_detail_rows(content, width);
+            if rows.len() <= max_rows {
+                rows
+            } else {
+                wrapped_decision_rows(COMPLETE_DETAIL_HINT, width, max_rows)
+            }
+        }
         DecisionDetail::Wrapped(content) => wrapped_decision_rows(content, width, max_rows),
         DecisionDetail::Tail(content) => vec![decision_tail_row(content, width)],
     }
@@ -2391,7 +2579,10 @@ fn decision_panel_height(state: &UiState, area: Rect) -> u16 {
     let Some(panel) = decision_panel(state, width) else {
         return 0;
     };
-    let details = decision_detail_rows(&panel.detail, width, DECISION_DETAIL_MAX_ROWS).len();
+    let details = match &panel.detail {
+        DecisionDetail::Complete(content) => complete_detail_rows(content, width).len(),
+        detail => decision_detail_rows(detail, width, DECISION_DETAIL_MAX_ROWS).len(),
+    };
     let footnote = if panel.footnote.is_some() { 2 } else { 0 };
     let preferred = 2 + details + 1 + panel.choices.len() + footnote;
     u16::try_from(preferred)
@@ -2480,9 +2671,7 @@ fn render_decision_panel(
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
 
-    let alert = notice.filter(|notice| {
-        notice.contains("Skipped approval response") || notice.contains("again exits")
-    });
+    let alert = decision_alert(notice);
     let bottom: Vec<Line<'static>> = match alert {
         Some(alert) => wrapped_decision_rows(alert, width, usize::from(inner.height))
             .into_iter()
@@ -2501,11 +2690,11 @@ fn render_decision_panel(
     let mut spare = height.saturating_sub(1 + bottom.len());
     let separator = spare > 0;
     spare = spare.saturating_sub(usize::from(separator));
-    let details = decision_detail_rows(
-        &panel.detail,
-        width,
-        (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
-    );
+    let max_detail_rows = match panel.detail {
+        DecisionDetail::Complete(_) => 1 + spare,
+        _ => (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
+    };
+    let details = decision_detail_rows(&panel.detail, width, max_detail_rows);
     spare = spare.saturating_sub(details.len().saturating_sub(1));
     let footnote = panel.footnote.filter(|_| alert.is_none() && spare >= 2);
 
@@ -3462,6 +3651,7 @@ mod tests {
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
+            grants_allowed: true,
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approval"));
@@ -3487,6 +3677,7 @@ mod tests {
             arguments: json!({"command": "ls", "cwd": "/tmp/elsewhere"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
+            grants_allowed: true,
         });
         let with_other_arguments = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(with_other_arguments.contains("$ ls"));
@@ -3503,6 +3694,7 @@ mod tests {
             arguments: json!({"command": "promote", "target": "prod"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
+            grants_allowed: true,
         });
         let mcp = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!mcp.contains("$ promote"), "{mcp}");
@@ -3517,6 +3709,7 @@ mod tests {
             arguments: json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask\u{2066}safe".into(),
+            grants_allowed: true,
         });
         let adversarial = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!adversarial.contains('\u{1b}'));
@@ -3531,6 +3724,7 @@ mod tests {
             arguments: json!({"command": "x".repeat(DECISION_PREVIEW_GRAPHEMES + 20)}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
+            grants_allowed: true,
         });
         let bounded = wrapped_decision_rows(
             &approval_detail("bash", &state.pending_approval.as_ref().unwrap().arguments),
@@ -3547,6 +3741,7 @@ mod tests {
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
+            grants_allowed: true,
         });
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
         assert!(narrow.contains("3  YOLO (saved)"));
@@ -3732,6 +3927,7 @@ mod tests {
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
+            grants_allowed: true,
         });
         state
             .transcript
@@ -3765,6 +3961,7 @@ mod tests {
             arguments: json!({"command": "ls"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
+            grants_allowed: true,
         });
         let palette = crate::theme::resolve("glass").unwrap().palette(true);
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
@@ -3799,6 +3996,7 @@ mod tests {
             arguments: json!({"command": "rm -rf /tmp/example"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
+            grants_allowed: true,
         });
         let palette = crate::theme::resolve("glass").unwrap().palette(false);
         assert_eq!(palette.base().bg, None);

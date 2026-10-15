@@ -379,6 +379,8 @@ impl BackendEvent {
             "tool.approval.requested" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;
                 let arguments = object_field(value, &event_type, "arguments")?;
+                // Sessions saved before this field existed only hold grantable tools.
+                let grants_allowed = bool_field_or(value, &event_type, "grants_allowed", true)?;
                 Self::ToolApprovalRequested(PendingApproval {
                     call_id: string_field(value, &event_type, "call_id")?,
                     detail_source: project_tool_detail_source(
@@ -387,9 +389,17 @@ impl BackendEvent {
                             .as_object()
                             .expect("object_field returned an object"),
                     ),
-                    arguments: bounded_tool_arguments(raw_name, arguments),
+                    // A confirmation shows exactly what it confirms, so its arguments
+                    // are kept whole (the backend validated and bounded them before
+                    // asking); one too large to keep is dropped and cannot be confirmed.
+                    arguments: if grants_allowed {
+                        bounded_tool_arguments(raw_name, arguments)
+                    } else {
+                        complete_confirmation_arguments(arguments)
+                    },
                     name: bounded_tool_name(raw_name),
                     safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
+                    grants_allowed,
                 })
             }
             "tool.approval.resolved" => Self::ToolApprovalResolved {
@@ -1619,6 +1629,16 @@ fn bool_field(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+/// Largest confirmation argument object kept whole for display.
+const CONFIRMATION_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
+
+fn complete_confirmation_arguments(arguments: &Value) -> Value {
+    match serde_json::to_vec(arguments) {
+        Ok(encoded) if encoded.len() <= CONFIRMATION_ARGUMENTS_MAX_BYTES => arguments.clone(),
+        _ => Value::Null,
+    }
 }
 
 fn bool_field_or(

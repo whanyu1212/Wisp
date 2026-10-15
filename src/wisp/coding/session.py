@@ -280,6 +280,12 @@ class CodingSession:
         )
 
     @property
+    def busy(self) -> bool:
+        """Whether a prompt or compaction operation is still running."""
+
+        return self._operation_active
+
+    @property
     def configuration(self) -> CodingSessionConfiguration:
         """Return the configuration applied to subsequent operations."""
 
