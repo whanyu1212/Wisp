@@ -10,12 +10,68 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc7 — release preparation
+## 0.2.0rc8 — release preparation
+
+RC8 makes MCP servers manageable without editing `settings.json`, lets Wisp set one up on request,
+adds header and OAuth authentication for hosted MCP servers, and offers the providers' own web
+search. It changes the live RPC contract (new commands, events, and fields), so an RC8 backend and
+frontend must be paired. This section describes the candidate under preparation; publication
+requires a separate tagged release.
+
+### MCP servers
+
+- `wisp mcp list`, `add`, `import`, `remove`, `enable`, `disable`, `login`, and `logout` edit
+  `mcp_servers` in `~/.wisp/settings.json` through a locked, validated writer that keeps every other
+  setting. Adding or enabling a server shows exactly what it runs, or where it connects and which
+  variables it sends there, and asks first. (#695)
+- `/mcp` in the TUI adds (by pasting a server's config snippet), enables, disables, removes,
+  reconnects, signs in to, and signs out of servers without restarting Wisp. Values you enter are
+  masked and never shown again. (#696, #697, #698, #703)
+- Ask Wisp to "set up the GitHub MCP server": it proposes the change with `propose_mcp_server` or
+  `propose_mcp_server_change`, and you confirm it. Only Confirm or Deny is offered; no permission
+  mode, `--yes`, or session grant approves a proposal, and one that seems to carry a secret, or a
+  field the confirmation does not show, is refused. (#699)
+- HTTP servers can authenticate with `headers` (stored values) and `headers_from` (a header built
+  from an environment variable, such as `"Authorization": "Bearer ${LINEAR_API_KEY}"`). Headers go
+  only to the server's own origin, and every confirmation names each variable and the host it is sent
+  to. Pasted snippets may set `headers`. (#701, #703)
+- OAuth sign-in for hosted servers such as Linear's: `wisp mcp login NAME` or `l` in `/mcp` opens
+  the sign-in page and waits for the browser. Tokens are saved in `~/.wisp/mcp-auth.json` (private,
+  protected from file tools), bound to the server's URL, refreshed automatically, and never shown or
+  sent to the model. A server that needs a new sign-in shows "sign in required". (#702, #703)
+
+### Web search
+
+- New user-only `web_search` setting (or `WISP_WEB_SEARCH`), off by default, offers the provider's
+  built-in web search to the model: Anthropic (at most 5 searches per reply), OpenAI, xAI, and the
+  Codex login. Google, DeepSeek, and OpenAI-compatible endpoints are not supported yet; the model is
+  told it cannot search. Providers bill searches on top of tokens, so a reply that searched shows its
+  cost as a lower bound (`cost ≥…`). (#700)
+- Anthropic `pause_turn` is now resumed inside the adapter as one response. (#700)
+
+### Event and protocol contract
+
+- New commands: `add_mcp_server`, `remove_mcp_server`, `set_mcp_server_enabled`, `reconnect_mcp`,
+  `preview_mcp_snippet`, `login_mcp_server`, and `logout_mcp_server`.
+- New events: `web.search` (`WebSearchPerformed`, also saved in sessions), `rpc.mcp.preview`
+  (`RpcMcpSnippetPreviewed`), and `rpc.mcp.login` (`RpcMcpLoginStarted`).
+- `rpc.mcp` server entries gain `launch` (what the server runs or connects to, values never
+  included) and `sign_in`. Tool approval requests gain `grants_allowed`. `UsageCost` gains
+  `web_searches`, present only when a reply searched.
+- New `McpStartupDiagnostic` codes: `invalid-header` and `login-required`.
+
+### Compatibility
+
+- RC7 reads RC8 sessions in which no web search ran. A session where one did (which records
+  `web_searches` and a `web.search` event) is reported as malformed by RC7.
+- RC7 cannot load a `settings.json` in which any MCP server uses `headers` or `headers_from`: it
+  ignores the whole file. Remove those entries before rolling back.
+
+## 0.2.0rc7 — 2026-10-15
 
 RC7 fixes a dead end found while dogfooding RC6: a prompt that failed, for example because the
 selected provider had no credentials, locked the TUI's composer until exit. It changes no session,
-event, or protocol format, so RC4 through RC7 read each other's sessions. This section describes the
-candidate under preparation; publication requires a separate tagged release.
+event, or protocol format, so RC4 through RC7 read each other's sessions.
 
 - Fixed the Rust TUI locking the composer after a failed prompt, which left "The prompt failed.
   Ctrl-C exits." as the only way out and made `/connect` unreachable without credentials. A failed

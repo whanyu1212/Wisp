@@ -62,10 +62,12 @@ class UsageCost(BaseModel):
     rates: UsageCostRates | None = None
     estimated_usd: Decimal | None = Field(default=None, ge=0)
     unavailable_reason: CostUnavailableReason | None = None
-    # Provider-native web searches the response ran. Providers bill them on top
-    # of tokens and the estimate prices tokens only, so a response with
-    # searches costs more than ``estimated_usd``.
-    web_searches: int = Field(default=0, ge=0)
+    # Provider-native web searches the response ran, or None when it ran none.
+    # Providers bill them on top of tokens and the estimate prices tokens only,
+    # so a response with searches costs more than ``estimated_usd``. None (and
+    # so omitted from saved sessions) keeps sessions without searches readable
+    # by releases that predate the field.
+    web_searches: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_estimate(self) -> Self:

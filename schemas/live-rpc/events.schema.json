@@ -6434,10 +6434,17 @@
           "title": "Unavailable Reason"
         },
         "web_searches": {
-          "default": 0,
-          "minimum": 0,
-          "title": "Web Searches",
-          "type": "integer"
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Web Searches"
         }
       },
       "required": [

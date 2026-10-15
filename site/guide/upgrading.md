@@ -6,7 +6,9 @@ RC4 adds prompt-cache improvements, removes the remaining compatibility shims, a
 backend and frontend to be the same Wisp release. RC5 fixes stdio MCP servers and `wisp update` in
 public installs. RC6 refreshes the Rust TUI's approval prompts, diff cards, tool-card markers, and
 working row, and fixes dropped trackpad scrolling. RC7 lets the TUI recover from a failed prompt, such
-as one sent without credentials, instead of requiring an exit.
+as one sent without credentials, instead of requiring an exit. RC8 manages MCP servers from `/mcp`,
+`wisp mcp`, or by asking Wisp, adds header and OAuth authentication for hosted MCP servers, and
+offers the providers' own web search.
 Check the
 [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
@@ -73,11 +75,11 @@ checkout; native wheels are built and published in lockstep with the Python rele
 
 ## Trying a published candidate
 
-After RC7's artifacts are published and verified, use its exact version in an explicit pin:
+After RC8's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --python 3.12 --from "wisp-ai==0.2.0rc7" wisp --version
-uvx --python 3.12 --from "wisp-ai==0.2.0rc7" wisp
+uvx --python 3.12 --from "wisp-ai==0.2.0rc8" wisp --version
+uvx --python 3.12 --from "wisp-ai==0.2.0rc8" wisp
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
@@ -89,16 +91,19 @@ still uses normal Wisp configuration and session locations. Use a disposable pro
 important state when testing. Continue using [0.1.0 installation instructions](./installation)
 if you do not want to opt into prerelease testing.
 
-To return a persistent `uv tool` installation to the published RC6 after an RC7 regression, exit
+To return a persistent `uv tool` installation to the published RC7 after an RC8 regression, exit
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.2.0rc6"
+uv tool install --force --python 3.12 "wisp-ai==0.2.0rc7"
 wisp --version
 ```
 
-RC4 through RC7 read each other's sessions. Going back to RC4 additionally needs
-`--with "mcp==2.0.0"` to keep stdio MCP servers working there.
+RC7 reads RC8 sessions in which no web search ran; it reports a session where one did as malformed.
+RC7 also ignores the whole `~/.wisp/settings.json` if any MCP server in it uses `headers` or
+`headers_from`, so remove those entries (or note them and re-add them later) before going back. RC4
+through RC7 read each other's sessions. Going back to RC4 additionally needs `--with "mcp==2.0.0"`
+to keep stdio MCP servers working there.
 
 This replaces the installed package and its paired native binary on supported platforms. Do not
 delete session files. Older versions may not understand records written by newer versions. In
@@ -108,7 +113,7 @@ sessions before going back to RC3, and test session resume before relying on a d
 
 ## Before promoting to 0.2.0
 
-Use the [RC7 release checklist](../contributing/rc7-release) for candidate publication, platform
+Use the [RC8 release checklist](../contributing/rc8-release) for candidate publication, platform
 installation, long-session measurements, and rollback gates.
 
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.

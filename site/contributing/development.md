@@ -47,7 +47,7 @@ never searches `PATH`. Source development uses the explicit override above. A re
 working directory.
 
 The Rust frontend is exact-lockstep with the Python runtime. The current package and crate
-versions are `0.2.0rc7` (Python) and `0.2.0-rc.7` (Cargo); only the prerelease spelling differs.
+versions are `0.2.0rc8` (Python) and `0.2.0-rc.8` (Cargo); only the prerelease spelling differs.
 Rust translates `-alpha.N`, `-beta.N`, and `-rc.N` to Python's `aN`, `bN`, and `rcN` before the
 exact version comparison. Neither the handshake nor events carry a protocol or schema version. Python's models and committed schemas remain authoritative, and `wisp-protocol`
 generates its private Rust projections from those schemas at compile time. Package, protocol, or

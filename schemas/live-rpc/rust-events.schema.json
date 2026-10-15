@@ -5906,10 +5906,17 @@
           "title": "UsageCostUnavailableReason"
         },
         "web_searches": {
-          "default": 0,
-          "minimum": 0,
-          "title": "UsageCostWebSearches",
-          "type": "integer"
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "UsageCostWebSearches"
         }
       },
       "required": [
