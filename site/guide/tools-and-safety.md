@@ -134,11 +134,12 @@ duplicate names, collisions, or limit violations expose none of that server's to
 Set `"enabled": false` on a server, or run `wisp mcp disable NAME`, to keep its settings without
 starting it.
 
-Run `/mcp` in the TUI to inspect configured server status, registered tool names, and sanitized
-startup failures. The command reads the current runtime snapshot and does not reconnect servers.
-SDK and RPC clients can add, remove, enable, disable, and reconnect servers without restarting
-Wisp; see the [SDK reference](../reference/sdk). Changes made with `wisp mcp` still apply the next
-time Wisp starts, or after a reconnect.
+Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and
+sanitized startup failures, and to add, remove, enable, disable, or reconnect servers without
+restarting Wisp; see [Managing MCP servers](./tui#managing-mcp-servers). Adding or enabling a server
+always shows exactly what it runs and asks for confirmation. SDK and RPC clients can make the same
+changes; see the [SDK reference](../reference/sdk). Changes made with `wisp mcp` apply the next time
+Wisp starts, or after a reconnect (`c` in `/mcp`).
 
 > [!TIP]
 > **Why 16 servers**

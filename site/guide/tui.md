@@ -180,8 +180,8 @@ closes logo, theme, help, history, context, discovery, model and connection view
 session/tree/detail views retain the normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
-drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`,
-which docks above the composer; at the minimum 30×8
+drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`
+and the `/mcp` add, enable, and remove panels, which dock above the composer; at the minimum 30×8
 terminal size they can fill the screen. Short decision layouts prioritize readable controls while
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
 read longer challenges. Pointer navigation requires the opt-in described below.
@@ -412,6 +412,34 @@ Allow-once and tool-session choices do not persist; temporary session grants exp
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
 is not saved. These choices do not change project trust or protected paths.
 
+### Managing MCP servers
+
+`/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
+you see what it runs (or the URL it connects to), the environment variables it sets or forwards,
+any startup error, and its tools. `PgUp`/`PgDn` scroll those details.
+
+| Key | Action |
+|---|---|
+| `a` | Add a server by pasting its config snippet |
+| `e` | Disable the selected server, or enable it after confirming what it runs |
+| `d` | Remove the selected server, after confirming |
+| `c` | Reconnect: reload servers from your settings file and restart them |
+| `r` | Refresh the status without reconnecting |
+| `Esc` | Close, or step back out of a panel |
+
+To add a server, press `a` and paste the `{"mcpServers": {...}}` block from the server's README, one
+server at a time (use `wisp mcp import` for several). Wisp reads the snippet without saving it. For
+each environment variable the server needs, choose whether to forward it from Wisp's environment or
+enter a value; entered values are masked, never shown again, and saved to `~/.wisp/settings.json`.
+The snippet's own values are ignored, since published snippets usually hold placeholders.
+
+Adding, enabling, and removing end in a confirmation docked above the composer that shows exactly
+what will run. Like an approval, it has no default: choose with `1`/`2`, or highlight with `↑`/`↓`
+and press `Enter`; a key pressed before the panel was drawn does nothing. Confirming saves the change
+and reconnects, and the list then shows the server's new status and tools. Changes wait until the
+current prompt finishes. "Allow for this session" answers for MCP tools are cleared on every
+reconnect.
+
 ## Steering and follow-ups
 
 The composer remains active while a prompt runs:
@@ -472,7 +500,7 @@ loss can leave a command outcome unknown, so destructive operations are not retr
 /logo [name]                preview or select a startup logo
 /update [check|install]     check immediately or explicitly install an update
 /skills                     inspect loaded skills and discovery diagnostics
-/mcp                        show configured MCP servers and registered tools
+/mcp                        manage MCP servers: add, remove, enable, disable, reconnect
 /quit, /exit
 ```
 
