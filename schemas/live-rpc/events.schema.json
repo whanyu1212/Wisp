@@ -2221,6 +2221,47 @@
       "title": "RpcMcpHeaderFrom",
       "type": "object"
     },
+    "RpcMcpLoginStarted": {
+      "additionalProperties": false,
+      "description": "Signing in to an MCP server needs the user in their browser.\n\nWisp tries to open ``authorization_url`` itself; a frontend shows it too,\nfor when no browser could be opened. It is the authorization server's own\npage (HTTPS, or HTTP on a loopback address) and carries no secret.",
+      "properties": {
+        "authorization_url": {
+          "maxLength": 8192,
+          "minLength": 1,
+          "title": "Authorization Url",
+          "type": "string"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.mcp.login",
+          "default": "rpc.mcp.login",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "name",
+        "authorization_url"
+      ],
+      "title": "RpcMcpLoginStarted",
+      "type": "object"
+    },
     "RpcMcpServerLaunch": {
       "additionalProperties": false,
       "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment. An HTTP\nserver's headers appear the same way: ``header_names`` carry stored values, and\n``headers_from`` send the named variables to the server's URL.",
@@ -2381,6 +2422,23 @@
           "title": "Name",
           "type": "string"
         },
+        "sign_in": {
+          "anyOf": [
+            {
+              "enum": [
+                "required",
+                "signed_in",
+                "available"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sign In"
+        },
         "status": {
           "enum": [
             "connected",
@@ -2405,7 +2463,8 @@
         "status",
         "tool_names",
         "error",
-        "launch"
+        "launch",
+        "sign_in"
       ],
       "title": "RpcMcpServerSnapshot",
       "type": "object"
@@ -6590,6 +6649,7 @@
       "rpc.device_code": "#/$defs/RpcDeviceCodeReported",
       "rpc.device_code.progress": "#/$defs/RpcDeviceCodeProgressReported",
       "rpc.mcp": "#/$defs/RpcMcpStatusReported",
+      "rpc.mcp.login": "#/$defs/RpcMcpLoginStarted",
       "rpc.mcp.preview": "#/$defs/RpcMcpSnippetPreviewed",
       "rpc.messages": "#/$defs/RpcMessagesReported",
       "rpc.model_catalog": "#/$defs/RpcModelCatalogReported",
@@ -6740,6 +6800,9 @@
     },
     {
       "$ref": "#/$defs/RpcMcpSnippetPreviewed"
+    },
+    {
+      "$ref": "#/$defs/RpcMcpLoginStarted"
     },
     {
       "$ref": "#/$defs/SkillCatalogUpdated"
@@ -7034,6 +7097,13 @@
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.mcp"
+    },
+    "rpc.mcp.login": {
+      "authorization_url": "https://auth.example.test/authorize",
+      "command_id": "command-1",
+      "name": "fixture",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.mcp.login"
     },
     "rpc.mcp.preview": {
       "command_id": "command-1",

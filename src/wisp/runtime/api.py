@@ -19,6 +19,7 @@ from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
     from wisp.mcp.config import McpServerConfig
+    from wisp.mcp.credentials import McpTokenStore
     from wisp.mcp.runtime import McpRuntime
 
 
@@ -136,6 +137,8 @@ class WispRuntime:
     # runtime failed; per-server failures are in `mcp_runtime.diagnostics` instead.
     failed_mcp_servers: tuple[str, ...] = ()
     auth_store: JsonAuthStore | None = field(default=None, repr=False)
+    # MCP OAuth credentials; None uses ~/.wisp/mcp-auth.json.
+    mcp_token_store: McpTokenStore | None = field(default=None, repr=False)
     openai_compatible_provider: str | None = None
     openai_compatible_requires_api_key: bool = True
     # Events from building this runtime. They are not refreshed when MCP servers

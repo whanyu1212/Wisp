@@ -80,11 +80,13 @@ class _HttpClient(httpx2.AsyncClient):
         *,
         origin: tuple[str, str, int | None] | None = None,
         auth_headers: Mapping[str, str] | None = None,
+        on_unauthorized: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._origin = origin
         self._auth_headers = dict(auth_headers or {})
+        self._on_unauthorized = on_unauthorized
 
     async def send(self, request: httpx2.Request, **kwargs: Any) -> httpx2.Response:
         """Send a request, bounding session termination (DELETE) by a deadline.
@@ -110,11 +112,16 @@ class _HttpClient(httpx2.AsyncClient):
             TimeoutError: A DELETE did not complete within the shutdown deadline.
         """
 
-        if self._auth_headers and _origin(request.url) == self._origin:
+        same_origin = _origin(request.url) == self._origin
+        if self._auth_headers and same_origin:
             for name, value in self._auth_headers.items():
                 request.headers[name] = value
         if request.method != "DELETE":
-            return await super().send(request, **kwargs)
+            response = await super().send(request, **kwargs)
+            # A 401 left after any OAuth flow means the user must sign in.
+            if response.status_code == 401 and same_origin and self._on_unauthorized:
+                self._on_unauthorized()
+            return response
         async with asyncio.timeout(_HTTP_SHUTDOWN_SECONDS):
             response = await super().send(request, **kwargs)
             if kwargs.get("stream"):
@@ -137,6 +144,8 @@ async def bounded_http_client(
     *,
     on_disconnect: Callable[[], None],
     headers: Mapping[str, str] | None = None,
+    auth: httpx2.Auth | None = None,
+    on_unauthorized: Callable[[], None] | None = None,
 ) -> AsyncIterator[TransportStreams]:
     """Open SDK streams with bounded bodies and task-local diagnostic redaction.
 
@@ -146,6 +155,11 @@ async def bounded_http_client(
         headers (Mapping[str, str] | None): Extra headers, such as credentials,
             sent only on requests to ``url``'s origin. Values must already be
             checked for line breaks and control characters.
+        auth (httpx2.Auth | None): OAuth for the server, such as the SDK's
+            ``OAuthClientProvider``. Its discovery and token requests use the
+            same client, so they are bounded and never redirected either.
+        on_unauthorized (Callable[[], None] | None): Called when the server still
+            answers 401, after any OAuth flow.
 
     Yields:
         TransportStreams: SDK-compatible incoming and outgoing message streams.
@@ -153,6 +167,9 @@ async def bounded_http_client(
     # Filters are shared, but their decision is task-local, preserving other HTTP users' logs.
     for name in (
         "mcp.client.streamable_http",
+        "mcp.client.auth",
+        "mcp.client.auth.oauth2",
+        "mcp.client.auth.utils",
         "client",
         "mcp.shared.jsonrpc_dispatcher",
         "httpx2",
@@ -168,6 +185,8 @@ async def bounded_http_client(
         async with _HttpClient(
             origin=_origin(httpx2.URL(url)),
             auth_headers=headers or {},
+            on_unauthorized=on_unauthorized,
+            auth=auth,
             follow_redirects=False,
             headers={"Accept-Encoding": "identity"},
             timeout=httpx2.Timeout(30.0, read=300.0),

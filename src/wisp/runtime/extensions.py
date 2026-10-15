@@ -30,6 +30,7 @@ from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ProviderRegistry, ToolRegistry
 
 if TYPE_CHECKING:
+    from wisp.mcp.credentials import McpTokenStore
     from wisp.mcp.runtime import McpRuntime
     from wisp.providers.anthropic import AnthropicCacheTtl
 from wisp.tools.shell.supervisor import ProcessSupervisor
@@ -44,8 +45,13 @@ async def build_runtime(
     mcp_servers: tuple[McpServerConfig, ...] = (),
     openai_compatible: OpenAICompatibleSettings | None = None,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
+    mcp_token_store: McpTokenStore | None = None,
 ) -> WispRuntime:
-    """Create runtime state and activate built-in extensions."""
+    """Create runtime state and activate built-in extensions.
+
+    ``mcp_token_store`` holds MCP OAuth credentials; None uses
+    ``~/.wisp/mcp-auth.json``.
+    """
 
     providers = ProviderRegistry()
     tools = ToolRegistry()
@@ -87,6 +93,7 @@ async def build_runtime(
                 enabled_servers,
                 api=api,
                 existing_tool_names=tools.names(),
+                token_store=mcp_token_store,
             )
     except BaseException:
         try:
@@ -106,6 +113,7 @@ async def build_runtime(
         mcp_runtime=mcp_runtime,
         mcp_server_configs=mcp_servers,
         auth_store=auth_store,
+        mcp_token_store=mcp_token_store,
         openai_compatible_provider=openai_compatible_provider,
         openai_compatible_requires_api_key=(
             openai_compatible.requires_api_key if openai_compatible is not None else True
@@ -176,6 +184,7 @@ async def restart_mcp_servers(
                 enabled_servers,
                 api=runtime.api,
                 existing_tool_names=runtime.tools.names(),
+                token_store=runtime.mcp_token_store,
             )
     finally:
         if started is None:

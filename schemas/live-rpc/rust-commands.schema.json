@@ -1027,6 +1027,74 @@
       "title": "InitCommand",
       "type": "object"
     },
+    "LoginMcpServerCommand": {
+      "additionalProperties": false,
+      "description": "Sign in to an HTTP MCP server with OAuth, then restart MCP servers.\n\nThe host opens the authorization page in the user's browser and reports it\nas ``rpc.mcp.login``; the command finishes when the browser returns, the\nsign-in times out, or the command is cancelled.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "LoginMcpServerCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "LoginMcpServerCommandName",
+          "type": "string"
+        },
+        "type": {
+          "const": "login_mcp_server",
+          "default": "login_mcp_server",
+          "title": "LoginMcpServerCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "LoginMcpServerCommand",
+      "type": "object"
+    },
+    "LogoutMcpServerCommand": {
+      "additionalProperties": false,
+      "description": "Forget an MCP server's OAuth sign-in, then restart MCP servers.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "LogoutMcpServerCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "LogoutMcpServerCommandName",
+          "type": "string"
+        },
+        "type": {
+          "const": "logout_mcp_server",
+          "default": "logout_mcp_server",
+          "title": "LogoutMcpServerCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "LogoutMcpServerCommand",
+      "type": "object"
+    },
     "NavigateSessionTreeCommand": {
       "additionalProperties": false,
       "description": "Navigate the selected session to one persisted tree entry.",
@@ -1786,6 +1854,8 @@
       "get_skills": "#/$defs/GetSkillsCommand",
       "get_state": "#/$defs/GetStateCommand",
       "init": "#/$defs/InitCommand",
+      "login_mcp_server": "#/$defs/LoginMcpServerCommand",
+      "logout_mcp_server": "#/$defs/LogoutMcpServerCommand",
       "navigate_session_tree": "#/$defs/NavigateSessionTreeCommand",
       "new_session": "#/$defs/NewSessionCommand",
       "pop_queue": "#/$defs/PopQueueCommand",
@@ -1866,6 +1936,12 @@
     },
     {
       "$ref": "#/$defs/ReconnectMcpCommand"
+    },
+    {
+      "$ref": "#/$defs/LoginMcpServerCommand"
+    },
+    {
+      "$ref": "#/$defs/LogoutMcpServerCommand"
     },
     {
       "$ref": "#/$defs/PreviewMcpSnippetCommand"

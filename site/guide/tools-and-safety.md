@@ -129,6 +129,32 @@ cannot replace the headers the transport manages (such as `Host`, `Accept-Encodi
 and the host it goes to. Pasted snippets with `headers` are not accepted yet; add those servers with
 `wisp mcp add --header` or `--header-from`.
 
+#### Signing in with OAuth
+
+Many hosted servers, such as Linear's, use OAuth instead of a token you paste. Add the server by URL,
+then sign in:
+
+```text
+wisp mcp add linear --url https://mcp.linear.app/mcp
+wisp mcp login linear
+```
+
+`login` opens the server's sign-in page in your browser and waits up to five minutes for the
+browser to return to Wisp, on a one-time `http://127.0.0.1` address. Wisp follows the MCP
+authorization spec: it discovers the server's authorization server, registers itself as a client,
+and uses PKCE with state and issuer checks. It opens the sign-in page only if it is HTTPS (or HTTP on
+a loopback address). Nothing is saved unless the whole sign-in succeeds.
+
+The tokens are saved in `~/.wisp/mcp-auth.json`, readable only by you, separate from `auth.json`
+and protected from Wisp's file tools like it. Each sign-in is bound to the server's URL: if the URL
+changes, the tokens are never sent to the new one. The access token goes only to the server's own
+origin, never to another host, and is never shown, logged, or sent to the model. Wisp refreshes it
+automatically. When a server refuses Wisp, or a refresh fails, the server shows as unavailable with
+"sign in with `wisp mcp login NAME`"; Wisp never opens a browser on its own. `wisp mcp logout NAME`
+forgets a sign-in, and removing a server forgets it too. A server that sends its own
+`Authorization` header does not sign in. Servers that require a pre-registered client, rather than
+registering Wisp themselves, are not supported yet.
+
 For stdio servers, `env` contains literal user-owned values. `env_from` forwards only the named
 variables from Wisp's process environment; if one is missing, that server is skipped. Server
 processes otherwise receive only the MCP SDK's small safe environment baseline, run from the user's
@@ -167,8 +193,8 @@ Wisp starts, or after a reconnect (`c` in `/mcp`).
 > starting every local server, rather than raising it without a lifecycle or lazy-start solution.
 
 Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
-Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, OAuth, and
-interactive authentication are not yet supported.
+Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, and OAuth clients that
+must be registered in advance are not yet supported.
 
 ### Asking Wisp to set up a server
 

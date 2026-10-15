@@ -106,6 +106,7 @@ DEFAULT_PROTECTED_PATHS: tuple[str, ...] = (
     ".netrc",
     ".pgpass",
     ".wisp/auth.json",
+    ".wisp/mcp-auth.json",
     ".wisp/settings.json",
 )
 

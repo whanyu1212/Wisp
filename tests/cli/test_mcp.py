@@ -397,3 +397,47 @@ def test_add_header_on_a_command_server_is_rejected(home: Path) -> None:
 
     assert result.exit_code != 0
     assert _servers(home) == {}
+
+
+def test_login_opens_the_sign_in_page_and_logout_forgets_it(
+    home: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    import httpx
+
+    from tests.mcp.test_http_transport import _mock_http
+    from tests.mcp.test_oauth import ISSUER, MCP_URL, _AuthorizationServer
+    from wisp.mcp.credentials import McpTokenStore
+
+    _mock_http(monkeypatch, _AuthorizationServer().handle)
+
+    def approve(url: str) -> bool:
+        query = {key: values[0] for key, values in parse_qs(urlsplit(url).query).items()}
+        httpx.get(query["redirect_uri"], params={"code": "code-1", "state": query["state"]})
+        return True
+
+    monkeypatch.setattr("wisp.cli.mcp.webbrowser.open", approve)
+    assert _run(["add", "linear", "--url", MCP_URL, "--yes"]).exit_code == 0
+
+    login = _run(["login", "linear"])
+
+    assert login.exit_code == 0, login.output
+    assert f"{ISSUER}/authorize?" in login.output
+    assert "Signed in to linear." in login.output
+    assert "access-1" not in login.output
+    assert McpTokenStore().load("linear", MCP_URL) is not None
+
+    logout = _run(["logout", "linear"])
+    assert logout.exit_code == 0, logout.output
+    assert McpTokenStore().load("linear", MCP_URL) is None
+    assert _run(["logout", "linear"]).exit_code != 0
+
+
+def test_login_refuses_a_command_server(home: Path) -> None:
+    assert _run(["add", "x", "--yes", "--", "npx"]).exit_code == 0
+
+    result = _run(["login", "x"])
+
+    assert result.exit_code != 0
+    assert "only HTTP servers sign in" in result.output

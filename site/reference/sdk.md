@@ -143,6 +143,8 @@ request. Completion and results arrive through `events()`.
 | `remove_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
 | `set_mcp_server_enabled` | `(name: str, enabled: bool, *, expected=None, command_id=None)` | Same as `add_mcp_server`; `expected` is required when enabling |
 | `reconnect_mcp` | `(*, command_id: str \| None = None)` | Reloads servers from the settings file and restarts them; same events |
+| `login_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Signs in to an HTTP server with OAuth: `RpcMcpLoginStarted` with the sign-in page's URL, then, once the browser returns, the same events as `add_mcp_server`; cancel the command to stop waiting |
+| `logout_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Forgets a server's sign-in; same events as `add_mcp_server` |
 | `preview_mcp_snippet` | `(snippet: str, *, command_id: str \| None = None)` | `RpcMcpSnippetPreviewed`; nothing is saved |
 | `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
 
@@ -165,6 +167,13 @@ enabled only if its saved settings still match, so a confirmation cannot enable 
 edited in the meantime. `env` and `headers` values given to `add_mcp_server` are written to the
 settings file and are never echoed in events or errors. A `headers_from` value names one variable,
 optionally after a scheme word: `{"Authorization": "Bearer ${LINEAR_API_KEY}"}`.
+
+An HTTP server's status also carries `sign_in`: `"required"` when the server refused Wisp or a saved
+sign-in could not be refreshed, `"signed_in"` when it started with a saved sign-in, and
+`"available"` when the user could sign in. It is null for servers that run a command or send their
+own `Authorization` header. `login_mcp_server` opens the sign-in page on the host's machine and
+reports its URL in `RpcMcpLoginStarted`, for a frontend to show when no browser opens; tokens never
+appear in events.
 
 `preview_mcp_snippet` parses a pasted `{"mcpServers": {...}}` snippet with the same rules as
 `wisp mcp import` and replies with each server's name and `launch`, naming environment variables

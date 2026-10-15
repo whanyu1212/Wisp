@@ -278,6 +278,8 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "preview_mcp_snippet": {"snippet": "<redacted>"},
     "reconnect_mcp": {},
+    "login_mcp_server": {"name": "fixture"},
+    "logout_mcp_server": {"name": "fixture"},
     "get_model_catalog": {},
     "get_messages": {},
     "get_queue_state": {},
@@ -402,6 +404,11 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "attempt": 1,
     },
     "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
+    "rpc.mcp.login": {
+        "command_id": "command-1",
+        "name": "fixture",
+        "authorization_url": "https://auth.example.test/authorize",
+    },
     "rpc.mcp.preview": {
         "command_id": "command-1",
         "servers": (

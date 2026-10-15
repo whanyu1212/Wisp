@@ -38,6 +38,8 @@ type _SequentialRpcCommandType = Literal[
     "remove_mcp_server",
     "set_mcp_server_enabled",
     "reconnect_mcp",
+    "login_mcp_server",
+    "logout_mcp_server",
 ]
 
 

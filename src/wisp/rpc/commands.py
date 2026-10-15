@@ -358,6 +358,25 @@ class ReconnectMcpCommand(RpcCommandModel):
     type: Literal["reconnect_mcp"] = "reconnect_mcp"
 
 
+class LoginMcpServerCommand(RpcCommandModel):
+    """Sign in to an HTTP MCP server with OAuth, then restart MCP servers.
+
+    The host opens the authorization page in the user's browser and reports it
+    as ``rpc.mcp.login``; the command finishes when the browser returns, the
+    sign-in times out, or the command is cancelled.
+    """
+
+    type: Literal["login_mcp_server"] = "login_mcp_server"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+
+
+class LogoutMcpServerCommand(RpcCommandModel):
+    """Forget an MCP server's OAuth sign-in, then restart MCP servers."""
+
+    type: Literal["logout_mcp_server"] = "logout_mcp_server"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+
+
 class GetMessagesCommand(RpcCommandModel):
     """Return a bounded persisted transcript page."""
 
@@ -622,6 +641,8 @@ type RpcCommand = Annotated[
     | RemoveMcpServerCommand
     | SetMcpServerEnabledCommand
     | ReconnectMcpCommand
+    | LoginMcpServerCommand
+    | LogoutMcpServerCommand
     | PreviewMcpSnippetCommand
     | GetMessagesCommand
     | GetSessionsCommand
