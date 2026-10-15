@@ -1295,6 +1295,40 @@
       "title": "PopQueueCommand",
       "type": "object"
     },
+    "PreviewMcpSnippetCommand": {
+      "additionalProperties": false,
+      "description": "Parse a pasted ``{\"mcpServers\": {...}}`` snippet without saving anything.\n\nThe reply lists each server's launch settings with environment variables named\nonly. A snippet can hold real secret values, so it is treated like an API key: it\nis never echoed in events, errors, or this model's repr.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "snippet": {
+          "maxLength": 65536,
+          "minLength": 1,
+          "title": "Snippet",
+          "type": "string"
+        },
+        "type": {
+          "const": "preview_mcp_snippet",
+          "default": "preview_mcp_snippet",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "snippet"
+      ],
+      "title": "PreviewMcpSnippetCommand",
+      "type": "object"
+    },
     "PromptCommand": {
       "additionalProperties": false,
       "description": "Run one agent turn.",
@@ -1388,6 +1422,59 @@
       "title": "RemoveMcpServerCommand",
       "type": "object"
     },
+    "RpcMcpServerLaunch": {
+      "additionalProperties": false,
+      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Args",
+          "type": "array"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Command"
+        },
+        "env_from": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Env From",
+          "type": "array"
+        },
+        "env_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Env Names",
+          "type": "array"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "Url"
+        }
+      },
+      "required": [
+        "args",
+        "env_names",
+        "env_from"
+      ],
+      "title": "RpcMcpServerLaunch",
+      "type": "object"
+    },
     "SelectSessionCommand": {
       "additionalProperties": false,
       "description": "Select a persisted session as the active RPC session.",
@@ -1423,11 +1510,18 @@
     },
     "SetMcpServerEnabledCommand": {
       "additionalProperties": false,
-      "description": "Enable or disable an MCP server in the user settings, then restart MCP servers.\n\nEnabling a server that runs a command is the user's decision, as adding one is.",
+      "description": "Enable or disable an MCP server in the user settings, then restart MCP servers.\n\nEnabling a server is the user's decision, as adding one is. ``expected`` is\nrequired when enabling: it is the ``launch`` from the ``rpc.mcp`` status that the\nuser was shown and confirmed, and the server is enabled only if its saved\nsettings still match it.",
       "properties": {
         "enabled": {
           "title": "Enabled",
           "type": "boolean"
+        },
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpcMcpServerLaunch"
+            }
+          ]
         },
         "id": {
           "anyOf": [
@@ -1800,6 +1894,7 @@
       "navigate_session_tree": "#/$defs/NavigateSessionTreeCommand",
       "new_session": "#/$defs/NewSessionCommand",
       "pop_queue": "#/$defs/PopQueueCommand",
+      "preview_mcp_snippet": "#/$defs/PreviewMcpSnippetCommand",
       "prompt": "#/$defs/PromptCommand",
       "reconnect_mcp": "#/$defs/ReconnectMcpCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
@@ -1876,6 +1971,9 @@
     },
     {
       "$ref": "#/$defs/ReconnectMcpCommand"
+    },
+    {
+      "$ref": "#/$defs/PreviewMcpSnippetCommand"
     },
     {
       "$ref": "#/$defs/GetMessagesCommand"
@@ -2054,6 +2152,10 @@
       "kind": "steering",
       "type": "pop_queue"
     },
+    "preview_mcp_snippet": {
+      "snippet": "<redacted>",
+      "type": "preview_mcp_snippet"
+    },
     "prompt": {
       "prompt": "fixture, 世界",
       "type": "prompt"
@@ -2070,7 +2172,19 @@
       "type": "select_session"
     },
     "set_mcp_server_enabled": {
-      "enabled": false,
+      "enabled": true,
+      "expected": {
+        "args": [
+          "--stdio"
+        ],
+        "command": "fixture-server",
+        "env_from": [
+          "FIXTURE_HOME"
+        ],
+        "env_names": [
+          "FIXTURE_TOKEN"
+        ]
+      },
       "name": "fixture",
       "type": "set_mcp_server_enabled"
     },

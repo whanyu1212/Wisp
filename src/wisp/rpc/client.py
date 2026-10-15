@@ -20,6 +20,7 @@ from wisp.events import (
     PermissionMode,
     QueueKind,
     QueueMode,
+    RpcMcpServerLaunch,
     wisp_event_from_json,
 )
 from wisp.rpc.commands import (
@@ -52,6 +53,7 @@ from wisp.rpc.commands import (
     NavigateSessionTreeCommand,
     NewSessionCommand,
     PopQueueCommand,
+    PreviewMcpSnippetCommand,
     PromptCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
@@ -294,17 +296,37 @@ class RpcController:
         return selected_id
 
     async def set_mcp_server_enabled(
-        self, name: str, enabled: bool, *, command_id: str | None = None
+        self,
+        name: str,
+        enabled: bool,
+        *,
+        expected: RpcMcpServerLaunch | None = None,
+        command_id: str | None = None,
     ) -> str:
         """Enable or disable an MCP server and restart MCP servers.
 
-        Enabling a server that runs a command is the user's decision, as adding one is.
+        Enabling is the user's decision. Pass as ``expected`` the server's ``launch``
+        from the MCP status that the user confirmed; it is required when enabling, and
+        the server is enabled only if its saved settings still match.
         """
 
         selected_id = command_id or self._command_id_factory("mcp-enable")
         await self._transport.send(
-            SetMcpServerEnabledCommand(id=selected_id, name=name, enabled=enabled)
+            SetMcpServerEnabledCommand(
+                id=selected_id, name=name, enabled=enabled, expected=expected
+            )
         )
+        return selected_id
+
+    async def preview_mcp_snippet(self, snippet: str, *, command_id: str | None = None) -> str:
+        """Parse a pasted ``{"mcpServers": {...}}`` snippet without saving it.
+
+        The reply is ``RpcMcpSnippetPreviewed``. The snippet is never echoed back, and
+        environment variables in the reply are named only.
+        """
+
+        selected_id = command_id or self._command_id_factory("mcp-preview")
+        await self._transport.send(PreviewMcpSnippetCommand(id=selected_id, snippet=snippet))
         return selected_id
 
     async def reconnect_mcp(self, *, command_id: str | None = None) -> str:

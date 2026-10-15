@@ -198,7 +198,7 @@ def test_command_schema_contains_every_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 41
+    assert len(mapping) == 42
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
 
@@ -239,7 +239,7 @@ def test_conformance_fixtures_cover_and_round_trip_every_wire_discriminator() ->
 def test_rust_discovery_fixtures_round_trip_through_python_models() -> None:
     fixture_path = FIXTURES_DIR / "rust_tui_discovery.json"
     fixtures = json.loads(fixture_path.read_text(encoding="utf-8"))
-    assert set(fixtures) == {"rpc.skills", "skill.catalog.updated", "rpc.mcp"}
+    assert set(fixtures) == {"rpc.skills", "skill.catalog.updated", "rpc.mcp", "rpc.mcp.preview"}
     validator = Draft202012Validator(_artifact("events.schema.json"))
     for kind, payload in fixtures.items():
         assert payload["type"] == kind
@@ -338,7 +338,7 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 53
+    assert len(mapping) == 54
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
     for name, definition in cast(dict[str, dict[str, object]], schema["$defs"]).items():

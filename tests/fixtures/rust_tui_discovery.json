@@ -112,7 +112,19 @@
           "tool_names": [
             "mcp__search__query"
           ],
-          "error": null
+          "error": null,
+          "launch": {
+            "command": "npx",
+            "args": [
+              "-y",
+              "search-server"
+            ],
+            "url": null,
+            "env_names": [],
+            "env_from": [
+              "SEARCH_TOKEN"
+            ]
+          }
         },
         {
           "name": "files",
@@ -120,21 +132,68 @@
           "tool_names": [
             "mcp__files__read"
           ],
-          "error": null
+          "error": null,
+          "launch": {
+            "command": null,
+            "args": [],
+            "url": "https://files.example/mcp",
+            "env_names": [],
+            "env_from": []
+          }
         },
         {
           "name": "offline",
           "status": "unavailable",
           "tool_names": [],
-          "error": "Server startup failed"
+          "error": "Server startup failed",
+          "launch": {
+            "command": "offline-server",
+            "args": [],
+            "url": null,
+            "env_names": [],
+            "env_from": []
+          }
         },
         {
           "name": "archived",
           "status": "disabled",
           "tool_names": [],
-          "error": null
+          "error": null,
+          "launch": {
+            "command": "uvx",
+            "args": [
+              "archive-server"
+            ],
+            "url": null,
+            "env_names": [
+              "ARCHIVE_TOKEN"
+            ],
+            "env_from": []
+          }
         }
       ]
     }
+  },
+  "rpc.mcp.preview": {
+    "type": "rpc.mcp.preview",
+    "timestamp": "2026-09-11T00:00:00Z",
+    "command_id": "preview-1",
+    "servers": [
+      {
+        "name": "github",
+        "launch": {
+          "command": "npx",
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-github"
+          ],
+          "url": null,
+          "env_names": [
+            "GITHUB_PERSONAL_ACCESS_TOKEN"
+          ],
+          "env_from": []
+        }
+      }
+    ]
   }
 }

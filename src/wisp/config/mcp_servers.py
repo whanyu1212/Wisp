@@ -119,7 +119,7 @@ def set_user_mcp_server_enabled(
     name: str,
     enabled: bool,
     *,
-    expected: McpServerConfig | None = None,
+    confirmed: Callable[[McpServerConfig], bool] | None = None,
     home_dir: Path | None = None,
 ) -> None:
     """Enable or disable the server named ``name`` without changing anything else.
@@ -127,21 +127,22 @@ def set_user_mcp_server_enabled(
     Args:
         name (str): Server to change.
         enabled (bool): New state.
-        expected (McpServerConfig | None): The configuration the user was shown. When
-            given, the change is refused if the saved server no longer matches it, so
-            a confirmation cannot enable a command that was edited in the meantime.
+        confirmed (Callable[[McpServerConfig], bool] | None): Whether the saved
+            server is still the one the user confirmed, checked under the settings
+            lock. When given and false, the change is refused, so a confirmation
+            cannot enable a command that was edited in the meantime.
         home_dir (Path | None): User home override, for isolated callers.
 
     Raises:
-        McpSettingsError: If no such server exists, it changed since ``expected`` was
-            read, or the settings are invalid.
+        McpSettingsError: If no such server exists, it is no longer the one the user
+            confirmed, or the settings are invalid.
     """
 
     def change(servers: dict[str, object]) -> None:
         entry = servers.get(name)
         if not isinstance(entry, dict):
             raise McpSettingsError(f"no MCP server named {name!r} is configured")
-        if expected is not None and not _same_server(validated_mcp_server(name, entry), expected):
+        if confirmed is not None and not confirmed(validated_mcp_server(name, entry)):
             raise McpSettingsError(f"MCP server {name!r} changed while you were confirming")
         updated = dict(entry)
         if enabled:
@@ -232,9 +233,25 @@ def _settings_entry(server: McpServerConfig) -> dict[str, object]:
     return entry
 
 
-def _same_server(saved: McpServerConfig, shown: McpServerConfig) -> bool:
-    # SecretStr compares by value, so env changes count; `enabled` is what changes.
-    return saved.model_dump(exclude={"enabled"}) == shown.model_dump(exclude={"enabled"})
+def same_launch(saved: McpServerConfig, shown: McpServerConfig) -> bool:
+    """Return whether two servers run or connect to the same thing, as a user sees it.
+
+    Compares the transport, arguments, and environment variable names; environment
+    values are never shown, so they are not part of what a user confirms.
+
+    Args:
+        saved (McpServerConfig): The server as currently saved.
+        shown (McpServerConfig): The server as the user was shown it.
+
+    Returns:
+        bool: True when a confirmation of ``shown`` still covers ``saved``.
+    """
+
+    def launch(server: McpServerConfig) -> tuple[object, ...]:
+        names = tuple(name for name, _value in server.env)
+        return (server.command, server.args, server.url, names, server.env_from)
+
+    return launch(saved) == launch(shown)
 
 
 def _update_user_mcp_servers(
@@ -300,6 +317,7 @@ __all__ = [
     "load_user_mcp_servers",
     "parse_mcp_snippet",
     "remove_user_mcp_server",
+    "same_launch",
     "set_user_mcp_server_enabled",
     "validated_mcp_server",
 ]

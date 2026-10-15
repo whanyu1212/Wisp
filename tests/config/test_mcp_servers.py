@@ -17,6 +17,7 @@ from wisp.config.mcp_servers import (
     load_user_mcp_servers,
     parse_mcp_snippet,
     remove_user_mcp_server,
+    same_launch,
     set_user_mcp_server_enabled,
     validated_mcp_server,
 )
@@ -186,11 +187,15 @@ def test_enable_refuses_a_server_that_changed_since_it_was_shown(tmp_path: Path)
     add_user_mcp_servers((_stdio(command="curl", enabled=False),), replace=True, home_dir=tmp_path)
 
     with pytest.raises(McpSettingsError, match="changed while you were confirming"):
-        set_user_mcp_server_enabled("github", True, expected=shown, home_dir=tmp_path)
+        set_user_mcp_server_enabled(
+            "github", True, confirmed=lambda saved: same_launch(saved, shown), home_dir=tmp_path
+        )
     (current,) = load_user_mcp_servers(home_dir=tmp_path)
     assert not current.enabled
 
-    set_user_mcp_server_enabled("github", True, expected=current, home_dir=tmp_path)
+    set_user_mcp_server_enabled(
+        "github", True, confirmed=lambda saved: same_launch(saved, current), home_dir=tmp_path
+    )
     (enabled,) = load_user_mcp_servers(home_dir=tmp_path)
     assert enabled.enabled
 

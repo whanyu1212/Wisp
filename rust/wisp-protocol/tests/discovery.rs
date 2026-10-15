@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use wisp_protocol::{
     commands::WispTypedClientRpcCommands,
-    events::{self, McpServerStatus},
+    events::{self, McpServerLaunch, McpServerStatus},
 };
 
 fn fixture(kind: &str) -> Value {
@@ -110,4 +110,71 @@ fn actionable_skill_names_match_the_backend_directive_grammar() {
         entry.name = name.into();
         assert!(!entry.is_invocable(), "{name}");
     }
+}
+
+#[test]
+fn mcp_launch_settings_and_snippet_previews_project_from_python_fixtures() {
+    let mcp = events::deserialize(fixture("rpc.mcp")).unwrap();
+    let status = mcp.mcp_status("mcp-1").unwrap();
+    let archived = status.servers.last().unwrap().launch.clone().unwrap();
+    assert_eq!(archived.command.as_deref(), Some("uvx"));
+    assert_eq!(archived.env_names, ["ARCHIVE_TOKEN"]);
+    assert_eq!(
+        status.servers[1].launch.as_ref().unwrap().url.as_deref(),
+        Some("https://files.example/mcp")
+    );
+
+    let preview = events::deserialize(fixture("rpc.mcp.preview")).unwrap();
+    assert!(preview.mcp_snippet_preview("other").is_none());
+    let servers = preview.mcp_snippet_preview("preview-1").unwrap();
+    assert_eq!(servers.len(), 1);
+    assert_eq!(servers[0].name, "github");
+    assert_eq!(
+        servers[0].launch.env_names,
+        ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+    );
+}
+
+#[test]
+fn mcp_management_builders_validate_and_redact_secrets() {
+    let launch = McpServerLaunch {
+        command: Some("npx".into()),
+        args: vec!["-y".into(), "server".into()],
+        url: None,
+        env_names: vec!["TOKEN".into()],
+        env_from: vec!["HOME_DIR".into()],
+    };
+    let add = WispTypedClientRpcCommands::add_mcp_server(
+        "add-1",
+        "github",
+        &launch,
+        &[("TOKEN".into(), "sentinel-secret".into())],
+        false,
+    )
+    .unwrap();
+    assert!(!format!("{add:?}").contains("sentinel-secret"));
+    let wire = add.to_value().unwrap();
+    assert_eq!(wire["env"]["TOKEN"], "sentinel-secret");
+    assert_eq!(wire["command"], "npx");
+    assert!(wire.get("url").is_none());
+
+    let preview =
+        WispTypedClientRpcCommands::preview_mcp_snippet("p-1", "{\"sentinel-secret\": 1}").unwrap();
+    assert!(!format!("{preview:?}").contains("sentinel-secret"));
+
+    let enable =
+        WispTypedClientRpcCommands::set_mcp_server_enabled("e-1", "github", true, Some(&launch))
+            .unwrap();
+    assert_eq!(
+        enable.to_value().unwrap()["expected"],
+        json!({
+            "command": "npx",
+            "args": ["-y", "server"],
+            "env_names": ["TOKEN"],
+            "env_from": ["HOME_DIR"],
+        })
+    );
+    assert!(WispTypedClientRpcCommands::remove_mcp_server("r-1", "github").is_ok());
+    assert!(WispTypedClientRpcCommands::reconnect_mcp("c-1").is_ok());
+    assert!(WispTypedClientRpcCommands::remove_mcp_server("r-2", "").is_err());
 }

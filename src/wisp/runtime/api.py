@@ -18,6 +18,7 @@ from wisp.tools.base import Tool, ToolExecutionMetadata, ToolPromptMetadata
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
+    from wisp.mcp.config import McpServerConfig
     from wisp.mcp.runtime import McpRuntime
 
 
@@ -127,6 +128,8 @@ class WispRuntime:
         repr=False,
     )
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
+    # Every configured MCP server, enabled or not, as last started; holds secrets.
+    mcp_server_configs: tuple[McpServerConfig, ...] = field(default=(), repr=False)
     # Configured servers that are not started because their settings disable them.
     disabled_mcp_servers: tuple[str, ...] = ()
     # Enabled servers left without a connection because a restart of the whole MCP
@@ -158,6 +161,7 @@ class WispRuntime:
         self,
         mcp_runtime: McpRuntime | None,
         *,
+        mcp_server_configs: tuple[McpServerConfig, ...],
         disabled_mcp_servers: tuple[str, ...],
         failed_mcp_servers: tuple[str, ...],
         unavailable_tool_prefixes: tuple[str, ...],
@@ -170,6 +174,7 @@ class WispRuntime:
         """
 
         object.__setattr__(self, "mcp_runtime", mcp_runtime)
+        object.__setattr__(self, "mcp_server_configs", mcp_server_configs)
         object.__setattr__(self, "disabled_mcp_servers", disabled_mcp_servers)
         object.__setattr__(self, "failed_mcp_servers", failed_mcp_servers)
         object.__setattr__(self, "unavailable_tool_prefixes", unavailable_tool_prefixes)

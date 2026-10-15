@@ -265,7 +265,18 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "env_from": ["FIXTURE_HOME"],
     },
     "remove_mcp_server": {"name": "fixture"},
-    "set_mcp_server_enabled": {"name": "fixture", "enabled": False},
+    "set_mcp_server_enabled": {
+        "name": "fixture",
+        "enabled": True,
+        "expected": {
+            "command": "fixture-server",
+            "args": ["--stdio"],
+            "url": None,
+            "env_names": ["FIXTURE_TOKEN"],
+            "env_from": ["FIXTURE_HOME"],
+        },
+    },
+    "preview_mcp_snippet": {"snippet": "<redacted>"},
     "reconnect_mcp": {},
     "get_model_catalog": {},
     "get_messages": {},
@@ -391,6 +402,21 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "attempt": 1,
     },
     "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
+    "rpc.mcp.preview": {
+        "command_id": "command-1",
+        "servers": (
+            {
+                "name": "fixture",
+                "launch": {
+                    "command": "fixture-server",
+                    "args": ("--stdio",),
+                    "url": None,
+                    "env_names": ("FIXTURE_TOKEN",),
+                    "env_from": (),
+                },
+            },
+        ),
+    },
     "rpc.model_catalog": {
         "command_id": "command-1",
         "catalog": {

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
 
 import anyio
 from anyio.abc import TaskGroup
@@ -26,6 +25,7 @@ from wisp.config.mcp_servers import (
     McpSettingsError,
     add_user_mcp_servers,
     load_user_mcp_servers,
+    parse_mcp_snippet,
     remove_user_mcp_server,
     set_user_mcp_server_enabled,
     validated_mcp_server,
@@ -33,13 +33,17 @@ from wisp.config.mcp_servers import (
 from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,
+    RpcMcpServerLaunch,
+    RpcMcpServerPreview,
     RpcMcpServerSnapshot,
+    RpcMcpSnippetPreviewed,
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
 )
 from wisp.mcp.config import McpServerConfig
 from wisp.rpc.commands import (
     AddMcpServerCommand,
+    PreviewMcpSnippetCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
     SetMcpServerEnabledCommand,
@@ -232,6 +236,35 @@ class RpcMcpServers:
         return error
 
 
+def handle_rpc_mcp_snippet_preview_command(
+    command: PreviewMcpSnippetCommand,
+    *,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report the servers a pasted snippet describes, without saving them.
+
+    Errors name the problem without echoing snippet values, and the reply names
+    environment variables only.
+    """
+
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    try:
+        servers = parse_mcp_snippet(command.snippet)
+    except McpSettingsError as exc:
+        lifecycle.fail(str(exc))
+        return
+    write_event(
+        RpcMcpSnippetPreviewed(
+            command_id=lifecycle.command_id,
+            servers=tuple(
+                RpcMcpServerPreview(name=server.name, launch=rpc_mcp_server_launch(server))
+                for server in servers
+            ),
+        )
+    )
+    lifecycle.finish()
+
+
 def _change_settings(command: McpServerCommand) -> None:
     """Apply one command's change to the user settings file.
 
@@ -254,10 +287,33 @@ def _change_settings(command: McpServerCommand) -> None:
     elif isinstance(command, RemoveMcpServerCommand):
         remove_user_mcp_server(command.name)
     elif isinstance(command, SetMcpServerEnabledCommand):
-        # Unlike `wisp mcp enable`, this cannot check the entry against what the
-        # user was shown: RPC has no command that shows a server's launch settings
-        # yet. HY-258 adds one, and the check, before the TUI offers enabling.
-        set_user_mcp_server_enabled(command.name, command.enabled)
+        expected = command.expected
+        set_user_mcp_server_enabled(
+            command.name,
+            command.enabled,
+            confirmed=(
+                None if expected is None else lambda saved: rpc_mcp_server_launch(saved) == expected
+            ),
+        )
+
+
+def rpc_mcp_server_launch(server: McpServerConfig) -> RpcMcpServerLaunch:
+    """Return what ``server`` runs or connects to, naming environment variables only.
+
+    Args:
+        server (McpServerConfig): Configured server.
+
+    Returns:
+        RpcMcpServerLaunch: The settings a user must see to confirm the server.
+    """
+
+    return RpcMcpServerLaunch(
+        command=server.command,
+        args=server.args,
+        url=server.url,
+        env_names=tuple(name for name, _value in server.env),
+        env_from=server.env_from,
+    )
 
 
 def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
@@ -267,38 +323,44 @@ def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
         runtime (WispRuntime): Runtime whose MCP connections are reported.
 
     Returns:
-        RpcMcpStatusSnapshot: Status without commands, URLs, or environment values.
+        RpcMcpStatusSnapshot: Status and launch settings, without environment values.
     """
 
-    snapshots = [
-        RpcMcpServerSnapshot(name=name, status="disabled") for name in runtime.disabled_mcp_servers
-    ]
-    snapshots.extend(
-        RpcMcpServerSnapshot(
-            name=name,
-            status="unavailable",
-            error=f"MCP server {name} is unavailable: the MCP runtime could not start",
-        )
-        for name in runtime.failed_mcp_servers
-    )
+    configs = {server.name: server for server in runtime.mcp_server_configs}
     mcp_runtime = runtime.mcp_runtime
-    if mcp_runtime is not None:
-        diagnostics = {item.server_name: item for item in mcp_runtime.diagnostics}
-        for name in mcp_runtime.server_names:
-            diagnostic = diagnostics.get(name)
-            status: Literal["connected", "disconnected", "unavailable"]
-            if diagnostic is not None:
-                status = "unavailable"
-            elif mcp_runtime.is_connected(name):
-                status = "connected"
-            else:
-                status = "disconnected"
-            snapshots.append(
-                RpcMcpServerSnapshot(
-                    name=name,
-                    status=status,
-                    tool_names=mcp_runtime.tool_names_for(name),
-                    error=diagnostic.message if diagnostic is not None else None,
-                )
+    running = mcp_runtime.server_names if mcp_runtime is not None else ()
+    diagnostics = (
+        {item.server_name: item for item in mcp_runtime.diagnostics}
+        if mcp_runtime is not None
+        else {}
+    )
+    names = sorted({*configs, *running, *runtime.disabled_mcp_servers, *runtime.failed_mcp_servers})
+    snapshots: list[RpcMcpServerSnapshot] = []
+    for name in names:
+        config = configs.get(name)
+        launch = rpc_mcp_server_launch(config) if config is not None else None
+        diagnostic = diagnostics.get(name)
+        if name in runtime.disabled_mcp_servers:
+            snapshot = RpcMcpServerSnapshot(name=name, status="disabled", launch=launch)
+        elif name in runtime.failed_mcp_servers:
+            snapshot = RpcMcpServerSnapshot(
+                name=name,
+                status="unavailable",
+                error=f"MCP server {name} is unavailable: the MCP runtime could not start",
+                launch=launch,
             )
-    return RpcMcpStatusSnapshot(servers=tuple(sorted(snapshots, key=lambda item: item.name)))
+        elif mcp_runtime is None or name not in running:
+            continue
+        elif diagnostic is not None:
+            snapshot = RpcMcpServerSnapshot(
+                name=name, status="unavailable", error=diagnostic.message, launch=launch
+            )
+        else:
+            snapshot = RpcMcpServerSnapshot(
+                name=name,
+                status="connected" if mcp_runtime.is_connected(name) else "disconnected",
+                tool_names=mcp_runtime.tool_names_for(name),
+                launch=launch,
+            )
+        snapshots.append(snapshot)
+    return RpcMcpStatusSnapshot(servers=tuple(snapshots))

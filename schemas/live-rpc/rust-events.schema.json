@@ -2025,6 +2025,90 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcMcpServerLaunch": {
+      "additionalProperties": false,
+      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerLaunchArgs",
+          "type": "array"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMcpServerLaunchCommand"
+        },
+        "env_from": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerLaunchEnvFrom",
+          "type": "array"
+        },
+        "env_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerLaunchEnvNames",
+          "type": "array"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMcpServerLaunchUrl"
+        }
+      },
+      "required": [
+        "command",
+        "args",
+        "url",
+        "env_names",
+        "env_from"
+      ],
+      "title": "RpcMcpServerLaunch",
+      "type": "object"
+    },
+    "RpcMcpServerPreview": {
+      "additionalProperties": false,
+      "description": "One server parsed from a pasted config snippet, not yet saved.",
+      "properties": {
+        "launch": {
+          "$ref": "#/$defs/RpcMcpServerLaunch",
+          "title": "RpcMcpServerPreviewLaunch"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "RpcMcpServerPreviewName",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "launch"
+      ],
+      "title": "RpcMcpServerPreview",
+      "type": "object"
+    },
     "RpcMcpServerSnapshot": {
       "additionalProperties": false,
       "description": "Sanitized status for one configured MCP server.",
@@ -2040,6 +2124,18 @@
           ],
           "default": null,
           "title": "RpcMcpServerSnapshotError"
+        },
+        "launch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RpcMcpServerLaunch"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMcpServerSnapshotLaunch"
         },
         "name": {
           "minLength": 1,
@@ -2069,9 +2165,46 @@
         "name",
         "status",
         "tool_names",
-        "error"
+        "error",
+        "launch"
       ],
       "title": "RpcMcpServerSnapshot",
+      "type": "object"
+    },
+    "RpcMcpSnippetPreviewed": {
+      "additionalProperties": false,
+      "description": "Servers parsed from a pasted MCP config snippet, returned over RPC.\n\nEnvironment values from the snippet are never included: a frontend asks for\neach one again, or forwards the variable from Wisp's environment.",
+      "properties": {
+        "command_id": {
+          "title": "RpcMcpSnippetPreviewedCommandId",
+          "type": "string"
+        },
+        "servers": {
+          "items": {
+            "$ref": "#/$defs/RpcMcpServerPreview"
+          },
+          "title": "RpcMcpSnippetPreviewedServers",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "RpcMcpSnippetPreviewedTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.mcp.preview",
+          "default": "rpc.mcp.preview",
+          "title": "RpcMcpSnippetPreviewedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "servers"
+      ],
+      "title": "RpcMcpSnippetPreviewed",
       "type": "object"
     },
     "RpcMcpStatusReported": {
@@ -5756,6 +5889,7 @@
       "rpc.device_code": "#/$defs/RpcDeviceCodeReported",
       "rpc.device_code.progress": "#/$defs/RpcDeviceCodeProgressReported",
       "rpc.mcp": "#/$defs/RpcMcpStatusReported",
+      "rpc.mcp.preview": "#/$defs/RpcMcpSnippetPreviewed",
       "rpc.messages": "#/$defs/RpcMessagesReported",
       "rpc.model_catalog": "#/$defs/RpcModelCatalogReported",
       "rpc.permissions": "#/$defs/RpcPermissionsReported",
@@ -5898,6 +6032,9 @@
     },
     {
       "$ref": "#/$defs/RpcMcpStatusReported"
+    },
+    {
+      "$ref": "#/$defs/RpcMcpSnippetPreviewed"
     },
     {
       "$ref": "#/$defs/SkillCatalogUpdated"
