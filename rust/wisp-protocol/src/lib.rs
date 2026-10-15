@@ -810,6 +810,11 @@ pub mod commands {
             enabled: bool,
             expected: Option<&crate::discovery::McpServerLaunch>,
         ) -> Result<Self, super::ProtocolDecodeError> {
+            if enabled && expected.is_none() {
+                return Err(super::ProtocolDecodeError(
+                    "enabling an MCP server requires the confirmed launch settings".into(),
+                ));
+            }
             let mut command = serde_json::json!({
                 "type": "set_mcp_server_enabled",
                 "id": id,

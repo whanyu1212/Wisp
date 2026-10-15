@@ -253,6 +253,9 @@ def handle_rpc_mcp_snippet_preview_command(
     except McpSettingsError as exc:
         lifecycle.fail(str(exc))
         return
+    except Exception:  # noqa: BLE001 - a malformed snippet must not stop the host
+        lifecycle.fail("the snippet could not be parsed")
+        return
     write_event(
         RpcMcpSnippetPreviewed(
             command_id=lifecycle.command_id,

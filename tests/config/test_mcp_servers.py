@@ -289,6 +289,8 @@ def test_parse_snippet_accepts_published_shapes() -> None:
         ('{"mcpServers": {"a": {"command": "x", "cwd": "/"}}}', "unsupported settings: cwd"),
         ('{"mcpServers": {"a": {"command": "x", "type": "http"}}}', "does not match"),
         ('{"mcpServers": {"a": {"url": "https://e.com", "type": "stdio"}}}', "does not match"),
+        ('{"mcpServers": {"a": {"command": "x", "type": []}}}', "does not match"),
+        ('{"mcpServers": {"a": {"command": "x", "type": {"k": 1}}}}', "does not match"),
         ('{"mcpServers": {"a": "npx"}}', "must be a JSON object"),
         ('{"mcpServers": {"Bad Name": {"command": "x"}}}', "is invalid"),
     ],
@@ -296,3 +298,10 @@ def test_parse_snippet_accepts_published_shapes() -> None:
 def test_parse_snippet_rejects_unsupported_input(snippet: str, message: str) -> None:
     with pytest.raises(McpSettingsError, match=message):
         parse_mcp_snippet(snippet)
+
+
+def test_snippet_errors_do_not_echo_values() -> None:
+    with pytest.raises(McpSettingsError) as error:
+        parse_mcp_snippet('{"mcpServers": {"a": {"command": "x", "type": "sentinel-secret"}}}')
+
+    assert "sentinel-secret" not in str(error.value)

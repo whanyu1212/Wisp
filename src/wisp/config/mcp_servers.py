@@ -194,9 +194,10 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         kind = raw.get("type")
         if kind is not None:
             expected = _STDIO_TYPES if "command" in raw else _HTTP_TYPES
-            if kind not in expected:
+            # The value is not echoed: a snippet can hold secrets in any field.
+            if not isinstance(kind, str) or kind not in expected:
                 raise McpSettingsError(
-                    f"server {name!r} has type {kind!r}, which does not match its transport"
+                    f"server {name!r} has a type that does not match its transport"
                 )
         configs.append(validated_mcp_server(str(name), entry))
     return tuple(configs)

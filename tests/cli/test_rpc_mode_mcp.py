@@ -281,6 +281,16 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
             {"id": "preview", "type": "preview_mcp_snippet", "snippet": snippet},
             {"id": "bad", "type": "preview_mcp_snippet", "snippet": bad},
             {"id": "not-json", "type": "preview_mcp_snippet", "snippet": SECRET},
+            {
+                "id": "odd-type",
+                "type": "preview_mcp_snippet",
+                "snippet": json.dumps({"mcpServers": {"x": {"command": "npx", "type": []}}}),
+            },
+            {
+                "id": "secret-type",
+                "type": "preview_mcp_snippet",
+                "snippet": json.dumps({"mcpServers": {"x": {"command": "npx", "type": SECRET}}}),
+            },
         ],
     )
 
@@ -306,5 +316,8 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
     assert finished["bad"]["ok"] is False
     assert "unsupported settings: headers" in str(finished["bad"]["error"])
     assert finished["not-json"]["ok"] is False
+    # A non-string type fails the command instead of stopping the host.
+    assert finished["odd-type"]["ok"] is False
+    assert finished["secret-type"]["ok"] is False
     # Previewing never saves anything.
     assert _saved_servers() is None

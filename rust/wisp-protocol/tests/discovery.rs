@@ -174,6 +174,12 @@ fn mcp_management_builders_validate_and_redact_secrets() {
             "env_from": ["HOME_DIR"],
         })
     );
+    assert!(
+        WispTypedClientRpcCommands::set_mcp_server_enabled("e-2", "github", true, None).is_err()
+    );
+    assert!(
+        WispTypedClientRpcCommands::set_mcp_server_enabled("e-3", "github", false, None).is_ok()
+    );
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-1", "github").is_ok());
     assert!(WispTypedClientRpcCommands::reconnect_mcp("c-1").is_ok());
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-2", "").is_err());
