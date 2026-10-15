@@ -121,6 +121,8 @@ wisp mcp import FILE|- [--replace] [--yes|-y]
 wisp mcp remove NAME [--yes|-y]
 wisp mcp enable NAME [--yes|-y]
 wisp mcp disable NAME
+wisp mcp login NAME
+wisp mcp logout NAME
 ```
 
 These commands edit `mcp_servers` in `~/.wisp/settings.json` and keep every other setting.
@@ -139,6 +141,9 @@ Changes apply the next time Wisp starts.
   stdin and requires `--yes`, which keeps the snippet's `env` values as written.
 - `--replace` writes the whole new entry, so an existing server's `tool_safety` overrides and
   `"enabled": false` are not kept.
+- `login` signs in to an HTTP server with OAuth in your browser and saves the tokens in
+  `~/.wisp/mcp-auth.json`; `logout` forgets them. See
+  [Signing in with OAuth](../guide/tools-and-safety#signing-in-with-oauth).
 - `list` never prints environment or header values.
 - If the settings file is already invalid, the commands refuse to change it and name the field to
   fix.

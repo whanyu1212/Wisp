@@ -72,6 +72,7 @@ from wisp.events.rpc import (
     RpcDeviceCodeProgressReported,
     RpcDeviceCodeReported,
     RpcMcpHeaderFrom,
+    RpcMcpLoginStarted,
     RpcMcpServerLaunch,
     RpcMcpServerPreview,
     RpcMcpServerSnapshot,
@@ -233,6 +234,7 @@ __all__ = [
     "RpcDeviceCodeProgressReported",
     "RpcDeviceCodeReported",
     "RpcMcpHeaderFrom",
+    "RpcMcpLoginStarted",
     "RpcMcpServerLaunch",
     "RpcMcpServerPreview",
     "RpcMcpServerSnapshot",
@@ -345,6 +347,7 @@ type KnownWispEvent = Annotated[
     | ProjectFilesInvalidated
     | RpcMcpStatusReported
     | RpcMcpSnippetPreviewed
+    | RpcMcpLoginStarted
     | SkillCatalogUpdated
     | RpcMessagesReported
     | RpcSessionsReported

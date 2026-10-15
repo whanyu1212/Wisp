@@ -14,8 +14,10 @@ from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
-from wisp.mcp.config import McpServerConfig, header_template_variable, is_valid_header_value
+from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
+from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
 from wisp.mcp.http_transport import bounded_http_client
+from wisp.mcp.oauth import McpLoginRequired, stored_oauth
 from wisp.mcp.tool import adapt_mcp_tool
 from wisp.mcp.transport import bounded_stdio_client
 from wisp.runtime.api import ExtensionAPI
@@ -31,6 +33,7 @@ MAX_MCP_TOOL_DEFINITION_BYTES = 4_194_304
 type McpDiagnosticCode = Literal[
     "missing-environment",
     "invalid-header",
+    "login-required",
     "unavailable",
     "timeout",
     "invalid-discovery",
@@ -52,6 +55,7 @@ class McpStartupDiagnostic:
         reasons: dict[McpDiagnosticCode, str] = {
             "missing-environment": "a configured environment variable is unavailable",
             "invalid-header": "a header value is empty or has invalid characters or spacing",
+            "login-required": (f"sign in with `wisp mcp login {self.server_name}` or /mcp"),
             "unavailable": "the server could not be started or initialized",
             "timeout": "startup or tool discovery timed out",
             "invalid-discovery": "the server returned an invalid tool catalog",
@@ -92,8 +96,10 @@ class McpRuntime:
         servers: tuple[McpServerConfig, ...],
         api: ExtensionAPI,
         existing_tool_names: tuple[str, ...],
+        token_store: McpTokenStore | None = None,
     ) -> None:
         self._servers = servers
+        self._token_store = token_store or McpTokenStore()
         self._api = api
         self._existing_tool_names = existing_tool_names
         self._close_requested = anyio.Event()
@@ -108,6 +114,10 @@ class McpRuntime:
             server.name: () for server in servers
         }
         self._disconnected_server_names: set[str] = set()
+        # HTTP servers started with a saved OAuth sign-in.
+        self._signed_in_server_names: set[str] = set()
+        # Servers that refused Wisp, at startup or later: the user must sign in.
+        self._sign_in_required_server_names: set[str] = set()
 
     @classmethod
     async def start(
@@ -116,10 +126,15 @@ class McpRuntime:
         *,
         api: ExtensionAPI,
         existing_tool_names: tuple[str, ...],
+        token_store: McpTokenStore | None = None,
     ) -> McpRuntime:
-        """Connect configured servers and register every accepted catalog."""
+        """Connect configured servers and register every accepted catalog.
 
-        runtime = cls(servers, api, existing_tool_names)
+        HTTP servers the user signed in to send their saved OAuth tokens from
+        ``token_store`` (``~/.wisp/mcp-auth.json`` by default).
+        """
+
+        runtime = cls(servers, api, existing_tool_names, token_store)
         runtime._owner_task = asyncio.create_task(runtime._run_owner())
         try:
             await runtime._started.wait()
@@ -148,6 +163,16 @@ class McpRuntime:
         """Return tool names registered by this runtime for one configured server."""
 
         return self._registered_tool_names.get(server_name, ())
+
+    def is_signed_in(self, server_name: str) -> bool:
+        """Return whether ``server_name`` started with a saved OAuth sign-in."""
+
+        return server_name in self._signed_in_server_names
+
+    def needs_sign_in(self, server_name: str) -> bool:
+        """Return whether ``server_name`` refused Wisp, at startup or since."""
+
+        return server_name in self._sign_in_required_server_names
 
     def is_connected(self, server_name: str) -> bool:
         """Return whether one registered server's transport remains live."""
@@ -218,14 +243,36 @@ class McpRuntime:
 
         release = anyio.Event()
         reported = False
+        unauthorized = False
         stage: Literal["connect", "discover"] = "connect"
+
+        def mark_unauthorized() -> None:
+            # A server with its own Authorization header cannot sign in; its
+            # refusal is reported as unavailable instead.
+            if uses_header_authorization(server):
+                return
+            nonlocal unauthorized
+            unauthorized = True
+            self._sign_in_required_server_names.add(server.name)
+
         try:
             async with AsyncExitStack() as stack:
                 if server.url is not None:
+                    oauth = await stored_oauth(
+                        server,
+                        self._token_store,
+                        on_sign_in_required=lambda: self._sign_in_required_server_names.add(
+                            server.name
+                        ),
+                    )
+                    if oauth is not None:
+                        self._signed_in_server_names.add(server.name)
                     transport = bounded_http_client(
                         server.url,
                         on_disconnect=lambda: self._disconnected_server_names.add(server.name),
                         headers=headers,
+                        auth=oauth,
+                        on_unauthorized=mark_unauthorized,
                     )
                 else:
                     assert server.command is not None
@@ -261,11 +308,17 @@ class McpRuntime:
             if reported:
                 # A failed live connection is isolated. Explicit shutdown still reports
                 # cleanup failures through the runtime's redacted close error.
-                if release.is_set():
+                if unauthorized or _raised(exc, McpLoginRequired):
+                    # A sign-in that stopped working mid-session is reported as
+                    # needing a new one, not as a failure to shut down.
+                    self._sign_in_required_server_names.add(server.name)
+                elif release.is_set():
                     self._close_error = exc
             else:
                 code: McpDiagnosticCode
-                if isinstance(exc, TimeoutError):
+                if unauthorized or _raised(exc, McpLoginRequired):
+                    code = "login-required"
+                elif isinstance(exc, TimeoutError):
                     code = "timeout"
                 elif isinstance(exc, _DiscoveryRejected):
                     code = exc.code
@@ -374,29 +427,25 @@ def _server_environment(server: McpServerConfig) -> dict[str, str]:
 
 
 def _server_headers(server: McpServerConfig) -> dict[str, str]:
-    """Resolve an HTTP server's headers from literal values and the environment.
+    try:
+        return resolve_headers(server)
+    except HeaderUnavailable as exc:
+        raise _DiscoveryRejected(exc.code) from None
 
-    Args:
-        server (McpServerConfig): Validated server configuration.
 
-    Returns:
-        dict[str, str]: Header values to send to the server's origin.
+def _raised(exc: BaseException, kind: type[BaseException], depth: int = 0) -> bool:
+    """Return whether ``kind`` was raised anywhere in ``exc``, including task groups."""
 
-    Raises:
-        _DiscoveryRejected: A referenced variable is unset (``missing-environment``),
-            or its value would split the header (``invalid-header``).
-    """
-
-    headers = {name: value.get_secret_value() for name, value in server.headers}
-    for name, template in server.headers_from:
-        scheme, variable = header_template_variable(template)
-        value = os.environ.get(variable)
-        if value is None:
-            raise _DiscoveryRejected("missing-environment")
-        if not is_valid_header_value(value):
-            raise _DiscoveryRejected("invalid-header")
-        headers[name] = f"{scheme} {value}" if scheme else value
-    return headers
+    if depth > 16:
+        return False
+    if isinstance(exc, kind):
+        return True
+    if isinstance(exc, BaseExceptionGroup) and any(
+        _raised(inner, kind, depth + 1) for inner in exc.exceptions
+    ):
+        return True
+    cause = exc.__cause__ or exc.__context__
+    return cause is not None and _raised(cause, kind, depth + 1)
 
 
 def _safe_server_cwd() -> Path:

@@ -35,7 +35,7 @@ def _reports(records: list[dict[str, object]]) -> dict[str, object]:
     return {
         str(record["command_id"]): {
             "servers": [
-                {key: value for key, value in server.items() if key != "launch"}
+                {key: value for key, value in server.items() if key not in {"launch", "sign_in"}}
                 for server in record["status"]["servers"]
             ]
         }

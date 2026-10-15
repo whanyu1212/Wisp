@@ -188,7 +188,12 @@ def test_interrupted_start_removes_the_tools_it_registered(
         name = "mcp__fixture__echo"
 
     async def partial_start(
-        cls: type[McpRuntime], servers: object, *, api: ExtensionAPI, existing_tool_names: object
+        cls: type[McpRuntime],
+        servers: object,
+        *,
+        api: ExtensionAPI,
+        existing_tool_names: object,
+        token_store: object = None,
     ) -> McpRuntime:
         # Registration happens before `start` returns, as in the real runtime.
         api.register_tool(_PartialTool(), replace=False)

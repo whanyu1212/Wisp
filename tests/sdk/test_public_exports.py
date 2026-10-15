@@ -88,6 +88,8 @@ _EXPECTED_RPC_EXPORTS = {
     "RemoveMcpServerCommand",
     "SetMcpServerEnabledCommand",
     "ReconnectMcpCommand",
+    "LoginMcpServerCommand",
+    "LogoutMcpServerCommand",
     "PreviewMcpSnippetCommand",
     "GetMessagesCommand",
     "GetModelCatalogCommand",

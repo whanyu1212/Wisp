@@ -36,6 +36,8 @@ from wisp.rpc.commands import (
     GetSkillsCommand,
     GetStateCommand,
     InitCommand,
+    LoginMcpServerCommand,
+    LogoutMcpServerCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     ParsedRpcCommand,
@@ -267,6 +269,8 @@ class RpcCommandExecutor:
                 RemoveMcpServerCommand,
                 SetMcpServerEnabledCommand,
                 ReconnectMcpCommand,
+                LoginMcpServerCommand,
+                LogoutMcpServerCommand,
             ),
         ):
             self.coordinator.running_command = running_command

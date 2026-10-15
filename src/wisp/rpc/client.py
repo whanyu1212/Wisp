@@ -50,6 +50,8 @@ from wisp.rpc.commands import (
     GetSkillsCommand,
     GetStateCommand,
     InitCommand,
+    LoginMcpServerCommand,
+    LogoutMcpServerCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     PopQueueCommand,
@@ -340,6 +342,24 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("mcp-reconnect")
         await self._transport.send(ReconnectMcpCommand(id=selected_id))
+        return selected_id
+
+    async def login_mcp_server(self, name: str, *, command_id: str | None = None) -> str:
+        """Sign in to an HTTP MCP server with OAuth, then restart MCP servers.
+
+        The host opens the sign-in page in the browser and reports its URL as
+        ``RpcMcpLoginStarted``. Cancel the command to stop waiting.
+        """
+
+        selected_id = command_id or self._command_id_factory("mcp-login")
+        await self._transport.send(LoginMcpServerCommand(id=selected_id, name=name))
+        return selected_id
+
+    async def logout_mcp_server(self, name: str, *, command_id: str | None = None) -> str:
+        """Forget an MCP server's OAuth sign-in, then restart MCP servers."""
+
+        selected_id = command_id or self._command_id_factory("mcp-logout")
+        await self._transport.send(LogoutMcpServerCommand(id=selected_id, name=name))
         return selected_id
 
     async def get_messages(

@@ -86,60 +86,42 @@ def _auth_file_state(path: Path) -> _AuthFileState:
         return state
 
 
-class JsonAuthStore:
-    """Locked, JSON-backed credential store with private file permissions."""
+class PrivateJsonFile:
+    """A JSON object kept in a private file, replaced atomically under a lock.
 
-    def __init__(self, path: Path) -> None:
+    The file and its directory are owner-only (0600/0700). Reads tolerate a
+    concurrent atomic replacement; writes go to a private temporary file that
+    is fsynced and renamed over the original. A thread lock and an
+    interprocess lock serialize changes, so concurrent Wisp processes never
+    lose each other's updates.
+    """
+
+    def __init__(self, path: Path, *, description: str = "auth file") -> None:
         self.path = path.expanduser()
+        self._description = description
         self._file_state = _auth_file_state(self.path)
 
-    def get(self, provider: str) -> AuthCredential | None:
+    def read(self) -> dict[str, object]:
+        """Return the stored object, or an empty one when the file does not exist.
+
+        Raises:
+            AuthStorageError: The file is not private, not JSON, or not an object.
+        """
+
         with self._file_state.lock:
-            return self._load_unlocked().get(provider)
-
-    def providers(self) -> tuple[str, ...]:
-        with self._file_state.lock:
-            return tuple(sorted(self._load_unlocked()))
-
-    def set(self, provider: str, credential: AuthCredential) -> None:
-        with self._mutation_lock():
-            credentials = self._load_unlocked()
-            credentials[provider] = credential
-            self._publish_unlocked(credentials)
-
-    def compare_and_set(
-        self,
-        provider: str,
-        *,
-        expected: AuthCredential,
-        replacement: AuthCredential,
-    ) -> bool:
-        """Replace one credential only if it still equals the caller's snapshot."""
-
-        with self._mutation_lock():
-            credentials = self._load_unlocked()
-            if credentials.get(provider) != expected:
-                return False
-            credentials[provider] = replacement
-            self._publish_unlocked(credentials)
-            return True
-
-    def delete(self, provider: str) -> bool:
-        with self._mutation_lock():
-            credentials = self._load_unlocked()
-            if provider not in credentials:
-                return False
-            del credentials[provider]
-            self._publish_unlocked(credentials)
-            return True
+            return self.read_unlocked()
 
     @contextmanager
-    def _mutation_lock(self) -> Iterator[None]:
+    def lock(self) -> Iterator[None]:
+        """Hold the thread and interprocess locks for a read-modify-write."""
+
         with self._file_state.lock:
             with _interprocess_lock(self.path):
                 yield
 
-    def _load_unlocked(self) -> dict[str, AuthCredential]:
+    def read_unlocked(self) -> dict[str, object]:
+        """Read the object; the caller holds :meth:`lock` or accepts a snapshot."""
+
         # Atomic publication may replace the pathname between lstat/open/lstat.
         # Retry a bounded number of times so ordinary concurrent credential
         # updates do not surface as read failures while sustained churn remains
@@ -156,19 +138,17 @@ class JsonAuthStore:
         try:
             raw = json.loads(raw_text)
         except json.JSONDecodeError as exc:
-            raise AuthStorageError(f"Invalid auth file JSON: {self.path}") from exc
+            raise AuthStorageError(f"Invalid {self._description} JSON: {self.path}") from exc
         if not isinstance(raw, dict):
-            raise AuthStorageError(f"Auth file must contain a JSON object: {self.path}")
-        return {
-            str(provider): _credential_from_json(value, provider=str(provider))
-            for provider, value in raw.items()
-        }
+            raise AuthStorageError(
+                f"{self._description.capitalize()} must contain a JSON object: {self.path}"
+            )
+        return {str(key): value for key, value in raw.items()}
 
-    def _publish_unlocked(self, credentials: dict[str, AuthCredential]) -> None:
+    def write_unlocked(self, payload: dict[str, object]) -> None:
+        """Replace the file with ``payload``; the caller holds :meth:`lock`."""
+
         _ensure_private_parent(self.path)
-        payload = {
-            provider: credential.to_json() for provider, credential in sorted(credentials.items())
-        }
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
         temp_path = self.path.with_name(f".{self.path.name}.{uuid4().hex}.tmp")
         flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
@@ -194,12 +174,73 @@ class JsonAuthStore:
         except AuthStorageError:
             raise
         except OSError as exc:
-            raise AuthStorageError(f"Could not write auth file: {self.path}") from exc
+            raise AuthStorageError(f"Could not write {self._description}: {self.path}") from exc
         finally:
             if fd != -1:
                 os.close(fd)
             if signature is not None:
                 _unlink_if_same_file(temp_path, signature)
+
+
+class JsonAuthStore:
+    """Locked, JSON-backed credential store with private file permissions."""
+
+    def __init__(self, path: Path) -> None:
+        self._file = PrivateJsonFile(path)
+        self.path = self._file.path
+
+    def get(self, provider: str) -> AuthCredential | None:
+        return self._parse(self._file.read()).get(provider)
+
+    def providers(self) -> tuple[str, ...]:
+        return tuple(sorted(self._parse(self._file.read())))
+
+    def set(self, provider: str, credential: AuthCredential) -> None:
+        with self._file.lock():
+            credentials = self._load_unlocked()
+            credentials[provider] = credential
+            self._publish_unlocked(credentials)
+
+    def compare_and_set(
+        self,
+        provider: str,
+        *,
+        expected: AuthCredential,
+        replacement: AuthCredential,
+    ) -> bool:
+        """Replace one credential only if it still equals the caller's snapshot."""
+
+        with self._file.lock():
+            credentials = self._load_unlocked()
+            if credentials.get(provider) != expected:
+                return False
+            credentials[provider] = replacement
+            self._publish_unlocked(credentials)
+            return True
+
+    def delete(self, provider: str) -> bool:
+        with self._file.lock():
+            credentials = self._load_unlocked()
+            if provider not in credentials:
+                return False
+            del credentials[provider]
+            self._publish_unlocked(credentials)
+            return True
+
+    def _load_unlocked(self) -> dict[str, AuthCredential]:
+        return self._parse(self._file.read_unlocked())
+
+    def _publish_unlocked(self, credentials: dict[str, AuthCredential]) -> None:
+        self._file.write_unlocked(
+            {provider: credential.to_json() for provider, credential in sorted(credentials.items())}
+        )
+
+    @staticmethod
+    def _parse(raw: dict[str, object]) -> dict[str, AuthCredential]:
+        return {
+            provider: _credential_from_json(value, provider=provider)
+            for provider, value in raw.items()
+        }
 
 
 def _credential_from_json(value: object, *, provider: str) -> AuthCredential:

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from wisp.auth.storage import AuthStorageError
 from wisp.config.settings import (
     SettingsDocumentError,
     WispSettings,
@@ -27,6 +28,7 @@ from wisp.config.settings import (
     user_settings_path,
 )
 from wisp.mcp.config import SERVER_NAME_PATTERN, McpServerConfig
+from wisp.mcp.credentials import McpTokenStore, mcp_auth_path
 
 # Keys accepted from a pasted `{"mcpServers": {...}}` snippet. `type` is checked
 # against the transport and dropped; anything else (headers, cwd, ...) is rejected
@@ -102,7 +104,7 @@ def add_user_mcp_servers(
 
 
 def remove_user_mcp_server(name: str, *, home_dir: Path | None = None) -> None:
-    """Remove the server named ``name``.
+    """Remove the server named ``name``, and forget its OAuth sign-in.
 
     Raises:
         McpSettingsError: If no such server exists, or the settings are invalid.
@@ -113,6 +115,15 @@ def remove_user_mcp_server(name: str, *, home_dir: Path | None = None) -> None:
             raise McpSettingsError(f"no MCP server named {name!r} is configured")
         del servers[name]
 
+    # The sign-in is forgotten first: if that fails, nothing has changed and the
+    # removal can be retried. A later server with the same name and URL must not
+    # inherit it.
+    try:
+        McpTokenStore(mcp_auth_path(home_dir=home_dir)).delete(name)
+    except AuthStorageError:
+        raise McpSettingsError(
+            f"MCP server {name!r} was not removed: its sign-in could not be forgotten"
+        ) from None
     _update_user_mcp_servers(change, home_dir=home_dir)
 
 

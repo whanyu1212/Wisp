@@ -12,8 +12,10 @@ MCP startup is already bounded by its own timeout.
 
 from __future__ import annotations
 
+import webbrowser
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 import anyio
 from anyio.abc import TaskGroup
@@ -35,6 +37,7 @@ from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,
     RpcMcpHeaderFrom,
+    RpcMcpLoginStarted,
     RpcMcpServerLaunch,
     RpcMcpServerPreview,
     RpcMcpServerSnapshot,
@@ -43,8 +46,11 @@ from wisp.events import (
     RpcMcpStatusSnapshot,
 )
 from wisp.mcp.config import McpServerConfig, header_template_variable
+from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
 from wisp.rpc.commands import (
     AddMcpServerCommand,
+    LoginMcpServerCommand,
+    LogoutMcpServerCommand,
     PreviewMcpSnippetCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
@@ -70,8 +76,16 @@ from wisp.tools.mcp_servers import (
 )
 from wisp.tools.selection import select_tools
 
+if TYPE_CHECKING:
+    from wisp.mcp.runtime import McpRuntime, McpStartupDiagnostic
+
 type McpServerCommand = (
-    AddMcpServerCommand | RemoveMcpServerCommand | SetMcpServerEnabledCommand | ReconnectMcpCommand
+    AddMcpServerCommand
+    | RemoveMcpServerCommand
+    | SetMcpServerEnabledCommand
+    | ReconnectMcpCommand
+    | LoginMcpServerCommand
+    | LogoutMcpServerCommand
 )
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
@@ -254,22 +268,22 @@ class RpcMcpServers:
         command_completed_factory: CommandCompletedFactory,
     ) -> None:
         error: str | None = None
-        # `cancel_scope` belongs to the running-command contract; shielding inside
-        # it makes a cancel request a no-op (see the module docstring).
         try:
-            with cancel_scope, anyio.CancelScope(shield=True):
-                try:
-                    await anyio.to_thread.run_sync(_change_settings, command)
-                    servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
-                except McpSettingsError as exc:
-                    error = str(exc)
-                else:
-                    error = await self._restart(servers)
-                    write_event(
-                        RpcMcpStatusReported(
-                            command_id=command_id, status=rpc_mcp_status_snapshot(self._runtime)
-                        )
-                    )
+            if isinstance(command, LoginMcpServerCommand):
+                # Signing in waits for the user, so unlike the other changes it
+                # can be cancelled; nothing is saved until it succeeds.
+                with cancel_scope:
+                    error = await self._sign_in(command, command_id, write_event)
+                if cancel_scope.cancelled_caught:
+                    error = "Signing in was cancelled"
+                if error is None:
+                    with anyio.CancelScope(shield=True):
+                        error = await self._apply(command, command_id, write_event)
+            else:
+                # `cancel_scope` belongs to the running-command contract; shielding
+                # inside it makes a cancel request a no-op (see the module docstring).
+                with cancel_scope, anyio.CancelScope(shield=True):
+                    error = await self._apply(command, command_id, write_event)
         except Exception as exc:  # noqa: BLE001 - command failures must not stop RPC
             error = f"MCP servers could not be changed: {type(exc).__name__}"
         finally:
@@ -293,6 +307,72 @@ class RpcMcpServers:
                         entry_count=entry_count,
                     )
                 )
+
+    async def _apply(
+        self, command: McpServerCommand, command_id: str, write_event: RpcEventWriter
+    ) -> str | None:
+        """Change the settings for ``command``, restart MCP servers, and report status.
+
+        Returns:
+            str | None: Why the change or restart failed, or None.
+        """
+
+        try:
+            if isinstance(command, LogoutMcpServerCommand):
+                await anyio.to_thread.run_sync(self._sign_out, command.name)
+            elif not isinstance(command, LoginMcpServerCommand):
+                await anyio.to_thread.run_sync(_change_settings, command)
+            servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
+        except McpSettingsError as exc:
+            return str(exc)
+        error = await self._restart(servers)
+        write_event(
+            RpcMcpStatusReported(
+                command_id=command_id, status=rpc_mcp_status_snapshot(self._runtime)
+            )
+        )
+        return error
+
+    async def _sign_in(
+        self, command: LoginMcpServerCommand, command_id: str, write_event: RpcEventWriter
+    ) -> str | None:
+        """Sign in to one saved HTTP server in the user's browser.
+
+        Returns:
+            str | None: Why signing in failed, or None once the tokens are saved.
+        """
+
+        # Imported here: the MCP SDK is loaded only when it is needed.
+        from wisp.mcp.oauth import McpLoginError, login_mcp_server
+
+        try:
+            servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
+        except McpSettingsError as exc:
+            return str(exc)
+        server = next((server for server in servers if server.name == command.name), None)
+        if server is None:
+            return f"no MCP server named {command.name!r} is configured"
+
+        async def show(url: str) -> None:
+            write_event(
+                RpcMcpLoginStarted(command_id=command_id, name=server.name, authorization_url=url)
+            )
+            # The host runs on the user's machine; without a browser the
+            # frontend still shows the URL.
+            await anyio.to_thread.run_sync(webbrowser.open, url)
+
+        try:
+            await login_mcp_server(server, store=self._token_store(), open_url=show)
+        except McpLoginError as exc:
+            return str(exc)
+        return None
+
+    def _sign_out(self, name: str) -> None:
+        if not self._token_store().delete(name):
+            raise McpSettingsError(f"MCP server {name!r} is not signed in")
+
+    def _token_store(self) -> McpTokenStore:
+        return self._runtime.mcp_token_store or McpTokenStore()
 
     async def _restart(self, servers: tuple[McpServerConfig, ...]) -> str | None:
         """Restart MCP servers and hand the session the resulting tools.
@@ -462,5 +542,26 @@ def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
                 tool_names=mcp_runtime.tool_names_for(name),
                 launch=launch,
             )
+        sign_in = _sign_in_state(config, mcp_runtime, diagnostic)
+        if sign_in is not None:
+            snapshot = snapshot.model_copy(update={"sign_in": sign_in})
         snapshots.append(snapshot)
     return RpcMcpStatusSnapshot(servers=tuple(snapshots))
+
+
+def _sign_in_state(
+    config: McpServerConfig | None,
+    mcp_runtime: McpRuntime | None,
+    diagnostic: McpStartupDiagnostic | None,
+) -> Literal["required", "signed_in", "available"] | None:
+    """Return a server's OAuth sign-in state, or None when it cannot sign in."""
+
+    if config is None or config.url is None or uses_header_authorization(config):
+        return None
+    if diagnostic is not None and diagnostic.code == "login-required":
+        return "required"
+    if mcp_runtime is not None and mcp_runtime.needs_sign_in(config.name):
+        return "required"
+    if mcp_runtime is not None and mcp_runtime.is_signed_in(config.name):
+        return "signed_in"
+    return "available"

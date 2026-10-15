@@ -181,6 +181,11 @@ class RpcMcpServerSnapshot(BaseModel):
     error: str | None = None
     # The configuration the server was last started (or skipped) with.
     launch: RpcMcpServerLaunch | None = None
+    # OAuth sign-in for an HTTP server: "required" when it refused Wisp, or the
+    # saved sign-in failed to refresh; "signed_in" when it started with a saved
+    # sign-in; "available" when the user could sign in. None for servers that
+    # run a command or send their own Authorization header.
+    sign_in: Literal["required", "signed_in", "available"] | None = None
 
     @model_validator(mode="after")
     def _validate_status(self) -> Self:
@@ -480,6 +485,20 @@ class RpcMcpSnippetPreviewed(WispEvent):
     type: Literal["rpc.mcp.preview"] = "rpc.mcp.preview"
     command_id: str
     servers: tuple[RpcMcpServerPreview, ...]
+
+
+class RpcMcpLoginStarted(WispEvent):
+    """Signing in to an MCP server needs the user in their browser.
+
+    Wisp tries to open ``authorization_url`` itself; a frontend shows it too,
+    for when no browser could be opened. It is the authorization server's own
+    page (HTTPS, or HTTP on a loopback address) and carries no secret.
+    """
+
+    type: Literal["rpc.mcp.login"] = "rpc.mcp.login"
+    command_id: str
+    name: str = Field(min_length=1)
+    authorization_url: str = Field(min_length=1, max_length=8_192)
 
 
 class SkillCatalogUpdated(WispEvent):

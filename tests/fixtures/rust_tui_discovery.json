@@ -126,7 +126,8 @@
             ],
             "header_names": [],
             "headers_from": []
-          }
+          },
+          "sign_in": null
         },
         {
           "name": "files",
@@ -151,7 +152,8 @@
                 "scheme": "Bearer"
               }
             ]
-          }
+          },
+          "sign_in": "signed_in"
         },
         {
           "name": "offline",
@@ -166,7 +168,8 @@
             "env_from": [],
             "header_names": [],
             "headers_from": []
-          }
+          },
+          "sign_in": null
         },
         {
           "name": "archived",
@@ -185,7 +188,8 @@
             "env_from": [],
             "header_names": [],
             "headers_from": []
-          }
+          },
+          "sign_in": null
         }
       ]
     }

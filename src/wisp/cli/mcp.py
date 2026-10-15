@@ -13,14 +13,17 @@ import re
 import shlex
 import sys
 import unicodedata
+import webbrowser
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, NoReturn
 from urllib.parse import urlsplit
 
+import anyio
 import typer
 from typer.core import TyperCommand
 
+from wisp.auth.storage import AuthStorageError
 from wisp.config.mcp_servers import (
     McpServerExistsError,
     McpSettingsError,
@@ -34,6 +37,7 @@ from wisp.config.mcp_servers import (
 )
 from wisp.config.settings import user_settings_path
 from wisp.mcp.config import HEADER_TEMPLATE_PATTERN, McpServerConfig, header_template_variable
+from wisp.mcp.credentials import McpTokenStore
 
 mcp_app = typer.Typer(
     help="Manage MCP servers. Changes apply the next time Wisp starts.",
@@ -251,6 +255,50 @@ def disable_command(name: Annotated[str, typer.Argument(help="Server to disable.
     except McpSettingsError as exc:
         _fail(str(exc))
     typer.echo(f"Disabled {_display(name)}. {_RESTART_NOTE}")
+
+
+@mcp_app.command("login")
+def login_command(name: Annotated[str, typer.Argument(help="HTTP server to sign in to.")]) -> None:
+    """Sign in to an HTTP server with OAuth in your browser.
+
+    Wisp opens the server's sign-in page and waits up to five minutes for the
+    browser to return. The tokens are saved in ~/.wisp/mcp-auth.json, readable
+    only by you, and refreshed automatically.
+    """
+
+    # Imported here: the MCP SDK is loaded only for commands that connect.
+    from wisp.mcp.oauth import McpLoginError, login_mcp_server
+
+    server = next((server for server in _load_or_exit() if server.name == name), None)
+    if server is None:
+        _fail(f"no MCP server named {name!r} is configured")
+
+    async def show(url: str) -> None:
+        typer.echo(f"Opening the sign-in page for {_display(name)}. If no browser opens, visit:")
+        typer.echo(f"  {_display(url)}")
+        await anyio.to_thread.run_sync(webbrowser.open, url)
+
+    async def sign_in() -> None:
+        await login_mcp_server(server, store=McpTokenStore(), open_url=show)
+
+    try:
+        anyio.run(sign_in)
+    except (McpLoginError, AuthStorageError) as exc:
+        _fail(str(exc))
+    typer.echo(f"Signed in to {_display(name)}. {_RESTART_NOTE}")
+
+
+@mcp_app.command("logout")
+def logout_command(name: Annotated[str, typer.Argument(help="Server to sign out of.")]) -> None:
+    """Forget a server's saved OAuth sign-in."""
+
+    try:
+        forgotten = McpTokenStore().delete(name)
+    except AuthStorageError as exc:
+        _fail(str(exc))
+    if not forgotten:
+        _fail(f"MCP server {name!r} is not signed in")
+    typer.echo(f"Signed out of {_display(name)}. {_RESTART_NOTE}")
 
 
 def _describe(server: McpServerConfig) -> list[str]:

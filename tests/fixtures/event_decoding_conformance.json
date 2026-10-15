@@ -1539,6 +1539,44 @@
    "accepted": false
   },
   {
+   "event": "rpc.mcp.login",
+   "operation": "remove",
+   "path": [
+    "authorization_url"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.login",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.login",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.login",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.login",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "rpc.mcp.preview",
    "operation": "remove",
    "path": [
