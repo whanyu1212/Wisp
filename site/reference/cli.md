@@ -111,6 +111,35 @@ The project defaults to the current directory. `allow` and `revoke` persist a de
 returns it to undecided. `WISP_TRUST=1` or `0` overrides the decision for one process without
 persisting it.
 
+### MCP servers
+
+```text
+wisp mcp list
+wisp mcp add NAME [--env NAME]... [--env-from NAME]... [--replace] [--yes|-y] -- COMMAND [ARGS]...
+wisp mcp add NAME --url URL [--replace] [--yes|-y]
+wisp mcp import FILE|- [--replace] [--yes|-y]
+wisp mcp remove NAME [--yes|-y]
+wisp mcp enable NAME [--yes|-y]
+wisp mcp disable NAME
+```
+
+These commands edit `mcp_servers` in `~/.wisp/settings.json` and keep every other setting.
+Changes apply the next time Wisp starts.
+
+- Everything after `--` is the server's command, passed unchanged, so its own flags (such as
+  `npx -y`) are never read as Wisp options.
+- `add`, `import`, and `enable` show what a server runs and ask before saving; without a terminal
+  they require `--yes`.
+- `--env` prompts for each value with masked input, after showing the command, so it also needs a
+  terminal.
+- `import` saves every server in the snippet or none of them. `import -` reads the snippet from
+  stdin and requires `--yes`, which keeps the snippet's `env` values as written.
+- `--replace` writes the whole new entry, so an existing server's `tool_safety` overrides and
+  `"enabled": false` are not kept.
+- `list` never prints environment values.
+- If the settings file is already invalid, the commands refuse to change it and name the field to
+  fix.
+
 ### Skills
 
 ```text

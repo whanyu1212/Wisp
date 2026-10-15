@@ -76,14 +76,15 @@ async def build_runtime(
             openai_compatible=openai_compatible,
             anthropic_cache_ttl=anthropic_cache_ttl,
         )
-        if mcp_servers:
+        enabled_servers = tuple(server for server in mcp_servers if server.enabled)
+        if enabled_servers:
             # `mcp` costs ~430 ms to import and is only reachable through this
             # branch, which already runs solely when servers are configured. Import
             # it here so a session without MCP servers never pays for it.
             from wisp.mcp.runtime import McpRuntime
 
             mcp_runtime = await McpRuntime.start(
-                mcp_servers,
+                enabled_servers,
                 api=api,
                 existing_tool_names=tools.names(),
             )
@@ -113,11 +114,23 @@ async def build_runtime(
             if mcp_runtime is not None
             else ()
         ),
-        unavailable_tool_prefixes=(
-            tuple(f"mcp__{diagnostic.server_name}__" for diagnostic in mcp_runtime.diagnostics)
-            if mcp_runtime is not None
-            else ()
-        ),
+        unavailable_tool_prefixes=_unavailable_tool_prefixes(mcp_servers, mcp_runtime),
+    )
+
+
+def _unavailable_tool_prefixes(
+    mcp_servers: tuple[McpServerConfig, ...], mcp_runtime: McpRuntime | None
+) -> tuple[str, ...]:
+    """Name the MCP tool prefixes that are withheld this run rather than unknown.
+
+    Servers that failed to start or are disabled register no tools, but selecting
+    one of their tools with ``--allow-tool`` must not abort startup.
+    """
+
+    failed = mcp_runtime.diagnostics if mcp_runtime is not None else ()
+    return (
+        *(f"mcp__{diagnostic.server_name}__" for diagnostic in failed),
+        *(f"mcp__{server.name}__" for server in mcp_servers if not server.enabled),
     )
 
 

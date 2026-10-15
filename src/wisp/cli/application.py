@@ -14,6 +14,7 @@ from rich.console import Console
 from wisp import __version__
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.auth import auth_app
+from wisp.cli.mcp import mcp_app
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config.runtime import WispConfig
 from wisp.events import (
@@ -83,6 +84,7 @@ app = typer.Typer(
 )
 app.add_typer(auth_app, name="auth")
 app.add_typer(_cli_trust.trust_app, name="trust")
+app.add_typer(mcp_app, name="mcp")
 app.command("skills")(_cli_skills.skills_command)
 app.command("update")(_cli_update.update_command)
 

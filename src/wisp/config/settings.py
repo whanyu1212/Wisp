@@ -24,10 +24,13 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Self
+from uuid import uuid4
 
 from pydantic import (
     BaseModel,
@@ -180,8 +183,13 @@ class WispSettings(BaseModel):
     ) -> dict[str, dict[str, Any]] | None:
         if value is None:
             return None
+        # `enabled` is written only when false, so enabled entries keep their shape.
         return {
-            server.name: server.model_dump(mode="json", exclude={"name"}, exclude_none=True)
+            server.name: server.model_dump(
+                mode="json",
+                exclude={"name", "enabled"} if server.enabled else {"name"},
+                exclude_none=True,
+            )
             for server in value
         }
 
@@ -368,69 +376,171 @@ def _persist_user_settings(
 ) -> bool:
     """Safely read, update, and atomically replace the user settings file.
 
-    A missing or malformed file is treated like an empty settings document, matching
-    the read path. An existing file that cannot be read aborts the update because
-    continuing would risk destroying unrelated settings. Write failures warn and do
-    not affect the already-applied runtime configuration.
+    A missing file is treated like an empty settings document. A file that cannot be
+    read, or is not a JSON object, aborts the update: it may hold settings the user
+    is part-way through editing (MCP servers and their secrets included), and
+    replacing it would destroy them. Failures warn and do not affect the
+    already-applied runtime configuration.
     """
 
     path = user_settings_path(home_dir=home_dir)
-    data: dict[str, object] = {}
+    try:
+        with user_settings_lock(path):
+            data = read_settings_document(path) or {}
+
+            # A valid JSON object can still contain values rejected by WispSettings.
+            # If those values survive this write, the next startup rejects the entire
+            # file and loses the newly persisted selection. Remove only invalid
+            # recognized top-level fields; preserve valid and unknown keys for
+            # forward compatibility. `mcp_servers` is kept even when invalid: it
+            # describes commands the user chose to run, and dropping it here would
+            # silently delete them instead of letting the user fix one entry.
+            try:
+                WispSettings.model_validate(data)
+            except ValidationError as exc:
+                for error in exc.errors():
+                    location = error.get("loc", ())
+                    field = location[0] if location else None
+                    if (
+                        isinstance(field, str)
+                        and field in WispSettings.model_fields
+                        and field != "mcp_servers"
+                    ):
+                        data.pop(field, None)
+
+            for key, value in updates.items():
+                if value is None:
+                    data.pop(key, None)
+                else:
+                    data[key] = value
+            replace_settings_document(path, data)
+    except (OSError, SettingsDocumentError) as exc:
+        _warn(f"could not update settings file {path}, {preference} not persisted: {exc}")
+        return False
+    return True
+
+
+class SettingsDocumentError(RuntimeError):
+    """The user settings file could not be read or written safely."""
+
+
+@contextmanager
+def user_settings_lock(path: Path) -> Iterator[None]:
+    """Serialize read-modify-write updates of one settings file across processes.
+
+    The lock is a private sibling file (``settings.json.lock``). Readers do not take
+    it; they always see either the old or the new file because writers replace the
+    file atomically.
+
+    Args:
+        path (Path): The settings file being updated.
+
+    Yields:
+        None: While the exclusive lock is held.
+
+    Raises:
+        SettingsDocumentError: If the lock file is not a private regular file.
+        OSError: If the parent directory or lock file cannot be created.
+    """
+
+    _ensure_private_directory(path.parent)
+    lock_path = path.with_name(f"{path.name}.lock")
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SettingsDocumentError(f"settings lock is not a private regular file: {lock_path}")
+        if os.name == "posix":
+            import fcntl
+
+            os.fchmod(fd, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        else:
+            yield
+    finally:
+        os.close(fd)
+
+
+def read_settings_document(path: Path) -> dict[str, object] | None:
+    """Read a settings file as a raw JSON object, without validating its fields.
+
+    Args:
+        path (Path): Settings file to read.
+
+    Returns:
+        dict[str, object] | None: The parsed object, or None when the file is missing.
+
+    Raises:
+        SettingsDocumentError: If the file cannot be read, or is not a JSON object.
+    """
+
     try:
         raw = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        raw = None
+        return None
     except (OSError, UnicodeError) as exc:
-        _warn(
-            f"could not read settings file {path} before writing, {preference} not persisted: {exc}"
-        )
-        return False
-    if raw is not None:
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            data = parsed
-
-    # A valid JSON object can still contain values rejected by WispSettings. If
-    # those values survive this write, the next startup rejects the entire file and
-    # loses the newly persisted selection. Remove only invalid recognized top-level
-    # fields; preserve valid and unknown keys for forward compatibility.
+        raise SettingsDocumentError(f"could not read {path}: {exc}") from exc
     try:
-        WispSettings.model_validate(data)
-    except ValidationError as exc:
-        for error in exc.errors():
-            location = error.get("loc", ())
-            field = location[0] if location else None
-            if isinstance(field, str) and field in WispSettings.model_fields:
-                data.pop(field, None)
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise SettingsDocumentError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise SettingsDocumentError(f"{path} must contain a JSON object")
+    return parsed
 
-    for key, value in updates.items():
-        if value is None:
-            data.pop(key, None)
-        else:
-            data[key] = value
 
+def replace_settings_document(path: Path, data: Mapping[str, object]) -> None:
+    """Atomically replace a settings file with ``data``, privately and durably.
+
+    Writes a uniquely named private temporary file beside ``path``, fsyncs it,
+    renames it over ``path``, and fsyncs the directory, so a crash leaves either the
+    old or the new file. Call it while holding :func:`user_settings_lock`.
+
+    Args:
+        path (Path): Settings file to replace.
+        data (Mapping[str, object]): JSON-serializable settings object.
+
+    Raises:
+        OSError: If the file cannot be written or renamed; the old file is kept.
+    """
+
+    _ensure_private_directory(path.parent)
+    payload = (json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temp_path, flags, 0o600)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.parent.chmod(0o700)
-        tmp_path = path.with_name(f".{path.name}.tmp")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(tmp_path, flags, 0o600)
         try:
-            os.chmod(tmp_path, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-                fd = -1
-                tmp_file.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+            if os.name == "posix":
+                os.fchmod(fd, 0o600)
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fsync(fd)
         finally:
-            if fd >= 0:
-                os.close(fd)
-        tmp_path.replace(path)
-    except OSError as exc:
-        _warn(f"could not write settings file {path}: {exc}")
-        return False
-    return True
+            os.close(fd)
+        temp_path.replace(path)
+    except BaseException:
+        temp_path.unlink(missing_ok=True)
+        raise
+    if os.name == "posix":
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name == "posix":
+        path.chmod(0o700)
 
 
 def _load_settings_file(

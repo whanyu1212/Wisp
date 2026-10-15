@@ -62,6 +62,8 @@ class McpServerConfig(BaseModel):
     tool_safety: tuple[tuple[ToolName, ToolSafety], ...] = Field(
         default=(), max_length=MAX_MCP_TOOL_OVERRIDES
     )
+    # A disabled server keeps its configuration but is not started.
+    enabled: bool = True
 
     @model_validator(mode="wrap")
     @classmethod

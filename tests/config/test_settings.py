@@ -803,24 +803,27 @@ def test_persist_user_settings_uses_private_permissions_and_preserves_mcp_env(
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
-def test_persist_user_settings_tolerates_a_malformed_existing_file(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "content",
+    [
+        # A trailing comma: the commonest hand-edit mistake, with secrets still in it.
+        '{"mcp_servers": {"github": {"command": "npx", "env": {"TOKEN": "secret"},}}}',
+        "[1, 2, 3]",
+    ],
+    ids=["invalid-json", "non-object"],
+)
+def test_persist_user_settings_keeps_a_malformed_existing_file(
+    tmp_path: Path, capsys: CaptureFixture[str], content: str
+) -> None:
     path = user_settings_path(home_dir=tmp_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not valid json", encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
 
-    try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
+    persisted = try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {"provider": "openai", "effort": "high"}
-
-
-def test_persist_user_settings_tolerates_a_non_object_existing_file(tmp_path: Path) -> None:
-    path = user_settings_path(home_dir=tmp_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("[1, 2, 3]", encoding="utf-8")
-
-    try_persist_user_model_selection("openai", None, "high", home_dir=tmp_path)
-
-    assert json.loads(path.read_text(encoding="utf-8")) == {"provider": "openai", "effort": "high"}
+    assert persisted is False
+    assert path.read_text(encoding="utf-8") == content
+    assert "not persisted" in capsys.readouterr().err
 
 
 def test_user_settings_path_matches_layout(tmp_path: Path) -> None:
@@ -859,9 +862,8 @@ def test_persist_user_settings_does_not_overwrite_settings_it_could_not_read(
     # the file were empty. This function's whole contract is preserving every
     # other key (provider/model/auth_path/protected_paths/retry); writing a
     # fresh selection over an unread file would silently destroy all of
-    # them, the opposite of "best-effort." Distinct from
-    # test_persist_user_settings_tolerates_a_malformed_existing_file (a
-    # genuinely unreadable/corrupt document with nothing salvageable) --
+    # them, the opposite of "best-effort." A malformed file is kept for the
+    # same reason (test_persist_user_settings_keeps_a_malformed_existing_file);
     # here the file is fine, just not readable through this path right now.
     #
     # A directory-in-place-of-the-file fixture (like the write-side test

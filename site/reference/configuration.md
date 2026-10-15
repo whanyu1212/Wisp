@@ -48,7 +48,8 @@ auth file.
 After a successful TUI `/model` or `/provider` change, Wisp atomically records the active provider,
 model, and effort as user defaults, reused next launch unless a higher-precedence source overrides
 them. Failed changes, trusted-project configuration, CLI flags, and external RPC configuration do not
-rewrite these preferences.
+rewrite these preferences. If `~/.wisp/settings.json` is not valid JSON, Wisp leaves it untouched and
+warns that the preference was not saved; fix the file to resume saving.
 
 ## Secrets
 
