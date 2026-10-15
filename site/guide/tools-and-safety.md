@@ -74,6 +74,7 @@ servers over stdio or Streamable HTTP. Servers live only in the user settings fi
 ```text
 wisp mcp add github --env-from GITHUB_TOKEN -- npx -y @modelcontextprotocol/server-github
 wisp mcp add openai-developer-docs --url https://developers.openai.com/mcp
+wisp mcp add linear --url https://mcp.linear.app/mcp --header-from "Authorization=Bearer LINEAR_API_KEY"
 wisp mcp import snippet.json
 wisp mcp list
 ```
@@ -100,6 +101,10 @@ You can also edit the file directly:
     "openai-developer-docs": {
       "url": "https://developers.openai.com/mcp",
       "tool_safety": {"search_openai_docs": "read", "fetch_openai_doc": "read"}
+    },
+    "linear": {
+      "url": "https://mcp.linear.app/mcp",
+      "headers_from": {"Authorization": "Bearer ${LINEAR_API_KEY}"}
     }
   }
 }
@@ -110,6 +115,19 @@ directly over Streamable HTTP. Remote URLs require HTTPS except for loopback dev
 and cannot contain credentials, query strings, or fragments. HTTP entries do not accept stdio-only
 `args`, `env`, or `env_from` fields. Configure the final endpoint URL: redirects are not followed.
 HTTP responses must be uncompressed; JSON bodies and streamed events have bounded sizes.
+
+For HTTP servers that need authentication, `headers` holds literal header values, stored like `env`,
+and `headers_from` builds a header from an environment variable each time Wisp connects. A
+`headers_from` value is `"${VAR}"` or a scheme word and the variable, such as
+`"Bearer ${LINEAR_API_KEY}"`; nothing else, so the visible part can never hold a credential. If the
+variable is unset, or its value is empty, starts or ends with a space, or contains a line break or
+control character, the server is skipped.
+Headers go only to the configured URL's origin (scheme, host, and port), never to another host, and
+cannot replace the headers the transport manages (such as `Host`, `Accept-Encoding`, or
+`Mcp-Session-Id`). Header values are never shown, logged, or sent to the model. A server's
+`headers_from` sends that variable's value to the server, so every confirmation names the variable
+and the host it goes to. Pasted snippets with `headers` are not accepted yet; add those servers with
+`wisp mcp add --header` or `--header-from`.
 
 For stdio servers, `env` contains literal user-owned values. `env_from` forwards only the named
 variables from Wisp's process environment; if one is missing, that server is skipped. Server
@@ -149,7 +167,7 @@ Wisp starts, or after a reconnect (`c` in `/mcp`).
 > starting every local server, rather than raising it without a lifecycle or lazy-start solution.
 
 Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
-Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, custom HTTP authentication, OAuth, and
+Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, OAuth, and
 interactive authentication are not yet supported.
 
 ### Asking Wisp to set up a server
@@ -164,14 +182,16 @@ your files. Keep `bash` on ask when that matters.)
 | Tool | Safety | What it does |
 |---|---|---|
 | `list_mcp_servers` | read | Lists saved servers: the executable or URL origin and the environment variable names; never arguments, URL paths, or values |
-| `propose_mcp_server` | command | Proposes adding (or replacing) a server: name, command and arguments or URL, and `env_from` names |
+| `propose_mcp_server` | command | Proposes adding (or replacing) a server: name, command and arguments or URL, `env_from` names, and `headers_from` for an HTTP server's token |
 | `propose_mcp_server_change` | command | Proposes removing or disabling a saved server |
 
 With [web search](./providers#web-search) on, Wisp can look up a server's command or URL itself,
 for example "add the Linear MCP server". What it finds is still only a proposal.
 
 Every proposal opens a confirmation that shows exactly what the server would run or connect to and
-which variables it forwards. Only **Confirm** or **Deny** is offered: no permission mode, `--yes`,
+which variables it forwards. A header built from a variable is shown with the host that receives
+it, such as "sends $LINEAR_API_KEY to mcp.linear.app in header Authorization". A proposal with any
+field the confirmation does not show cannot be confirmed. Only **Confirm** or **Deny** is offered: no permission mode, `--yes`,
 or "allow for this session" answer ever approves a proposal, and a confirmation cannot be accepted
 while part of it is hidden. In print and JSON modes a proposal is always refused. Confirming saves
 the change from exactly the arguments you were shown; MCP servers then restart when the reply ends,

@@ -143,6 +143,7 @@ fn mcp_management_builders_validate_and_redact_secrets() {
         url: None,
         env_names: vec!["TOKEN".into()],
         env_from: vec!["HOME_DIR".into()],
+        ..Default::default()
     };
     let add = WispTypedClientRpcCommands::add_mcp_server(
         "add-1",
@@ -172,6 +173,8 @@ fn mcp_management_builders_validate_and_redact_secrets() {
             "args": ["-y", "server"],
             "env_names": ["TOKEN"],
             "env_from": ["HOME_DIR"],
+            "header_names": [],
+            "headers_from": [],
         })
     );
     assert!(
@@ -183,4 +186,50 @@ fn mcp_management_builders_validate_and_redact_secrets() {
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-1", "github").is_ok());
     assert!(WispTypedClientRpcCommands::reconnect_mcp("c-1").is_ok());
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-2", "").is_err());
+}
+
+#[test]
+fn adding_an_http_server_sends_its_forwarded_headers_as_saved() {
+    let launch = McpServerLaunch {
+        url: Some("https://mcp.linear.app/mcp".into()),
+        headers_from: vec![wisp_protocol::events::McpHeaderFrom {
+            header: "Authorization".into(),
+            variable: "LINEAR_API_KEY".into(),
+            scheme: Some("Bearer".into()),
+        }],
+        ..Default::default()
+    };
+
+    let wire = WispTypedClientRpcCommands::add_mcp_server("add-1", "linear", &launch, &[], false)
+        .unwrap()
+        .to_value()
+        .unwrap();
+
+    assert_eq!(
+        wire["headers_from"],
+        json!({"Authorization": "Bearer ${LINEAR_API_KEY}"})
+    );
+    assert_eq!(wire["headers"], json!({}));
+}
+
+#[test]
+fn enabling_a_server_with_a_bare_header_template_sends_no_null_scheme() {
+    let launch = McpServerLaunch {
+        url: Some("https://mcp.example.com/mcp".into()),
+        headers_from: vec![wisp_protocol::events::McpHeaderFrom {
+            header: "X-API-Key".into(),
+            variable: "TOKEN".into(),
+            scheme: None,
+        }],
+        ..Default::default()
+    };
+
+    let enable =
+        WispTypedClientRpcCommands::set_mcp_server_enabled("e-1", "docs", true, Some(&launch))
+            .unwrap();
+
+    assert_eq!(
+        enable.to_value().unwrap()["expected"]["headers_from"],
+        json!([{"header": "X-API-Key", "variable": "TOKEN"}])
+    );
 }

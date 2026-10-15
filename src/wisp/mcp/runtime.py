@@ -14,7 +14,7 @@ from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import McpServerConfig, header_template_variable, is_valid_header_value
 from wisp.mcp.http_transport import bounded_http_client
 from wisp.mcp.tool import adapt_mcp_tool
 from wisp.mcp.transport import bounded_stdio_client
@@ -30,6 +30,7 @@ MAX_MCP_TOOL_DEFINITION_BYTES = 4_194_304
 
 type McpDiagnosticCode = Literal[
     "missing-environment",
+    "invalid-header",
     "unavailable",
     "timeout",
     "invalid-discovery",
@@ -50,6 +51,7 @@ class McpStartupDiagnostic:
     def message(self) -> str:
         reasons: dict[McpDiagnosticCode, str] = {
             "missing-environment": "a configured environment variable is unavailable",
+            "invalid-header": "a header value is empty or has invalid characters or spacing",
             "unavailable": "the server could not be started or initialized",
             "timeout": "startup or tool discovery timed out",
             "invalid-discovery": "the server returned an invalid tool catalog",
@@ -208,6 +210,7 @@ class McpRuntime:
     ) -> None:
         try:
             environment = _server_environment(server)
+            headers = _server_headers(server)
         except _DiscoveryRejected as exc:
             await send.send(_FailedServer(McpStartupDiagnostic(server.name, exc.code)))
             await send.aclose()
@@ -222,6 +225,7 @@ class McpRuntime:
                     transport = bounded_http_client(
                         server.url,
                         on_disconnect=lambda: self._disconnected_server_names.add(server.name),
+                        headers=headers,
                     )
                 else:
                     assert server.command is not None
@@ -367,6 +371,32 @@ def _server_environment(server: McpServerConfig) -> dict[str, str]:
             raise _DiscoveryRejected("missing-environment")
         environment[name] = value
     return environment
+
+
+def _server_headers(server: McpServerConfig) -> dict[str, str]:
+    """Resolve an HTTP server's headers from literal values and the environment.
+
+    Args:
+        server (McpServerConfig): Validated server configuration.
+
+    Returns:
+        dict[str, str]: Header values to send to the server's origin.
+
+    Raises:
+        _DiscoveryRejected: A referenced variable is unset (``missing-environment``),
+            or its value would split the header (``invalid-header``).
+    """
+
+    headers = {name: value.get_secret_value() for name, value in server.headers}
+    for name, template in server.headers_from:
+        scheme, variable = header_template_variable(template)
+        value = os.environ.get(variable)
+        if value is None:
+            raise _DiscoveryRejected("missing-environment")
+        if not is_valid_header_value(value):
+            raise _DiscoveryRejected("invalid-header")
+        headers[name] = f"{scheme} {value}" if scheme else value
+    return headers
 
 
 def _safe_server_cwd() -> Path:

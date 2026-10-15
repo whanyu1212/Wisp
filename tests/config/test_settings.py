@@ -471,6 +471,8 @@ def test_mcp_settings_json_round_trip_uses_name_keyed_servers() -> None:
             "args": [],
             "env": {},
             "env_from": [],
+            "headers": {},
+            "headers_from": {},
             "tool_safety": {"read-file": "read"},
         }
     }

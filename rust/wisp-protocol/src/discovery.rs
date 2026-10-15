@@ -116,6 +116,35 @@ pub struct McpServerLaunch {
     pub url: Option<String>,
     pub env_names: Vec<String>,
     pub env_from: Vec<String>,
+    /// An HTTP server's headers with stored values, by name only.
+    #[serde(default)]
+    pub header_names: Vec<String>,
+    /// An HTTP server's headers built from environment variables: each sends
+    /// that variable's value to the server's URL.
+    #[serde(default)]
+    pub headers_from: Vec<McpHeaderFrom>,
+}
+
+/// One HTTP header whose value Wisp builds from an environment variable,
+/// sent as `"{scheme} {value}"` or the bare value.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpHeaderFrom {
+    pub header: String,
+    pub variable: String,
+    // Commands omit an absent scheme; their schema does not accept null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+impl McpHeaderFrom {
+    /// The `headers_from` settings value this header is saved as.
+    pub fn template(&self) -> String {
+        match &self.scheme {
+            Some(scheme) => format!("{scheme} ${{{}}}", self.variable),
+            None => format!("${{{}}}", self.variable),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

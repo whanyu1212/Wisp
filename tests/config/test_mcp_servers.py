@@ -314,3 +314,30 @@ def test_snippet_errors_do_not_echo_values_or_invalid_names(snippet: str) -> Non
         parse_mcp_snippet(snippet)
 
     assert "sentinel-secret" not in str(error.value).lower()
+
+
+def test_header_values_are_written_and_a_changed_forwarded_header_needs_a_new_confirmation(
+    tmp_path: Path,
+) -> None:
+    def http(template: str) -> McpServerConfig:
+        return McpServerConfig.model_validate(
+            {
+                "name": "linear",
+                "url": "https://mcp.linear.app/mcp",
+                "headers": {"X-Workspace": "workspace-secret"},
+                "headers_from": {"Authorization": template},
+                "enabled": False,
+            }
+        )
+
+    add_user_mcp_servers((http("Bearer ${LINEAR_API_KEY}"),), home_dir=tmp_path)
+    saved = _settings(tmp_path)["mcp_servers"]["linear"]
+    assert saved["headers"] == {"X-Workspace": "workspace-secret"}
+    assert saved["headers_from"] == {"Authorization": "Bearer ${LINEAR_API_KEY}"}
+
+    (shown,) = load_user_mcp_servers(home_dir=tmp_path)
+    add_user_mcp_servers((http("Bearer ${OPENAI_API_KEY}"),), replace=True, home_dir=tmp_path)
+    with pytest.raises(McpSettingsError, match="changed while you were confirming"):
+        set_user_mcp_server_enabled(
+            "linear", True, confirmed=lambda saved: same_launch(saved, shown), home_dir=tmp_path
+        )

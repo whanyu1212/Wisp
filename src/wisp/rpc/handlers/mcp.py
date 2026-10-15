@@ -34,6 +34,7 @@ from wisp.config.mcp_servers import (
 from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,
+    RpcMcpHeaderFrom,
     RpcMcpServerLaunch,
     RpcMcpServerPreview,
     RpcMcpServerSnapshot,
@@ -41,7 +42,7 @@ from wisp.events import (
     RpcMcpStatusReported,
     RpcMcpStatusSnapshot,
 )
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import McpServerConfig, header_template_variable
 from wisp.rpc.commands import (
     AddMcpServerCommand,
     PreviewMcpSnippetCommand,
@@ -365,6 +366,8 @@ def _change_settings(command: McpServerCommand) -> None:
             "url": command.url,
             "env": command.env,
             "env_from": command.env_from,
+            "headers": command.headers,
+            "headers_from": command.headers_from,
         }
         server = validated_mcp_server(
             command.name, {key: value for key, value in entry.items() if value}
@@ -386,6 +389,9 @@ def _change_settings(command: McpServerCommand) -> None:
 def rpc_mcp_server_launch(server: McpServerConfig) -> RpcMcpServerLaunch:
     """Return what ``server`` runs or connects to, naming environment variables only.
 
+    Literal header values are reduced to their header names; a forwarded header
+    names the variable whose value it sends.
+
     Args:
         server (McpServerConfig): Configured server.
 
@@ -399,6 +405,14 @@ def rpc_mcp_server_launch(server: McpServerConfig) -> RpcMcpServerLaunch:
         url=server.url,
         env_names=tuple(name for name, _value in server.env),
         env_from=server.env_from,
+        header_names=tuple(name for name, _value in server.headers),
+        headers_from=tuple(
+            RpcMcpHeaderFrom(header=header, variable=variable, scheme=scheme)
+            for header, (scheme, variable) in (
+                (header, header_template_variable(template))
+                for header, template in server.headers_from
+            )
+        ),
     )
 
 

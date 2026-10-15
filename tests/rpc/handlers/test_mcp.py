@@ -304,3 +304,37 @@ def test_a_restart_after_the_run_waits_for_an_idle_session(tmp_path: Path) -> No
             await runtime.aclose()
 
     anyio.run(scenario)
+
+
+def test_add_command_never_shows_header_values() -> None:
+    command = AddMcpServerCommand(
+        id="add",
+        name="linear",
+        url="https://mcp.linear.app/mcp",
+        headers={"Authorization": f"Bearer {SECRET}"},
+        headers_from={"X-Workspace": "${LINEAR_WORKSPACE}"},
+    )
+
+    assert SECRET not in repr(command)
+    parsed = ParsedRpcCommand.from_known(command)
+    assert SECRET not in repr(parsed._payload)
+    assert {"headers", "headers_from"} <= parsed.provided_fields
+
+
+def test_launch_names_header_values_and_the_variables_headers_send() -> None:
+    server = validated_mcp_server(
+        "linear",
+        {
+            "url": "https://mcp.linear.app/mcp",
+            "headers": {"X-Workspace": SECRET},
+            "headers_from": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
+        },
+    )
+
+    launch = rpc_mcp_server_launch(server)
+
+    assert launch.header_names == ("X-Workspace",)
+    assert [header.model_dump() for header in launch.headers_from] == [
+        {"header": "Authorization", "variable": "LINEAR_API_KEY", "scheme": "Bearer"}
+    ]
+    assert SECRET not in launch.model_dump_json()

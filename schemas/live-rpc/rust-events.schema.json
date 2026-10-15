@@ -2025,9 +2025,44 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcMcpHeaderFrom": {
+      "additionalProperties": false,
+      "description": "One HTTP header whose value Wisp builds from an environment variable.\n\nThe header is sent as ``\"{scheme} {value}\"``, or the bare value when\n``scheme`` is None. Showing it tells the user which variable's value goes to\nthe server.",
+      "properties": {
+        "header": {
+          "minLength": 1,
+          "title": "RpcMcpHeaderFromHeader",
+          "type": "string"
+        },
+        "scheme": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMcpHeaderFromScheme"
+        },
+        "variable": {
+          "minLength": 1,
+          "title": "RpcMcpHeaderFromVariable",
+          "type": "string"
+        }
+      },
+      "required": [
+        "header",
+        "variable",
+        "scheme"
+      ],
+      "title": "RpcMcpHeaderFrom",
+      "type": "object"
+    },
     "RpcMcpServerLaunch": {
       "additionalProperties": false,
-      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment.",
+      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment. An HTTP\nserver's headers appear the same way: ``header_names`` carry stored values, and\n``headers_from`` send the named variables to the server's URL.",
       "properties": {
         "args": {
           "default": [],
@@ -2065,6 +2100,22 @@
           "title": "RpcMcpServerLaunchEnvNames",
           "type": "array"
         },
+        "header_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerLaunchHeaderNames",
+          "type": "array"
+        },
+        "headers_from": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcMcpHeaderFrom"
+          },
+          "title": "RpcMcpServerLaunchHeadersFrom",
+          "type": "array"
+        },
         "url": {
           "anyOf": [
             {
@@ -2083,7 +2134,9 @@
         "args",
         "url",
         "env_names",
-        "env_from"
+        "env_from",
+        "header_names",
+        "headers_from"
       ],
       "title": "RpcMcpServerLaunch",
       "type": "object"

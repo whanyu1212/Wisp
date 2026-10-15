@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from typing import Any
@@ -75,8 +75,23 @@ async def _bound_response(response: httpx2.Response) -> None:
 
 
 class _HttpClient(httpx2.AsyncClient):
+    def __init__(
+        self,
+        *,
+        origin: tuple[str, str, int | None] | None = None,
+        auth_headers: Mapping[str, str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._origin = origin
+        self._auth_headers = dict(auth_headers or {})
+
     async def send(self, request: httpx2.Request, **kwargs: Any) -> httpx2.Response:
         """Send a request, bounding session termination (DELETE) by a deadline.
+
+        The configured headers usually carry credentials. They are added only
+        to requests for the configured origin, so no other host ever receives
+        them, whatever URL the SDK requests.
 
         A server that stalls session termination must not stall TUI shutdown. The
         deadline is applied here because every client method ends in ``send``: the
@@ -95,6 +110,9 @@ class _HttpClient(httpx2.AsyncClient):
             TimeoutError: A DELETE did not complete within the shutdown deadline.
         """
 
+        if self._auth_headers and _origin(request.url) == self._origin:
+            for name, value in self._auth_headers.items():
+                request.headers[name] = value
         if request.method != "DELETE":
             return await super().send(request, **kwargs)
         async with asyncio.timeout(_HTTP_SHUTDOWN_SECONDS):
@@ -108,17 +126,26 @@ class _HttpClient(httpx2.AsyncClient):
             return response
 
 
+def _origin(url: httpx2.URL) -> tuple[str, str, int | None]:
+    default_port = {"http": 80, "https": 443}.get(url.scheme)
+    return url.scheme, url.host.casefold(), url.port or default_port
+
+
 @asynccontextmanager
 async def bounded_http_client(
     url: str,
     *,
     on_disconnect: Callable[[], None],
+    headers: Mapping[str, str] | None = None,
 ) -> AsyncIterator[TransportStreams]:
     """Open SDK streams with bounded bodies and task-local diagnostic redaction.
 
     Args:
         url (str): Validated HTTP endpoint. Redirects are not followed.
         on_disconnect (Callable[[], None]): Called when the transport exits.
+        headers (Mapping[str, str] | None): Extra headers, such as credentials,
+            sent only on requests to ``url``'s origin. Values must already be
+            checked for line breaks and control characters.
 
     Yields:
         TransportStreams: SDK-compatible incoming and outgoing message streams.
@@ -139,6 +166,8 @@ async def bounded_http_client(
     token = _REDACT_HTTP_LOGS.set(True)
     try:
         async with _HttpClient(
+            origin=_origin(httpx2.URL(url)),
+            auth_headers=headers or {},
             follow_redirects=False,
             headers={"Accept-Encoding": "identity"},
             timeout=httpx2.Timeout(30.0, read=300.0),

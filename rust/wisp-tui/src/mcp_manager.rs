@@ -764,7 +764,53 @@ fn launch_rows(launch: &McpServerLaunch) -> Vec<String> {
     if !launch.env_from.is_empty() {
         rows.push(format!("forwards: {}", launch.env_from.join(", ")));
     }
+    if !launch.header_names.is_empty() {
+        rows.push(format!(
+            "sends headers: {} (values hidden)",
+            launch.header_names.join(", ")
+        ));
+    }
+    let host = launch.url.as_deref().map(url_host).unwrap_or_default();
+    for header in &launch.headers_from {
+        rows.push(header_forward_row(&header.header, &header.variable, host));
+    }
     rows
+}
+
+/// One forwarded header: which variable's value leaves the machine, and for
+/// which host. Both are named on one row so neither can be missed.
+pub(crate) fn header_forward_row(header: &str, variable: &str, host: &str) -> String {
+    format!("sends ${variable} to {host} in header {header}")
+}
+
+/// The host (and port) part of an absolute URL.
+pub(crate) fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#']).next().unwrap_or(rest)
+}
+
+/// Split a `headers_from` value, `${VAR}` or `Scheme ${VAR}`, into its scheme
+/// and variable, or None when it has any other shape.
+pub(crate) fn parse_header_template(template: &str) -> Option<(Option<&str>, &str)> {
+    let (scheme, reference) = match template.split_once(' ') {
+        Some((scheme, reference)) => (Some(scheme), reference),
+        None => (None, template),
+    };
+    if let Some(scheme) = scheme {
+        if scheme.is_empty()
+            || scheme.len() > 20
+            || !scheme.chars().all(|c| c.is_ascii_alphabetic())
+        {
+            return None;
+        }
+    }
+    let variable = reference.strip_prefix("${")?.strip_suffix('}')?;
+    let mut characters = variable.chars();
+    let valid = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|c| c.is_ascii_alphanumeric() || c == '_');
+    valid.then_some((scheme, variable))
 }
 
 /// Quote a command line the way a POSIX shell would read it back.
@@ -1049,8 +1095,7 @@ mod tests {
             command: Some(command.into()),
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             url: None,
-            env_names: vec![],
-            env_from: vec![],
+            ..Default::default()
         }
     }
 
@@ -1573,5 +1618,51 @@ mod tests {
             panic!("expected an add");
         };
         assert_eq!(env[0].1.as_str(), "");
+    }
+
+    #[test]
+    fn launch_rows_name_header_values_and_the_variables_headers_send() {
+        let launch = McpServerLaunch {
+            url: Some("https://mcp.linear.app/mcp".into()),
+            header_names: vec!["X-Workspace".into()],
+            headers_from: vec![wisp_protocol::events::McpHeaderFrom {
+                header: "Authorization".into(),
+                variable: "LINEAR_API_KEY".into(),
+                scheme: Some("Bearer".into()),
+            }],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            launch_rows(&launch),
+            vec![
+                "connects to: https://mcp.linear.app/mcp".to_owned(),
+                "sends headers: X-Workspace (values hidden)".to_owned(),
+                "sends $LINEAR_API_KEY to mcp.linear.app in header Authorization".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn header_templates_parse_only_a_variable_after_an_optional_scheme() {
+        assert_eq!(
+            parse_header_template("Bearer ${LINEAR_API_KEY}"),
+            Some((Some("Bearer"), "LINEAR_API_KEY"))
+        );
+        assert_eq!(parse_header_template("${TOKEN}"), Some((None, "TOKEN")));
+        for invalid in [
+            "Bearer abc",
+            "Bearer sk-1 ${T}",
+            "${1X}",
+            "$TOKEN",
+            "B3arer ${T}",
+            "",
+        ] {
+            assert_eq!(parse_header_template(invalid), None, "{invalid}");
+        }
+        assert_eq!(
+            url_host("https://mcp.linear.app:8443/mcp"),
+            "mcp.linear.app:8443"
+        );
     }
 }

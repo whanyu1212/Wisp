@@ -324,7 +324,7 @@ def test_import_rejects_unsupported_snippet(home: Path) -> None:
     result = _run(["import", str(path), "--yes"])
 
     assert result.exit_code == 1
-    assert "unsupported settings: headers" in result.output
+    assert "sets HTTP headers, which a snippet cannot add yet" in result.output
     assert SECRET not in result.output
     assert _servers(home) == {}
 
@@ -338,3 +338,62 @@ def test_import_of_a_deeply_nested_snippet_fails_cleanly(home: Path) -> None:
     assert result.exit_code == 1
     assert "nested too deeply" in result.output
     assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize(
+    ("option", "template"),
+    [
+        ("Authorization=Bearer LINEAR_API_KEY", "Bearer ${LINEAR_API_KEY}"),
+        ("Authorization=Bearer ${LINEAR_API_KEY}", "Bearer ${LINEAR_API_KEY}"),
+        ("Authorization=LINEAR_API_KEY", "${LINEAR_API_KEY}"),
+    ],
+)
+def test_add_header_from_names_the_variable_and_where_it_goes(
+    home: Path, option: str, template: str
+) -> None:
+    result = _run(
+        ["add", "linear", "--url", "https://mcp.linear.app/mcp", "--header-from", option, "--yes"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "sends $LINEAR_API_KEY to mcp.linear.app in header Authorization" in result.output
+    assert _servers(home) == {
+        "linear": {
+            "url": "https://mcp.linear.app/mcp",
+            "headers_from": {"Authorization": template},
+        }
+    }
+
+
+def test_add_header_value_is_masked_and_never_printed(home: Path, terminal: None) -> None:
+    result = _run(
+        ["add", "linear", "--url", "https://mcp.linear.app/mcp", "--header", "Authorization"],
+        input=f"Bearer {SECRET}\ny\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert SECRET not in result.output
+    assert "sends headers: Authorization (values hidden)" in result.output
+    assert _servers(home)["linear"]["headers"] == {"Authorization": f"Bearer {SECRET}"}
+    listed = _run(["list"])
+    assert SECRET not in listed.output
+
+
+@pytest.mark.parametrize(
+    "option", ["Authorization", "Authorization=Bearer sk-live-1234 TOKEN", "Authorization="]
+)
+def test_add_rejects_a_header_from_that_is_not_a_variable(home: Path, option: str) -> None:
+    result = _run(
+        ["add", "linear", "--url", "https://mcp.linear.app/mcp", "--header-from", option, "--yes"]
+    )
+
+    assert result.exit_code != 0
+    assert "sk-live-1234" not in result.output
+    assert _servers(home) == {}
+
+
+def test_add_header_on_a_command_server_is_rejected(home: Path) -> None:
+    result = _run(["add", "x", "--header-from", "Authorization=TOKEN", "--yes", "--", "npx"])
+
+    assert result.exit_code != 0
+    assert _servers(home) == {}

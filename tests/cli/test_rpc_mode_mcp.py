@@ -84,6 +84,8 @@ def test_add_disable_enable_and_remove_apply_without_restart(tmp_path: Path) -> 
         "url": None,
         "env_names": ["WISP_MCP_TEST_CLOSED_FILE", "WISP_MCP_TEST_LITERAL"],
         "env_from": [],
+        "header_names": [],
+        "headers_from": [],
     }
     records = _run_rpc(
         tmp_path,
@@ -225,6 +227,8 @@ def test_enable_is_refused_unless_the_saved_server_is_the_confirmed_one(tmp_path
         "url": None,
         "env_names": [],
         "env_from": [],
+        "header_names": [],
+        "headers_from": [],
     }
     records = _run_rpc(
         tmp_path,
@@ -307,6 +311,8 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
                         "url": None,
                         "env_names": ["GITHUB_PERSONAL_ACCESS_TOKEN"],
                         "env_from": [],
+                        "header_names": [],
+                        "headers_from": [],
                     },
                 }
             ],
@@ -314,7 +320,7 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
     ]
     finished = _finished(records)
     assert finished["bad"]["ok"] is False
-    assert "unsupported settings: headers" in str(finished["bad"]["error"])
+    assert "sets HTTP headers, which a snippet cannot add yet" in str(finished["bad"]["error"])
     assert finished["not-json"]["ok"] is False
     # A non-string type fails the command instead of stopping the host.
     assert finished["odd-type"]["ok"] is False

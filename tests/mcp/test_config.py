@@ -238,3 +238,67 @@ def test_wisp_config_limits_server_count() -> None:
 
     with pytest.raises(ValidationError):
         WispConfig(mcp_servers=servers)
+
+
+def _http(**headers: object) -> McpServerConfig:
+    return McpServerConfig.model_validate(
+        {"name": "linear", "url": "https://mcp.linear.app/mcp", **headers}
+    )
+
+
+def test_http_headers_keep_values_hidden_and_forwarded_templates_visible() -> None:
+    server = _http(
+        headers={"X-Workspace": "secret-workspace-id"},
+        headers_from={"Authorization": "Bearer ${LINEAR_API_KEY}"},
+    )
+
+    assert "secret-workspace-id" not in repr(server)
+    dumped = json.loads(server.model_dump_json())
+    assert dumped["headers"] == {"X-Workspace": "**********"}
+    assert dumped["headers_from"] == {"Authorization": "Bearer ${LINEAR_API_KEY}"}
+    assert mcp_config_module.header_template_variable("Bearer ${LINEAR_API_KEY}") == (
+        "Bearer",
+        "LINEAR_API_KEY",
+    )
+    assert mcp_config_module.header_template_variable("${TOKEN}") == (None, "TOKEN")
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        # Header injection through a line break or other control character.
+        {"headers": {"X-Key": "abc\r\nX-Injected: yes"}},
+        {"headers": {"X-Key": "abc\x00"}},
+        # Values HTTP clients refuse to send.
+        {"headers": {"Authorization": "Bearer "}},
+        {"headers": {"X-Key": " abc"}},
+        {"headers": {"X-Key": ""}},
+        # Headers the transport or the MCP protocol manages.
+        {"headers": {"Host": "evil.example"}},
+        {"headers_from": {"mcp-session-id": "${SESSION}"}},
+        {"headers": {"Accept-Encoding": "gzip"}},
+        {"headers_from": {"Last-Event-ID": "${EVENT}"}},
+        # Not a header name.
+        {"headers": {"Bad Name": "x"}},
+        # The same header twice, in any case, across both maps.
+        {"headers": {"authorization": "x"}, "headers_from": {"Authorization": "${TOKEN}"}},
+        # A visible template that could carry a literal credential.
+        {"headers_from": {"Authorization": "Bearer sk-live-123 ${TOKEN}"}},
+        {"headers_from": {"Authorization": "Bearer lin_api_abcdef"}},
+        {"headers_from": {"Authorization": "Token1 ${TOKEN}"}},
+        {"headers_from": {"Authorization": "${TOKEN} extra"}},
+        {"headers_from": {"Authorization": "$TOKEN"}},
+    ],
+)
+def test_invalid_http_headers_are_rejected_without_echoing_values(
+    headers: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError) as caught:
+        _http(**headers)
+    assert "sk-live-123" not in str(caught.value)
+    assert "X-Injected" not in str(caught.value)
+
+
+def test_stdio_servers_take_no_headers() -> None:
+    with pytest.raises(ValidationError, match="stdio MCP servers do not accept headers"):
+        McpServerConfig(name="x", command="npx", headers_from=(("Authorization", "${TOKEN}"),))

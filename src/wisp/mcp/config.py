@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Self
 from urllib.parse import urlsplit
@@ -27,6 +28,7 @@ MAX_MCP_SERVERS = 16
 MAX_MCP_ARGS = 64
 MAX_MCP_ENV_VARS = 64
 MAX_MCP_TOOL_OVERRIDES = 256
+MAX_MCP_HEADERS = 16
 _ENVIRONMENT_NAMES_CASE_INSENSITIVE = os.name == "nt"
 
 SERVER_NAME_PATTERN = r"^[a-z][a-z0-9-]{0,31}$"
@@ -40,6 +42,41 @@ EnvironmentName = Annotated[
 ]
 EnvironmentValue = Annotated[SecretStr, Field(max_length=16_384)]
 ToolName = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+# An HTTP header field name (RFC 9110 token).
+HeaderName = Annotated[
+    str,
+    StringConstraints(pattern=r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$"),
+]
+HeaderValue = Annotated[SecretStr, Field(max_length=8_192)]
+# A header built from one environment variable, optionally after an
+# authentication scheme word: "${VAR}" or "Bearer ${VAR}". Only the variable's
+# value is secret; the scheme is a short word so the visible template cannot
+# carry a literal credential.
+HEADER_TEMPLATE_PATTERN = re.compile(
+    r"^(?:(?P<scheme>[A-Za-z]{1,20}) )?\$\{(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\}$"
+)
+HeaderTemplate = Annotated[str, StringConstraints(max_length=256)]
+# Headers the transport or the MCP protocol sets itself. Overriding them could
+# break framing, defeat response bounding, or hijack the session.
+RESERVED_HEADER_NAMES = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "keep-alive",
+        "last-event-id",
+        "mcp-protocol-version",
+        "mcp-session-id",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
 
 
 class McpServerConfig(BaseModel):
@@ -60,6 +97,16 @@ class McpServerConfig(BaseModel):
         default=(), max_length=MAX_MCP_ENV_VARS, repr=False
     )
     env_from: tuple[EnvironmentName, ...] = Field(default=(), max_length=MAX_MCP_ENV_VARS)
+    # HTTP request headers, usually for authentication. ``headers`` holds literal
+    # values, kept like ``env``; ``headers_from`` builds a value from an
+    # environment variable at connect time, e.g. ``{"Authorization": "Bearer
+    # ${LINEAR_API_KEY}"}``.
+    headers: tuple[tuple[HeaderName, HeaderValue], ...] = Field(
+        default=(), max_length=MAX_MCP_HEADERS, repr=False
+    )
+    headers_from: tuple[tuple[HeaderName, HeaderTemplate], ...] = Field(
+        default=(), max_length=MAX_MCP_HEADERS
+    )
     tool_safety: tuple[tuple[ToolName, ToolSafety], ...] = Field(
         default=(), max_length=MAX_MCP_TOOL_OVERRIDES
     )
@@ -89,6 +136,32 @@ class McpServerConfig(BaseModel):
 
     @field_serializer("env", when_used="json")
     def _serialize_env(self, values: tuple[tuple[str, SecretStr], ...]) -> dict[str, SecretStr]:
+        return dict(values)
+
+    @field_validator("headers", mode="before", json_schema_input_type=dict[str, str])
+    @classmethod
+    def _headers_mapping_to_items(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return tuple(value.items())
+        if isinstance(value, tuple):
+            return value
+        raise ValueError("value must be a JSON object")
+
+    @field_serializer("headers", when_used="json")
+    def _serialize_headers(self, values: tuple[tuple[str, SecretStr], ...]) -> dict[str, SecretStr]:
+        return dict(values)
+
+    @field_validator("headers_from", mode="before", json_schema_input_type=dict[str, str])
+    @classmethod
+    def _headers_from_mapping_to_items(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return tuple(value.items())
+        if isinstance(value, tuple):
+            return value
+        raise ValueError("value must be a JSON object")
+
+    @field_serializer("headers_from", when_used="json")
+    def _serialize_headers_from(self, values: tuple[tuple[str, str], ...]) -> dict[str, str]:
         return dict(values)
 
     @field_validator(
@@ -172,6 +245,27 @@ class McpServerConfig(BaseModel):
             raise ValueError("env_from names must be unique")
         return tuple(sorted(values))
 
+    @field_validator("headers")
+    @classmethod
+    def _validate_headers(
+        cls, values: tuple[tuple[str, SecretStr], ...]
+    ) -> tuple[tuple[str, SecretStr], ...]:
+        if any(not is_valid_header_value(value.get_secret_value()) for _, value in values):
+            raise ValueError(
+                "header values must not be empty, start or end with a space, or contain "
+                "line breaks or control characters"
+            )
+        return tuple(sorted(values))
+
+    @field_validator("headers_from")
+    @classmethod
+    def _validate_headers_from(
+        cls, values: tuple[tuple[str, str], ...]
+    ) -> tuple[tuple[str, str], ...]:
+        if any(HEADER_TEMPLATE_PATTERN.fullmatch(template) is None for _, template in values):
+            raise ValueError('headers_from values must look like "${VAR}" or "Bearer ${VAR}"')
+        return tuple(sorted(values))
+
     @field_validator("tool_safety")
     @classmethod
     def _validate_tool_safety(
@@ -190,12 +284,57 @@ class McpServerConfig(BaseModel):
             raise ValueError("exactly one of command or url must be configured")
         if self.url is not None and (self.args or self.env or self.env_from):
             raise ValueError("HTTP MCP servers do not accept args, env, or env_from")
+        if self.command is not None and (self.headers or self.headers_from):
+            raise ValueError("stdio MCP servers do not accept headers or headers_from")
+        header_names = [name.casefold() for name, _ in (*self.headers, *self.headers_from)]
+        if len(header_names) != len(set(header_names)):
+            raise ValueError("header names must be unique across headers and headers_from")
+        if RESERVED_HEADER_NAMES.intersection(header_names):
+            raise ValueError("headers must not set a header the MCP transport manages")
         literal_names = {_environment_name_key(name) for name, _ in self.env}
         inherited_names = {_environment_name_key(name) for name in self.env_from}
         overlap = literal_names.intersection(inherited_names)
         if overlap:
             raise ValueError("env and env_from must not contain the same variable")
         return self
+
+
+def is_valid_header_value(value: str) -> bool:
+    """Return whether a value can be sent as one HTTP header without injection.
+
+    Args:
+        value (str): Literal value or resolved environment value.
+
+    Returns:
+        bool: False for an empty value, surrounding spaces or tabs (which HTTP
+        clients refuse to send), and line breaks, NUL, and other control
+        characters, which could split the header or smuggle another one.
+    """
+
+    if not value or value != value.strip(" \t"):
+        return False
+    return not any(
+        (ord(character) < 32 and character != "\t") or ord(character) == 127 for character in value
+    )
+
+
+def header_template_variable(template: str) -> tuple[str | None, str]:
+    """Split a validated ``headers_from`` template into its scheme and variable.
+
+    Args:
+        template (str): A value matching ``HEADER_TEMPLATE_PATTERN``.
+
+    Returns:
+        tuple[str | None, str]: The scheme word, if any, and the variable name.
+
+    Raises:
+        ValueError: The template is not a valid header template.
+    """
+
+    match = HEADER_TEMPLATE_PATTERN.fullmatch(template)
+    if match is None:
+        raise ValueError("invalid header template")
+    return match.group("scheme"), match.group("variable")
 
 
 def _environment_name_key(name: str) -> str:

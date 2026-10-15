@@ -360,9 +360,11 @@ macro_rules! validated_wire_wrapper {
                         value["api_key"] = serde_json::Value::String("<redacted>".into());
                     }
                     Some("add_mcp_server") => {
-                        if let Some(env) = value["env"].as_object_mut() {
-                            for secret in env.values_mut() {
-                                *secret = serde_json::Value::String("<redacted>".into());
+                        for field in ["env", "headers"] {
+                            if let Some(secrets) = value[field].as_object_mut() {
+                                for secret in secrets.values_mut() {
+                                    *secret = serde_json::Value::String("<redacted>".into());
+                                }
                             }
                         }
                     }
@@ -766,8 +768,9 @@ pub mod commands {
 
         /// Save an MCP server the user confirmed, then restart MCP servers.
         ///
-        /// `launch.env_names` is ignored: `env` carries the literal values the user
-        /// entered, which travel only through this secret-bearing command.
+        /// `launch.env_names` and `launch.header_names` are ignored: `env` carries the
+        /// literal values the user entered, which travel only through this
+        /// secret-bearing command. `launch.headers_from` is sent as saved.
         pub fn add_mcp_server(
             id: &str,
             name: &str,
@@ -785,6 +788,13 @@ pub mod commands {
                     .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
                     .collect::<serde_json::Map<String, serde_json::Value>>(),
                 "env_from": launch.env_from,
+                // Literal header values are never entered in the TUI yet.
+                "headers": {},
+                "headers_from": launch
+                    .headers_from
+                    .iter()
+                    .map(|header| (header.header.clone(), serde_json::Value::String(header.template())))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
                 "replace": replace,
             });
             if let Some(executable) = &launch.command {
@@ -1220,9 +1230,9 @@ pub mod events {
         ContextEstimated, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
     pub use crate::discovery::{
-        McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus, McpStatusSnapshot,
-        SkillCatalogEntry, SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity,
-        SkillSource,
+        McpHeaderFrom, McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus,
+        McpStatusSnapshot, SkillCatalogEntry, SkillCatalogSnapshot, SkillDiagnostic,
+        SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
         typify::import_types!(schema = "../../schemas/live-rpc/rust-events.schema.json");

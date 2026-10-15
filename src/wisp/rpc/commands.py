@@ -42,10 +42,10 @@ STORE_API_KEY_SECRET_FIELD = "_api_key"
 # Secret-bearing fields by command type. Before a command is queued, each one is
 # moved under its underscore-prefixed name and wrapped so the retained payload
 # never prints it; `provided_fields` reports it under its submitted name.
-_SECRET_FIELDS = {
-    "store_api_key": "api_key",
-    "add_mcp_server": "env",
-    "preview_mcp_snippet": "snippet",
+_SECRET_FIELDS: dict[str, tuple[str, ...]] = {
+    "store_api_key": ("api_key",),
+    "add_mcp_server": ("env", "headers"),
+    "preview_mcp_snippet": ("snippet",),
 }
 
 
@@ -60,13 +60,16 @@ class _RpcSecretValue:
 
 
 def detach_secret_fields(command: dict[str, object]) -> dict[str, object]:
-    """Move a command's secret field into a redacted value before queueing or logging."""
+    """Move a command's secret fields into redacted values before queueing or logging."""
 
-    field = _SECRET_FIELDS.get(rpc_command_type(command))
-    if field is None or field not in command:
+    fields = [
+        field for field in _SECRET_FIELDS.get(rpc_command_type(command), ()) if field in command
+    ]
+    if not fields:
         return command
     detached = dict(command)
-    detached[f"_{field}"] = _RpcSecretValue(detached.pop(field))
+    for field in fields:
+        detached[f"_{field}"] = _RpcSecretValue(detached.pop(field))
     return detached
 
 
@@ -248,11 +251,12 @@ class GetMcpStatusCommand(RpcCommandModel):
 class AddMcpServerCommand(RpcCommandModel):
     """Save an MCP server to the user settings, then restart MCP servers.
 
-    The entry has the shape of one ``mcp_servers`` settings entry. ``env`` holds
-    literal values the user entered; they are written to the settings file and
-    never echoed in events, errors, or this model's repr. Adding a server that runs
-    a command is the user's decision: a frontend must show the exact command,
-    arguments, and ``env_from`` names and have the user confirm before sending it.
+    The entry has the shape of one ``mcp_servers`` settings entry. ``env`` and
+    ``headers`` hold literal values the user entered; they are written to the
+    settings file and never echoed in events, errors, or this model's repr. Adding a
+    server is the user's decision: a frontend must show the exact command and
+    arguments or URL, the ``env_from`` names, and the variables ``headers_from``
+    sends to the URL, and have the user confirm before sending it.
     """
 
     type: Literal["add_mcp_server"] = "add_mcp_server"
@@ -263,6 +267,8 @@ class AddMcpServerCommand(RpcCommandModel):
     url: str | None = Field(default=None, min_length=1)
     env: dict[str, str] = Field(default_factory=dict, repr=False)
     env_from: tuple[str, ...] = Field(default=(), strict=False)
+    headers: dict[str, str] = Field(default_factory=dict, repr=False)
+    headers_from: dict[str, str] = Field(default_factory=dict)
     replace: bool = False
 
     @model_validator(mode="wrap")
@@ -282,7 +288,8 @@ class AddMcpServerCommand(RpcCommandModel):
         return (
             f"AddMcpServerCommand(id={self.id!r}, name={self.name!r}, command={self.command!r}, "
             f"args={self.args!r}, url={self.url!r}, env=<{len(self.env)} hidden>, "
-            f"env_from={self.env_from!r}, replace={self.replace!r})"
+            f"env_from={self.env_from!r}, headers=<{len(self.headers)} hidden>, "
+            f"headers_from={self.headers_from!r}, replace={self.replace!r})"
         )
 
     __str__ = __repr__
@@ -734,7 +741,9 @@ class ParsedRpcCommand:
     def provided_fields(self) -> frozenset[str]:
         """Return submitted payload field names without exposing their values."""
 
-        secret_fields = {f"_{field}": field for field in _SECRET_FIELDS.values()}
+        secret_fields = {
+            f"_{field}": field for fields in _SECRET_FIELDS.values() for field in fields
+        }
         return frozenset(secret_fields.get(field, field) for field in self._payload)
 
     def without_id(self) -> ParsedRpcCommand:

@@ -417,8 +417,9 @@ is not saved. These choices do not change project trust or protected paths.
 ### Managing MCP servers
 
 `/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
-you see what it runs (or the URL it connects to), the environment variables it sets or forwards,
-any startup error, and its tools. `PgUp`/`PgDn` scroll those details.
+you see what it runs (or the URL it connects to), the environment variables it sets or forwards, the
+headers it sends (naming each variable a header sends and the host that receives it), any startup
+error, and its tools. `PgUp`/`PgDn` scroll those details.
 
 | Key | Action |
 |---|---|
