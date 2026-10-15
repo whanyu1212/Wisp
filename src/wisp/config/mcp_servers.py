@@ -12,6 +12,7 @@ user setting, not only the MCP ones).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from wisp.config.settings import (
     user_settings_lock,
     user_settings_path,
 )
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import SERVER_NAME_PATTERN, McpServerConfig
 
 # Keys accepted from a pasted `{"mcpServers": {...}}` snippet. `type` is checked
 # against the transport and dropped; anything else (headers, cwd, ...) is rejected
@@ -119,7 +120,7 @@ def set_user_mcp_server_enabled(
     name: str,
     enabled: bool,
     *,
-    expected: McpServerConfig | None = None,
+    confirmed: Callable[[McpServerConfig], bool] | None = None,
     home_dir: Path | None = None,
 ) -> None:
     """Enable or disable the server named ``name`` without changing anything else.
@@ -127,21 +128,22 @@ def set_user_mcp_server_enabled(
     Args:
         name (str): Server to change.
         enabled (bool): New state.
-        expected (McpServerConfig | None): The configuration the user was shown. When
-            given, the change is refused if the saved server no longer matches it, so
-            a confirmation cannot enable a command that was edited in the meantime.
+        confirmed (Callable[[McpServerConfig], bool] | None): Whether the saved
+            server is still the one the user confirmed, checked under the settings
+            lock. When given and false, the change is refused, so a confirmation
+            cannot enable a command that was edited in the meantime.
         home_dir (Path | None): User home override, for isolated callers.
 
     Raises:
-        McpSettingsError: If no such server exists, it changed since ``expected`` was
-            read, or the settings are invalid.
+        McpSettingsError: If no such server exists, it is no longer the one the user
+            confirmed, or the settings are invalid.
     """
 
     def change(servers: dict[str, object]) -> None:
         entry = servers.get(name)
         if not isinstance(entry, dict):
             raise McpSettingsError(f"no MCP server named {name!r} is configured")
-        if expected is not None and not _same_server(validated_mcp_server(name, entry), expected):
+        if confirmed is not None and not confirmed(validated_mcp_server(name, entry)):
             raise McpSettingsError(f"MCP server {name!r} changed while you were confirming")
         updated = dict(entry)
         if enabled:
@@ -175,13 +177,22 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
         raise McpSettingsError(f"the snippet is not valid JSON: {exc.msg}") from None
+    except RecursionError:
+        raise McpSettingsError("the snippet is nested too deeply") from None
     servers = None
     if isinstance(parsed, Mapping):
         servers = parsed.get("mcpServers", parsed.get("mcp_servers"))
     if not isinstance(servers, Mapping) or not servers:
         raise McpSettingsError('the snippet must contain an "mcpServers" object with a server')
     configs: list[McpServerConfig] = []
-    for name, raw in servers.items():
+    for position, (name, raw) in enumerate(servers.items(), start=1):
+        # Names are checked first so that later messages only ever repeat a valid
+        # name; anything else in a snippet may be a secret.
+        if not isinstance(name, str) or re.fullmatch(SERVER_NAME_PATTERN, name) is None:
+            raise McpSettingsError(
+                f"server {position} has an invalid name: use lowercase letters, digits, "
+                "and '-', starting with a letter (at most 32 characters)"
+            )
         if not isinstance(raw, Mapping):
             raise McpSettingsError(f"server {name!r} must be a JSON object")
         unsupported = sorted(str(key) for key in raw if key not in _SNIPPET_KEYS)
@@ -193,11 +204,12 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         kind = raw.get("type")
         if kind is not None:
             expected = _STDIO_TYPES if "command" in raw else _HTTP_TYPES
-            if kind not in expected:
+            # The value is not echoed: a snippet can hold secrets in any field.
+            if not isinstance(kind, str) or kind not in expected:
                 raise McpSettingsError(
-                    f"server {name!r} has type {kind!r}, which does not match its transport"
+                    f"server {name!r} has a type that does not match its transport"
                 )
-        configs.append(validated_mcp_server(str(name), entry))
+        configs.append(validated_mcp_server(name, entry))
     return tuple(configs)
 
 
@@ -232,9 +244,25 @@ def _settings_entry(server: McpServerConfig) -> dict[str, object]:
     return entry
 
 
-def _same_server(saved: McpServerConfig, shown: McpServerConfig) -> bool:
-    # SecretStr compares by value, so env changes count; `enabled` is what changes.
-    return saved.model_dump(exclude={"enabled"}) == shown.model_dump(exclude={"enabled"})
+def same_launch(saved: McpServerConfig, shown: McpServerConfig) -> bool:
+    """Return whether two servers run or connect to the same thing, as a user sees it.
+
+    Compares the transport, arguments, and environment variable names; environment
+    values are never shown, so they are not part of what a user confirms.
+
+    Args:
+        saved (McpServerConfig): The server as currently saved.
+        shown (McpServerConfig): The server as the user was shown it.
+
+    Returns:
+        bool: True when a confirmation of ``shown`` still covers ``saved``.
+    """
+
+    def launch(server: McpServerConfig) -> tuple[object, ...]:
+        names = tuple(name for name, _value in server.env)
+        return (server.command, server.args, server.url, names, server.env_from)
+
+    return launch(saved) == launch(shown)
 
 
 def _update_user_mcp_servers(
@@ -300,6 +328,7 @@ __all__ = [
     "load_user_mcp_servers",
     "parse_mcp_snippet",
     "remove_user_mcp_server",
+    "same_launch",
     "set_user_mcp_server_enabled",
     "validated_mcp_server",
 ]

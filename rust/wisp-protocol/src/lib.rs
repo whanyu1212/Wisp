@@ -355,8 +355,21 @@ macro_rules! validated_wire_wrapper {
         impl std::fmt::Debug for $wrapper {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 let mut value = serde_json::to_value(self).map_err(|_| std::fmt::Error)?;
-                if value["type"] == "store_api_key" {
-                    value["api_key"] = serde_json::Value::String("<redacted>".into());
+                match value["type"].as_str() {
+                    Some("store_api_key") => {
+                        value["api_key"] = serde_json::Value::String("<redacted>".into());
+                    }
+                    Some("add_mcp_server") => {
+                        if let Some(env) = value["env"].as_object_mut() {
+                            for secret in env.values_mut() {
+                                *secret = serde_json::Value::String("<redacted>".into());
+                            }
+                        }
+                    }
+                    Some("preview_mcp_snippet") => {
+                        value["snippet"] = serde_json::Value::String("<redacted>".into());
+                    }
+                    _ => {}
                 }
                 formatter
                     .debug_tuple(stringify!($wrapper))
@@ -751,6 +764,87 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_mcp_status", "id": id}))
         }
 
+        /// Save an MCP server the user confirmed, then restart MCP servers.
+        ///
+        /// `launch.env_names` is ignored: `env` carries the literal values the user
+        /// entered, which travel only through this secret-bearing command.
+        pub fn add_mcp_server(
+            id: &str,
+            name: &str,
+            launch: &crate::discovery::McpServerLaunch,
+            env: &[(String, String)],
+            replace: bool,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut command = serde_json::json!({
+                "type": "add_mcp_server",
+                "id": id,
+                "name": name,
+                "args": launch.args,
+                "env": env
+                    .iter()
+                    .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
+                "env_from": launch.env_from,
+                "replace": replace,
+            });
+            if let Some(executable) = &launch.command {
+                command["command"] = serde_json::Value::String(executable.clone());
+            }
+            if let Some(url) = &launch.url {
+                command["url"] = serde_json::Value::String(url.clone());
+            }
+            deserialize(command)
+        }
+
+        /// Remove an MCP server, then restart MCP servers.
+        pub fn remove_mcp_server(id: &str, name: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "remove_mcp_server", "id": id, "name": name}))
+        }
+
+        /// Enable or disable an MCP server, then restart MCP servers.
+        ///
+        /// Enabling requires `expected`: the launch settings the user confirmed.
+        pub fn set_mcp_server_enabled(
+            id: &str,
+            name: &str,
+            enabled: bool,
+            expected: Option<&crate::discovery::McpServerLaunch>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            if enabled && expected.is_none() {
+                return Err(super::ProtocolDecodeError(
+                    "enabling an MCP server requires the confirmed launch settings".into(),
+                ));
+            }
+            let mut command = serde_json::json!({
+                "type": "set_mcp_server_enabled",
+                "id": id,
+                "name": name,
+                "enabled": enabled,
+            });
+            if let Some(expected) = expected {
+                command["expected"] = serde_json::to_value(expected)
+                    .map_err(|error| super::ProtocolDecodeError(error.to_string()))?;
+            }
+            deserialize(command)
+        }
+
+        /// Reload MCP servers from the user settings and restart them.
+        pub fn reconnect_mcp(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "reconnect_mcp", "id": id}))
+        }
+
+        /// Parse a pasted MCP config snippet without saving it.
+        pub fn preview_mcp_snippet(
+            id: &str,
+            snippet: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "preview_mcp_snippet",
+                "id": id,
+                "snippet": snippet,
+            }))
+        }
+
         /// Compact the selected persisted session using optional summary guidance.
         pub fn compact(
             id: &str,
@@ -1126,8 +1220,9 @@ pub mod events {
         ContextEstimated, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
     pub use crate::discovery::{
-        McpServerSnapshot, McpServerStatus, McpStatusSnapshot, SkillCatalogEntry,
-        SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity, SkillSource,
+        McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus, McpStatusSnapshot,
+        SkillCatalogEntry, SkillCatalogSnapshot, SkillDiagnostic, SkillDiagnosticSeverity,
+        SkillSource,
     };
     mod generated {
         typify::import_types!(schema = "../../schemas/live-rpc/rust-events.schema.json");
@@ -1308,6 +1403,15 @@ pub mod events {
                 return None;
             }
             serde_json::from_value(value["status"].clone()).ok()
+        }
+
+        /// Project the servers parsed from a pasted snippet for one exact request.
+        pub fn mcp_snippet_preview(&self, id: &str) -> Option<Vec<McpServerPreview>> {
+            let value = self.wire_value();
+            if value["type"] != "rpc.mcp.preview" || value["command_id"] != id {
+                return None;
+            }
+            serde_json::from_value(value["servers"].clone()).ok()
         }
 
         /// Project a statistics snapshot for one exact command.

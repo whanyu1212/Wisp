@@ -104,6 +104,7 @@ async def build_runtime(
         models=models,
         process_supervisor=process_supervisor,
         mcp_runtime=mcp_runtime,
+        mcp_server_configs=mcp_servers,
         auth_store=auth_store,
         openai_compatible_provider=openai_compatible_provider,
         openai_compatible_requires_api_key=(
@@ -162,6 +163,7 @@ async def restart_mcp_servers(
                     )
                     runtime.replace_mcp_state(
                         None,
+                        mcp_server_configs=(),
                         disabled_mcp_servers=(),
                         failed_mcp_servers=(),
                         unavailable_tool_prefixes=_unavailable_tool_prefixes(servers, None),
@@ -185,6 +187,7 @@ async def restart_mcp_servers(
             )
         runtime.replace_mcp_state(
             started,
+            mcp_server_configs=servers,
             disabled_mcp_servers=tuple(server.name for server in servers if not server.enabled),
             failed_mcp_servers=(
                 tuple(server.name for server in enabled_servers) if started is None else ()

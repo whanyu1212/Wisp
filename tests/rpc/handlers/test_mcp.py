@@ -17,9 +17,19 @@ from wisp.config.mcp_servers import validated_mcp_server
 from wisp.events import RpcCommandFinished, RpcMcpServerSnapshot, WispEvent
 from wisp.mcp.config import McpServerConfig
 from wisp.providers.fake import ScriptedProvider
-from wisp.rpc.commands import AddMcpServerCommand, ParsedRpcCommand, ReconnectMcpCommand
+from wisp.rpc.commands import (
+    AddMcpServerCommand,
+    ParsedRpcCommand,
+    PreviewMcpSnippetCommand,
+    ReconnectMcpCommand,
+)
 from wisp.rpc.coordinator import _RpcControlEvent, _RpcRunningCommand, _RpcSessionState
-from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection, rpc_mcp_status_snapshot
+from wisp.rpc.handlers.mcp import (
+    RpcMcpServers,
+    RpcToolSelection,
+    rpc_mcp_server_launch,
+    rpc_mcp_status_snapshot,
+)
 from wisp.rpc.host import RpcToolApprovalPolicy
 from wisp.runtime.api import ExtensionAPI
 from wisp.runtime.extensions import build_runtime, restart_mcp_servers
@@ -206,6 +216,7 @@ def test_interrupted_start_removes_the_tools_it_registered(
                     name="fixture",
                     status="unavailable",
                     error="MCP server fixture is unavailable: the MCP runtime could not start",
+                    launch=rpc_mcp_server_launch(_fixture_server(tmp_path)),
                 ),
             )
         finally:
@@ -248,3 +259,14 @@ def test_cancel_request_does_not_interrupt_a_started_command(tmp_path: Path) -> 
 
     finished = [event for event in events if isinstance(event, RpcCommandFinished)]
     assert [(event.ok, event.error) for event in finished] == [(True, None)]
+
+
+def test_preview_command_never_shows_the_snippet() -> None:
+    snippet = f'{{"mcpServers": {{"x": {{"command": "npx", "env": {{"T": "{SECRET}"}}}}}}}}'
+    command = PreviewMcpSnippetCommand(id="preview", snippet=snippet)
+
+    assert SECRET not in repr(command)
+    assert SECRET not in str(command)
+    parsed = ParsedRpcCommand.from_known(command)
+    assert SECRET not in repr(parsed._payload)
+    assert "snippet" in parsed.provided_fields

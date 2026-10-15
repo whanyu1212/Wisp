@@ -27,6 +27,7 @@ from wisp.events import (
     PermissionMode,
     QueueKind,
     QueueMode,
+    RpcMcpServerLaunch,
 )
 from wisp.validation import redact_validation_error_inputs
 
@@ -34,13 +35,18 @@ type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project
 
 MAX_RPC_COMMAND_ID_CHARS = 256
 MAX_RPC_MCP_SERVER_NAME_CHARS = 64
+MAX_RPC_MCP_SNIPPET_CHARS = 65_536
 MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
 STORE_API_KEY_SECRET_FIELD = "_api_key"
 # Secret-bearing fields by command type. Before a command is queued, each one is
 # moved under its underscore-prefixed name and wrapped so the retained payload
 # never prints it; `provided_fields` reports it under its submitted name.
-_SECRET_FIELDS = {"store_api_key": "api_key", "add_mcp_server": "env"}
+_SECRET_FIELDS = {
+    "store_api_key": "api_key",
+    "add_mcp_server": "env",
+    "preview_mcp_snippet": "snippet",
+}
 
 
 @dataclass(frozen=True)
@@ -292,12 +298,51 @@ class RemoveMcpServerCommand(RpcCommandModel):
 class SetMcpServerEnabledCommand(RpcCommandModel):
     """Enable or disable an MCP server in the user settings, then restart MCP servers.
 
-    Enabling a server that runs a command is the user's decision, as adding one is.
+    Enabling a server is the user's decision, as adding one is. ``expected`` is
+    required when enabling: it is the ``launch`` from the ``rpc.mcp`` status that the
+    user was shown and confirmed, and the server is enabled only if its saved
+    settings still match it.
     """
 
     type: Literal["set_mcp_server_enabled"] = "set_mcp_server_enabled"
     name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
     enabled: bool
+    expected: RpcMcpServerLaunch | None = None
+
+    @model_validator(mode="after")
+    def _require_expected_when_enabling(self) -> Self:
+        if self.enabled and self.expected is None:
+            raise ValueError("enabling an MCP server requires the confirmed launch settings")
+        return self
+
+
+class PreviewMcpSnippetCommand(RpcCommandModel):
+    """Parse a pasted ``{"mcpServers": {...}}`` snippet without saving anything.
+
+    The reply lists each server's launch settings with environment variables named
+    only. A snippet can hold real secret values, so it is treated like an API key: it
+    is never echoed in events, errors, or this model's repr.
+    """
+
+    type: Literal["preview_mcp_snippet"] = "preview_mcp_snippet"
+    snippet: str = Field(min_length=1, max_length=MAX_RPC_MCP_SNIPPET_CHARS, repr=False)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_validation_errors(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            raise redact_validation_error_inputs(exc) from None
+
+    def __repr__(self) -> str:
+        return f"PreviewMcpSnippetCommand(id={self.id!r}, snippet=<{len(self.snippet)} chars>)"
+
+    __str__ = __repr__
 
 
 class ReconnectMcpCommand(RpcCommandModel):
@@ -570,6 +615,7 @@ type RpcCommand = Annotated[
     | RemoveMcpServerCommand
     | SetMcpServerEnabledCommand
     | ReconnectMcpCommand
+    | PreviewMcpSnippetCommand
     | GetMessagesCommand
     | GetSessionsCommand
     | NewSessionCommand

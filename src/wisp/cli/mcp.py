@@ -26,6 +26,7 @@ from wisp.config.mcp_servers import (
     load_user_mcp_servers,
     parse_mcp_snippet,
     remove_user_mcp_server,
+    same_launch,
     set_user_mcp_server_enabled,
     validated_mcp_server,
 )
@@ -200,7 +201,7 @@ def enable_command(
     _show(server, action="Enable")
     _confirm(yes=yes)
     try:
-        set_user_mcp_server_enabled(name, True, expected=server)
+        set_user_mcp_server_enabled(name, True, confirmed=lambda saved: same_launch(saved, server))
     except McpSettingsError as exc:
         _fail(str(exc))
     typer.echo(f"Enabled {_display(name)}. {_RESTART_NOTE}")

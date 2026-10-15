@@ -1539,6 +1539,130 @@
    "accepted": false
   },
   {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "add_unknown",
+   "path": [
+    "servers",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "args"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "command"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "env_from"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "env_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "url"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "add_unknown",
+   "path": [
+    "servers",
+    0,
+    "launch"
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.messages",
    "operation": "remove",
    "path": [

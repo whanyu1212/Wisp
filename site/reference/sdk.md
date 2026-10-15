@@ -141,8 +141,9 @@ request. Completion and results arrive through `events()`.
 | `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
 | `add_mcp_server` | `(name: str, *, command=None, args=(), url=None, env=None, env_from=(), replace=False, command_id=None)` | Saves the server, restarts MCP servers, then `RpcMcpStatusReported` and terminal `RpcCommandFinished` |
 | `remove_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
-| `set_mcp_server_enabled` | `(name: str, enabled: bool, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
+| `set_mcp_server_enabled` | `(name: str, enabled: bool, *, expected=None, command_id=None)` | Same as `add_mcp_server`; `expected` is required when enabling |
 | `reconnect_mcp` | `(*, command_id: str \| None = None)` | Reloads servers from the settings file and restarts them; same events |
+| `preview_mcp_snippet` | `(snippet: str, *, command_id: str \| None = None)` | `RpcMcpSnippetPreviewed`; nothing is saved |
 | `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
 
 The MCP server commands edit `mcp_servers` in `~/.wisp/settings.json` and then restart every
@@ -152,10 +153,20 @@ tools, cannot be cancelled once started, and finish within MCP's startup timeout
 settings change leaves both the file and the running servers as they were. Each restart revokes
 per-tool "allow for this session" grants for MCP tools; the permission mode and an "allow
 everything this session" answer are kept. Per-server startup problems appear as `unavailable`
-entries in the status, and a disabled server is reported as `disabled`. Adding or enabling a
-server that runs a command is the user's decision: before calling `add_mcp_server`, show the user
-the exact command, arguments, and `env_from` names and get their confirmation. `env` values are
-written to the settings file and are never echoed in events or errors.
+entries in the status, and a disabled server is reported as `disabled`.
+
+Each status entry carries `launch`: the server's command and arguments or URL, the names of the
+environment variables it sets, and the variables it forwards (`env_from`). Environment values are
+never included. Adding or enabling a server is the user's decision: show them the launch settings
+and get their confirmation first. To enable, pass the confirmed `launch` as `expected`; the server is
+enabled only if its saved settings still match, so a confirmation cannot enable a command that was
+edited in the meantime. `env` values given to `add_mcp_server` are written to the settings file and
+are never echoed in events or errors.
+
+`preview_mcp_snippet` parses a pasted `{"mcpServers": {...}}` snippet with the same rules as
+`wisp mcp import` and replies with each server's name and `launch`, naming environment variables
+only. The snippet may hold real secrets, so it is never echoed back; ask the user for each value
+again, or forward the variable with `env_from`.
 
 For credential mutations, the terminal `RpcCommandFinished` is authoritative for the mutation
 itself. A successful mutation normally emits a correlated refreshed connection catalog first. If
@@ -314,7 +325,7 @@ idempotent and re-raises a retained close failure.
   `PopQueueCommand`, `ClearQueueCommand`, `CancelCommand`
 - safety: `ApprovalCommand`, `TrustCommand`
 - MCP servers: `AddMcpServerCommand`, `RemoveMcpServerCommand`, `SetMcpServerEnabledCommand`,
-  `ReconnectMcpCommand`
+  `ReconnectMcpCommand`, `PreviewMcpSnippetCommand`
 - sessions: `GetMessagesCommand`, `GetSessionsCommand`, `NewSessionCommand`,
   `SelectSessionCommand`, `SetSessionNameCommand`, `CloneSessionCommand`, `ForkSessionCommand`,
   `GetSessionTreeCommand`, `NavigateSessionTreeCommand`, `UnrevertSessionTreeCommand`

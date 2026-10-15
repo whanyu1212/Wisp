@@ -29,7 +29,8 @@ MAX_MCP_ENV_VARS = 64
 MAX_MCP_TOOL_OVERRIDES = 256
 _ENVIRONMENT_NAMES_CASE_INSENSITIVE = os.name == "nt"
 
-ServerName = Annotated[str, StringConstraints(pattern=r"^[a-z][a-z0-9-]{0,31}$")]
+SERVER_NAME_PATTERN = r"^[a-z][a-z0-9-]{0,31}$"
+ServerName = Annotated[str, StringConstraints(pattern=SERVER_NAME_PATTERN)]
 Command = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 ServerUrl = Annotated[str, StringConstraints(min_length=1, max_length=4096)]
 Argument = Annotated[str, StringConstraints(max_length=4096)]

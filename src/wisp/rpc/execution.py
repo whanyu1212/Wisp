@@ -40,6 +40,7 @@ from wisp.rpc.commands import (
     NewSessionCommand,
     ParsedRpcCommand,
     PopQueueCommand,
+    PreviewMcpSnippetCommand,
     PromptCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
@@ -54,7 +55,11 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
-from wisp.rpc.handlers.mcp import McpServerCommand, RpcMcpServers
+from wisp.rpc.handlers.mcp import (
+    McpServerCommand,
+    RpcMcpServers,
+    handle_rpc_mcp_snippet_preview_command,
+)
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -248,6 +253,10 @@ class RpcCommandExecutor:
         if isinstance(known, GetSkillsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_skills(known, running_command)
+        if isinstance(known, PreviewMcpSnippetCommand):
+            self.coordinator.running_command = running_command
+            handle_rpc_mcp_snippet_preview_command(known, write_event=self.write_event)
+            return _RpcDispatchResult(running_command=running_command)
         if isinstance(known, GetMcpStatusCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_mcp_status(known, running_command)

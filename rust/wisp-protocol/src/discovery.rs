@@ -1,6 +1,6 @@
 //! Presentation values for the existing skill and MCP inspection contracts.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 pub enum SkillSource {
@@ -101,12 +101,37 @@ impl McpServerStatus {
     }
 }
 
+/// What one MCP server runs or connects to, with environment variables named only.
+///
+/// This is what a user must see before confirming a server, and what
+/// `set_mcp_server_enabled` sends back as the confirmed settings.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServerLaunch {
+    // Commands omit absent optional fields; events send them as null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub env_names: Vec<String>,
+    pub env_from: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct McpServerSnapshot {
     pub name: String,
     pub status: McpServerStatus,
     pub tool_names: Vec<String>,
     pub error: Option<String>,
+    pub launch: Option<McpServerLaunch>,
+}
+
+/// One server parsed from a pasted config snippet, not yet saved.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct McpServerPreview {
+    pub name: String,
+    pub launch: McpServerLaunch,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]

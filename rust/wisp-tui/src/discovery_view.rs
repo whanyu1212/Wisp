@@ -666,24 +666,28 @@ mod tests {
                     status: McpServerStatus::Connected,
                     tool_names: vec!["find".into()],
                     error: None,
+                    launch: None,
                 },
                 McpServerSnapshot {
                     name: "disconnected-server".into(),
                     status: McpServerStatus::Disconnected,
                     tool_names: vec![format!("{} final-tool", "wide界".repeat(100))],
                     error: None,
+                    launch: None,
                 },
                 McpServerSnapshot {
                     name: "offline".into(),
                     status: McpServerStatus::Unavailable,
                     tool_names: vec![],
                     error: Some("\u{1b}[31mbackend failed".into()),
+                    launch: None,
                 },
                 McpServerSnapshot {
                     name: "paused".into(),
                     status: McpServerStatus::Disabled,
                     tool_names: vec![],
                     error: None,
+                    launch: None,
                 },
             ],
         }));

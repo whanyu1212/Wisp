@@ -134,6 +134,23 @@ class RpcSkillCatalogSnapshot(BaseModel):
     project_trusted: bool = False
 
 
+class RpcMcpServerLaunch(BaseModel):
+    """What one MCP server runs or connects to, as a user must see it to confirm it.
+
+    Exactly one of ``command`` or ``url`` is set. Environment variables appear only
+    by name: ``env_names`` are set from values stored in the settings file, which are
+    never sent, and ``env_from`` are forwarded from Wisp's own environment.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    command: str | None = None
+    args: tuple[str, ...] = ()
+    url: str | None = None
+    env_names: tuple[str, ...] = ()
+    env_from: tuple[str, ...] = ()
+
+
 class RpcMcpServerSnapshot(BaseModel):
     """Sanitized status for one configured MCP server."""
 
@@ -143,6 +160,8 @@ class RpcMcpServerSnapshot(BaseModel):
     status: Literal["connected", "disconnected", "unavailable", "disabled"]
     tool_names: tuple[str, ...] = ()
     error: str | None = None
+    # The configuration the server was last started (or skipped) with.
+    launch: RpcMcpServerLaunch | None = None
 
     @model_validator(mode="after")
     def _validate_status(self) -> Self:
@@ -159,6 +178,15 @@ class RpcMcpStatusSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     servers: tuple[RpcMcpServerSnapshot, ...] = ()
+
+
+class RpcMcpServerPreview(BaseModel):
+    """One server parsed from a pasted config snippet, not yet saved."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    launch: RpcMcpServerLaunch
 
 
 RpcProviderId = Annotated[
@@ -421,6 +449,18 @@ class RpcMcpStatusReported(WispEvent):
     type: Literal["rpc.mcp"] = "rpc.mcp"
     command_id: str
     status: RpcMcpStatusSnapshot
+
+
+class RpcMcpSnippetPreviewed(WispEvent):
+    """Servers parsed from a pasted MCP config snippet, returned over RPC.
+
+    Environment values from the snippet are never included: a frontend asks for
+    each one again, or forwards the variable from Wisp's environment.
+    """
+
+    type: Literal["rpc.mcp.preview"] = "rpc.mcp.preview"
+    command_id: str
+    servers: tuple[RpcMcpServerPreview, ...]
 
 
 class SkillCatalogUpdated(WispEvent):
