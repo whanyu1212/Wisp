@@ -87,6 +87,7 @@ pub enum McpServerStatus {
     Connected,
     Disconnected,
     Unavailable,
+    Disabled,
 }
 
 impl McpServerStatus {
@@ -95,6 +96,7 @@ impl McpServerStatus {
             Self::Connected => "connected",
             Self::Disconnected => "disconnected",
             Self::Unavailable => "unavailable",
+            Self::Disabled => "disabled",
         }
     }
 }

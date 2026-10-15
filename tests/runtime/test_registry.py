@@ -1014,3 +1014,21 @@ def test_event_bus_emits_to_named_and_wildcard_handlers() -> None:
     anyio.run(run)
 
     assert seen == ["named:agent.started", "wildcard:agent.started"]
+
+
+def test_tool_registry_unregister_keeps_order_and_drops_metadata() -> None:
+    registry = ToolRegistry()
+    for tool in (ReadTool(), FindTool(), GrepTool()):
+        registry.register(
+            tool,
+            execution=ToolExecutionMetadata(parallel_safe=True),
+            prompt=ToolPromptMetadata(prompt_snippet=tool.name),
+        )
+
+    registry.unregister(("find", "missing"))
+
+    assert registry.names() == ("read", "grep")
+    assert registry.execution_metadata_for("find") == ToolExecutionMetadata()
+    assert registry.prompt_metadata_for("find") is None
+    registry.register(FindTool())
+    assert registry.names() == ("read", "grep", "find")

@@ -140,7 +140,7 @@ class RpcMcpServerSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    status: Literal["connected", "disconnected", "unavailable"]
+    status: Literal["connected", "disconnected", "unavailable", "disabled"]
     tool_names: tuple[str, ...] = ()
     error: str | None = None
 

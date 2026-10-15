@@ -302,6 +302,24 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self._apply_configuration(configuration)
 
+    def replace_tool_registry(self, tool_registry: ToolRegistry) -> None:
+        """Use ``tool_registry`` for subsequent agent operations.
+
+        The allowed tool specs are recomputed from it under the current tool policy,
+        replacing any tools given at construction.
+
+        Args:
+            tool_registry (ToolRegistry): The tools later operations may use.
+
+        Raises:
+            RuntimeError: If an operation is active; its tools cannot change mid-run.
+        """
+
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        self.tool_registry = tool_registry
+        self.tools = self._allowed_tool_specs(tool_registry)
+
     def set_mode(self, mode: AgentMode) -> None:
         """Select the operating mode for subsequent agent operations."""
 

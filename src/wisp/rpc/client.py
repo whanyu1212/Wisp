@@ -23,6 +23,7 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.rpc.commands import (
+    AddMcpServerCommand,
     ApprovalCommand,
     ApprovalScope,
     BeginDeviceCodeCommand,
@@ -52,8 +53,11 @@ from wisp.rpc.commands import (
     NewSessionCommand,
     PopQueueCommand,
     PromptCommand,
+    ReconnectMcpCommand,
+    RemoveMcpServerCommand,
     RpcCommand,
     SelectSessionCommand,
+    SetMcpServerEnabledCommand,
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
@@ -245,6 +249,69 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("mcp")
         await self._transport.send(GetMcpStatusCommand(id=selected_id))
+        return selected_id
+
+    async def add_mcp_server(
+        self,
+        name: str,
+        *,
+        command: str | None = None,
+        args: tuple[str, ...] = (),
+        url: str | None = None,
+        env: dict[str, str] | None = None,
+        env_from: tuple[str, ...] = (),
+        replace: bool = False,
+        command_id: str | None = None,
+    ) -> str:
+        """Save an MCP server to the user settings and restart MCP servers.
+
+        Pass exactly one of ``command`` or ``url``. Adding a server that runs a
+        command is the user's decision: show them the exact command, arguments, and
+        ``env_from`` names and have them confirm before calling this. ``env`` values
+        are written to the settings file and never echoed back.
+        """
+
+        selected_id = command_id or self._command_id_factory("mcp-add")
+        await self._transport.send(
+            AddMcpServerCommand(
+                id=selected_id,
+                name=name,
+                command=command,
+                args=args,
+                url=url,
+                env=dict(env or {}),
+                env_from=env_from,
+                replace=replace,
+            )
+        )
+        return selected_id
+
+    async def remove_mcp_server(self, name: str, *, command_id: str | None = None) -> str:
+        """Remove an MCP server from the user settings and restart MCP servers."""
+
+        selected_id = command_id or self._command_id_factory("mcp-remove")
+        await self._transport.send(RemoveMcpServerCommand(id=selected_id, name=name))
+        return selected_id
+
+    async def set_mcp_server_enabled(
+        self, name: str, enabled: bool, *, command_id: str | None = None
+    ) -> str:
+        """Enable or disable an MCP server and restart MCP servers.
+
+        Enabling a server that runs a command is the user's decision, as adding one is.
+        """
+
+        selected_id = command_id or self._command_id_factory("mcp-enable")
+        await self._transport.send(
+            SetMcpServerEnabledCommand(id=selected_id, name=name, enabled=enabled)
+        )
+        return selected_id
+
+    async def reconnect_mcp(self, *, command_id: str | None = None) -> str:
+        """Reload MCP servers from the user settings and restart them."""
+
+        selected_id = command_id or self._command_id_factory("mcp-reconnect")
+        await self._transport.send(ReconnectMcpCommand(id=selected_id))
         return selected_id
 
     async def get_messages(

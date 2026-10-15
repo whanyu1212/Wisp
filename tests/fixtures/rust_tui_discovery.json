@@ -127,6 +127,12 @@
           "status": "unavailable",
           "tool_names": [],
           "error": "Server startup failed"
+        },
+        {
+          "name": "archived",
+          "status": "disabled",
+          "tool_names": [],
+          "error": null
         }
       ]
     }

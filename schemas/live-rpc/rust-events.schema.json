@@ -2050,7 +2050,8 @@
           "enum": [
             "connected",
             "disconnected",
-            "unavailable"
+            "unavailable",
+            "disabled"
           ],
           "title": "RpcMcpServerSnapshotStatus",
           "type": "string"

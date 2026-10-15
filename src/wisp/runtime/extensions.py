@@ -114,8 +114,83 @@ async def build_runtime(
             if mcp_runtime is not None
             else ()
         ),
+        disabled_mcp_servers=tuple(server.name for server in mcp_servers if not server.enabled),
         unavailable_tool_prefixes=_unavailable_tool_prefixes(mcp_servers, mcp_runtime),
     )
+
+
+async def restart_mcp_servers(
+    runtime: WispRuntime,
+    servers: tuple[McpServerConfig, ...],
+) -> None:
+    """Replace the runtime's MCP connections with ``servers`` and their tools.
+
+    Every current server is stopped and its tools unregistered before the enabled
+    servers in ``servers`` start, so two copies of one server never run at once and
+    a renamed or removed server's tools cannot linger. Servers that fail to start
+    are reported through ``runtime.mcp_runtime.diagnostics``, as at startup. The
+    runtime's MCP state and tools are updated even when starting fails or is
+    cancelled, so neither refers to closed connections.
+
+    The caller must ensure no agent run is using the runtime's tools.
+
+    Args:
+        runtime (WispRuntime): Runtime whose MCP connections are replaced.
+        servers (tuple[McpServerConfig, ...]): Every configured server, including
+            disabled ones.
+
+    Raises:
+        RuntimeError: If the MCP runtime could not start or the previous one could
+            not close cleanly. The runtime is then left without MCP tools, and its
+            enabled servers are listed in ``runtime.failed_mcp_servers``.
+    """
+
+    previous = runtime.mcp_runtime
+    started: McpRuntime | None = None
+    enabled_servers = tuple(server for server in servers if server.enabled)
+    tools_before_start = frozenset(runtime.tools.names())
+    try:
+        if previous is not None:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await previous.aclose()
+                finally:
+                    runtime.tools.unregister(
+                        name
+                        for server_name in previous.server_names
+                        for name in previous.tool_names_for(server_name)
+                    )
+                    runtime.replace_mcp_state(
+                        None,
+                        disabled_mcp_servers=(),
+                        failed_mcp_servers=(),
+                        unavailable_tool_prefixes=_unavailable_tool_prefixes(servers, None),
+                    )
+                    tools_before_start = frozenset(runtime.tools.names())
+        if enabled_servers:
+            from wisp.mcp.runtime import McpRuntime
+
+            started = await McpRuntime.start(
+                enabled_servers,
+                api=runtime.api,
+                existing_tool_names=runtime.tools.names(),
+            )
+    finally:
+        if started is None:
+            # A start that failed or was cancelled after registering a catalog closes
+            # its clients but leaves their tools behind; they would shadow the server
+            # as a name collision on every later restart.
+            runtime.tools.unregister(
+                name for name in runtime.tools.names() if name not in tools_before_start
+            )
+        runtime.replace_mcp_state(
+            started,
+            disabled_mcp_servers=tuple(server.name for server in servers if not server.enabled),
+            failed_mcp_servers=(
+                tuple(server.name for server in enabled_servers) if started is None else ()
+            ),
+            unavailable_tool_prefixes=_unavailable_tool_prefixes(servers, started),
+        )
 
 
 def _unavailable_tool_prefixes(
@@ -123,14 +198,15 @@ def _unavailable_tool_prefixes(
 ) -> tuple[str, ...]:
     """Name the MCP tool prefixes that are withheld this run rather than unknown.
 
-    Servers that failed to start or are disabled register no tools, but selecting
-    one of their tools with ``--allow-tool`` must not abort startup.
+    Servers that are disabled, failed to start, or are not running register no
+    tools, but selecting one of their tools with ``--allow-tool`` must not abort
+    startup or a reconnect.
     """
 
-    failed = mcp_runtime.diagnostics if mcp_runtime is not None else ()
-    return (
-        *(f"mcp__{diagnostic.server_name}__" for diagnostic in failed),
-        *(f"mcp__{server.name}__" for server in mcp_servers if not server.enabled),
+    return tuple(
+        f"mcp__{server.name}__"
+        for server in mcp_servers
+        if mcp_runtime is None or not mcp_runtime.tool_names_for(server.name)
     )
 
 
