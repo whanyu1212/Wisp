@@ -36,6 +36,7 @@ from wisp.tools.mcp_servers import (
     ListMcpServersTool,
     ProposeMcpServerChangeTool,
     ProposeMcpServerTool,
+    proposed_server,
 )
 
 SECRET = "sentinel-secret-value-1234567890abcdef"
@@ -338,3 +339,67 @@ def test_fields_a_proposal_would_not_show_are_rejected(
     problem = tool.check_arguments(arguments)
     assert problem is not None and "Unsupported fields" in problem
     assert SECRET not in problem
+
+
+def _http_proposal(**extra: object) -> dict[str, object]:
+    return {"name": "linear", "url": "https://mcp.linear.app/mcp", **extra}
+
+
+def test_an_http_proposal_can_forward_a_token_variable_into_a_header() -> None:
+    arguments = _http_proposal(headers_from={"Authorization": "Bearer ${LINEAR_API_KEY}"})
+
+    assert ProposeMcpServerTool().check_arguments(arguments) is None
+    assert proposed_server(arguments).headers_from == (
+        ("Authorization", "Bearer ${LINEAR_API_KEY}"),
+    )
+
+
+@pytest.mark.parametrize(
+    "headers_from",
+    [
+        {"Authorization": f"Bearer {SECRET}"},
+        {"Authorization": f"Bearer {SECRET} ${{TOKEN}}"},
+        {"Authorization‮": "${TOKEN}"},
+        {"Host": "${TOKEN}"},
+        ["Authorization"],
+    ],
+)
+def test_a_header_proposal_that_could_carry_or_hide_a_value_is_rejected(
+    headers_from: object,
+) -> None:
+    problem = ProposeMcpServerTool().check_arguments(_http_proposal(headers_from=headers_from))
+
+    assert problem is not None
+    assert SECRET not in problem
+
+
+def test_a_literal_header_value_is_never_accepted_from_a_proposal() -> None:
+    problem = ProposeMcpServerTool().check_arguments(
+        _http_proposal(headers={"Authorization": f"Bearer {SECRET}"})
+    )
+
+    assert problem is not None and "Unsupported fields: headers" in problem
+    assert SECRET not in problem
+
+
+def test_listing_names_the_variable_a_header_sends() -> None:
+    add_user_mcp_servers(
+        (
+            McpServerConfig.model_validate(
+                {
+                    "name": "linear",
+                    "url": "https://mcp.linear.app/mcp",
+                    "headers": {"X-Workspace": SECRET},
+                    "headers_from": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
+                }
+            ),
+        )
+    )
+
+    result = anyio.run(ListMcpServersTool().run, {}, ToolContext(cwd=Path.cwd()))
+
+    assert (
+        "linear (enabled): connects to https://mcp.linear.app (path hidden); "
+        "sends $LINEAR_API_KEY in header Authorization"
+    ) in result.text
+    assert SECRET not in result.text

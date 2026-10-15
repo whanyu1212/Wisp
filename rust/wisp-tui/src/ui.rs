@@ -2393,10 +2393,44 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
     let Some(server) = text("name").map(bounded_decision_preview) else {
         return unshowable("Proposal unavailable".into());
     };
+    // A field the panel does not show could still be saved; refuse it.
+    let known: &[&str] = match pending.name.as_str() {
+        "propose_mcp_server" => &[
+            "name",
+            "command",
+            "args",
+            "url",
+            "env_from",
+            "headers_from",
+            "replace",
+        ],
+        "propose_mcp_server_change" => &["name", "action"],
+        _ => &[],
+    };
+    if arguments.keys().any(|key| !known.contains(&key.as_str())) {
+        return unshowable(format!("Change MCP server {server}?"));
+    }
     let (title, detail) = match pending.name.as_str() {
         "propose_mcp_server" => {
             let (Some(args), Some(forwarded)) = (strings("args"), strings("env_from")) else {
                 return unshowable(format!("Add MCP server {server}?"));
+            };
+            let headers: Vec<(String, String)> = match arguments.get("headers_from") {
+                None => Vec::new(),
+                Some(serde_json::Value::Object(headers)) => {
+                    let mut parsed = Vec::new();
+                    for (header, template) in headers {
+                        let Some((_scheme, variable)) = template
+                            .as_str()
+                            .and_then(crate::mcp_manager::parse_header_template)
+                        else {
+                            return unshowable(format!("Add MCP server {server}?"));
+                        };
+                        parsed.push((header.clone(), variable.to_owned()));
+                    }
+                    parsed
+                }
+                Some(_) => return unshowable(format!("Add MCP server {server}?")),
             };
             let mut rows = Vec::new();
             match (text("command"), text("url")) {
@@ -2412,6 +2446,17 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
                     "forwards from your environment: {}",
                     forwarded.join(", ")
                 ));
+            }
+            match (text("url"), headers.is_empty()) {
+                (_, true) => {}
+                (Some(url), false) => {
+                    let host = crate::mcp_manager::url_host(url);
+                    rows.extend(headers.iter().map(|(header, variable)| {
+                        crate::mcp_manager::header_forward_row(header, variable, host)
+                    }));
+                }
+                // Headers on a command server would not be shown as sent anywhere.
+                (None, false) => return unshowable(format!("Add MCP server {server}?")),
             }
             match arguments.get("replace") {
                 None | Some(serde_json::Value::Bool(false)) => {}

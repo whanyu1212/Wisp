@@ -2,7 +2,7 @@
   "$defs": {
     "AddMcpServerCommand": {
       "additionalProperties": false,
-      "description": "Save an MCP server to the user settings, then restart MCP servers.\n\nThe entry has the shape of one ``mcp_servers`` settings entry. ``env`` holds\nliteral values the user entered; they are written to the settings file and\nnever echoed in events, errors, or this model's repr. Adding a server that runs\na command is the user's decision: a frontend must show the exact command,\narguments, and ``env_from`` names and have the user confirm before sending it.",
+      "description": "Save an MCP server to the user settings, then restart MCP servers.\n\nThe entry has the shape of one ``mcp_servers`` settings entry. ``env`` and\n``headers`` hold literal values the user entered; they are written to the\nsettings file and never echoed in events, errors, or this model's repr. Adding a\nserver is the user's decision: a frontend must show the exact command and\narguments or URL, the ``env_from`` names, and the variables ``headers_from``\nsends to the URL, and have the user confirm before sending it.",
       "properties": {
         "args": {
           "default": [],
@@ -35,6 +35,20 @@
           },
           "title": "AddMcpServerCommandEnvFrom",
           "type": "array"
+        },
+        "headers": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "AddMcpServerCommandHeaders",
+          "type": "object"
+        },
+        "headers_from": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "AddMcpServerCommandHeadersFrom",
+          "type": "object"
         },
         "id": {
           "anyOf": [
@@ -79,6 +93,8 @@
         "args",
         "env",
         "env_from",
+        "headers",
+        "headers_from",
         "replace"
       ],
       "title": "AddMcpServerCommand",
@@ -1251,9 +1267,39 @@
       "title": "RemoveMcpServerCommand",
       "type": "object"
     },
+    "RpcMcpHeaderFrom": {
+      "additionalProperties": false,
+      "description": "One HTTP header whose value Wisp builds from an environment variable.\n\nThe header is sent as ``\"{scheme} {value}\"``, or the bare value when\n``scheme`` is None. Showing it tells the user which variable's value goes to\nthe server.",
+      "properties": {
+        "header": {
+          "minLength": 1,
+          "title": "RpcMcpHeaderFromHeader",
+          "type": "string"
+        },
+        "scheme": {
+          "anyOf": [
+            {
+              "type": "string"
+            }
+          ],
+          "title": "RpcMcpHeaderFromScheme"
+        },
+        "variable": {
+          "minLength": 1,
+          "title": "RpcMcpHeaderFromVariable",
+          "type": "string"
+        }
+      },
+      "required": [
+        "header",
+        "variable"
+      ],
+      "title": "RpcMcpHeaderFrom",
+      "type": "object"
+    },
     "RpcMcpServerLaunch": {
       "additionalProperties": false,
-      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment.",
+      "description": "What one MCP server runs or connects to, as a user must see it to confirm it.\n\nExactly one of ``command`` or ``url`` is set. Environment variables appear only\nby name: ``env_names`` are set from values stored in the settings file, which are\nnever sent, and ``env_from`` are forwarded from Wisp's own environment. An HTTP\nserver's headers appear the same way: ``header_names`` carry stored values, and\n``headers_from`` send the named variables to the server's URL.",
       "properties": {
         "args": {
           "default": [],
@@ -1287,6 +1333,22 @@
           "title": "RpcMcpServerLaunchEnvNames",
           "type": "array"
         },
+        "header_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerLaunchHeaderNames",
+          "type": "array"
+        },
+        "headers_from": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcMcpHeaderFrom"
+          },
+          "title": "RpcMcpServerLaunchHeadersFrom",
+          "type": "array"
+        },
         "url": {
           "anyOf": [
             {
@@ -1299,7 +1361,9 @@
       "required": [
         "args",
         "env_names",
-        "env_from"
+        "env_from",
+        "header_names",
+        "headers_from"
       ],
       "title": "RpcMcpServerLaunch",
       "type": "object"

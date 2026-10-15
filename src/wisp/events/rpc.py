@@ -134,12 +134,29 @@ class RpcSkillCatalogSnapshot(BaseModel):
     project_trusted: bool = False
 
 
+class RpcMcpHeaderFrom(BaseModel):
+    """One HTTP header whose value Wisp builds from an environment variable.
+
+    The header is sent as ``"{scheme} {value}"``, or the bare value when
+    ``scheme`` is None. Showing it tells the user which variable's value goes to
+    the server.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    header: str = Field(min_length=1)
+    variable: str = Field(min_length=1)
+    scheme: str | None = None
+
+
 class RpcMcpServerLaunch(BaseModel):
     """What one MCP server runs or connects to, as a user must see it to confirm it.
 
     Exactly one of ``command`` or ``url`` is set. Environment variables appear only
     by name: ``env_names`` are set from values stored in the settings file, which are
-    never sent, and ``env_from`` are forwarded from Wisp's own environment.
+    never sent, and ``env_from`` are forwarded from Wisp's own environment. An HTTP
+    server's headers appear the same way: ``header_names`` carry stored values, and
+    ``headers_from`` send the named variables to the server's URL.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -149,6 +166,8 @@ class RpcMcpServerLaunch(BaseModel):
     url: str | None = None
     env_names: tuple[str, ...] = ()
     env_from: tuple[str, ...] = ()
+    header_names: tuple[str, ...] = ()
+    headers_from: tuple[RpcMcpHeaderFrom, ...] = ()
 
 
 class RpcMcpServerSnapshot(BaseModel):

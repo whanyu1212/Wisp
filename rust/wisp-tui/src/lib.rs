@@ -7936,6 +7936,13 @@ mod tests {
             json!({"name": "x", "command": "npx", "args": "not a list"}),
             json!({"name": "x", "command": "npx", "url": "https://e.com"}),
             json!({"name": "x", "command": "npx", "replace": "yes"}),
+            // A field the panel does not show, which confirming could still save.
+            json!({"name": "x", "command": "npx", "headers": {"Authorization": "secret"}}),
+            json!({"name": "x", "url": "https://e.com/mcp", "future_field": true}),
+            // Headers the panel cannot tie to a destination or a variable.
+            json!({"name": "x", "command": "npx", "headers_from": {"Authorization": "${TOKEN}"}}),
+            json!({"name": "x", "url": "https://e.com/mcp", "headers_from": {"Authorization": "Bearer abc"}}),
+            json!({"name": "x", "url": "https://e.com/mcp", "headers_from": ["Authorization"]}),
         ] {
             let mut state = UiState::unconfigured();
             state.view_status = ViewStatus::WaitingForApproval;
@@ -7972,6 +7979,82 @@ mod tests {
                 .unwrap();
             assert!(writer_rx.try_recv().is_err(), "{arguments}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_proposal_shows_which_variable_a_header_sends_and_where() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(projected(
+            "propose_mcp_server",
+            json!({
+                "name": "linear",
+                "url": "https://mcp.linear.app/mcp",
+                "headers_from": {"Authorization": "Bearer ${LINEAR_API_KEY}"},
+            }),
+        ));
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                },
+            )
+            .unwrap();
+        let rendered = screen(&terminal);
+        assert!(
+            rendered.contains("connects to: https://mcp.linear.app/mcp"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("sends $LINEAR_API_KEY to mcp.linear.app in header Authorization"),
+            "{rendered}"
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_change_proposal_with_an_unknown_field_is_never_armed() {
+        let pending = projected(
+            "propose_mcp_server_change",
+            json!({"name": "github", "action": "disable", "also": "remove"}),
+        );
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(pending);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut live_ui = LiveUi {
+            state,
+            ..LiveUi::default()
+        };
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                },
+            )
+            .unwrap();
+        assert!(screen(&terminal).contains("cannot be confirmed"));
     }
 
     #[tokio::test]

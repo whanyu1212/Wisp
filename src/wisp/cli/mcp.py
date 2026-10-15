@@ -9,12 +9,14 @@ and are never printed.
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 import unicodedata
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, NoReturn
+from urllib.parse import urlsplit
 
 import typer
 from typer.core import TyperCommand
@@ -31,7 +33,7 @@ from wisp.config.mcp_servers import (
     validated_mcp_server,
 )
 from wisp.config.settings import user_settings_path
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import HEADER_TEMPLATE_PATTERN, McpServerConfig, header_template_variable
 
 mcp_app = typer.Typer(
     help="Manage MCP servers. Changes apply the next time Wisp starts.",
@@ -89,6 +91,17 @@ def add_command(
         list[str] | None,
         typer.Option("--env-from", help="Variable to forward from Wisp's environment."),
     ] = None,
+    header: Annotated[
+        list[str] | None,
+        typer.Option("--header", help="HTTP header to send; its value is prompted for, masked."),
+    ] = None,
+    header_from: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--header-from",
+            help="HTTP header built from a variable: NAME=VAR, or 'NAME=Bearer VAR'.",
+        ),
+    ] = None,
     replace: Annotated[
         bool, typer.Option("--replace", help="Replace an existing server with this name.")
     ] = False,
@@ -99,6 +112,9 @@ def add_command(
     Everything after `--` is passed to the server unchanged.
 
     Example: `wisp mcp add github -- npx -y @modelcontextprotocol/server-github`
+
+    Example: `wisp mcp add linear --url https://mcp.linear.app/mcp
+    --header-from "Authorization=Bearer LINEAR_API_KEY"`
     """
 
     command: list[str] = ctx.meta.get(_SERVER_COMMAND, [])
@@ -112,12 +128,30 @@ def add_command(
         entry["args"] = command[1:]
     if env_from:
         entry["env_from"] = list(env_from)
+    if header_from:
+        entry["headers_from"] = dict(_header_from(value) for value in header_from)
     if env and not _interactive():
         _fail("--env values are prompted for; run in a terminal, or use --env-from")
-    # Show what will run before asking for any secret value.
-    _show(_validated(name, {**entry, "env": dict.fromkeys(env or (), "")}), action="Add")
+    if header and not _interactive():
+        _fail("--header values are prompted for; run in a terminal, or use --header-from")
+    # Show what will run or receive credentials before asking for any secret value.
+    _show(
+        _validated(
+            name,
+            {
+                **entry,
+                "env": dict.fromkeys(env or (), ""),
+                "headers": dict.fromkeys(header or (), ""),
+            },
+        ),
+        action="Add",
+    )
     if env:
         entry["env"] = {key: typer.prompt(f"Value for {key}", hide_input=True) for key in env}
+    if header:
+        entry["headers"] = {
+            key: typer.prompt(f"Value for header {key}", hide_input=True) for key in header
+        }
     server = _validated(name, entry)
     _confirm(yes=yes)
     _save((server,), replace=replace)
@@ -234,7 +268,35 @@ def _describe(server: McpServerConfig) -> list[str]:
         lines.append(f"sets: {names} (values hidden)")
     if server.env_from:
         lines.append(f"forwards: {', '.join(_display(name) for name in server.env_from)}")
+    if server.headers:
+        names = ", ".join(_display(name) for name, _ in server.headers)
+        lines.append(f"sends headers: {names} (values hidden)")
+    if server.headers_from:
+        # Name the variable and where its value goes on one line: this is what
+        # leaves the machine.
+        host = _display(urlsplit(server.url or "").netloc)
+        for header_name, template in server.headers_from:
+            _scheme, variable = header_template_variable(template)
+            lines.append(f"sends ${_display(variable)} to {host} in header {_display(header_name)}")
     return lines
+
+
+def _header_from(option: str) -> tuple[str, str]:
+    """Parse ``NAME=VAR``, ``NAME=Scheme VAR``, or ``NAME=Scheme ${VAR}``."""
+
+    header_name, separator, value = option.partition("=")
+    if not separator or not header_name:
+        _fail("--header-from takes NAME=VAR, for example 'Authorization=Bearer LINEAR_API_KEY'")
+    if HEADER_TEMPLATE_PATTERN.fullmatch(value):
+        return header_name, value
+    match = re.fullmatch(r"(?:([A-Za-z]{1,20}) )?([A-Za-z_][A-Za-z0-9_]*)", value)
+    if match is None:
+        _fail(
+            "--header-from takes a variable name, optionally after a scheme word, "
+            "for example 'Authorization=Bearer LINEAR_API_KEY'"
+        )
+    scheme, variable = match.groups()
+    return header_name, f"{scheme} ${{{variable}}}" if scheme else f"${{{variable}}}"
 
 
 def _show(server: McpServerConfig, *, action: str) -> None:

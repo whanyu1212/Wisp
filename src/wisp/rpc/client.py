@@ -262,15 +262,19 @@ class RpcController:
         url: str | None = None,
         env: dict[str, str] | None = None,
         env_from: tuple[str, ...] = (),
+        headers: dict[str, str] | None = None,
+        headers_from: dict[str, str] | None = None,
         replace: bool = False,
         command_id: str | None = None,
     ) -> str:
         """Save an MCP server to the user settings and restart MCP servers.
 
-        Pass exactly one of ``command`` or ``url``. Adding a server that runs a
-        command is the user's decision: show them the exact command, arguments, and
-        ``env_from`` names and have them confirm before calling this. ``env`` values
-        are written to the settings file and never echoed back.
+        Pass exactly one of ``command`` or ``url``. Adding a server is the user's
+        decision: show them the exact command and arguments or URL, the ``env_from``
+        names, and which variables ``headers_from`` sends to the URL, and have them
+        confirm before calling this. ``env`` and ``headers`` values are written to
+        the settings file and never echoed back. A ``headers_from`` value names one
+        variable, optionally after a scheme word: ``"Bearer ${LINEAR_API_KEY}"``.
         """
 
         selected_id = command_id or self._command_id_factory("mcp-add")
@@ -283,6 +287,8 @@ class RpcController:
                 url=url,
                 env=dict(env or {}),
                 env_from=env_from,
+                headers=dict(headers or {}),
+                headers_from=dict(headers_from or {}),
                 replace=replace,
             )
         )

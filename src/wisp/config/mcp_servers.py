@@ -196,6 +196,11 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         if not isinstance(raw, Mapping):
             raise McpSettingsError(f"server {name!r} must be a JSON object")
         unsupported = sorted(str(key) for key in raw if key not in _SNIPPET_KEYS)
+        if "headers" in unsupported:
+            raise McpSettingsError(
+                f"server {name!r} sets HTTP headers, which a snippet cannot add yet; "
+                "add it with `wisp mcp add NAME --url URL --header-from NAME=VAR`"
+            )
         if unsupported:
             raise McpSettingsError(
                 f"server {name!r} uses unsupported settings: {', '.join(unsupported)}"
@@ -241,13 +246,16 @@ def _settings_entry(server: McpServerConfig) -> dict[str, object]:
     # JSON dumps mask SecretStr values; the file must hold the real values.
     if server.env:
         entry["env"] = {name: value.get_secret_value() for name, value in server.env}
+    if server.headers:
+        entry["headers"] = {name: value.get_secret_value() for name, value in server.headers}
     return entry
 
 
 def same_launch(saved: McpServerConfig, shown: McpServerConfig) -> bool:
     """Return whether two servers run or connect to the same thing, as a user sees it.
 
-    Compares the transport, arguments, and environment variable names; environment
+    Compares the transport, arguments, environment variable names, header names,
+    and the variables forwarded into headers. Literal environment and header
     values are never shown, so they are not part of what a user confirms.
 
     Args:
@@ -260,7 +268,16 @@ def same_launch(saved: McpServerConfig, shown: McpServerConfig) -> bool:
 
     def launch(server: McpServerConfig) -> tuple[object, ...]:
         names = tuple(name for name, _value in server.env)
-        return (server.command, server.args, server.url, names, server.env_from)
+        header_names = tuple(name for name, _value in server.headers)
+        return (
+            server.command,
+            server.args,
+            server.url,
+            names,
+            server.env_from,
+            header_names,
+            server.headers_from,
+        )
 
     return launch(saved) == launch(shown)
 

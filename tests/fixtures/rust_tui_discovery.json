@@ -123,7 +123,9 @@
             "env_names": [],
             "env_from": [
               "SEARCH_TOKEN"
-            ]
+            ],
+            "header_names": [],
+            "headers_from": []
           }
         },
         {
@@ -138,7 +140,17 @@
             "args": [],
             "url": "https://files.example/mcp",
             "env_names": [],
-            "env_from": []
+            "env_from": [],
+            "header_names": [
+              "X-Workspace"
+            ],
+            "headers_from": [
+              {
+                "header": "Authorization",
+                "variable": "FILES_TOKEN",
+                "scheme": "Bearer"
+              }
+            ]
           }
         },
         {
@@ -151,7 +163,9 @@
             "args": [],
             "url": null,
             "env_names": [],
-            "env_from": []
+            "env_from": [],
+            "header_names": [],
+            "headers_from": []
           }
         },
         {
@@ -168,7 +182,9 @@
             "env_names": [
               "ARCHIVE_TOKEN"
             ],
-            "env_from": []
+            "env_from": [],
+            "header_names": [],
+            "headers_from": []
           }
         }
       ]
@@ -191,7 +207,9 @@
           "env_names": [
             "GITHUB_PERSONAL_ACCESS_TOKEN"
           ],
-          "env_from": []
+          "env_from": [],
+          "header_names": [],
+          "headers_from": []
         }
       }
     ]

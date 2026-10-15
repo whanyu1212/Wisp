@@ -1648,6 +1648,28 @@
     "servers",
     0,
     "launch",
+    "header_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
+    "headers_from"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp.preview",
+   "operation": "remove",
+   "path": [
+    "servers",
+    0,
+    "launch",
     "url"
    ],
    "accepted": true

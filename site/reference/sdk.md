@@ -139,7 +139,7 @@ request. Completion and results arrive through `events()`.
 | `get_project_files` | `(*, command_id: str \| None = None)` | `RpcProjectFilesReported` |
 | `get_skills` | `(*, command_id: str \| None = None)` | `RpcSkillsReported` |
 | `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
-| `add_mcp_server` | `(name: str, *, command=None, args=(), url=None, env=None, env_from=(), replace=False, command_id=None)` | Saves the server, restarts MCP servers, then `RpcMcpStatusReported` and terminal `RpcCommandFinished` |
+| `add_mcp_server` | `(name: str, *, command=None, args=(), url=None, env=None, env_from=(), headers=None, headers_from=None, replace=False, command_id=None)` | Saves the server, restarts MCP servers, then `RpcMcpStatusReported` and terminal `RpcCommandFinished` |
 | `remove_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
 | `set_mcp_server_enabled` | `(name: str, enabled: bool, *, expected=None, command_id=None)` | Same as `add_mcp_server`; `expected` is required when enabling |
 | `reconnect_mcp` | `(*, command_id: str \| None = None)` | Reloads servers from the settings file and restarts them; same events |
@@ -156,12 +156,15 @@ everything this session" answer are kept. Per-server startup problems appear as 
 entries in the status, and a disabled server is reported as `disabled`.
 
 Each status entry carries `launch`: the server's command and arguments or URL, the names of the
-environment variables it sets, and the variables it forwards (`env_from`). Environment values are
-never included. Adding or enabling a server is the user's decision: show them the launch settings
+environment variables it sets, and the variables it forwards (`env_from`). An HTTP server's launch
+also names its stored headers (`header_names`) and each header built from a variable
+(`headers_from`, with the header, variable, and scheme). Environment and header values are never
+included. Adding or enabling a server is the user's decision: show them the launch settings
 and get their confirmation first. To enable, pass the confirmed `launch` as `expected`; the server is
 enabled only if its saved settings still match, so a confirmation cannot enable a command that was
-edited in the meantime. `env` values given to `add_mcp_server` are written to the settings file and
-are never echoed in events or errors.
+edited in the meantime. `env` and `headers` values given to `add_mcp_server` are written to the
+settings file and are never echoed in events or errors. A `headers_from` value names one variable,
+optionally after a scheme word: `{"Authorization": "Bearer ${LINEAR_API_KEY}"}`.
 
 `preview_mcp_snippet` parses a pasted `{"mcpServers": {...}}` snippet with the same rules as
 `wisp mcp import` and replies with each server's name and `launch`, naming environment variables
