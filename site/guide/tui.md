@@ -442,7 +442,8 @@ variable instead and needs no value.
 
 A server that needs you to sign in shows "sign in required". Press `l`: Wisp opens the server's
 sign-in page in your browser and waits up to five minutes. The list shows the page's address in case
-no browser opens (for example over SSH), and `Esc` cancels. Once you finish, the server reconnects
+no browser opens; open it in a browser on the same machine as Wisp, because the page returns to a
+local address. `Esc` cancels. Once you finish, the server reconnects
 with its tools; the list shows "signed in", and `o` signs out. See
 [Signing in with OAuth](./tools-and-safety#signing-in-with-oauth).
 

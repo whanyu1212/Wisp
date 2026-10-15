@@ -25,6 +25,7 @@ from typer.core import TyperCommand
 
 from wisp.auth.storage import AuthStorageError
 from wisp.config.mcp_servers import (
+    SNIPPET_HEADER_PLACEHOLDER,
     McpServerExistsError,
     McpSettingsError,
     add_user_mcp_servers,
@@ -207,6 +208,13 @@ def import_command(
         _show(server, action="Import")
         if (server.env or server.headers) and not yes:
             server = _ask_for_values(server)
+        elif any(
+            value.get_secret_value() == SNIPPET_HEADER_PLACEHOLDER for _, value in server.headers
+        ):
+            _fail(
+                f"server {server.name!r} has a header without a usable value; "
+                "import without --yes to enter it"
+            )
         ready.append(server)
     _confirm(yes=yes, question="Save it?" if len(ready) == 1 else f"Save all {len(ready)}?")
     _save(ready, replace=replace)
@@ -392,8 +400,9 @@ def _ask_for_values(server: McpServerConfig) -> McpServerConfig:
             env[name] = value
         else:
             env_from.append(name)
+    # HTTP refuses surrounding spaces, and a copied token often has one.
     headers = {
-        name: typer.prompt(f"Value for header {name}", hide_input=True)
+        name: typer.prompt(f"Value for header {name}", hide_input=True).strip(" \t")
         for name, _ in server.headers
     }
     data = server.model_dump(exclude={"name", "env", "env_from", "headers"})

@@ -1560,6 +1560,15 @@ fn submit(
     local_display: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
+    // The backend would hold the prompt until the browser returns, for minutes.
+    if state.mcp_sign_in.is_some() {
+        return Ok(vec![
+            UiEffect::Notice(
+                "Finish signing in to the MCP server first, or cancel it with Esc in /mcp.".into(),
+            ),
+            UiEffect::RequestRender,
+        ]);
+    }
     if state.configuration_active() {
         return Ok(vec![
             UiEffect::Notice("Wait for configuration to finish.".into()),

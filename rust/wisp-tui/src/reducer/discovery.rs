@@ -864,4 +864,28 @@ mod tests {
         .unwrap();
         assert_eq!(sent(&effects)["type"], "logout_mcp_server");
     }
+
+    #[test]
+    fn a_prompt_waits_for_a_sign_in_instead_of_queueing_behind_it() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Login("linear".into())),
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(&mut state, UiAction::Submit("hello".into()), &mut ids).unwrap();
+
+        assert!(
+            matches!(&effects[0], UiEffect::Notice(notice) if notice.contains("Finish signing in")),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SendCommand(_)))
+        );
+    }
 }
