@@ -146,6 +146,7 @@ def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
             )
         env["WISP_CONTEXT_RESERVE_TOKENS"] = str(options.config.context_reserve_tokens)
         env["WISP_AUTO_COMPACTION"] = "1" if options.config.auto_compaction_enabled else "0"
+        env["WISP_WEB_SEARCH"] = "1" if options.config.web_search else "0"
     return env
 
 

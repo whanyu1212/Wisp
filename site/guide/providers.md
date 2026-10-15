@@ -120,7 +120,9 @@ cannot turn it on.
 | `google`, `deepseek`, OpenAI-compatible endpoints | Not supported yet; the model is told it cannot search |
 
 **Cost.** Providers bill each search on top of tokens, and the pages a search returns count as input
-tokens for the rest of the conversation. Check your provider's pricing before turning search on. An
+tokens for the rest of the conversation. Wisp's cost estimates price tokens only, so a reply that
+searched shows its cost as a lower bound (`cost ≥…`). Check your provider's pricing before turning
+search on. An
 Anthropic organization administrator can also disable web search, and a model without search support
 rejects the request; turn the setting off if that happens.
 

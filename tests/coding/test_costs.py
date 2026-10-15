@@ -8,7 +8,13 @@ from pydantic import ValidationError
 
 from tests.support.session_entries import linked_entries
 from wisp.agent.messages import CompactionRecord, Message
-from wisp.coding.costs import CostEstimator, aggregate_session_cost, format_cost_summary, format_usd
+from wisp.coding.costs import (
+    CostEstimator,
+    aggregate_session_cost,
+    format_cost_summary,
+    format_usage_cost,
+    format_usd,
+)
 from wisp.coding.stats import build_session_stats
 from wisp.events import MessageCompleted, TokenUsage, wisp_event_from_json
 from wisp.providers.catalog import (
@@ -492,6 +498,25 @@ def test_cost_summary_marks_old_usage_partial_without_repricing() -> None:
     assert summary.priced_record_count == 1
     assert summary.unpriced_record_count == 1
     assert format_cost_summary(summary) == "cost ≥$0.0010"
+
+
+def test_costs_with_unpriced_search_fees_are_lower_bounds() -> None:
+    priced = CostEstimator(_models())(
+        "openai",
+        "model",
+        "model",
+        TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
+    )
+    searched = priced.model_copy(update={"web_searches": 2})
+
+    summary = aggregate_session_cost((priced, searched))
+
+    assert summary.known_usd == Decimal("0.002")
+    assert summary.complete is False
+    assert summary.unpriced_record_count == 0
+    assert format_cost_summary(summary) == "cost ≥$0.0020"
+    assert format_usage_cost(searched) == "cost ≥$0.0010"
+    assert format_usage_cost(priced) == "cost $0.0010"
 
 
 def test_stats_use_saved_costs_for_messages_and_compactions() -> None:

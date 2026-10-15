@@ -10,7 +10,9 @@ import pytest
 
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import CompletedModelResponse, ModelResponseStream
+from wisp.agent.loop.provider_lifecycle import CompletedProviderResponse
 from wisp.agent.loop.provider_request import open_provider_stream
+from wisp.agent.loop.response_projection import project_usage_and_cost
 from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import WebSearchPerformed, WebSearchSource
@@ -19,6 +21,7 @@ from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
     ProviderResponseStarted,
+    ProviderUsage,
     ProviderWebSearch,
     ProviderWebSource,
     ToolCall,
@@ -186,3 +189,24 @@ def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
 
     assert isinstance(stream.outcome, CompletedModelResponse)
     assert stream.outcome.had_streamed_delta is True
+    assert stream.outcome.completed.web_searches == 1
+
+
+def test_a_response_cost_records_its_searches() -> None:
+    completed = CompletedProviderResponse(
+        response=ProviderResponseCompleted(
+            content="done",
+            usage=ProviderUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+        ),
+        content="done",
+        response_id=None,
+        response_model="searching",
+        web_searches=3,
+    )
+
+    _, cost = project_usage_and_cost(
+        AgentLoopConfig(provider=_SearchingProvider(), tool_executor=_NeverExecutor()),  # type: ignore[arg-type]
+        completed,
+    )
+
+    assert cost.web_searches == 3

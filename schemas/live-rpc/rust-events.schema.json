@@ -5792,6 +5792,12 @@
           ],
           "default": null,
           "title": "UsageCostUnavailableReason"
+        },
+        "web_searches": {
+          "default": 0,
+          "minimum": 0,
+          "title": "UsageCostWebSearches",
+          "type": "integer"
         }
       },
       "required": [
@@ -5803,7 +5809,8 @@
         "billable",
         "rates",
         "estimated_usd",
-        "unavailable_reason"
+        "unavailable_reason",
+        "web_searches"
       ],
       "title": "UsageCost",
       "type": "object"
