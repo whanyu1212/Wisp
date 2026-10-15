@@ -114,11 +114,23 @@ async def build_runtime(
             if mcp_runtime is not None
             else ()
         ),
-        unavailable_tool_prefixes=(
-            tuple(f"mcp__{diagnostic.server_name}__" for diagnostic in mcp_runtime.diagnostics)
-            if mcp_runtime is not None
-            else ()
-        ),
+        unavailable_tool_prefixes=_unavailable_tool_prefixes(mcp_servers, mcp_runtime),
+    )
+
+
+def _unavailable_tool_prefixes(
+    mcp_servers: tuple[McpServerConfig, ...], mcp_runtime: McpRuntime | None
+) -> tuple[str, ...]:
+    """Name the MCP tool prefixes that are withheld this run rather than unknown.
+
+    Servers that failed to start or are disabled register no tools, but selecting
+    one of their tools with ``--allow-tool`` must not abort startup.
+    """
+
+    failed = mcp_runtime.diagnostics if mcp_runtime is not None else ()
+    return (
+        *(f"mcp__{diagnostic.server_name}__" for diagnostic in failed),
+        *(f"mcp__{server.name}__" for server in mcp_servers if not server.enabled),
     )
 
 

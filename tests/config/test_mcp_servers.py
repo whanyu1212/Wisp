@@ -27,6 +27,7 @@ from wisp.config.settings import (
 )
 from wisp.mcp.config import McpServerConfig
 from wisp.runtime.extensions import build_runtime
+from wisp.tools.selection import select_tools
 
 
 def _settings(home: Path) -> dict[str, object]:
@@ -239,6 +240,13 @@ def test_disabled_server_is_loaded_but_not_started(tmp_path: Path) -> None:
         runtime = await build_runtime(mcp_servers=settings.mcp_servers or ())
         try:
             assert runtime.mcp_runtime is None
+            # An explicit selection of a disabled server's tool is withheld, not fatal.
+            selected = select_tools(
+                runtime.tools,
+                allowed_tools=("mcp__github__search",),
+                ignored_unknown_prefixes=runtime.unavailable_tool_prefixes,
+            )
+            assert "mcp__github__search" not in selected.names()
         finally:
             await runtime.aclose()
 
