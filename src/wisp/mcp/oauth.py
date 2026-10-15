@@ -46,6 +46,7 @@ _CALLBACK_PATH = "/callback"
 # A refresh this close to expiry happens before the request instead of after a 401.
 _EXPIRY_MARGIN_SECONDS = 30.0
 _MAX_CALLBACK_REQUEST_BYTES = 16 * 1024
+_CALLBACK_READ_TIMEOUT_SECONDS = 10.0
 
 
 class McpLoginRequired(Exception):
@@ -85,6 +86,8 @@ class _ServerTokens:
         self.authorization_server = credential.authorization_server if credential else None
 
     async def get_tokens(self) -> OAuthToken | None:
+        if self._persist:
+            await self._adopt_saved()
         if self._tokens is None or self._expires_at is None:
             return self._tokens
         remaining = self._expires_at - time.time() - _EXPIRY_MARGIN_SECONDS
@@ -103,6 +106,27 @@ class _ServerTokens:
             )
             if saved:
                 self._saved = credential
+
+    async def _adopt_saved(self) -> None:
+        """Pick up a sign-in another Wisp process refreshed, replaced, or removed.
+
+        The SDK reads tokens when it starts and again after a failed refresh, so
+        a session whose refresh token another session already used recovers
+        with the saved tokens instead of asking the user to sign in.
+        """
+
+        try:
+            current = await anyio.to_thread.run_sync(self._store.load, self._name, self._server_url)
+        except AuthStorageError:
+            return
+        if current == self._saved:
+            return
+        self._saved = current
+        self._tokens = current.tokens if current else None
+        self._expires_at = current.expires_at if current else None
+        self._client_info = current.client_info if current else None
+        if current is not None:
+            self.authorization_server = current.authorization_server
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         return self._client_info
@@ -260,13 +284,15 @@ async def login_mcp_server(
             f"MCP server {server.name} sends its own Authorization header; remove it to sign in"
         )
 
-    async def show(url: str) -> None:
-        _check_authorization_url(url)
-        await open_url(url)
-
     try:
         with anyio.fail_after(timeout):
             async with _redirect_listener() as listener:
+
+                async def show(url: str) -> None:
+                    _check_authorization_url(url)
+                    listener.expected_state = parse_qs(urlsplit(url).query).get("state", [None])[0]
+                    await open_url(url)
+
                 tokens = _ServerTokens(store, server, None, persist=False)
                 provider = _McpOAuthProvider(
                     server.url,
@@ -295,7 +321,12 @@ async def login_mcp_server(
     credential = tokens.credential()
     if credential is None:
         raise McpLoginError(f"{server.name} did not issue a token")
-    await anyio.to_thread.run_sync(store.save, server.name, credential)
+    try:
+        await anyio.to_thread.run_sync(store.save, server.name, credential)
+    except AuthStorageError:
+        raise McpLoginError(
+            f"Signed in to {server.name}, but the sign-in could not be saved"
+        ) from None
 
 
 def _login_headers(server: McpServerConfig) -> dict[str, str]:
@@ -356,6 +387,9 @@ def _login_problem(exc: BaseException, depth: int = 0) -> str | None:
 class _RedirectListener:
     redirect_uri: str
     _result: asyncio.Future[AuthorizationCodeResult]
+    # The state the authorization request carries; a callback with any other
+    # state is someone else's and must not use up the one redirect.
+    expected_state: str | None = None
 
     async def result(self) -> AuthorizationCodeResult:
         return await self._result
@@ -363,25 +397,44 @@ class _RedirectListener:
 
 @asynccontextmanager
 async def _redirect_listener() -> AsyncIterator[_RedirectListener]:
-    """Listen on a loopback port for the authorization server's one redirect."""
+    """Listen on a loopback port for the authorization server's one redirect.
+
+    Only a ``GET`` of the callback path whose ``state`` matches the authorization
+    request completes the sign-in; anything else gets a 404 and changes nothing.
+    A connection must send its request promptly, and connections still open when
+    the sign-in ends are closed rather than waited for, so an idle connection
+    (a browser's spare one, or another local process) cannot hold up sign-in.
+    """
 
     loop = asyncio.get_running_loop()
     result: asyncio.Future[AuthorizationCodeResult] = loop.create_future()
+    writers: set[asyncio.StreamWriter] = set()
+    listener: _RedirectListener
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writers.add(writer)
         try:
-            head = await reader.readuntil(b"\r\n\r\n")
-        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            head = await asyncio.wait_for(
+                reader.readuntil(b"\r\n\r\n"), _CALLBACK_READ_TIMEOUT_SECONDS
+            )
+        except (TimeoutError, asyncio.IncompleteReadError, asyncio.LimitOverrunError):
             writer.close()
             return
+        finally:
+            writers.discard(writer)
         request_line = head.split(b"\r\n", 1)[0].decode("latin-1")
         method, _, rest = request_line.partition(" ")
-        target = rest.rsplit(" ", 1)[0]
-        parts = urlsplit(target)
-        if method != "GET" or parts.path != _CALLBACK_PATH or result.done():
+        parts = urlsplit(rest.rsplit(" ", 1)[0])
+        query = {key: values[0] for key, values in parse_qs(parts.query).items()}
+        if (
+            method != "GET"
+            or parts.path != _CALLBACK_PATH
+            or result.done()
+            or listener.expected_state is None
+            or query.get("state") != listener.expected_state
+        ):
             await _respond(writer, 404, "Not found.")
             return
-        query = {key: values[0] for key, values in parse_qs(parts.query).items()}
         if "code" in query:
             result.set_result(
                 AuthorizationCodeResult(
@@ -395,10 +448,13 @@ async def _redirect_listener() -> AsyncIterator[_RedirectListener]:
 
     server = await asyncio.start_server(handle, "127.0.0.1", 0, limit=_MAX_CALLBACK_REQUEST_BYTES)
     port = server.sockets[0].getsockname()[1]
+    listener = _RedirectListener(f"http://127.0.0.1:{port}{_CALLBACK_PATH}", result)
     try:
-        async with server:
-            yield _RedirectListener(f"http://127.0.0.1:{port}{_CALLBACK_PATH}", result)
+        yield listener
     finally:
+        server.close()
+        for writer in tuple(writers):
+            writer.close()
         if not result.done():
             result.cancel()
 

@@ -15,7 +15,7 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
 from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
-from wisp.mcp.credentials import McpTokenStore
+from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
 from wisp.mcp.http_transport import bounded_http_client
 from wisp.mcp.oauth import McpLoginRequired, stored_oauth
 from wisp.mcp.tool import adapt_mcp_tool
@@ -247,6 +247,10 @@ class McpRuntime:
         stage: Literal["connect", "discover"] = "connect"
 
         def mark_unauthorized() -> None:
+            # A server with its own Authorization header cannot sign in; its
+            # refusal is reported as unavailable instead.
+            if uses_header_authorization(server):
+                return
             nonlocal unauthorized
             unauthorized = True
             self._sign_in_required_server_names.add(server.name)

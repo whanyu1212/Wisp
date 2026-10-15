@@ -212,6 +212,9 @@ def test_a_refused_refresh_asks_the_user_to_sign_in_again(
     authorization_server: _AuthorizationServer, store: McpTokenStore, tmp_path: Path
 ) -> None:
     _login(_server(), store)
+    credential = store.load("linear", MCP_URL)
+    assert credential is not None
+    store.save("linear", replace(credential, expires_at=0.0))
     authorization_server.valid_access.clear()
     authorization_server.refuse_refresh = True
 
@@ -355,3 +358,98 @@ def test_signing_in_sends_the_headers_the_server_needs_to_answer(
     monkeypatch.setenv("WISP_TEST_TENANT", "acme")
     _login(tenant, store)
     assert store.load("linear", MCP_URL) is not None
+
+
+def test_a_server_with_its_own_authorization_header_is_not_told_to_sign_in(
+    monkeypatch: MonkeyPatch, store: McpTokenStore, tmp_path: Path
+) -> None:
+    _mock_http(monkeypatch, lambda _request: httpx2.Response(401))
+
+    _, messages = _connect(_server(headers={"Authorization": "Bearer expired"}), store, tmp_path)
+
+    assert messages == (
+        "MCP server linear is unavailable: the server could not be started or initialized",
+    )
+
+
+def test_a_session_picks_up_a_sign_in_another_session_refreshed(
+    authorization_server: _AuthorizationServer, store: McpTokenStore
+) -> None:
+    from wisp.mcp.oauth import _ServerTokens
+
+    _login(_server(), store)
+    first = store.load("linear", MCP_URL)
+    assert first is not None
+    tokens = _ServerTokens(store, _server(), first, persist=True)
+    newer = replace(first, tokens=first.tokens.model_copy(update={"access_token": "newer"}))
+    store.save("linear", newer)
+
+    current = anyio.run(tokens.get_tokens)
+
+    assert current is not None and current.access_token == "newer"
+
+
+def _callback(port_url: str, **params: str) -> int:
+    return httpx.get(port_url, params=params).status_code
+
+
+def test_the_redirect_listener_accepts_only_the_matching_callback() -> None:
+    import socket
+
+    from wisp.mcp.oauth import _redirect_listener
+
+    async def scenario() -> tuple[list[int], str]:
+        with anyio.fail_after(10):
+            return await _listen()
+
+    async def _listen() -> tuple[list[int], str]:
+        async with _redirect_listener() as listener:
+            listener.expected_state = "expected"
+            port = int(urlsplit(listener.redirect_uri).port or 0)
+            # An idle connection must not hold anything up.
+            idle = socket.create_connection(("127.0.0.1", port))
+            statuses = []
+            for params in (
+                {"code": "stolen", "state": "wrong"},
+                {"state": "wrong"},
+                {"code": "stolen"},
+            ):
+                statuses.append(
+                    await anyio.to_thread.run_sync(
+                        lambda params=params: _callback(listener.redirect_uri, **params)
+                    )
+                )
+            statuses.append(
+                await anyio.to_thread.run_sync(
+                    lambda: _callback(listener.redirect_uri, code="real", state="expected")
+                )
+            )
+            result = await listener.result()
+            # A second, matching callback cannot replace the first.
+            statuses.append(
+                await anyio.to_thread.run_sync(
+                    lambda: _callback(listener.redirect_uri, code="later", state="expected")
+                )
+            )
+        idle.close()
+        return statuses, result.code
+
+    statuses, code = anyio.run(scenario)
+
+    assert statuses == [404, 404, 404, 200, 404]
+    assert code == "real"
+
+
+def test_a_refused_sign_in_with_the_right_state_reports_it(
+    authorization_server: _AuthorizationServer, store: McpTokenStore
+) -> None:
+    async def refuse(url: str) -> None:
+        query = {key: values[0] for key, values in parse_qs(urlsplit(url).query).items()}
+        async with httpx.AsyncClient() as browser:
+            await browser.get(
+                query["redirect_uri"], params={"error": "access_denied", "state": query["state"]}
+            )
+
+    with pytest.raises(McpLoginError, match="refused the sign-in"):
+        _login(_server(), store, refuse)
+    assert not store.path.exists()

@@ -283,7 +283,7 @@ def login_command(name: Annotated[str, typer.Argument(help="HTTP server to sign 
 
     try:
         anyio.run(sign_in)
-    except McpLoginError as exc:
+    except (McpLoginError, AuthStorageError) as exc:
         _fail(str(exc))
     typer.echo(f"Signed in to {_display(name)}. {_RESTART_NOTE}")
 
