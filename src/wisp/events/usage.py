@@ -66,8 +66,9 @@ class UsageCost(BaseModel):
     # Providers bill them on top of tokens and the estimate prices tokens only,
     # so a response with searches costs more than ``estimated_usd``. None (and
     # so omitted from saved sessions) keeps sessions without searches readable
-    # by releases that predate the field.
-    web_searches: int | None = Field(default=None, ge=1)
+    # by releases that predate the field. Zero still decodes: builds before
+    # 0.2.0rc8 saved it for every response.
+    web_searches: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _validate_estimate(self) -> Self:
