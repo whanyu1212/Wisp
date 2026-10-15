@@ -10,12 +10,30 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc6 — release preparation
+## 0.2.0rc7 — release preparation
+
+RC7 fixes a dead end found while dogfooding RC6: a prompt that failed, for example because the
+selected provider had no credentials, locked the TUI's composer until exit. It changes no session,
+event, or protocol format, so RC4 through RC7 read each other's sessions. This section describes the
+candidate under preparation; publication requires a separate tagged release.
+
+- Fixed the Rust TUI locking the composer after a failed prompt, which left "The prompt failed.
+  Ctrl-C exits." as the only way out and made `/connect` unreachable without credentials. A failed
+  prompt now returns to idle, and its reason stays as a red `✗ Prompt failed: …` row under the
+  transcript until the next command starts or the session is replaced. The backend's
+  missing-credential messages name `/connect`. A closed backend connection still ends the session.
+  (#693)
+- The `/connect` API-key entry docks above the composer, shows a cursor after the masked key and a
+  character count, and says when an environment variable already supplies the key, since that
+  variable takes precedence over a saved one. (#693)
+- Refreshed the bundled `wisp-development` and `github-pr-delivery` skills' runtime guidance and
+  review-evidence rules. (#692)
+
+## 0.2.0rc6 — 2026-10-14
 
 RC6 refreshes how the Rust TUI presents approvals, diffs, tool progress, and work in progress, and
 fixes dropped trackpad scrolling found while dogfooding RC5. It changes no session, event, or
-protocol format, so RC4, RC5, and RC6 read each other's sessions. This section describes the
-candidate under preparation; publication requires a separate tagged release.
+protocol format, so RC4, RC5, and RC6 read each other's sessions.
 
 - Fixed trackpad and wheel scrolling being silently dropped while the agent was working: tool output
   queued ahead of the gesture invalidated it, so earlier turns looked unreachable. Scrolling while
