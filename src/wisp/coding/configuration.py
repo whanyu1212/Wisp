@@ -31,6 +31,7 @@ class CodingSessionConfiguration:
     context_reserve_tokens: int
     auto_compaction_enabled: bool
     skill_catalog: SkillCatalog = field(default_factory=SkillCatalog)
+    web_search: bool = False
 
 
 def resolve_coding_session_configuration(
@@ -79,4 +80,5 @@ def resolve_coding_session_configuration(
         trusted=trusted,
         context_reserve_tokens=config.context_reserve_tokens,
         auto_compaction_enabled=config.auto_compaction_enabled,
+        web_search=config.web_search,
     )

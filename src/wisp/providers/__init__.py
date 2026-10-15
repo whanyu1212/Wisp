@@ -30,6 +30,8 @@ from .events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderWebSearch,
+    ProviderWebSource,
     ToolCall,
 )
 from .fake import FakeProvider, ProviderRequest, ScriptedProvider
@@ -85,6 +87,8 @@ __all__ = [
     "ProviderTextDelta",
     "ProviderThinkingDelta",
     "ProviderToolCallCompleted",
+    "ProviderWebSearch",
+    "ProviderWebSource",
     "ScriptedProvider",
     "RetryPolicy",
     "RetrySettings",

@@ -300,6 +300,21 @@ def test_config_resolves_auto_compaction_from_env_and_explicit_override(
     )
 
 
+def test_config_resolves_web_search_off_by_default_then_settings_env_and_override(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).web_search is False
+
+    (home / ".wisp" / "settings.json").write_text('{"web_search": true}', encoding="utf-8")
+    assert WispConfig.from_env(session_dir=tmp_path).web_search is True
+
+    monkeypatch.setenv("WISP_WEB_SEARCH", "off")
+    assert WispConfig.from_env(session_dir=tmp_path).web_search is False
+    assert WispConfig.from_env(session_dir=tmp_path, web_search=True).web_search is True
+
+
 def test_config_rejects_invalid_auto_compaction_env(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

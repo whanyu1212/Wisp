@@ -358,7 +358,7 @@ deprecation policy.
 | Group | Important models |
 |---|---|
 | Command lifecycle | `RpcCommandStarted`, `RpcCommandFinished` |
-| Assistant output | `MessageStarted`, `MessageDelta`, `MessageCompleted` |
+| Assistant output | `MessageStarted`, `MessageDelta`, `WebSearchPerformed`, `MessageCompleted` |
 | Run lifecycle | `AgentStarted`, `TurnStarted`, `TurnCompleted`, `AgentCompleted`, `ErrorEvent` |
 | Safety | `TrustRequested`, `TrustResolved`, `ToolApprovalRequested`, `ToolApprovalResolved` |
 | Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionEnded`, `ToolResultReady` |
@@ -396,6 +396,7 @@ are ordered but do not all have command IDs.
 | `retry_policy` | `RetryPolicy` | Bounded default retry policy |
 | `context_reserve_tokens` | `int` | `16384` |
 | `auto_compaction_enabled` | `bool` | `True` |
+| `web_search` | `bool` | `False` |
 | `mcp_servers` | `tuple[McpServerConfig, ...]` | `()` |
 | `openai_compatible` | `OpenAICompatibleSettings \| None` | `None` |
 

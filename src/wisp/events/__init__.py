@@ -106,6 +106,8 @@ from wisp.events.run import (
     ProviderRetrying,
     TurnCompleted,
     TurnStarted,
+    WebSearchPerformed,
+    WebSearchSource,
 )
 from wisp.events.sessions import (
     QueueItemsRemoved,
@@ -289,6 +291,8 @@ __all__ = [
     "TurnStarted",
     "UsageCost",
     "UsageCostRates",
+    "WebSearchPerformed",
+    "WebSearchSource",
     "WispEvent",
     "_MessageOriginEvent",
     "_RpcSessionDerived",
@@ -305,6 +309,7 @@ type KnownWispEvent = Annotated[
     | ProviderRetrying
     | MessageStarted
     | MessageDelta
+    | WebSearchPerformed
     | MessageCompleted
     | ContextEstimated
     | ContextPressure

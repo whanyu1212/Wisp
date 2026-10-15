@@ -12,6 +12,8 @@ from wisp.events import (
     MessageDelta,
     MessageStarted,
     ProviderRetrying,
+    WebSearchPerformed,
+    WebSearchSource,
 )
 from wisp.providers.base import (
     ContextOverflowError,
@@ -26,6 +28,7 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
+    ProviderWebSearch,
 )
 
 from .provider_lifecycle import (
@@ -78,7 +81,9 @@ class CancelledModelResponse:
 type ModelResponseOutcome = (
     CompletedModelResponse | FailedModelResponse | OverflowModelResponse | CancelledModelResponse
 )
-type ModelResponseEvent = MessageStarted | ProviderRetrying | MessageDelta | CancelledModelResponse
+type ModelResponseEvent = (
+    MessageStarted | ProviderRetrying | MessageDelta | WebSearchPerformed | CancelledModelResponse
+)
 
 
 @dataclass(slots=True)
@@ -183,6 +188,16 @@ class ModelResponseStream:
                             )
                         elif isinstance(provider_event, ProviderToolCallCompleted):
                             lifecycle.add_tool_call(provider_event.tool_call)
+                        elif isinstance(provider_event, ProviderWebSearch):
+                            lifecycle.add_web_search()
+                            # A published search is visible, billed output: a
+                            # retry after overflow would run and record it again.
+                            attempt_had_streamed_delta = True
+                            yield _web_search_event(
+                                provider_event,
+                                turn=turn,
+                                provider=self.config.provider.name,
+                            )
                         elif isinstance(
                             provider_event, ProviderResponseCompleted | ProviderResponseFailed
                         ):
@@ -236,3 +251,45 @@ class ModelResponseStream:
             completed=finished,
             had_streamed_delta=attempt_had_streamed_delta,
         )
+
+
+# Search text comes from the web. Bound it before it enters events, the
+# session file, and every frontend.
+_MAX_WEB_SEARCH_SOURCES = 20
+_MAX_WEB_SEARCH_QUERY_CHARS = 500
+_MAX_WEB_SOURCE_URL_CHARS = 2_048
+_MAX_WEB_SOURCE_TITLE_CHARS = 200
+_MAX_WEB_SEARCH_ERROR_CHARS = 64
+
+
+def _web_search_event(search: ProviderWebSearch, *, turn: int, provider: str) -> WebSearchPerformed:
+    """Project a provider search into its bounded public event.
+
+    Args:
+        search (ProviderWebSearch): Search reported by the adapter.
+        turn (int): Turn whose response ran the search.
+        provider (str): Name of the provider that ran it.
+
+    Returns:
+        WebSearchPerformed: The search with at most 20 sources and every text
+        field cut to its limit.
+    """
+
+    return WebSearchPerformed(
+        turn=turn,
+        provider=provider,
+        action=search.action,
+        query=_bounded(search.query, _MAX_WEB_SEARCH_QUERY_CHARS),
+        sources=tuple(
+            WebSearchSource(
+                url=source.url[:_MAX_WEB_SOURCE_URL_CHARS],
+                title=_bounded(source.title, _MAX_WEB_SOURCE_TITLE_CHARS),
+            )
+            for source in search.sources[:_MAX_WEB_SEARCH_SOURCES]
+        ),
+        error=_bounded(search.error, _MAX_WEB_SEARCH_ERROR_CHARS),
+    )
+
+
+def _bounded(text: str | None, limit: int) -> str | None:
+    return None if text is None else text[:limit]

@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 import wisp.providers.events as provider_events
 from wisp.agent.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
-    ContinuationMessageProvider,
-    PromptCacheContinuationMessageProvider,
-    PromptCacheKeyProvider,
     Provider,
     ToolCallResult,
     is_context_overflow_message,
+    provider_supports_web_search,
 )
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseFailed
 
@@ -71,7 +69,8 @@ def open_provider_stream(
     """Open a provider stream using only the optional keywords it supports.
 
     Args:
-        config (AgentLoopConfig): Provider, model, tool schemas, effort, and cache settings.
+        config (AgentLoopConfig): Provider, model, tool schemas, effort, cache, and
+            web search settings.
         messages (Sequence[Message]): Portable base history.
         tool_results (Sequence[ToolCallResult]): Pending outputs for the next request.
         extra_messages (Sequence[Message]): User messages for a continued request; sent
@@ -81,7 +80,7 @@ def open_provider_stream(
     Returns:
         AsyncIterator[provider_events.ProviderEvent]: Provider stream, not yet consumed.
             The caller owns its lifetime and must close it when supported. Effort is omitted
-            when unset; cache keys are sent only to supporting adapters.
+            when unset; cache keys and web search are sent only to supporting adapters.
 
     Raises:
         Exception: Synchronous errors from the provider's stream factory propagate.
@@ -89,90 +88,25 @@ def open_provider_stream(
     """
 
     provider = config.provider
-    supports_continuation_messages = provider_supports_continuation_messages(provider)
-    supports_prompt_cache_key = provider_supports_prompt_cache_key(provider)
-    use_prompt_cache_key = config.prompt_cache_key is not None and supports_prompt_cache_key
-
-    if extra_messages and supports_continuation_messages and use_prompt_cache_key:
-        combined_provider = cast(PromptCacheContinuationMessageProvider, provider)
-        if config.effort is not None:
-            return combined_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                extra_messages=extra_messages,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-                prompt_cache_key=config.prompt_cache_key,
-            )
-        return combined_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            extra_messages=extra_messages,
-            previous_response_id=previous_response_id,
-            prompt_cache_key=config.prompt_cache_key,
-        )
-
-    if extra_messages and supports_continuation_messages:
-        continuation_provider = cast(ContinuationMessageProvider, provider)
-        if config.effort is not None:
-            return continuation_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                extra_messages=extra_messages,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-            )
-        return continuation_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            extra_messages=extra_messages,
-            previous_response_id=previous_response_id,
-        )
-
-    if use_prompt_cache_key:
-        cache_provider = cast(PromptCacheKeyProvider, provider)
-        if config.effort is not None:
-            return cache_provider.stream(
-                messages,
-                model=config.model,
-                tools=config.tools,
-                tool_results=tool_results,
-                previous_response_id=previous_response_id,
-                effort=config.effort,
-                prompt_cache_key=config.prompt_cache_key,
-            )
-        return cache_provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
-            prompt_cache_key=config.prompt_cache_key,
-        )
-
+    # Each optional keyword goes only to an adapter that declares it, so a
+    # third-party provider written against the minimal protocol keeps working.
+    options: dict[str, object] = {}
+    if extra_messages and provider_supports_continuation_messages(provider):
+        options["extra_messages"] = extra_messages
     if config.effort is not None:
-        return provider.stream(
-            messages,
-            model=config.model,
-            tools=config.tools,
-            tool_results=tool_results,
-            previous_response_id=previous_response_id,
-            effort=config.effort,
-        )
-    return provider.stream(
+        options["effort"] = config.effort
+    if config.prompt_cache_key is not None and provider_supports_prompt_cache_key(provider):
+        options["prompt_cache_key"] = config.prompt_cache_key
+    if config.web_search and provider_supports_web_search(provider):
+        options["web_search"] = True
+    stream = cast(Callable[..., AsyncIterator[provider_events.ProviderEvent]], provider.stream)
+    return stream(
         messages,
         model=config.model,
         tools=config.tools,
         tool_results=tool_results,
         previous_response_id=previous_response_id,
+        **options,
     )
 
 

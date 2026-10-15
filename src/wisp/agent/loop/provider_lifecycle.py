@@ -87,12 +87,14 @@ class CompletedProviderResponse:
         content (str): Terminal text or, when empty, accumulated streamed text.
         response_id (str | None): Consistent ID resolved across the stream.
         response_model (str | None): Model reported by the start event.
+        web_searches (int): Provider-native web searches the response ran.
     """
 
     response: ProviderResponseCompleted
     content: str
     response_id: str | None
     response_model: str | None
+    web_searches: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,7 @@ class ProviderResponseLifecycle:
     response_model: str | None = None
     terminal: ProviderResponseCompleted | ProviderResponseFailed | None = None
     tool_calls: list[ToolCall] = field(default_factory=list)
+    web_searches: int = 0
     text: list[str] = field(default_factory=list)
 
     def require_open(self) -> None:
@@ -181,6 +184,16 @@ class ProviderResponseLifecycle:
         self.require_open()
         require_provider_response_started(self.started)
         del delta
+
+    def add_web_search(self) -> None:
+        """Validate a provider-run web search reported inside an active response.
+
+        Raises:
+            ProviderProtocolError: The response has not started or has terminated.
+        """
+        self.require_open()
+        require_provider_response_started(self.started)
+        self.web_searches += 1
 
     def add_tool_call(self, tool_call: ToolCall) -> None:
         """Record a completed tool call for terminal-response validation.
@@ -269,4 +282,5 @@ class ProviderResponseLifecycle:
             content=self.terminal.content or "".join(self.text),
             response_id=response_id,
             response_model=self.response_model,
+            web_searches=self.web_searches,
         )

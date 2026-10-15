@@ -58,7 +58,8 @@ def project_usage_and_cost(
 
     Returns:
         tuple[TokenUsage | None, UsageCost]: Usage when reported, plus priced or explicitly
-            unavailable cost metadata. Estimator exceptions become estimation_failed.
+            unavailable cost metadata. Estimator exceptions become estimation_failed. The
+            cost records the response's web searches, whose fees it does not price.
     """
 
     response = completed.response
@@ -103,6 +104,8 @@ def project_usage_and_cost(
                 completed.response_model,
                 reason="estimation_failed",
             )
+    if completed.web_searches:
+        cost = cost.model_copy(update={"web_searches": completed.web_searches})
     return usage, cost
 
 

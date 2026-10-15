@@ -4292,6 +4292,97 @@
    "operation": "add_unknown",
    "path": [],
    "accepted": false
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "action"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "query"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "sources"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "web.search",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "sources",
+    0,
+    "title"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "web.search",
+   "operation": "remove",
+   "path": [
+    "sources",
+    0,
+    "url"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "web.search",
+   "operation": "add_unknown",
+   "path": [
+    "sources",
+    0
+   ],
+   "accepted": false
   }
  ]
 }

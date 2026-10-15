@@ -265,3 +265,20 @@ def test_reconfigure_rejects_invalid_reserve_without_changes(
     with pytest.raises(ValueError, match="context_reserve_tokens"):
         agent.reconfigure(invalid)
     assert agent.configuration == before
+
+
+def test_web_search_setting_carries_into_the_session(tmp_path: Path) -> None:
+    providers = ProviderRegistry()
+    providers.register(_OpenAIProvider())
+    config = WispConfig(provider="openai", web_search=True, auth_path=tmp_path / "auth.json")
+
+    configuration = resolve_coding_session_configuration(
+        config, providers=providers, models=None, trusted=False
+    )
+    agent = CodingSession.from_configuration(
+        configuration, sessions=JsonlSessionStore(tmp_path / "sessions")
+    )
+
+    assert configuration.web_search is True
+    assert agent.web_search is True
+    assert agent.configuration.web_search is True

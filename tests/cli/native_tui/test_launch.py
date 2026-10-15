@@ -224,12 +224,14 @@ def test_tui_rpc_env_forwards_context_policy(
 ) -> None:
     monkeypatch.delenv("WISP_AUTO_COMPACTION", raising=False)
     monkeypatch.delenv("WISP_CONTEXT_RESERVE_TOKENS", raising=False)
+    monkeypatch.delenv("WISP_WEB_SEARCH", raising=False)
     options = TuiOptions(
         config=WispConfig(
             provider="fake",
             session_dir=tmp_path,
             auto_compaction_enabled=enabled,
             context_reserve_tokens=4096,
+            web_search=enabled,
         )
     )
 
@@ -237,6 +239,7 @@ def test_tui_rpc_env_forwards_context_policy(
 
     assert child_env["WISP_AUTO_COMPACTION"] == ("1" if enabled else "0")
     assert child_env["WISP_CONTEXT_RESERVE_TOKENS"] == "4096"
+    assert child_env["WISP_WEB_SEARCH"] == ("1" if enabled else "0")
 
 
 @pytest.mark.parametrize("arguments", [["--mode", "tui"], ["tui"]])

@@ -6320,6 +6320,12 @@
           ],
           "default": null,
           "title": "Unavailable Reason"
+        },
+        "web_searches": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Web Searches",
+          "type": "integer"
         }
       },
       "required": [
@@ -6331,7 +6337,8 @@
         "billable",
         "rates",
         "estimated_usd",
-        "unavailable_reason"
+        "unavailable_reason",
+        "web_searches"
       ],
       "title": "UsageCost",
       "type": "object"
@@ -6393,6 +6400,113 @@
       ],
       "title": "UsageCostRates",
       "type": "object"
+    },
+    "WebSearchPerformed": {
+      "additionalProperties": false,
+      "description": "The provider searched the web on its own servers during a response.\n\nThe model already has the results; this event reports the search so\nfrontends can show it. Every text field comes from the web and is\nuntrusted: frontends must bound and sanitize it before display.\n``action`` is ``search`` for a query, ``open_page`` when the model opened a\nURL, and ``find_in_page`` when it searched within a page (``query`` holds\nthe pattern). ``error`` is the provider's error code for a failed search.",
+      "properties": {
+        "action": {
+          "default": "search",
+          "enum": [
+            "search",
+            "open_page",
+            "find_in_page"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Query"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebSearchSource"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "Turn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "web.search",
+          "default": "web.search",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "turn",
+        "provider",
+        "action",
+        "query",
+        "sources",
+        "error"
+      ],
+      "title": "WebSearchPerformed",
+      "type": "object"
+    },
+    "WebSearchSource": {
+      "additionalProperties": false,
+      "description": "One page a provider-native web search returned or opened.",
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "title"
+      ],
+      "title": "WebSearchSource",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6451,7 +6565,8 @@
       "trust.requested": "#/$defs/TrustRequested",
       "trust.resolved": "#/$defs/TrustResolved",
       "turn.completed": "#/$defs/TurnCompleted",
-      "turn.started": "#/$defs/TurnStarted"
+      "turn.started": "#/$defs/TurnStarted",
+      "web.search": "#/$defs/WebSearchPerformed"
     },
     "propertyName": "type"
   },
@@ -6470,6 +6585,9 @@
     },
     {
       "$ref": "#/$defs/MessageDelta"
+    },
+    {
+      "$ref": "#/$defs/WebSearchPerformed"
     },
     {
       "$ref": "#/$defs/MessageCompleted"
@@ -7261,6 +7379,21 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "turn": 1,
       "type": "turn.started"
+    },
+    "web.search": {
+      "action": "search",
+      "error": null,
+      "provider": "fixture",
+      "query": "fixture",
+      "sources": [
+        {
+          "title": "Fixture",
+          "url": "https://example.test/"
+        }
+      ],
+      "timestamp": "2026-01-02T03:04:05Z",
+      "turn": 1,
+      "type": "web.search"
     }
   }
 }

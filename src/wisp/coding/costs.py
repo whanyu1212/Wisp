@@ -94,9 +94,11 @@ def aggregate_session_cost(costs: Sequence[UsageCost | None]) -> SessionCostSumm
         cost.estimated_usd for cost in costs if cost is not None and cost.estimated_usd is not None
     ]
     unpriced_count = sum(cost is None or cost.estimated_usd is None for cost in costs)
+    # Search fees are not priced, so a total that includes searches is a lower bound.
+    searched = any(cost is not None and cost.web_searches for cost in costs)
     return SessionCostSummary(
         known_usd=sum(priced, Decimal()),
-        complete=unpriced_count == 0,
+        complete=unpriced_count == 0 and not searched,
         priced_record_count=len(priced),
         unpriced_record_count=unpriced_count,
     )
@@ -118,6 +120,8 @@ def format_usage_cost(cost: UsageCost | None) -> str:
 
     if cost is None or cost.estimated_usd is None:
         return "cost unknown"
+    if cost.web_searches:
+        return f"cost ≥{format_usd(cost.estimated_usd)}"
     return f"cost {format_usd(cost.estimated_usd)}"
 
 

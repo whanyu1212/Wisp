@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from json import JSONDecodeError, loads
 from typing import Literal, cast
 
@@ -25,11 +25,16 @@ from anthropic.types import (
     RawMessageStartEvent,
     RawMessageStreamEvent,
     RedactedThinkingBlockParam,
+    ServerToolUseBlockParam,
     TextBlockParam,
     ThinkingBlockParam,
     ToolParam,
     ToolResultBlockParam,
+    ToolUnionParam,
     ToolUseBlockParam,
+    WebSearchTool20250305Param,
+    WebSearchToolResultBlock,
+    WebSearchToolResultBlockParam,
 )
 
 from wisp.agent.messages import Message
@@ -54,6 +59,8 @@ from wisp.providers.events import (
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
+    ProviderWebSearch,
+    ProviderWebSource,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -82,15 +89,12 @@ _STOP_REASON_TO_FINISH_REASON: dict[str, ProviderFinishReason] = {
     "refusal": "stop",
     "tool_use": "tool_calls",
     "max_tokens": "length",
-    # pause_turn is Anthropic's server-side sampling loop (server-side tools
-    # like web search/code execution) hitting its internal iteration cap --
-    # unreachable today since this provider only ever sends client-defined
-    # tools (see _tool_spec_to_anthropic_tool), never a server-tool type. If
-    # server-tool support is added later, Anthropic's docs say the client
-    # must resend the conversation with the paused assistant turn appended to
-    # let the server resume -- reporting it as a clean "stop" would silently
-    # truncate the response instead, so it maps to "length" (incomplete)
-    # defensively, matching model_context_window_exceeded/compaction below.
+    # pause_turn is Anthropic's server-side loop (web search) hitting its
+    # iteration cap. stream() resends the paused turn so the server resumes;
+    # only a turn still paused after _MAX_PAUSE_CONTINUATIONS reaches this
+    # mapping. Reporting it as a clean "stop" would silently truncate the
+    # response, so it maps to "length" (incomplete), matching
+    # model_context_window_exceeded/compaction below.
     "pause_turn": "length",
     # Beta-only stop reasons not in the GA API this provider calls (server-side
     # compaction's "compaction", and context-window truncation) -- included
@@ -108,6 +112,21 @@ _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 # replay tail keyed by the provider cursor so it can append each request's new
 # tool results or user steering without flattening structured tool history.
 
+# Anthropic's server-side web search. The basic tool version
+# (web_search_20250305, in _create_stream) is used on purpose: later versions
+# run searches from code execution by default, which adds code-execution blocks
+# to every turn that the replay would have to keep.
+_WEB_SEARCH_TOOL_NAME = "web_search"
+# Searches allowed in one response. Past the cap the model gets a
+# max_uses_exceeded result instead of another search. Anthropic applies the cap
+# per request, so a resumed paused turn gets only what is left (at least one,
+# since the cap must be positive).
+_WEB_SEARCH_MAX_USES = 5
+# A long server-side search loop can stop with pause_turn. The adapter resends
+# the paused turn so the server can resume, at most this many times, and then
+# reports the response as incomplete.
+_MAX_PAUSE_CONTINUATIONS = 3
+
 
 @dataclass
 class _ContentBlockAccumulator:
@@ -116,22 +135,174 @@ class _ContentBlockAccumulator:
     Anthropic's tool-use guidance requires echoing thinking/redacted_thinking
     blocks back to the API unmodified alongside their sibling tool_use block
     on the same turn -- dropping them (e.g. replaying only text + tool_use)
-    can be rejected or lose reasoning continuity. This accumulates every
-    content-block type Wisp can actually receive (text, thinking,
-    redacted_thinking, tool_use -- Wisp declares no server-side tools, so the
-    other SDK block types cannot appear in its streams) so the replay is a
+    can be rejected or lose reasoning continuity. Web search adds two server
+    blocks, server_tool_use and web_search_tool_result, and citations on text;
+    the API rejects a later turn whose search results or citations were
+    changed, so those are kept as received (``raw_block``, ``citations``).
+    Every block type Wisp can receive is accumulated so the replay is a
     faithful reconstruction of the full assistant turn, not just its
     tool-relevant parts.
     """
 
     block_type: str
     text_chunks: list[str] = field(default_factory=list)
+    citations: list[dict[str, object]] = field(default_factory=list)
     thinking_chunks: list[str] = field(default_factory=list)
     signature: str = ""
     redacted_data: str = ""
     tool_use_id: str = ""
     tool_use_name: str = ""
     tool_use_json_chunks: list[str] = field(default_factory=list)
+    raw_block: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass
+class _StreamedTurn:
+    """One assistant turn assembled from one or more streamed requests.
+
+    A turn usually comes from one request. When Anthropic pauses its server-side
+    search loop, the adapter resends the turn so far and the next request's
+    blocks continue it; ``index_offset`` places them after the earlier ones.
+    """
+
+    blocks: dict[int, _ContentBlockAccumulator] = field(default_factory=dict)
+    chunks: list[str] = field(default_factory=list)
+    response_id: str | None = None
+    stop_reason: str | None = None
+    finish_reason: ProviderFinishReason = "stop"
+    stream_completed: bool = False
+    index_offset: int = 0
+    # Usage of the paused requests already finished, and of the current one.
+    earlier_usage: ProviderUsage | None = None
+    usage: ProviderUsage | None = None
+    # Queries of searches whose results may arrive in this turn, by block id.
+    # A search requested beside a client tool runs only on the next request,
+    # so its server_tool_use block is in the replay, not in ``blocks``.
+    search_queries: dict[str, str | None] = field(default_factory=dict)
+
+    def apply(self, event: RawMessageStreamEvent) -> list[ProviderEvent]:
+        """Record one raw stream event and return the provider events it produces.
+
+        Args:
+            event (RawMessageStreamEvent): Next event of the current request.
+
+        Returns:
+            list[ProviderEvent]: Deltas and web searches to yield, in stream order.
+        """
+
+        if isinstance(event, RawMessageStartEvent):
+            self.response_id = event.message.id
+            self.usage = _usage_from_anthropic_start(event)
+            return []
+        if isinstance(event, RawContentBlockStartEvent):
+            return self._start_block(event)
+        if isinstance(event, RawContentBlockDeltaEvent):
+            return self._apply_delta(event)
+        if isinstance(event, RawMessageDeltaEvent):
+            self.usage = _usage_from_anthropic_delta(event, self.usage)
+            if event.delta.stop_reason is not None:
+                self.stop_reason = event.delta.stop_reason
+                self.finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
+                    self.stop_reason, _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON
+                )
+                # message_delta carrying stop_reason is Anthropic's
+                # signal that the message actually finished -- the
+                # only remaining event is message_stop, which carries
+                # no further information. Anything else (a dropped
+                # connection, a truncated proxy response) ends the
+                # async iterator without this ever being set.
+                self.stream_completed = True
+        return []
+
+    def continue_after_pause(self) -> None:
+        """Prepare for the request that resumes a paused turn."""
+
+        self.index_offset = max(self.blocks, default=-1) + 1
+        self.earlier_usage = self.total_usage()
+        self.usage = None
+        self.stop_reason = None
+        self.finish_reason = "stop"
+        self.stream_completed = False
+
+    def searches_run(self) -> int:
+        """Return how many search results this turn has received so far."""
+
+        return sum(
+            accumulator.block_type == "web_search_tool_result"
+            for accumulator in self.blocks.values()
+        )
+
+    def total_usage(self) -> ProviderUsage | None:
+        """Return the usage of every request that built this turn."""
+
+        if self.earlier_usage is None:
+            return self.usage
+        if self.usage is None:
+            return self.earlier_usage
+        return _combined_usage(self.earlier_usage, self.usage)
+
+    def _start_block(self, event: RawContentBlockStartEvent) -> list[ProviderEvent]:
+        block = event.content_block
+        index = self.index_offset + event.index
+        if block.type == "tool_use":
+            accumulator = _ContentBlockAccumulator(block_type="tool_use")
+            accumulator.tool_use_id = block.id
+            accumulator.tool_use_name = block.name
+            self.blocks[index] = accumulator
+        elif block.type == "text":
+            self.blocks[index] = _ContentBlockAccumulator(block_type="text")
+        elif block.type == "thinking":
+            self.blocks[index] = _ContentBlockAccumulator(block_type="thinking")
+        elif block.type == "redacted_thinking":
+            accumulator = _ContentBlockAccumulator(block_type="redacted_thinking")
+            accumulator.redacted_data = block.data
+            self.blocks[index] = accumulator
+        elif block.type == "server_tool_use":
+            # Never a ToolCall: Anthropic runs it. Its input still streams as
+            # input_json_delta, like a client tool's.
+            accumulator = _ContentBlockAccumulator(block_type="server_tool_use")
+            accumulator.tool_use_id = block.id
+            accumulator.raw_block = block.model_dump(mode="json", exclude_none=True)
+            self.blocks[index] = accumulator
+        elif block.type == "web_search_tool_result":
+            # The whole result arrives in this start event.
+            accumulator = _ContentBlockAccumulator(block_type="web_search_tool_result")
+            accumulator.raw_block = block.model_dump(mode="json", exclude_none=True)
+            self.blocks[index] = accumulator
+            return [_web_search_from_result(block, query=self._search_query(block.tool_use_id))]
+        return []
+
+    def _apply_delta(self, event: RawContentBlockDeltaEvent) -> list[ProviderEvent]:
+        delta = event.delta
+        index = self.index_offset + event.index
+        accumulator = self.blocks.get(index)
+        if delta.type == "text_delta":
+            self.chunks.append(delta.text)
+            if accumulator is not None:
+                accumulator.text_chunks.append(delta.text)
+            return [ProviderTextDelta(delta=delta.text, content_index=index)]
+        if delta.type == "thinking_delta":
+            if accumulator is not None:
+                accumulator.thinking_chunks.append(delta.thinking)
+            return [ProviderThinkingDelta(delta=delta.thinking, content_index=index)]
+        if accumulator is None:
+            return []
+        if delta.type == "signature_delta":
+            accumulator.signature += delta.signature
+        elif delta.type == "input_json_delta":
+            accumulator.tool_use_json_chunks.append(delta.partial_json)
+        elif delta.type == "citations_delta":
+            # Not exclude_none: a citation's title is a required key even when null.
+            accumulator.citations.append(delta.citation.model_dump(mode="json"))
+        return []
+
+    def _search_query(self, tool_use_id: str) -> str | None:
+        for accumulator in self.blocks.values():
+            if accumulator.block_type == "server_tool_use" and (
+                accumulator.tool_use_id == tool_use_id
+            ):
+                return _search_query_from_input(_server_tool_input(accumulator))
+        return self.search_queries.get(tool_use_id)
 
 
 class AnthropicProvider:
@@ -140,6 +311,7 @@ class AnthropicProvider:
     name = "anthropic"
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
+    supports_web_search: Literal[True] = True
 
     def __init__(
         self,
@@ -191,6 +363,7 @@ class AnthropicProvider:
         extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        web_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized Anthropic response lifecycle.
 
@@ -212,143 +385,88 @@ class AnthropicProvider:
         Anthropic's migration guide pairs the two in every documented
         example and describes effort as controlling thinking depth, which
         has nothing to modulate without adaptive thinking enabled.
+
+        ``web_search`` adds Anthropic's server-side web search tool. Each
+        search is yielded as a ``ProviderWebSearch`` when its results arrive.
+        When Anthropic pauses a long search loop (``pause_turn``), the paused
+        turn is resent so the server can resume; the requests together form
+        one response lifecycle, with their usage summed.
         """
 
         selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
-        stream: AsyncIterator[RawMessageStreamEvent] | None = None
-        for retry_number in range(self._retry_policy.max_retries + 1):
-            try:
-                if extra_messages:
-                    stream = await self._create_stream(
-                        messages,
-                        model=selected_model,
-                        tools=tools,
-                        tool_results=tool_results,
-                        extra_messages=extra_messages,
-                        previous_response_id=previous_response_id,
-                        effort=effort,
+        request: dict[str, object] = {
+            "model": selected_model,
+            "tools": tools,
+            "tool_results": tool_results,
+            "previous_response_id": previous_response_id,
+            "effort": effort,
+        }
+        if extra_messages:
+            request["extra_messages"] = extra_messages
+        if web_search:
+            request["web_search"] = True
+
+        turn = _StreamedTurn(search_queries=self._pending_search_queries(previous_response_id))
+        failure: ProviderResponseFailed | None = None
+        started = False
+        for continuation in range(_MAX_PAUSE_CONTINUATIONS + 1):
+            if continuation:
+                request["paused_turn"] = _replay_message_from_stream(turn.blocks)
+                if web_search:
+                    request["web_search_max_uses"] = max(
+                        1, _WEB_SEARCH_MAX_USES - turn.searches_run()
+                    )
+            stream: AsyncIterator[RawMessageStreamEvent] | None = None
+            # Retry progress may only precede the response start, so a resumed
+            # request retries without reporting it.
+            async for opened in self._open_stream(messages, request, report_retries=not started):
+                if isinstance(opened, ProviderRetrying):
+                    yield opened
+                elif isinstance(opened, ProviderResponseFailed):
+                    if not started:
+                        yield opened
+                        return
+                    failure = replace(
+                        opened,
+                        partial_content="".join(turn.chunks),
+                        response_id=turn.response_id,
                     )
                 else:
-                    stream = await self._create_stream(
-                        messages,
-                        model=selected_model,
-                        tools=tools,
-                        tool_results=tool_results,
-                        previous_response_id=previous_response_id,
-                        effort=effort,
-                    )
+                    stream = opened
+            if failure is not None:
                 break
+            if stream is None:
+                raise AssertionError("Anthropic retry loop completed without a stream or error")
+            if not started:
+                yield ProviderResponseStarted(model=selected_model)
+                started = True
+
+            try:
+                async for event in stream:
+                    for provider_event in turn.apply(event):
+                        yield provider_event
             except AnthropicError as exc:
-                decision = _anthropic_retry_decision(exc)
-                if decision is None or retry_number >= self._retry_policy.max_retries:
-                    yield ProviderResponseFailed(
-                        message=str(exc),
-                        failure_kind=(
-                            "context_overflow" if is_context_overflow_message(str(exc)) else "error"
-                        ),
-                    )
-                    return
-                delay = retry_delay_seconds(
-                    self._retry_policy,
-                    retry_number=retry_number + 1,
-                    retry_after_seconds=decision.retry_after_seconds,
+                failure = ProviderResponseFailed(
+                    message=f"Anthropic stream error: {exc}",
+                    partial_content="".join(turn.chunks),
+                    response_id=turn.response_id,
                 )
-                if delay is None:
-                    yield ProviderResponseFailed(message=str(exc))
-                    return
-                yield ProviderRetrying(
-                    attempt=retry_number + 2,
-                    max_attempts=self._retry_policy.max_retries + 1,
-                    delay_seconds=delay,
-                    reason=decision.reason,
-                    status_code=decision.status_code,
-                )
-                await anyio.sleep(delay)
-        if stream is None:
-            raise AssertionError("Anthropic retry loop completed without a stream or error")
+                break
+            if turn.stop_reason != "pause_turn" or continuation == _MAX_PAUSE_CONTINUATIONS:
+                break
+            turn.continue_after_pause()
 
-        response_id: str | None = None
-        chunks: list[str] = []
-        tool_calls: list[ToolCall] = []
-        content_blocks: dict[int, _ContentBlockAccumulator] = {}
-        finish_reason: ProviderFinishReason = "stop"
-        stop_reason: str | None = None
-        stream_completed = False
-        usage: ProviderUsage | None = None
-        failure: ProviderResponseFailed | None = None
-
-        yield ProviderResponseStarted(model=selected_model)
-
-        try:
-            async for event in stream:
-                if isinstance(event, RawMessageStartEvent):
-                    response_id = event.message.id
-                    usage = _usage_from_anthropic_start(event)
-                elif isinstance(event, RawContentBlockStartEvent):
-                    block = event.content_block
-                    if block.type == "tool_use":
-                        accumulator = _ContentBlockAccumulator(block_type="tool_use")
-                        accumulator.tool_use_id = block.id
-                        accumulator.tool_use_name = block.name
-                        content_blocks[event.index] = accumulator
-                    elif block.type == "text":
-                        content_blocks[event.index] = _ContentBlockAccumulator(block_type="text")
-                    elif block.type == "thinking":
-                        content_blocks[event.index] = _ContentBlockAccumulator(
-                            block_type="thinking"
-                        )
-                    elif block.type == "redacted_thinking":
-                        accumulator = _ContentBlockAccumulator(block_type="redacted_thinking")
-                        accumulator.redacted_data = block.data
-                        content_blocks[event.index] = accumulator
-                elif isinstance(event, RawContentBlockDeltaEvent):
-                    delta = event.delta
-                    block_accumulator = content_blocks.get(event.index)
-                    if delta.type == "text_delta":
-                        chunks.append(delta.text)
-                        if block_accumulator is not None:
-                            block_accumulator.text_chunks.append(delta.text)
-                        yield ProviderTextDelta(delta=delta.text, content_index=event.index)
-                    elif delta.type == "thinking_delta":
-                        if block_accumulator is not None:
-                            block_accumulator.thinking_chunks.append(delta.thinking)
-                        yield ProviderThinkingDelta(delta=delta.thinking, content_index=event.index)
-                    elif delta.type == "signature_delta":
-                        if block_accumulator is not None:
-                            block_accumulator.signature += delta.signature
-                    elif delta.type == "input_json_delta":
-                        if block_accumulator is not None:
-                            block_accumulator.tool_use_json_chunks.append(delta.partial_json)
-                elif isinstance(event, RawMessageDeltaEvent):
-                    usage = _usage_from_anthropic_delta(event, usage)
-                    event_stop_reason = event.delta.stop_reason
-                    if event_stop_reason is not None:
-                        stop_reason = event_stop_reason
-                        finish_reason = _STOP_REASON_TO_FINISH_REASON.get(
-                            stop_reason, _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON
-                        )
-                        # message_delta carrying stop_reason is Anthropic's
-                        # signal that the message actually finished -- the
-                        # only remaining event is message_stop, which carries
-                        # no further information. Anything else (a dropped
-                        # connection, a truncated proxy response) ends the
-                        # async iterator without this ever being set.
-                        stream_completed = True
-        except AnthropicError as exc:
-            failure = ProviderResponseFailed(
-                message=f"Anthropic stream error: {exc}",
-                partial_content="".join(chunks),
-                response_id=response_id,
-            )
-
-        if failure is None and stop_reason == "model_context_window_exceeded":
+        response_id = turn.response_id
+        content_blocks = turn.blocks
+        chunks = turn.chunks
+        if failure is None and turn.stop_reason == "model_context_window_exceeded":
             failure = ProviderResponseFailed(
                 message="Anthropic model_context_window_exceeded",
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
 
-        if failure is None and not stream_completed:
+        if failure is None and not turn.stream_completed:
             # Regression guard: the stream ended (cleanly or not) without
             # Anthropic ever reporting a stop_reason. Silently yielding a
             # ProviderResponseCompleted here would report a truncated answer
@@ -358,6 +476,10 @@ class AnthropicProvider:
                 partial_content="".join(chunks),
                 response_id=response_id,
             )
+
+        tool_calls: list[ToolCall] = []
+        finish_reason = turn.finish_reason
+        usage = turn.total_usage()
 
         if failure is not None:
             # A context rejection does not advance or invalidate the replay
@@ -421,6 +543,79 @@ class AnthropicProvider:
             usage=usage,
         )
 
+    async def _open_stream(
+        self,
+        messages: Sequence[Message],
+        request: Mapping[str, object],
+        *,
+        report_retries: bool,
+    ) -> AsyncIterator[
+        ProviderRetrying | ProviderResponseFailed | AsyncIterator[RawMessageStreamEvent]
+    ]:
+        """Open one Messages stream, retrying transient failures.
+
+        Args:
+            messages (Sequence[Message]): Portable base history.
+            request (Mapping[str, object]): Keyword arguments for ``_create_stream``.
+            report_retries (bool): Yield retry progress; False still waits and retries.
+
+        Yields:
+            ProviderRetrying | ProviderResponseFailed | AsyncIterator[RawMessageStreamEvent]:
+            Retry progress, then either the opened stream or the final failure.
+        """
+
+        for retry_number in range(self._retry_policy.max_retries + 1):
+            try:
+                yield await self._create_stream(messages, **request)  # type: ignore[arg-type]
+                return
+            except AnthropicError as exc:
+                decision = _anthropic_retry_decision(exc)
+                if decision is None or retry_number >= self._retry_policy.max_retries:
+                    yield ProviderResponseFailed(
+                        message=str(exc),
+                        failure_kind=(
+                            "context_overflow" if is_context_overflow_message(str(exc)) else "error"
+                        ),
+                    )
+                    return
+                delay = retry_delay_seconds(
+                    self._retry_policy,
+                    retry_number=retry_number + 1,
+                    retry_after_seconds=decision.retry_after_seconds,
+                )
+                if delay is None:
+                    yield ProviderResponseFailed(message=str(exc))
+                    return
+                if report_retries:
+                    yield ProviderRetrying(
+                        attempt=retry_number + 2,
+                        max_attempts=self._retry_policy.max_retries + 1,
+                        delay_seconds=delay,
+                        reason=decision.reason,
+                        status_code=decision.status_code,
+                    )
+                await anyio.sleep(delay)
+
+    def _pending_search_queries(self, previous_response_id: str | None) -> dict[str, str | None]:
+        """Return the queries of searches requested in the replayed turns.
+
+        A search requested beside a client tool runs on the next request, so its
+        results arrive in a later response than its server_tool_use block.
+        """
+
+        if previous_response_id is None:
+            return {}
+        replay = self._replays.get(previous_response_id) or ()
+        queries: dict[str, str | None] = {}
+        for message in replay:
+            content = message["content"]
+            if isinstance(content, str):
+                continue
+            for block in content:
+                if isinstance(block, Mapping) and block.get("type") == "server_tool_use":
+                    queries[str(block.get("id"))] = _search_query_from_input(block.get("input"))
+        return queries
+
     async def _create_stream(
         self,
         messages: Sequence[Message],
@@ -431,6 +626,9 @@ class AnthropicProvider:
         extra_messages: Sequence[Message] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        web_search: bool = False,
+        paused_turn: MessageParam | None = None,
+        web_search_max_uses: int = _WEB_SEARCH_MAX_USES,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         client = await self._client_or_create()
         anthropic_messages = _messages_to_anthropic(messages)
@@ -439,8 +637,21 @@ class AnthropicProvider:
         if tool_results:
             anthropic_messages.append(_tool_results_to_message(tool_results))
         anthropic_messages.extend(_messages_to_anthropic(extra_messages))
+        if paused_turn is not None:
+            # Anthropic resumes a paused turn when it is sent back unchanged as
+            # the last message.
+            anthropic_messages.append(paused_turn)
         system = _system_from_messages(messages)
-        anthropic_tools = _tool_specs_to_anthropic_tools(tools)
+        anthropic_tools: list[ToolUnionParam] = [*_tool_specs_to_anthropic_tools(tools)]
+        # A client tool already named web_search would collide with the server
+        # tool; that request goes without search rather than failing.
+        if web_search and all(tool.name != _WEB_SEARCH_TOOL_NAME for tool in tools):
+            web_search_tool: WebSearchTool20250305Param = {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": web_search_max_uses,
+            }
+            anthropic_tools.append(web_search_tool)
 
         # Built as a single kwargs dict rather than a create() call per
         # system/tools/effort combination: branching per optional-parameter
@@ -530,7 +741,12 @@ class AnthropicProvider:
 
 
 _ReplayBlockParam = (
-    TextBlockParam | ThinkingBlockParam | RedactedThinkingBlockParam | ToolUseBlockParam
+    TextBlockParam
+    | ThinkingBlockParam
+    | RedactedThinkingBlockParam
+    | ToolUseBlockParam
+    | ServerToolUseBlockParam
+    | WebSearchToolResultBlockParam
 )
 
 
@@ -552,6 +768,9 @@ def _replay_message_from_stream(
     to replay -- falling back to ``{}`` here only affects what is echoed back
     to Anthropic's own conversation history, not the ``ToolCall.raw_arguments``
     Wisp's tool-execution layer sees.
+
+    Server-tool blocks and citations are sent back as received: Anthropic
+    rejects a turn whose search results or citation indexes changed.
     """
 
     content: list[_ReplayBlockParam] = []
@@ -559,7 +778,14 @@ def _replay_message_from_stream(
         accumulator = content_blocks[index]
         if accumulator.block_type == "text":
             text = "".join(accumulator.text_chunks)
-            if text:
+            if text and accumulator.citations:
+                content.append(
+                    cast(
+                        TextBlockParam,
+                        {"type": "text", "text": text, "citations": accumulator.citations},
+                    )
+                )
+            elif text:
                 content.append({"type": "text", "text": text})
         elif accumulator.block_type == "thinking":
             content.append(
@@ -584,6 +810,15 @@ def _replay_message_from_stream(
                     "input": dict(arguments),
                 }
             )
+        elif accumulator.block_type == "server_tool_use":
+            content.append(
+                cast(
+                    ServerToolUseBlockParam,
+                    {**accumulator.raw_block, "input": _server_tool_input(accumulator)},
+                )
+            )
+        elif accumulator.block_type == "web_search_tool_result":
+            content.append(cast(WebSearchToolResultBlockParam, accumulator.raw_block))
     return cast(MessageParam, {"role": "assistant", "content": content})
 
 
@@ -599,6 +834,42 @@ def _anthropic_retry_decision(exc: AnthropicError) -> RetryDecision | None:
             error_body=exc.body,
         )
     return None
+
+
+def _server_tool_input(accumulator: _ContentBlockAccumulator) -> dict[str, object]:
+    """Return a server tool's input from its streamed JSON, or the start block's."""
+
+    raw_arguments = "".join(accumulator.tool_use_json_chunks)
+    if raw_arguments:
+        arguments, _parse_error = _parse_tool_arguments(
+            name=_WEB_SEARCH_TOOL_NAME, raw_arguments=raw_arguments
+        )
+        return dict(arguments)
+    started_input = accumulator.raw_block.get("input")
+    return dict(started_input) if isinstance(started_input, Mapping) else {}
+
+
+def _search_query_from_input(arguments: object) -> str | None:
+    if not isinstance(arguments, Mapping):
+        return None
+    query = arguments.get("query")
+    return query if isinstance(query, str) else None
+
+
+def _web_search_from_result(
+    block: WebSearchToolResultBlock, *, query: str | None
+) -> ProviderWebSearch:
+    """Report one web_search_tool_result block as a provider search."""
+
+    if not isinstance(block.content, list):
+        return ProviderWebSearch(query=query, error=block.content.error_code)
+    return ProviderWebSearch(
+        query=query,
+        sources=tuple(
+            ProviderWebSource(url=result.url, title=result.title or None)
+            for result in block.content
+        ),
+    )
 
 
 def _tool_call_from_anthropic(
@@ -773,6 +1044,31 @@ def _usage_from_anthropic_delta(
         cache_read_input_tokens=cache_read_tokens,
         cache_write_input_tokens=cache_write_tokens,
         reasoning_output_tokens=reasoning_tokens,
+    )
+
+
+def _combined_usage(earlier: ProviderUsage, latest: ProviderUsage) -> ProviderUsage:
+    """Sum the usage of a paused turn's requests; context size is the latest one's."""
+
+    def total(first: int | None, second: int | None) -> int | None:
+        if first is None and second is None:
+            return None
+        return (first or 0) + (second or 0)
+
+    return ProviderUsage(
+        input_tokens=earlier.input_tokens + latest.input_tokens,
+        output_tokens=earlier.output_tokens + latest.output_tokens,
+        total_tokens=earlier.total_tokens + latest.total_tokens,
+        context_input_tokens=latest.context_input_tokens,
+        cache_read_input_tokens=total(
+            earlier.cache_read_input_tokens, latest.cache_read_input_tokens
+        ),
+        cache_write_input_tokens=total(
+            earlier.cache_write_input_tokens, latest.cache_write_input_tokens
+        ),
+        reasoning_output_tokens=total(
+            earlier.reasoning_output_tokens, latest.reasoning_output_tokens
+        ),
     )
 
 

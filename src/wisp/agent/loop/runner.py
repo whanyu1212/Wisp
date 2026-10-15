@@ -27,6 +27,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
     TurnStarted,
+    WebSearchPerformed,
 )
 from wisp.providers.base import (
     ContextOverflowError,
@@ -57,6 +58,7 @@ type AgentLoopEvent = (
     | ProviderRetrying
     | MessageStarted
     | MessageDelta
+    | WebSearchPerformed
     | MessageCompleted
     | ContextPressure
     | ContextOverflow

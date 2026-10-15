@@ -34,6 +34,7 @@ class AgentHarnessConfig:
     max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
     max_pending_queue_bytes: int = _MAX_PENDING_QUEUE_BYTES
     prompt_cache_key: str | None = None
+    web_search: bool = False
 
     def __post_init__(self) -> None:
         """Reject invalid runtime settings even when callers bypass static typing."""
@@ -90,6 +91,7 @@ def _build_loop_config(
         cancellation_token=cancellation_token,
         effort=config.effort,
         prompt_cache_key=config.prompt_cache_key,
+        web_search=config.web_search,
         context_window=config.context_window,
         context_reserve_tokens=config.context_reserve_tokens,
         context_pressure_threshold=config.context_pressure_threshold,

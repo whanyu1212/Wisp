@@ -32,6 +32,7 @@ from wisp.validation import redact_validation_error_inputs
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
+DEFAULT_WEB_SEARCH_ENABLED = False
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -51,6 +52,7 @@ class WispConfig(BaseModel):
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
+    web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -121,6 +123,7 @@ class WispConfig(BaseModel):
         retry_policy: RetryPolicy | None = None,
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
+        web_search: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
@@ -151,6 +154,9 @@ class WispConfig(BaseModel):
         provider/model defaults are coupled: a higher-precedence provider override
         without a model drops the saved user model and effort rather than sending
         them to another provider.
+
+        ``web_search`` is user-only too, because each search is billed to the user's
+        provider account. It is off unless enabled.
 
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
@@ -219,6 +225,16 @@ class WispConfig(BaseModel):
                     settings.auto_compaction_enabled,
                     default=DEFAULT_AUTO_COMPACTION_ENABLED,
                     name="WISP_AUTO_COMPACTION",
+                )
+            ),
+            web_search=(
+                web_search
+                if web_search is not None
+                else _resolve_bool(
+                    os.environ.get("WISP_WEB_SEARCH"),
+                    settings.web_search,
+                    default=DEFAULT_WEB_SEARCH_ENABLED,
+                    name="WISP_WEB_SEARCH",
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),

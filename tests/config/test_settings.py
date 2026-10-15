@@ -218,6 +218,18 @@ def test_auto_compaction_is_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.auto_compaction_enabled is False
 
 
+def test_web_search_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
+    # Searches are billed to the user's provider account; a repo must not turn them on.
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    home.mkdir()
+    _write_settings(project, web_search=True)
+
+    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
+
+    assert settings.web_search is None
+
+
 def test_tui_keybindings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"
