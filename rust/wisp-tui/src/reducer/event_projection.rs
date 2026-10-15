@@ -132,6 +132,17 @@ impl BackendEvent {
                 let status = discovery_report(&value["status"], || event.mcp_status(&command_id));
                 return Ok(Self::McpStatusReported { command_id, status });
             }
+            "rpc.mcp.login" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let name = exact_string_field(&value, &event_type, "name", 256)?;
+                let authorization_url =
+                    exact_string_field(&value, &event_type, "authorization_url", 8_192 * 4)?;
+                return Ok(Self::McpLoginStarted {
+                    command_id,
+                    name,
+                    authorization_url,
+                });
+            }
             "rpc.mcp.preview" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let servers =
@@ -323,6 +334,7 @@ impl BackendEvent {
             | "skill.catalog.updated"
             | "rpc.mcp"
             | "rpc.mcp.preview"
+            | "rpc.mcp.login"
             | "rpc.permissions"
             | "rpc.commands"
             | "rpc.state"

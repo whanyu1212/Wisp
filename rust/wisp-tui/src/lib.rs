@@ -2905,17 +2905,22 @@ impl LiveUi {
                 name,
                 launch,
                 env,
+                headers,
                 replace,
             }) => {
-                let values: Vec<(String, String)> = env
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
-                    .collect();
+                let reveal =
+                    |values: &[(String, crate::reducer::SecretText)]| -> Vec<(String, String)> {
+                        values
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
+                            .collect()
+                    };
                 Some(WispTypedClientRpcCommands::add_mcp_server(
                     &self.ids.peek_id(CommandKind::ChangeMcpServers),
                     name,
                     launch,
-                    &values,
+                    &reveal(env),
+                    &reveal(headers),
                     *replace,
                 )?)
             }

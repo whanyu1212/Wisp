@@ -324,7 +324,7 @@ def test_import_rejects_unsupported_snippet(home: Path) -> None:
     result = _run(["import", str(path), "--yes"])
 
     assert result.exit_code == 1
-    assert "sets HTTP headers, which a snippet cannot add yet" in result.output
+    assert "do not accept headers" in result.output
     assert SECRET not in result.output
     assert _servers(home) == {}
 
@@ -441,3 +441,72 @@ def test_login_refuses_a_command_server(home: Path) -> None:
 
     assert result.exit_code != 0
     assert "only HTTP servers sign in" in result.output
+
+
+def test_import_asks_for_each_header_value_masked(home: Path, terminal: None) -> None:
+    path = home / "snippet.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": "https://mcp.linear.app/mcp",
+                        "headers": {"Authorization": "Bearer <token>"},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run(["import", str(path)], input=f"Bearer {SECRET}\ny\n")
+
+    assert result.exit_code == 0, result.output
+    assert SECRET not in result.output
+    assert "sends headers: Authorization (values hidden)" in result.output
+    assert _servers(home)["linear"]["headers"] == {"Authorization": f"Bearer {SECRET}"}
+
+
+def _write_header_snippet(home: Path, headers: dict[str, str]) -> Path:
+    path = home / "snippet.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": "https://mcp.linear.app/mcp",
+                        "headers": headers,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_import_accepts_empty_header_placeholders_and_asks_for_them(
+    home: Path, terminal: None
+) -> None:
+    path = _write_header_snippet(home, {"X-Api-Key": "", "Authorization": "Bearer "})
+
+    # Values are asked for in header-name order, and surrounding spaces dropped.
+    result = _run(["import", str(path)], input=f"Bearer {SECRET}\n  key-{SECRET} \ny\n")
+
+    assert result.exit_code == 0, result.output
+    assert _servers(home)["linear"]["headers"] == {
+        "Authorization": f"Bearer {SECRET}",
+        "X-Api-Key": f"key-{SECRET}",
+    }
+
+
+def test_import_with_yes_refuses_a_header_placeholder(home: Path) -> None:
+    path = _write_header_snippet(home, {"X-Api-Key": ""})
+
+    result = _run(["import", str(path), "--yes"])
+
+    assert result.exit_code == 1
+    assert "header without a usable value" in result.output
+    assert _servers(home) == {}

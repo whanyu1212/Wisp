@@ -10,13 +10,28 @@ pub type McpPreviewReport = Result<Arc<Vec<McpServerPreview>>, String>;
 
 /// Commands answered with an `rpc.mcp` status report under their own ID. A
 /// refresh reports nothing when it fails, so treating it as a change is harmless.
-const MCP_STATUS_COMMANDS: [&str; 5] = [
+const MCP_STATUS_COMMANDS: [&str; 7] = [
     "get_mcp_status",
     "add_mcp_server",
     "remove_mcp_server",
     "set_mcp_server_enabled",
     "reconnect_mcp",
+    "login_mcp_server",
+    "logout_mcp_server",
 ];
+
+/// Longest sign-in page URL shown; the backend sends at most this many characters.
+const MCP_SIGN_IN_URL_MAX_BYTES: usize = 8_192 * 4;
+
+/// An MCP sign-in waiting for the user to finish it in their browser.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct McpSignInState {
+    pub command_id: String,
+    pub name: String,
+    /// The sign-in page, once the backend opened it.
+    pub url: Option<String>,
+    pub cancel_requested: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct PendingInspection<T> {
@@ -200,15 +215,20 @@ pub(super) fn change_mcp(
             name,
             launch,
             env,
+            headers,
             replace,
         } => {
-            let values: Vec<(String, String)> = env
-                .iter()
-                .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
-                .collect();
-            let command =
-                WispTypedClientRpcCommands::add_mcp_server(&id, &name, &launch, &values, replace)?;
-            drop(values);
+            let reveal = |values: &[(String, SecretText)]| -> Vec<(String, String)> {
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
+                    .collect()
+            };
+            let (env, headers) = (reveal(&env), reveal(&headers));
+            let command = WispTypedClientRpcCommands::add_mcp_server(
+                &id, &name, &launch, &env, &headers, replace,
+            )?;
+            drop((env, headers));
             UiEffect::SendSecretCommand(SecretCommand(command))
         }
         McpChange::Remove(name) => {
@@ -227,9 +247,43 @@ pub(super) fn change_mcp(
         McpChange::Reconnect => {
             UiEffect::SendCommand(WispTypedClientRpcCommands::reconnect_mcp(&id)?)
         }
+        McpChange::Login(name) => {
+            let command = WispTypedClientRpcCommands::login_mcp_server(&id, &name)?;
+            state.mcp_sign_in = Some(McpSignInState {
+                command_id: id.clone(),
+                name,
+                url: None,
+                cancel_requested: false,
+            });
+            UiEffect::SendCommand(command)
+        }
+        McpChange::Logout(name) => {
+            UiEffect::SendCommand(WispTypedClientRpcCommands::logout_mcp_server(&id, &name)?)
+        }
     };
     state.mcp.start(id);
     Ok(vec![effect, UiEffect::RequestRender])
+}
+
+/// Stop waiting for the MCP sign-in in progress, if any.
+pub(super) fn cancel_mcp_sign_in(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let Some(sign_in) = state
+        .mcp_sign_in
+        .as_mut()
+        .filter(|sign_in| !sign_in.cancel_requested)
+    else {
+        return Ok(Vec::new());
+    };
+    let id = ids.next_id(CommandKind::Cancel);
+    let command = WispTypedClientRpcCommands::cancel(&id, &sign_in.command_id)?;
+    sign_in.cancel_requested = true;
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
 }
 
 pub(super) fn permissions(
@@ -328,15 +382,40 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
         {
             Some(vec![UiEffect::SkillCatalogChanged, UiEffect::RequestRender])
         }
+        BackendEvent::McpLoginStarted {
+            command_id,
+            authorization_url,
+            ..
+        } => {
+            if let Some(sign_in) = state
+                .mcp_sign_in
+                .as_mut()
+                .filter(|sign_in| &sign_in.command_id == command_id)
+            {
+                sign_in.url = Some(super::bounded_session_text(
+                    authorization_url,
+                    MCP_SIGN_IN_URL_MAX_BYTES,
+                ));
+            }
+            Some(vec![UiEffect::RequestRender])
+        }
         BackendEvent::CommandFinished {
             command_id,
             command_type,
             ok,
             error,
-        } if MCP_STATUS_COMMANDS.contains(&command_type.as_str())
-            && state.mcp.finish_change(command_id, *ok, error.as_deref()) =>
-        {
-            Some(vec![UiEffect::RequestRender])
+        } if MCP_STATUS_COMMANDS.contains(&command_type.as_str()) => {
+            if state
+                .mcp_sign_in
+                .as_ref()
+                .is_some_and(|sign_in| &sign_in.command_id == command_id)
+            {
+                state.mcp_sign_in = None;
+            }
+            state
+                .mcp
+                .finish_change(command_id, *ok, error.as_deref())
+                .then(|| vec![UiEffect::RequestRender])
         }
         _ => None,
     }
@@ -577,6 +656,7 @@ mod tests {
             name: "docs".into(),
             launch: launch.clone(),
             env: vec![("TOKEN".into(), secret)],
+            headers: vec![],
             replace: false,
         });
         assert!(!format!("{add:?}").contains("sentinel-value"));
@@ -719,5 +799,93 @@ mod tests {
         .unwrap();
         assert_eq!(state.mcp.snapshot.as_ref().unwrap().servers.len(), 4);
         assert_eq!(state.mcp.error.as_deref(), Some("inspection failed"));
+    }
+
+    #[test]
+    fn a_sign_in_shows_its_page_until_it_finishes_and_can_be_cancelled() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Login("linear".into())),
+            &mut ids,
+        )
+        .unwrap();
+        let value = sent(&effects);
+        assert_eq!(value["type"], "login_mcp_server");
+        assert_eq!(value["name"], "linear");
+        let id = value["id"].as_str().unwrap().to_owned();
+        assert_eq!(state.mcp_sign_in.as_ref().unwrap().url, None);
+
+        let started = serde_json::json!({
+            "type": "rpc.mcp.login",
+            "timestamp": "2026-10-16T00:00:00Z",
+            "command_id": id,
+            "name": "linear",
+            "authorization_url": "https://auth.example.test/authorize?state=abc",
+        });
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&started).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state.mcp_sign_in.as_ref().unwrap().url.as_deref(),
+            Some("https://auth.example.test/authorize?state=abc")
+        );
+
+        let effects = reduce(&mut state, UiAction::CancelMcpSignIn, &mut ids).unwrap();
+        let cancel = sent(&effects);
+        assert_eq!(cancel["type"], "cancel");
+        assert_eq!(cancel["target_id"], id.as_str());
+        // A second Esc sends nothing more.
+        assert!(
+            reduce(&mut state, UiAction::CancelMcpSignIn, &mut ids)
+                .unwrap()
+                .is_empty()
+        );
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "login_mcp_server", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.mcp_sign_in.is_none());
+        assert!(!state.mcp.loading());
+
+        let effects = reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Logout("linear".into())),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&effects)["type"], "logout_mcp_server");
+    }
+
+    #[test]
+    fn a_prompt_waits_for_a_sign_in_instead_of_queueing_behind_it() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Login("linear".into())),
+            &mut ids,
+        )
+        .unwrap();
+
+        let effects = reduce(&mut state, UiAction::Submit("hello".into()), &mut ids).unwrap();
+
+        assert!(
+            matches!(&effects[0], UiEffect::Notice(notice) if notice.contains("Finish signing in")),
+            "{effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::SendCommand(_)))
+        );
     }
 }

@@ -126,8 +126,9 @@ Headers go only to the configured URL's origin (scheme, host, and port), never t
 cannot replace the headers the transport manages (such as `Host`, `Accept-Encoding`, or
 `Mcp-Session-Id`). Header values are never shown, logged, or sent to the model. A server's
 `headers_from` sends that variable's value to the server, so every confirmation names the variable
-and the host it goes to. Pasted snippets with `headers` are not accepted yet; add those servers with
-`wisp mcp add --header` or `--header-from`.
+and the host it goes to. A pasted snippet's `headers` work the same way: a value written as
+`"Bearer ${VAR}"` forwards that variable, and any other value is asked for again (masked), because
+published snippets usually hold placeholders.
 
 #### Signing in with OAuth
 
@@ -150,8 +151,8 @@ and protected from Wisp's file tools like it. Each sign-in is bound to the serve
 changes, the tokens are never sent to the new one. The access token goes only to the server's own
 origin, never to another host, and is never shown, logged, or sent to the model. Wisp refreshes it
 automatically. When a server refuses Wisp, or a refresh fails, the server shows as unavailable with
-"sign in with `wisp mcp login NAME`"; Wisp never opens a browser on its own. `wisp mcp logout NAME`
-forgets a sign-in, and removing a server forgets it too. A server that sends its own
+"sign in with `wisp mcp login NAME`"; Wisp never opens a browser on its own. In the TUI, press `l`
+on the server in `/mcp` instead. `wisp mcp logout NAME` (or `o` in `/mcp`) forgets a sign-in, and removing a server forgets it too. A server that sends its own
 `Authorization` header does not sign in. Servers that require a pre-registered client, rather than
 registering Wisp themselves, are not supported yet.
 

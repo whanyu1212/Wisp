@@ -7,8 +7,12 @@
 //! the panel appeared cannot confirm it.
 //!
 //! A pasted snippet is sent to the backend for parsing and not kept. Environment
-//! values the user types are held as [`SecretText`], rendered only as bullets, and
-//! sent once in a secret command.
+//! and header values the user types are held as [`SecretText`], rendered only as
+//! bullets, and sent once in a secret command.
+//!
+//! `l` signs in to an HTTP server with OAuth: the backend opens the sign-in page
+//! in the browser, and the list shows its URL until the browser returns. Esc
+//! cancels a sign-in in progress instead of closing the view.
 
 use crate::{
     discovery_view::{DiscoveryAction, ReportView},
@@ -28,11 +32,14 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::events::{
-    McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus,
+    McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus, McpSignIn,
 };
 
 /// Largest environment value the backend accepts.
 pub(crate) const MCP_ENV_VALUE_MAX_BYTES: usize = 16_384;
+/// Largest header value the backend accepts, counted in bytes so it also fits
+/// its character limit.
+const MCP_HEADER_VALUE_MAX_BYTES: usize = 8_192;
 /// Largest snippet the backend accepts, counted in bytes so it also fits its
 /// character limit.
 pub(crate) const MCP_SNIPPET_MAX_BYTES: usize = 65_536;
@@ -103,15 +110,25 @@ enum Flow {
     Confirm(Confirm),
 }
 
-/// Asking, one variable at a time, how to provide the values a snippet's server
-/// needs. The snippet's own values are never used: they are usually placeholders.
+/// Asking, one at a time, for the values a snippet's server needs: how to
+/// provide each environment variable, then each HTTP header's value. The
+/// snippet's own values are never used: they are usually placeholders.
 struct EnvStep {
     server: McpServerPreview,
     replace: bool,
     answers: Vec<(String, EnvAnswer)>,
+    /// Header values entered so far, in `launch.header_names` order.
+    headers: Vec<(String, SecretText)>,
     pick: Pick,
-    /// The value being typed, once the user chose to enter one.
+    /// The value being typed, once the user chose to enter one. A header value
+    /// is always typed.
     input: Option<String>,
+}
+
+/// What the current step asks for.
+enum Ask<'a> {
+    Env(&'a str),
+    Header(&'a str),
 }
 
 enum EnvAnswer {
@@ -120,12 +137,47 @@ enum EnvAnswer {
 }
 
 impl EnvStep {
-    fn current(&self) -> &str {
-        &self.server.launch.env_names[self.answers.len()]
+    fn new(server: McpServerPreview, replace: bool) -> Self {
+        let mut step = Self {
+            server,
+            replace,
+            answers: Vec::new(),
+            headers: Vec::new(),
+            pick: Pick::default(),
+            input: None,
+        };
+        step.begin_header();
+        step
+    }
+
+    fn current(&self) -> Ask<'_> {
+        let launch = &self.server.launch;
+        match launch.env_names.get(self.answers.len()) {
+            Some(name) => Ask::Env(name),
+            None => Ask::Header(&launch.header_names[self.headers.len()]),
+        }
+    }
+
+    /// The question being asked, counting from one, and how many there are.
+    fn position(&self) -> (usize, usize) {
+        let launch = &self.server.launch;
+        (
+            self.answers.len() + self.headers.len() + 1,
+            launch.env_names.len() + launch.header_names.len(),
+        )
     }
 
     fn finished(&self) -> bool {
-        self.answers.len() == self.server.launch.env_names.len()
+        let launch = &self.server.launch;
+        self.answers.len() == launch.env_names.len()
+            && self.headers.len() == launch.header_names.len()
+    }
+
+    /// Start typing when the next question is a header's value.
+    fn begin_header(&mut self) {
+        if !self.finished() && matches!(self.current(), Ask::Header(_)) {
+            self.input = Some(String::new());
+        }
     }
 }
 
@@ -139,6 +191,7 @@ enum ConfirmKind {
         name: String,
         launch: McpServerLaunch,
         env: Vec<(String, SecretText)>,
+        headers: Vec<(String, SecretText)>,
         replace: bool,
     },
     Enable {
@@ -192,11 +245,13 @@ impl ConfirmKind {
                 name,
                 launch,
                 env,
+                headers,
                 replace,
             } => McpChange::Add {
                 name,
                 launch,
                 env,
+                headers,
                 replace,
             },
             Self::Enable { name, launch } => McpChange::SetEnabled {
@@ -223,7 +278,7 @@ impl McpView {
             Some(Flow::Env(_) | Flow::Confirm(_)) => {
                 matches!(key.code, KeyCode::Enter | KeyCode::Char('1' | '2'))
             }
-            _ => matches!(key.code, KeyCode::Char('d' | 'e')),
+            _ => matches!(key.code, KeyCode::Char('d' | 'e' | 'l' | 'o')),
         }
     }
 
@@ -262,13 +317,7 @@ impl McpView {
         let replace = servers_of(state)
             .iter()
             .any(|known| known.name == server.name);
-        let step = EnvStep {
-            server: server.clone(),
-            replace,
-            answers: Vec::new(),
-            pick: Pick::default(),
-            input: None,
-        };
+        let step = EnvStep::new(server.clone(), replace);
         self.notice = None;
         self.flow = Some(if step.finished() {
             Flow::Confirm(confirm_add(step))
@@ -319,12 +368,18 @@ impl McpView {
                 self.flow = Some(Flow::Previewing);
                 DiscoveryAction::Refresh(UiAction::PreviewMcpSnippet(snippet))
             }
-            Some(Flow::Env(EnvStep {
-                input: Some(value), ..
-            })) => {
+            Some(Flow::Env(step @ EnvStep { input: Some(_), .. })) => {
+                let limit = if matches!(step.current(), Ask::Header(_)) {
+                    MCP_HEADER_VALUE_MAX_BYTES
+                } else {
+                    MCP_ENV_VALUE_MAX_BYTES
+                };
+                let Some(value) = step.input.as_mut() else {
+                    return DiscoveryAction::None;
+                };
                 // A copied token often ends with a newline; keep the value on one line.
                 for character in text.chars().filter(|character| !character.is_control()) {
-                    if value.len() + character.len_utf8() > MCP_ENV_VALUE_MAX_BYTES {
+                    if value.len() + character.len_utf8() > limit {
                         break;
                     }
                     value.push(character);
@@ -337,6 +392,15 @@ impl McpView {
 
     fn browse_key(&mut self, key: KeyEvent, state: &UiState) -> DiscoveryAction {
         if key.code == KeyCode::Esc {
+            // Esc first stops waiting for a sign-in; once that was asked for, it
+            // closes the view while the cancel finishes.
+            if state
+                .mcp_sign_in
+                .as_ref()
+                .is_some_and(|sign_in| !sign_in.cancel_requested)
+            {
+                return DiscoveryAction::Refresh(UiAction::CancelMcpSignIn);
+            }
             return DiscoveryAction::Close;
         }
         if key.modifiers != KeyModifiers::NONE {
@@ -354,6 +418,36 @@ impl McpView {
                     self.flow = Some(Flow::Paste);
                 }
                 DiscoveryAction::None
+            }
+            KeyCode::Char(key @ ('l' | 'o')) => {
+                let Some(server) = self
+                    .rendered
+                    .as_deref()
+                    .and_then(|name| servers.iter().find(|server| server.name == name))
+                else {
+                    return DiscoveryAction::None;
+                };
+                let change = match (key, server.sign_in) {
+                    ('l', Some(_)) => McpChange::Login(server.name.clone()),
+                    // A disabled or failed server may still have a saved sign-in.
+                    ('o', Some(_)) => McpChange::Logout(server.name.clone()),
+                    ('l', None) => {
+                        self.notice = Some(
+                            "Only an HTTP server without its own Authorization header signs in."
+                                .into(),
+                        );
+                        return DiscoveryAction::None;
+                    }
+                    _ => {
+                        self.notice = Some(format!("{} does not sign in.", server.name));
+                        return DiscoveryAction::None;
+                    }
+                };
+                if !self.ready_for_change(state) {
+                    return DiscoveryAction::None;
+                }
+                self.notice = None;
+                DiscoveryAction::Refresh(UiAction::ChangeMcpServers(change))
             }
             KeyCode::Char(key @ ('d' | 'e')) => {
                 let Some(server) = self
@@ -478,26 +572,53 @@ impl McpView {
     }
 
     fn env_key(&mut self, mut step: EnvStep, key: KeyEvent) -> (Option<Flow>, DiscoveryAction) {
+        let header = matches!(step.current(), Ask::Header(_));
         if let Some(value) = &mut step.input {
             match key.code {
+                // A header has no other way to be provided, so Esc stops adding.
+                KeyCode::Esc if header => return (None, DiscoveryAction::None),
                 KeyCode::Esc => step.input = None,
                 KeyCode::Backspace => {
                     value.pop();
                 }
                 KeyCode::Enter => {
-                    let typed = step.input.take().unwrap_or_default();
-                    match SecretText::env_value(typed, MCP_ENV_VALUE_MAX_BYTES) {
+                    let mut typed = step.input.take().unwrap_or_default();
+                    if header {
+                        // HTTP refuses surrounding spaces, and a copied token
+                        // often has one; an empty value can never be sent.
+                        typed = typed.trim_matches([' ', '\t']).to_owned();
+                    }
+                    let limit = if header {
+                        MCP_HEADER_VALUE_MAX_BYTES
+                    } else {
+                        MCP_ENV_VALUE_MAX_BYTES
+                    };
+                    let secret = if header && typed.is_empty() {
+                        None
+                    } else {
+                        SecretText::env_value(typed, limit)
+                    };
+                    let name = match step.current() {
+                        Ask::Env(name) | Ask::Header(name) => name.to_owned(),
+                    };
+                    match secret {
+                        Some(secret) if header => step.headers.push((name, secret)),
                         Some(secret) => {
-                            let name = step.current().to_owned();
                             step.answers.push((name, EnvAnswer::Value(secret)));
                             step.pick = Pick::default();
                         }
                         None => step.input = Some(String::new()),
                     }
+                    step.begin_header();
                 }
                 KeyCode::Char(character)
                     if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
-                        && value.len() + character.len_utf8() <= MCP_ENV_VALUE_MAX_BYTES =>
+                        && value.len() + character.len_utf8()
+                            <= if header {
+                                MCP_HEADER_VALUE_MAX_BYTES
+                            } else {
+                                MCP_ENV_VALUE_MAX_BYTES
+                            } =>
                 {
                     value.push(character);
                 }
@@ -514,9 +635,12 @@ impl McpView {
         }
         match step.pick.chosen(key.code, 2) {
             Some(0) => {
-                let name = step.current().to_owned();
-                step.answers.push((name, EnvAnswer::Forward));
+                if let Ask::Env(name) = step.current() {
+                    let name = name.to_owned();
+                    step.answers.push((name, EnvAnswer::Forward));
+                }
                 step.pick = Pick::default();
+                step.begin_header();
             }
             Some(_) => step.input = Some(String::new()),
             None => {}
@@ -570,12 +694,18 @@ impl McpView {
         state: &UiState,
         palette: Palette,
     ) {
-        let hint = if area.width >= 92 {
-            " ↑↓ select · a add · e enable/disable · d remove · c reconnect · r refresh · Esc close "
-        } else if area.width >= 52 {
-            " a add · e on/off · d remove · c reconnect · Esc close "
-        } else {
-            " a e d c r · Esc "
+        let hint = match &state.mcp_sign_in {
+            Some(sign_in) if !sign_in.cancel_requested => " Esc cancel sign-in ",
+            Some(_) => " Esc close ",
+            None => [
+                " ↑↓ select · a add · e enable/disable · d remove · l sign in · o sign out · c reconnect · r refresh · Esc close ",
+                " a add · e on/off · d remove · l/o sign in/out · c reconnect · Esc close ",
+                " a e d l o c r · Esc ",
+            ]
+            .into_iter()
+            // Borders and title corners take the rest of the row.
+            .find(|hint| hint.width() + 4 <= usize::from(area.width))
+            .unwrap_or(" Esc "),
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -607,6 +737,9 @@ impl McpView {
                 terminal_row(notice, width),
                 Style::default().fg(palette.warning),
             ));
+        }
+        if let Some(sign_in) = &state.mcp_sign_in {
+            status.push(sign_in_status(sign_in, width, palette));
         }
         let Some(snapshot) = state.mcp.snapshot.as_deref() else {
             status.push(Line::raw(terminal_row("MCP status unavailable.", width)));
@@ -655,9 +788,44 @@ impl McpView {
         if detail.height > 1 {
             let [_, body] =
                 Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(detail);
-            self.detail
-                .render(frame, body, &server_detail(&servers[selected]));
+            // While a sign-in waits, its page's address takes the details, where a
+            // long one wraps whole and scrolls instead of crowding out the list.
+            let rows = match &state.mcp_sign_in {
+                Some(sign_in) => sign_in_detail(sign_in),
+                None => server_detail(&servers[selected]),
+            };
+            self.detail.render(frame, body, &rows);
         }
+    }
+}
+
+/// The status row of a sign-in in progress.
+fn sign_in_status(
+    sign_in: &crate::reducer::McpSignInState,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let text = if sign_in.cancel_requested {
+        format!("Cancelling sign-in to {}…", sign_in.name)
+    } else {
+        format!("Signing in to {}: finish in your browser.", sign_in.name)
+    };
+    Line::styled(
+        terminal_row(&text, width),
+        Style::default().fg(palette.primary),
+    )
+}
+
+/// What a sign-in in progress waits for. The sign-in page's address is shown
+/// whole, so it can be copied when no browser opened; the browser must run on
+/// this machine, because the page returns to a local address.
+fn sign_in_detail(sign_in: &crate::reducer::McpSignInState) -> Vec<String> {
+    match &sign_in.url {
+        Some(url) => vec![
+            "If no browser opened, open this address in a browser on this machine:".into(),
+            url.clone(),
+        ],
+        None => vec!["Finding the sign-in page…".into()],
     }
 }
 
@@ -676,6 +844,7 @@ fn confirm_add(step: EnvStep) -> Confirm {
         server,
         replace,
         answers,
+        headers,
         ..
     } = step;
     let mut launch = server.launch;
@@ -695,11 +864,13 @@ fn confirm_add(step: EnvStep) -> Confirm {
         }
     }
     launch.env_names = env_names;
+    launch.header_names = headers.iter().map(|(name, _)| name.clone()).collect();
     Confirm {
         kind: ConfirmKind::Add {
             name: server.name,
             launch,
             env,
+            headers,
             replace,
         },
         pick: Pick::default(),
@@ -719,6 +890,11 @@ fn server_row(
             server.tool_names.len()
         ),
         status => status.as_str().to_owned(),
+    };
+    let state = match server.sign_in {
+        Some(McpSignIn::Required) => format!("{state} · sign in required"),
+        Some(McpSignIn::SignedIn) => format!("{state} · signed in"),
+        _ => state,
     };
     let text = terminal_row(
         &format!("{}  {state}", server.name),
@@ -740,6 +916,14 @@ fn server_detail(server: &McpServerSnapshot) -> Vec<String> {
     let mut rows = server.launch.as_ref().map(launch_rows).unwrap_or_default();
     if let Some(error) = &server.error {
         rows.push(error.clone());
+    }
+    match server.sign_in {
+        Some(McpSignIn::Required) => rows.push("Press l to sign in.".into()),
+        Some(McpSignIn::SignedIn) => rows.push("Signed in; press o to sign out.".into()),
+        Some(McpSignIn::Available) => {
+            rows.push("Press l to sign in, if the server asks for it.".into());
+        }
+        None => {}
     }
     if !server.tool_names.is_empty() {
         rows.push("tools:".into());
@@ -946,11 +1130,20 @@ fn render_paste(
 }
 
 fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Palette) {
-    let total = step.server.launch.env_names.len();
-    let position = step.answers.len() + 1;
-    let name = step.current().to_owned();
-    let title = format!("{} needs {name} ({position} of {total})", step.server.name);
-    let hint = if step.input.is_some() {
+    let (position, total) = step.position();
+    let (name, header) = match step.current() {
+        Ask::Env(name) => (name.to_owned(), false),
+        Ask::Header(name) => (name.to_owned(), true),
+    };
+    let asked = if header {
+        format!("header {name}")
+    } else {
+        name.clone()
+    };
+    let title = format!("{} needs {asked} ({position} of {total})", step.server.name);
+    let hint = if header {
+        " Enter save · Esc cancel "
+    } else if step.input.is_some() {
         " Enter save · Esc back "
     } else {
         " ↑↓ select · Enter choose · Esc cancel "
@@ -979,7 +1172,7 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
                 Span::raw(masked),
             ]),
             Line::default(),
-            Line::styled(terminal_row(&format!("Value for {name}."), width), muted),
+            Line::styled(terminal_row(&format!("Value for {asked}."), width), muted),
             Line::styled(
                 terminal_row(
                     "It stays hidden and is saved to your Wisp settings file.",
@@ -1111,6 +1304,7 @@ mod tests {
             tool_names: tools,
             error: (status == McpServerStatus::Unavailable).then(|| "startup failed".into()),
             launch: Some(launch),
+            sign_in: None,
         }
     }
 
@@ -1211,11 +1405,11 @@ mod tests {
             );
             assert!(wide.contains("forwards: HOME_DIR"), "{name}");
             assert!(wide.contains("mcp__github__search"), "{name}");
-            assert!(wide.contains("c reconnect · r refresh"), "{name}");
+            assert!(wide.contains("l/o sign in/out · c reconnect"), "{name}");
 
             let small = text(&draw_buffer(&mut view, &state, 30, 8, palette));
             assert!(small.contains("› github"), "{name}: {small}");
-            assert!(small.contains("a e d c r"), "{name}: {small}");
+            assert!(small.contains("a e d l o c r"), "{name}: {small}");
         }
     }
 
@@ -1409,6 +1603,7 @@ mod tests {
             name,
             launch,
             env,
+            headers,
             replace,
         }) = change(action)
         else {
@@ -1420,6 +1615,7 @@ mod tests {
         assert_eq!(env.len(), 1);
         assert_eq!(env[0].0, "ORG");
         assert_eq!(env[0].1.as_str(), SECRET);
+        assert!(headers.is_empty());
     }
 
     #[test]
@@ -1664,5 +1860,198 @@ mod tests {
             url_host("https://mcp.linear.app:8443/mcp"),
             "mcp.linear.app:8443"
         );
+    }
+
+    fn http_preview(headers: &[&str]) -> McpServerPreview {
+        McpServerPreview {
+            name: "linear".into(),
+            launch: McpServerLaunch {
+                url: Some("https://mcp.linear.app/mcp".into()),
+                header_names: headers.iter().map(|name| (*name).to_owned()).collect(),
+                headers_from: vec![wisp_protocol::events::McpHeaderFrom {
+                    header: "Authorization".into(),
+                    variable: "LINEAR_API_KEY".into(),
+                    scheme: Some("Bearer".into()),
+                }],
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_snippet_header_value_is_typed_masked_and_sent_with_the_server() {
+        let mut state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste("{}", &state);
+        state.mcp_preview.snapshot = Some(Arc::new(vec![http_preview(&["X-Team"])]));
+        view.advance(&state);
+
+        let ask = draw(&mut view, &state, 100, 8);
+        assert!(ask.contains("linear needs header X-Team (1 of 1)"), "{ask}");
+        // An empty value cannot be sent; the step stays open.
+        press(&mut view, &state, KeyCode::Enter);
+        assert!(draw(&mut view, &state, 100, 8).contains("header X-Team"));
+        for character in SECRET.chars() {
+            press(&mut view, &state, KeyCode::Char(character));
+        }
+        let typed = draw(&mut view, &state, 100, 8);
+        assert!(!typed.contains(SECRET), "{typed}");
+        press(&mut view, &state, KeyCode::Enter);
+
+        view.invalidate();
+        let confirm = draw(&mut view, &state, 100, 12);
+        assert!(
+            confirm.contains("sends headers: X-Team (values hidden)"),
+            "{confirm}"
+        );
+        assert!(
+            confirm.contains("sends $LINEAR_API_KEY to mcp.linear.app in header Authorization"),
+            "{confirm}"
+        );
+        let action = press(&mut view, &state, KeyCode::Char('1'));
+        assert!(!format!("{action:?}").contains(SECRET));
+        let Some(McpChange::Add {
+            launch, headers, ..
+        }) = change(action)
+        else {
+            panic!("expected an add");
+        };
+        assert_eq!(launch.header_names, ["X-Team"]);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].1.as_str(), SECRET);
+    }
+
+    #[test]
+    fn escape_while_typing_a_header_stops_adding() {
+        let mut state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste("{}", &state);
+        state.mcp_preview.snapshot = Some(Arc::new(vec![http_preview(&["X-Team"])]));
+        view.advance(&state);
+
+        press(&mut view, &state, KeyCode::Esc);
+
+        assert!(!view.docked());
+    }
+
+    fn signed(sign_in: Option<McpSignIn>) -> UiState {
+        let mut linear = server(
+            "linear",
+            McpServerStatus::Unavailable,
+            http_preview(&[]).launch,
+        );
+        linear.error = Some("MCP server linear is unavailable: sign in".into());
+        linear.sign_in = sign_in;
+        state(vec![linear])
+    }
+
+    #[test]
+    fn l_signs_in_to_the_shown_server_and_o_signs_out() {
+        let state = signed(Some(McpSignIn::Required));
+        let mut view = McpView::default();
+        let list = draw(&mut view, &state, 100, 20);
+        assert!(
+            list.contains("linear  unavailable · sign in required"),
+            "{list}"
+        );
+        assert!(list.contains("Press l to sign in."), "{list}");
+
+        let action = press(&mut view, &state, KeyCode::Char('l'));
+        assert_eq!(change(action), Some(McpChange::Login("linear".into())));
+        draw(&mut view, &state, 100, 20);
+        let action = press(&mut view, &state, KeyCode::Char('o'));
+        assert_eq!(change(action), Some(McpChange::Logout("linear".into())));
+
+        let stdio = sample_state();
+        let mut view = McpView::default();
+        draw(&mut view, &stdio, 100, 20);
+        assert_eq!(change(press(&mut view, &stdio, KeyCode::Char('l'))), None);
+        assert!(draw(&mut view, &stdio, 100, 20).contains("Only an HTTP server"));
+    }
+
+    fn signing_in(url: &str, cancel_requested: bool) -> UiState {
+        let mut state = signed(Some(McpSignIn::Required));
+        state.mcp_sign_in = Some(crate::reducer::McpSignInState {
+            command_id: "login-1".into(),
+            name: "linear".into(),
+            url: Some(url.to_owned()),
+            cancel_requested,
+        });
+        state
+    }
+
+    #[test]
+    fn a_long_sign_in_address_scrolls_whole_without_hiding_the_list() {
+        let url = format!(
+            "https://auth.example.test/authorize?state={}END",
+            "s".repeat(1_000)
+        );
+        let state = signing_in(&url, false);
+        let mut view = McpView::default();
+
+        let first = draw(&mut view, &state, 66, 21);
+        assert!(first.contains("Signing in to linear"), "{first}");
+        assert!(first.contains("linear  unavailable"), "{first}");
+        assert!(
+            first.contains("https://auth.example.test/authorize"),
+            "{first}"
+        );
+        // The rest of the address is reachable by scrolling, never cut off.
+        let mut seen = String::new();
+        for _ in 0..40 {
+            press(&mut view, &state, KeyCode::PageDown);
+            seen = draw(&mut view, &state, 66, 21);
+        }
+        assert!(seen.contains("END"), "{seen}");
+    }
+
+    #[test]
+    fn escape_cancels_a_sign_in_once_then_closes() {
+        let mut view = McpView::default();
+        let waiting = signing_in("https://auth.example.test/authorize", false);
+        assert!(matches!(
+            press(&mut view, &waiting, KeyCode::Esc),
+            DiscoveryAction::Refresh(UiAction::CancelMcpSignIn)
+        ));
+
+        let cancelling = signing_in("https://auth.example.test/authorize", true);
+        assert!(draw(&mut view, &cancelling, 100, 20).contains("Esc close"));
+        assert!(matches!(
+            press(&mut view, &cancelling, KeyCode::Esc),
+            DiscoveryAction::Close
+        ));
+    }
+
+    #[test]
+    fn a_header_value_is_saved_without_surrounding_spaces() {
+        let mut state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste("{}", &state);
+        state.mcp_preview.snapshot = Some(Arc::new(vec![http_preview(&["X-Team"])]));
+        view.advance(&state);
+        view.handle_paste(&format!("  {SECRET} \n"), &state);
+        press(&mut view, &state, KeyCode::Enter);
+        view.invalidate();
+        draw(&mut view, &state, 100, 12);
+
+        let Some(McpChange::Add { headers, .. }) =
+            change(press(&mut view, &state, KeyCode::Char('1')))
+        else {
+            panic!("expected an add");
+        };
+        assert_eq!(headers[0].1.as_str(), SECRET);
+    }
+
+    #[test]
+    fn the_key_hint_is_never_cut_off() {
+        let state = sample_state();
+        for width in [40_u16, 64, 70, 80, 100, 110, 120] {
+            let mut view = McpView::default();
+            let shown = draw(&mut view, &state, width, 20);
+            assert!(shown.contains("Esc"), "{width}: {shown}");
+        }
     }
 }

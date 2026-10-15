@@ -768,14 +768,15 @@ pub mod commands {
 
         /// Save an MCP server the user confirmed, then restart MCP servers.
         ///
-        /// `launch.env_names` and `launch.header_names` are ignored: `env` carries the
-        /// literal values the user entered, which travel only through this
-        /// secret-bearing command. `launch.headers_from` is sent as saved.
+        /// `launch.env_names` and `launch.header_names` are ignored: `env` and
+        /// `headers` carry the literal values the user entered, which travel only
+        /// through this secret-bearing command. `launch.headers_from` is sent as saved.
         pub fn add_mcp_server(
             id: &str,
             name: &str,
             launch: &crate::discovery::McpServerLaunch,
             env: &[(String, String)],
+            headers: &[(String, String)],
             replace: bool,
         ) -> Result<Self, super::ProtocolDecodeError> {
             let mut command = serde_json::json!({
@@ -788,8 +789,10 @@ pub mod commands {
                     .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
                     .collect::<serde_json::Map<String, serde_json::Value>>(),
                 "env_from": launch.env_from,
-                // Literal header values are never entered in the TUI yet.
-                "headers": {},
+                "headers": headers
+                    .iter()
+                    .map(|(name, value)| (name.clone(), serde_json::Value::String(value.clone())))
+                    .collect::<serde_json::Map<String, serde_json::Value>>(),
                 "headers_from": launch
                     .headers_from
                     .iter()
@@ -836,6 +839,16 @@ pub mod commands {
                     .map_err(|error| super::ProtocolDecodeError(error.to_string()))?;
             }
             deserialize(command)
+        }
+
+        /// Sign in to an HTTP MCP server with OAuth in the user's browser.
+        pub fn login_mcp_server(id: &str, name: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "login_mcp_server", "id": id, "name": name}))
+        }
+
+        /// Forget an MCP server's OAuth sign-in.
+        pub fn logout_mcp_server(id: &str, name: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "logout_mcp_server", "id": id, "name": name}))
         }
 
         /// Reload MCP servers from the user settings and restart them.
@@ -1231,7 +1244,7 @@ pub mod events {
     };
     pub use crate::discovery::{
         McpHeaderFrom, McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus,
-        McpStatusSnapshot, SkillCatalogEntry, SkillCatalogSnapshot, SkillDiagnostic,
+        McpSignIn, McpStatusSnapshot, SkillCatalogEntry, SkillCatalogSnapshot, SkillDiagnostic,
         SkillDiagnosticSeverity, SkillSource,
     };
     mod generated {
