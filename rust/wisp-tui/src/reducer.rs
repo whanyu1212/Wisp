@@ -260,6 +260,12 @@ impl SecretText {
         (!value.is_empty() && value.len() <= max_bytes).then_some(Self(value))
     }
 
+    /// Wrap an environment value, which may be empty: a variable set to the
+    /// empty string differs from one that is not set.
+    pub fn env_value(value: String, max_bytes: usize) -> Option<Self> {
+        (value.len() <= max_bytes).then_some(Self(value))
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }

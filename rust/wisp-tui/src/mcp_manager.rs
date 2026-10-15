@@ -486,7 +486,7 @@ impl McpView {
                 }
                 KeyCode::Enter => {
                     let typed = step.input.take().unwrap_or_default();
-                    match SecretText::new(typed, MCP_ENV_VALUE_MAX_BYTES) {
+                    match SecretText::env_value(typed, MCP_ENV_VALUE_MAX_BYTES) {
                         Some(secret) => {
                             let name = step.current().to_owned();
                             step.answers.push((name, EnvAnswer::Value(secret)));
@@ -1543,5 +1543,35 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("nothing was sent"));
+    }
+
+    #[test]
+    fn an_empty_value_can_be_entered() {
+        let mut state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste("{}", &state);
+        let mut preview_launch = launch("npx", &["docs"]);
+        preview_launch.env_names = vec!["EMPTY_OK".into()];
+        state.mcp_preview.snapshot = Some(Arc::new(vec![McpServerPreview {
+            name: "docs".into(),
+            launch: preview_launch,
+        }]));
+        view.advance(&state);
+        draw(&mut view, &state, 100, 8);
+        press(&mut view, &state, KeyCode::Char('2'));
+        draw(&mut view, &state, 100, 8);
+        press(&mut view, &state, KeyCode::Enter);
+        view.invalidate();
+        let confirm = draw(&mut view, &state, 100, 12);
+        assert!(
+            confirm.contains("sets: EMPTY_OK (values hidden)"),
+            "{confirm}"
+        );
+        let Some(McpChange::Add { env, .. }) = change(press(&mut view, &state, KeyCode::Char('1')))
+        else {
+            panic!("expected an add");
+        };
+        assert_eq!(env[0].1.as_str(), "");
     }
 }
