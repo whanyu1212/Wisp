@@ -76,14 +76,15 @@ async def build_runtime(
             openai_compatible=openai_compatible,
             anthropic_cache_ttl=anthropic_cache_ttl,
         )
-        if mcp_servers:
+        enabled_servers = tuple(server for server in mcp_servers if server.enabled)
+        if enabled_servers:
             # `mcp` costs ~430 ms to import and is only reachable through this
             # branch, which already runs solely when servers are configured. Import
             # it here so a session without MCP servers never pays for it.
             from wisp.mcp.runtime import McpRuntime
 
             mcp_runtime = await McpRuntime.start(
-                mcp_servers,
+                enabled_servers,
                 api=api,
                 existing_tool_names=tools.names(),
             )

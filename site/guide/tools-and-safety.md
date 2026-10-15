@@ -68,8 +68,24 @@ wisp trust forget [path]   # remove the decision so Wisp can prompt again
 ## MCP tools
 
 Wisp can connect to user-configured [Model Context Protocol](https://modelcontextprotocol.io/)
-servers over stdio or Streamable HTTP. Add servers only to the user settings file at
-`~/.wisp/settings.json`:
+servers over stdio or Streamable HTTP. Servers live only in the user settings file at
+`~/.wisp/settings.json`. The `wisp mcp` commands edit it for you:
+
+```text
+wisp mcp add github --env-from GITHUB_TOKEN -- npx -y @modelcontextprotocol/server-github
+wisp mcp add openai-developer-docs --url https://developers.openai.com/mcp
+wisp mcp import snippet.json
+wisp mcp list
+```
+
+Before saving a stdio server, `wisp mcp` shows the exact command it will run on every launch and
+asks for confirmation; `--yes` skips the question for scripted setup. `--env NAME` prompts for the
+value with masked input, and `import` asks again for each `env` value in a pasted
+`{"mcpServers": {...}}` snippet, because published snippets usually hold placeholders. Leave an
+answer empty to forward that variable from your environment instead. Changes apply the next time
+Wisp starts. See the [CLI reference](../reference/cli#mcp-servers) for every command.
+
+You can also edit the file directly:
 
 ```json
 {
@@ -114,6 +130,9 @@ servers, 64 discovery pages and 64 tools per server, 256 MCP tools overall, 1 Mi
 server, 4 MiB overall, and 2 MiB per protocol frame before parsing. Connection and discovery have a
 10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
 duplicate names, collisions, or limit violations expose none of that server's tools.
+
+Set `"enabled": false` on a server, or run `wisp mcp disable NAME`, to keep its settings without
+starting it.
 
 Run `/mcp` in the TUI to inspect configured server status, registered tool names, and sanitized
 startup failures. The command reads the current runtime snapshot and does not reconnect servers.
