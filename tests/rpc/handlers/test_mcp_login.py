@@ -154,3 +154,18 @@ def test_removing_a_server_forgets_its_sign_in(
     remove_user_mcp_server("linear")
 
     assert home_store.load("linear", MCP_URL) is None
+
+
+def test_a_server_whose_sign_in_cannot_be_forgotten_is_not_removed() -> None:
+    from wisp.config.mcp_servers import McpSettingsError
+
+    add_user_mcp_servers((McpServerConfig(name="linear", url=MCP_URL),))
+    unreadable = McpTokenStore().path
+    unreadable.parent.mkdir(parents=True, exist_ok=True)
+    unreadable.write_text("not json", encoding="utf-8")
+    unreadable.chmod(0o600)
+
+    with pytest.raises(McpSettingsError, match="was not removed"):
+        remove_user_mcp_server("linear")
+
+    assert [server.name for server in load_user_mcp_servers()] == ["linear"]

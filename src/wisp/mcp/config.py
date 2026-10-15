@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Mapping
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -316,6 +316,41 @@ def is_valid_header_value(value: str) -> bool:
     return not any(
         (ord(character) < 32 and character != "\t") or ord(character) == 127 for character in value
     )
+
+
+class HeaderUnavailable(Exception):
+    """A configured header cannot be sent; ``code`` says why, without the value."""
+
+    def __init__(self, code: Literal["missing-environment", "invalid-header"]) -> None:
+        super().__init__(code)
+        self.code: Literal["missing-environment", "invalid-header"] = code
+
+
+def resolve_headers(server: McpServerConfig) -> dict[str, str]:
+    """Resolve an HTTP server's headers from literal values and the environment.
+
+    Args:
+        server (McpServerConfig): Validated server configuration.
+
+    Returns:
+        dict[str, str]: Header values to send to the server's origin.
+
+    Raises:
+        HeaderUnavailable: A referenced variable is unset (``missing-environment``),
+            or its value would split the header or is refused by HTTP clients
+            (``invalid-header``).
+    """
+
+    headers = {name: value.get_secret_value() for name, value in server.headers}
+    for name, template in server.headers_from:
+        scheme, variable = header_template_variable(template)
+        value = os.environ.get(variable)
+        if value is None:
+            raise HeaderUnavailable("missing-environment")
+        if not is_valid_header_value(value):
+            raise HeaderUnavailable("invalid-header")
+        headers[name] = f"{scheme} {value}" if scheme else value
+    return headers
 
 
 def header_template_variable(template: str) -> tuple[str | None, str]:

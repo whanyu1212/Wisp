@@ -24,6 +24,7 @@ from wisp.mcp.oauth import (
 )
 from wisp.runtime.extensions import build_runtime
 from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolError
 
 MCP_URL = "https://mcp.example.test/mcp"
 ISSUER = "https://auth.example.test"
@@ -290,3 +291,67 @@ def test_a_sign_in_the_user_never_finishes_saves_nothing(
     with pytest.raises(McpLoginError, match="did not finish in time"):
         anyio.run(scenario)
     assert not store.path.exists()
+
+
+def test_a_sign_in_that_stops_working_after_startup_asks_for_a_new_one(
+    authorization_server: _AuthorizationServer, store: McpTokenStore, tmp_path: Path
+) -> None:
+    from wisp.rpc.handlers.mcp import rpc_mcp_status_snapshot
+
+    _login(_server(), store)
+
+    async def scenario() -> list[str | None]:
+        runtime = await build_runtime(mcp_servers=(_server(),), mcp_token_store=store)
+        try:
+            before = [server.sign_in for server in rpc_mcp_status_snapshot(runtime).servers]
+            # The authorization server revokes the sign-in mid-session.
+            authorization_server.valid_access.clear()
+            authorization_server.refuse_refresh = True
+            with pytest.raises(ToolError):
+                await runtime.tools.get("mcp__linear__echo").run(
+                    {"value": "x"}, ToolContext(cwd=tmp_path)
+                )
+            after = [server.sign_in for server in rpc_mcp_status_snapshot(runtime).servers]
+            return [*before, *after]
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(scenario) == ["signed_in", "required"]
+
+
+def test_a_refresh_finishing_after_sign_out_does_not_restore_the_sign_in(
+    authorization_server: _AuthorizationServer, store: McpTokenStore
+) -> None:
+    from wisp.mcp.oauth import _ServerTokens
+
+    _login(_server(), store)
+    credential = store.load("linear", MCP_URL)
+    assert credential is not None
+    tokens = _ServerTokens(store, _server(), credential, persist=True)
+    store.delete("linear")
+
+    anyio.run(tokens.set_tokens, credential.tokens.model_copy(update={"access_token": "late"}))
+
+    assert store.load("linear", MCP_URL) is None
+
+
+def test_signing_in_sends_the_headers_the_server_needs_to_answer(
+    monkeypatch: MonkeyPatch, store: McpTokenStore
+) -> None:
+    server = _AuthorizationServer()
+
+    def tenant_only(request: httpx2.Request) -> httpx2.Response:
+        if str(request.url).startswith(MCP_URL) and request.headers.get("x-tenant") != "acme":
+            return httpx2.Response(400)
+        return server.handle(request)
+
+    _mock_http(monkeypatch, tenant_only)
+    tenant = _server(headers_from={"X-Tenant": "${WISP_TEST_TENANT}"})
+
+    monkeypatch.delenv("WISP_TEST_TENANT", raising=False)
+    with pytest.raises(McpLoginError, match="needs an environment variable"):
+        _login(tenant, store)
+
+    monkeypatch.setenv("WISP_TEST_TENANT", "acme")
+    _login(tenant, store)
+    assert store.load("linear", MCP_URL) is not None

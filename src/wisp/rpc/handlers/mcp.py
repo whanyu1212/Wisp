@@ -560,6 +560,8 @@ def _sign_in_state(
         return None
     if diagnostic is not None and diagnostic.code == "login-required":
         return "required"
+    if mcp_runtime is not None and mcp_runtime.needs_sign_in(config.name):
+        return "required"
     if mcp_runtime is not None and mcp_runtime.is_signed_in(config.name):
         return "signed_in"
     return "available"

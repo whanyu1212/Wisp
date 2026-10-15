@@ -14,7 +14,7 @@ from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 
-from wisp.mcp.config import McpServerConfig, header_template_variable, is_valid_header_value
+from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
 from wisp.mcp.credentials import McpTokenStore
 from wisp.mcp.http_transport import bounded_http_client
 from wisp.mcp.oauth import McpLoginRequired, stored_oauth
@@ -116,6 +116,8 @@ class McpRuntime:
         self._disconnected_server_names: set[str] = set()
         # HTTP servers started with a saved OAuth sign-in.
         self._signed_in_server_names: set[str] = set()
+        # Servers that refused Wisp, at startup or later: the user must sign in.
+        self._sign_in_required_server_names: set[str] = set()
 
     @classmethod
     async def start(
@@ -166,6 +168,11 @@ class McpRuntime:
         """Return whether ``server_name`` started with a saved OAuth sign-in."""
 
         return server_name in self._signed_in_server_names
+
+    def needs_sign_in(self, server_name: str) -> bool:
+        """Return whether ``server_name`` refused Wisp, at startup or since."""
+
+        return server_name in self._sign_in_required_server_names
 
     def is_connected(self, server_name: str) -> bool:
         """Return whether one registered server's transport remains live."""
@@ -242,11 +249,18 @@ class McpRuntime:
         def mark_unauthorized() -> None:
             nonlocal unauthorized
             unauthorized = True
+            self._sign_in_required_server_names.add(server.name)
 
         try:
             async with AsyncExitStack() as stack:
                 if server.url is not None:
-                    oauth = await stored_oauth(server, self._token_store)
+                    oauth = await stored_oauth(
+                        server,
+                        self._token_store,
+                        on_sign_in_required=lambda: self._sign_in_required_server_names.add(
+                            server.name
+                        ),
+                    )
                     if oauth is not None:
                         self._signed_in_server_names.add(server.name)
                     transport = bounded_http_client(
@@ -290,7 +304,11 @@ class McpRuntime:
             if reported:
                 # A failed live connection is isolated. Explicit shutdown still reports
                 # cleanup failures through the runtime's redacted close error.
-                if release.is_set():
+                if unauthorized or _raised(exc, McpLoginRequired):
+                    # A sign-in that stopped working mid-session is reported as
+                    # needing a new one, not as a failure to shut down.
+                    self._sign_in_required_server_names.add(server.name)
+                elif release.is_set():
                     self._close_error = exc
             else:
                 code: McpDiagnosticCode
@@ -404,6 +422,13 @@ def _server_environment(server: McpServerConfig) -> dict[str, str]:
     return environment
 
 
+def _server_headers(server: McpServerConfig) -> dict[str, str]:
+    try:
+        return resolve_headers(server)
+    except HeaderUnavailable as exc:
+        raise _DiscoveryRejected(exc.code) from None
+
+
 def _raised(exc: BaseException, kind: type[BaseException], depth: int = 0) -> bool:
     """Return whether ``kind`` was raised anywhere in ``exc``, including task groups."""
 
@@ -417,32 +442,6 @@ def _raised(exc: BaseException, kind: type[BaseException], depth: int = 0) -> bo
         return True
     cause = exc.__cause__ or exc.__context__
     return cause is not None and _raised(cause, kind, depth + 1)
-
-
-def _server_headers(server: McpServerConfig) -> dict[str, str]:
-    """Resolve an HTTP server's headers from literal values and the environment.
-
-    Args:
-        server (McpServerConfig): Validated server configuration.
-
-    Returns:
-        dict[str, str]: Header values to send to the server's origin.
-
-    Raises:
-        _DiscoveryRejected: A referenced variable is unset (``missing-environment``),
-            or its value would split the header (``invalid-header``).
-    """
-
-    headers = {name: value.get_secret_value() for name, value in server.headers}
-    for name, template in server.headers_from:
-        scheme, variable = header_template_variable(template)
-        value = os.environ.get(variable)
-        if value is None:
-            raise _DiscoveryRejected("missing-environment")
-        if not is_valid_header_value(value):
-            raise _DiscoveryRejected("invalid-header")
-        headers[name] = f"{scheme} {value}" if scheme else value
-    return headers
 
 
 def _safe_server_cwd() -> Path:

@@ -37,7 +37,7 @@ from mcp.shared.auth import (
 from pydantic import AnyUrl
 
 from wisp.auth.storage import AuthStorageError
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
 from wisp.mcp.credentials import McpCredential, McpTokenStore, uses_header_authorization
 from wisp.mcp.http_transport import bounded_http_client
 
@@ -77,6 +77,8 @@ class _ServerTokens:
         self._name = server.name
         self._server_url = server.url
         self._persist = persist
+        # The saved credential this provider started from, or last saved.
+        self._saved = credential
         self._tokens = credential.tokens if credential else None
         self._expires_at = credential.expires_at if credential else None
         self._client_info = credential.client_info if credential else None
@@ -94,8 +96,13 @@ class _ServerTokens:
             time.time() + tokens.expires_in if tokens.expires_in is not None else None
         )
         credential = self.credential()
-        if self._persist and credential is not None:
-            await anyio.to_thread.run_sync(self._store.save, self._name, credential)
+        expected = self._saved
+        if self._persist and credential is not None and expected is not None:
+            saved = await anyio.to_thread.run_sync(
+                lambda: self._store.replace(self._name, expected=expected, replacement=credential)
+            )
+            if saved:
+                self._saved = credential
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         return self._client_info
@@ -170,12 +177,20 @@ def _client_metadata(redirect_uri: str) -> OAuthClientMetadata:
     )
 
 
-async def stored_oauth(server: McpServerConfig, store: McpTokenStore) -> OAuthClientProvider | None:
+async def stored_oauth(
+    server: McpServerConfig,
+    store: McpTokenStore,
+    *,
+    on_sign_in_required: Callable[[], None] = lambda: None,
+) -> OAuthClientProvider | None:
     """Return the provider a running server authenticates with, if signed in.
 
     Args:
         server (McpServerConfig): An HTTP server.
         store (McpTokenStore): Saved credentials.
+        on_sign_in_required (Callable[[], None]): Called when the saved sign-in no
+            longer works. A request that fails this way mid-session surfaces only
+            as a failed call, so this is how the runtime learns of it.
 
     Returns:
         OAuthClientProvider | None: A provider that sends and refreshes the saved
@@ -194,9 +209,11 @@ async def stored_oauth(server: McpServerConfig, store: McpTokenStore) -> OAuthCl
         return None
 
     async def sign_in_again(_url: str) -> None:
+        on_sign_in_required()
         raise McpLoginRequired
 
     async def no_callback() -> AuthorizationCodeResult:
+        on_sign_in_required()
         raise McpLoginRequired
 
     redirect_uris = credential.client_info.redirect_uris or [AnyUrl("http://127.0.0.1/")]
@@ -262,7 +279,7 @@ async def login_mcp_server(
                     transport = bounded_http_client(
                         server.url,
                         on_disconnect=lambda: None,
-                        headers=_static_headers(server),
+                        headers=_login_headers(server),
                         auth=provider,
                     )
                     await stack.enter_async_context(Client(transport, cache=None))
@@ -281,10 +298,23 @@ async def login_mcp_server(
     await anyio.to_thread.run_sync(store.save, server.name, credential)
 
 
-def _static_headers(server: McpServerConfig) -> dict[str, str]:
-    # Only literal headers: a headers_from variable may be unset, and sign-in
-    # does not need it. Authorization was refused above.
-    return {name: value.get_secret_value() for name, value in server.headers}
+def _login_headers(server: McpServerConfig) -> dict[str, str]:
+    """Resolve the headers a server needs to reach its sign-in (401) response.
+
+    A tenant or routing header may be required even before authentication.
+    Authorization headers were refused above.
+    """
+
+    try:
+        return resolve_headers(server)
+    except HeaderUnavailable as exc:
+        if exc.code == "missing-environment":
+            raise McpLoginError(
+                f"MCP server {server.name} needs an environment variable that is not set"
+            ) from None
+        raise McpLoginError(
+            f"MCP server {server.name} has a header value Wisp cannot send"
+        ) from None
 
 
 def _check_authorization_url(url: str) -> None:

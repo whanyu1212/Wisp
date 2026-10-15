@@ -115,14 +115,16 @@ def remove_user_mcp_server(name: str, *, home_dir: Path | None = None) -> None:
             raise McpSettingsError(f"no MCP server named {name!r} is configured")
         del servers[name]
 
-    _update_user_mcp_servers(change, home_dir=home_dir)
-    # A later server with the same name and URL must not inherit the sign-in.
+    # The sign-in is forgotten first: if that fails, nothing has changed and the
+    # removal can be retried. A later server with the same name and URL must not
+    # inherit it.
     try:
         McpTokenStore(mcp_auth_path(home_dir=home_dir)).delete(name)
     except AuthStorageError:
         raise McpSettingsError(
-            f"MCP server {name!r} was removed, but its sign-in could not be forgotten"
+            f"MCP server {name!r} was not removed: its sign-in could not be forgotten"
         ) from None
+    _update_user_mcp_servers(change, home_dir=home_dir)
 
 
 def set_user_mcp_server_enabled(

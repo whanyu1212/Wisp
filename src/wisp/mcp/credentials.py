@@ -106,21 +106,28 @@ class McpTokenStore:
     def save(self, name: str, credential: McpCredential) -> None:
         """Save ``credential`` for ``name``, replacing any earlier one."""
 
-        entry: dict[str, object] = {
-            "server_url": credential.server_url,
-            "tokens": credential.tokens.model_dump(mode="json", exclude_none=True),
-            "expires_at": credential.expires_at,
-            "client_info": credential.client_info.model_dump(mode="json", exclude_none=True),
-            "authorization_server": (
-                credential.authorization_server.model_dump(mode="json", exclude_none=True)
-                if credential.authorization_server is not None
-                else None
-            ),
-        }
         with self._file.lock():
             credentials = self._file.read_unlocked()
-            credentials[name] = entry
+            credentials[name] = _entry(credential)
             self._file.write_unlocked(credentials)
+
+    def replace(self, name: str, *, expected: McpCredential, replacement: McpCredential) -> bool:
+        """Save a refreshed credential only if ``expected`` is still the saved one.
+
+        A refresh can finish after the user signed out, removed the server, or
+        signed in again in another Wisp process; it must not undo that.
+
+        Returns:
+            bool: Whether the credential was replaced.
+        """
+
+        with self._file.lock():
+            credentials = self._file.read_unlocked()
+            if credentials.get(name) != _entry(expected):
+                return False
+            credentials[name] = _entry(replacement)
+            self._file.write_unlocked(credentials)
+            return True
 
     def delete(self, name: str) -> bool:
         """Forget ``name``'s credential.
@@ -136,6 +143,20 @@ class McpTokenStore:
             del credentials[name]
             self._file.write_unlocked(credentials)
             return True
+
+
+def _entry(credential: McpCredential) -> dict[str, object]:
+    return {
+        "server_url": credential.server_url,
+        "tokens": credential.tokens.model_dump(mode="json", exclude_none=True),
+        "expires_at": credential.expires_at,
+        "client_info": credential.client_info.model_dump(mode="json", exclude_none=True),
+        "authorization_server": (
+            credential.authorization_server.model_dump(mode="json", exclude_none=True)
+            if credential.authorization_server is not None
+            else None
+        ),
+    }
 
 
 def uses_header_authorization(server: McpServerConfig) -> bool:
