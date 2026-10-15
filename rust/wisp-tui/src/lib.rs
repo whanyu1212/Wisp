@@ -23,6 +23,7 @@ mod keybinding_tests;
 mod keybindings;
 mod logo_picker;
 mod markdown;
+mod mcp_manager;
 mod model_picker;
 mod mouse;
 #[cfg(test)]
@@ -1604,12 +1605,24 @@ impl LiveUi {
                             .render(frame, area, &self.state.project_files, palette);
                 }
             }
-            // `/permissions` and API-key entry dock above the composer; other popups
-            // are centered.
+            // `/permissions`, MCP server changes, and API-key entry dock above the
+            // composer; other popups are centered.
+            if let Some(view) = &mut self.discovery_view {
+                view.sync_mcp(&self.state);
+            }
+            let docked_mcp_height = self
+                .discovery_view
+                .as_mut()
+                .and_then(DiscoveryView::docked_mcp)
+                .map(|view| view.panel_height(frame.area().width));
             let docked_height = if overlay == Some(OverlayKind::Discovery)
                 && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)))
             {
                 Some(discovery_view::permissions_panel_height(&self.state))
+            } else if let Some(height) =
+                docked_mcp_height.filter(|_| overlay == Some(OverlayKind::Discovery))
+            {
+                Some(height)
             } else if overlay == Some(OverlayKind::Connection)
                 && self
                     .connection_panel
@@ -2847,6 +2860,56 @@ impl LiveUi {
         }
     }
 
+    /// Dispatch an action from `/mcp` or another discovery view. A command
+    /// carrying a snippet or entered values is checked against the frame limit
+    /// first, because it is sent without the logged command path's fallbacks.
+    async fn dispatch_discovery_action(
+        &mut self,
+        action: UiAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let secret = match &action {
+            UiAction::PreviewMcpSnippet(snippet) => {
+                Some(WispTypedClientRpcCommands::preview_mcp_snippet(
+                    &self.ids.peek_id(CommandKind::PreviewMcpSnippet),
+                    snippet.as_str(),
+                )?)
+            }
+            UiAction::ChangeMcpServers(reducer::McpChange::Add {
+                name,
+                launch,
+                env,
+                replace,
+            }) => {
+                let values: Vec<(String, String)> = env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
+                    .collect();
+                Some(WispTypedClientRpcCommands::add_mcp_server(
+                    &self.ids.peek_id(CommandKind::ChangeMcpServers),
+                    name,
+                    launch,
+                    &values,
+                    *replace,
+                )?)
+            }
+            _ => None,
+        };
+        if let Some(command) = secret {
+            let encoded_len = serde_json::to_vec(&command)?.len();
+            if encoded_len > limit {
+                self.notice = Some(format!(
+                    "The MCP request is {encoded_len} bytes, exceeding the negotiated \
+                     {limit}-byte frame limit; nothing was sent."
+                ));
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
+        }
+        self.dispatch(action, writer, limit).await
+    }
+
     async fn submit_connection_api_key(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
@@ -3741,7 +3804,7 @@ impl LiveUi {
                 match action {
                     DiscoveryAction::Close => self.discovery_view = None,
                     DiscoveryAction::Refresh(action) => {
-                        return self.dispatch(action, writer, limit).await;
+                        return self.dispatch_discovery_action(action, writer, limit).await;
                     }
                     DiscoveryAction::InsertSkill(prefix) => {
                         let outcome = self.editor.replace_range(0..0, &prefix);
@@ -3756,7 +3819,21 @@ impl LiveUi {
                 }
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Discovery) => Ok(LoopControl::Continue),
+            Input::Paste(pasted) if overlay == Some(OverlayKind::Discovery) => {
+                let action = self
+                    .discovery_view
+                    .as_mut()
+                    .expect("open discovery view")
+                    .handle_paste(&pasted, &self.state);
+                drop(pasted);
+                self.render_pending = true;
+                match action {
+                    DiscoveryAction::Refresh(action) => {
+                        self.dispatch_discovery_action(action, writer, limit).await
+                    }
+                    _ => Ok(LoopControl::Continue),
+                }
+            }
             Input::Key(key) if overlay == Some(OverlayKind::Context) => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.context_view = None;

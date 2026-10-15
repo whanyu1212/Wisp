@@ -2,10 +2,20 @@
 
 use super::*;
 use std::sync::Arc;
-use wisp_protocol::events::{McpStatusSnapshot, SkillCatalogSnapshot};
+use wisp_protocol::events::{McpServerPreview, McpStatusSnapshot, SkillCatalogSnapshot};
 
 pub type SkillReport = Result<Arc<SkillCatalogSnapshot>, String>;
 pub type McpReport = Result<Arc<McpStatusSnapshot>, String>;
+pub type McpPreviewReport = Result<Arc<Vec<McpServerPreview>>, String>;
+
+/// Commands answered with an `rpc.mcp` status report under their own ID.
+const MCP_STATUS_COMMANDS: [&str; 5] = [
+    "get_mcp_status",
+    "add_mcp_server",
+    "remove_mcp_server",
+    "set_mcp_server_enabled",
+    "reconnect_mcp",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 struct PendingInspection<T> {
@@ -123,6 +133,87 @@ pub(super) fn load_mcp(
     ])
 }
 
+/// Ask the backend to parse a pasted snippet. The snippet travels only in a
+/// secret command and is not kept; the reply replaces any earlier preview.
+pub(super) fn preview_mcp_snippet(
+    state: &mut UiState,
+    snippet: SecretText,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.mcp_preview.loading() || state.exit_requested {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::PreviewMcpSnippet);
+    let command = WispTypedClientRpcCommands::preview_mcp_snippet(&id, snippet.as_str())?;
+    drop(snippet);
+    state.mcp_preview.start(id);
+    state.mcp_preview.snapshot = None;
+    Ok(vec![
+        UiEffect::SendSecretCommand(SecretCommand(command)),
+        UiEffect::RequestRender,
+    ])
+}
+
+/// Send one MCP server change. The reply is the MCP status after the backend
+/// restarted its servers, reported like a refresh.
+pub(super) fn change_mcp(
+    state: &mut UiState,
+    change: McpChange,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.mcp.loading() {
+        return Ok(vec![UiEffect::Notice(
+            "Wait for the current MCP update to finish.".into(),
+        )]);
+    }
+    // The backend would queue the change behind the prompt; refusing here keeps
+    // the panel from appearing to hang.
+    if !state.can_select_model() || super::session_sync_pending(state) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing MCP servers.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::ChangeMcpServers);
+    let effect = match change {
+        McpChange::Add {
+            name,
+            launch,
+            env,
+            replace,
+        } => {
+            let values: Vec<(String, String)> = env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.as_str().to_owned()))
+                .collect();
+            let command =
+                WispTypedClientRpcCommands::add_mcp_server(&id, &name, &launch, &values, replace)?;
+            drop(values);
+            UiEffect::SendSecretCommand(SecretCommand(command))
+        }
+        McpChange::Remove(name) => {
+            UiEffect::SendCommand(WispTypedClientRpcCommands::remove_mcp_server(&id, &name)?)
+        }
+        McpChange::SetEnabled {
+            name,
+            enabled,
+            expected,
+        } => UiEffect::SendCommand(WispTypedClientRpcCommands::set_mcp_server_enabled(
+            &id,
+            &name,
+            enabled,
+            expected.as_ref(),
+        )?),
+        McpChange::Reconnect => {
+            UiEffect::SendCommand(WispTypedClientRpcCommands::reconnect_mcp(&id)?)
+        }
+    };
+    state.mcp.start(id);
+    Ok(vec![effect, UiEffect::RequestRender])
+}
+
 pub(super) fn permissions(
     state: &mut UiState,
     mode: Option<wisp_protocol::commands::PermissionMode>,
@@ -175,6 +266,23 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             state.mcp.report(command_id, status);
             Some(Vec::new())
         }
+        BackendEvent::McpSnippetPreviewed {
+            command_id,
+            servers,
+        } => {
+            state.mcp_preview.report(command_id, servers);
+            Some(Vec::new())
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } if command_type == "preview_mcp_snippet"
+            && state.mcp_preview.finish(command_id, *ok, error.as_deref()) =>
+        {
+            Some(vec![UiEffect::RequestRender])
+        }
         BackendEvent::SkillCatalogUpdated(catalog) => {
             if let Some(pending) = &mut state.skills.pending {
                 pending.superseded = true;
@@ -207,7 +315,7 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             command_type,
             ok,
             error,
-        } if command_type == "get_mcp_status"
+        } if MCP_STATUS_COMMANDS.contains(&command_type.as_str())
             && state.mcp.finish(command_id, *ok, error.as_deref()) =>
         {
             Some(vec![UiEffect::RequestRender])
@@ -418,5 +526,151 @@ mod tests {
         assert!(state.skills.snapshot.is_none());
         assert!(state.skills.error.as_ref().unwrap().contains("1 MiB"));
         assert_eq!(state.view_status, ViewStatus::Idle);
+    }
+
+    fn ready_state() -> UiState {
+        let mut state = UiState::unconfigured();
+        state.input_ready = true;
+        state
+    }
+
+    fn sent(effects: &[UiEffect]) -> Value {
+        match &effects[0] {
+            UiEffect::SendCommand(command) => command.to_value().unwrap(),
+            UiEffect::SendSecretCommand(command) => {
+                assert!(!format!("{command:?}").contains("sentinel-value"));
+                serde_json::to_value(command.0.clone()).unwrap()
+            }
+            effect => panic!("expected a command, got {effect:?}"),
+        }
+    }
+
+    #[test]
+    fn mcp_changes_report_status_under_their_own_id() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        let launch = wisp_protocol::events::McpServerLaunch {
+            command: Some("npx".into()),
+            args: vec!["server".into()],
+            ..Default::default()
+        };
+        let secret = SecretText::new("sentinel-value".into(), 64).unwrap();
+        let add = UiAction::ChangeMcpServers(McpChange::Add {
+            name: "docs".into(),
+            launch: launch.clone(),
+            env: vec![("TOKEN".into(), secret)],
+            replace: false,
+        });
+        assert!(!format!("{add:?}").contains("sentinel-value"));
+        let effects = reduce(&mut state, add, &mut ids).unwrap();
+        assert!(matches!(effects[0], UiEffect::SendSecretCommand(_)));
+        let value = sent(&effects);
+        assert_eq!(value["type"], "add_mcp_server");
+        assert_eq!(value["env"]["TOKEN"], "sentinel-value");
+        let id = value["id"].as_str().unwrap().to_owned();
+        assert!(state.mcp.loading());
+
+        // A second change waits for the first.
+        let effects = reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Reconnect),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(matches!(&effects[0], UiEffect::Notice(notice) if notice.contains("Wait")));
+
+        let mut report = fixture("rpc.mcp");
+        report["command_id"] = id.as_str().into();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&report).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        let mut done = finished(&id, "add_mcp_server", true);
+        if let BackendEvent::CommandFinished { error, .. } = &mut done {
+            *error = None;
+        }
+        reduce(&mut state, UiAction::BackendEvent(done), &mut ids).unwrap();
+        assert!(!state.mcp.loading());
+        assert_eq!(state.mcp.snapshot.as_ref().unwrap().servers.len(), 4);
+
+        for (change, kind) in [
+            (McpChange::Remove("docs".into()), "remove_mcp_server"),
+            (
+                McpChange::SetEnabled {
+                    name: "docs".into(),
+                    enabled: true,
+                    expected: Some(launch.clone()),
+                },
+                "set_mcp_server_enabled",
+            ),
+            (McpChange::Reconnect, "reconnect_mcp"),
+        ] {
+            let effects = reduce(&mut state, UiAction::ChangeMcpServers(change), &mut ids).unwrap();
+            let value = sent(&effects);
+            assert_eq!(value["type"], kind);
+            let id = value["id"].as_str().unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished(id, kind, false)),
+                &mut ids,
+            )
+            .unwrap();
+            assert!(!state.mcp.loading());
+            assert_eq!(state.mcp.error.as_deref(), Some("inspection failed"));
+        }
+    }
+
+    #[test]
+    fn mcp_changes_wait_for_the_current_operation() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        reduce(&mut state, UiAction::Submit("work".into()), &mut ids).unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Remove("docs".into())),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(
+            matches!(&effects[..], [UiEffect::Notice(notice)] if notice.contains("Finish the current operation"))
+        );
+        assert!(!state.mcp.loading());
+    }
+
+    #[test]
+    fn a_snippet_preview_is_sent_secretly_and_replaces_the_last_one() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        let snippet = SecretText::new("{\"sentinel-value\": 1}".into(), 1024).unwrap();
+        let action = UiAction::PreviewMcpSnippet(snippet);
+        assert!(!format!("{action:?}").contains("sentinel-value"));
+        let effects = reduce(&mut state, action, &mut ids).unwrap();
+        assert!(matches!(effects[0], UiEffect::SendSecretCommand(_)));
+        let value = sent(&effects);
+        assert_eq!(value["type"], "preview_mcp_snippet");
+        let id = value["id"].as_str().unwrap().to_owned();
+        let mut report = fixture("rpc.mcp.preview");
+        report["command_id"] = id.as_str().into();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&report).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        let mut done = finished(&id, "preview_mcp_snippet", true);
+        if let BackendEvent::CommandFinished { error, .. } = &mut done {
+            *error = None;
+        }
+        reduce(&mut state, UiAction::BackendEvent(done), &mut ids).unwrap();
+        let preview = state.mcp_preview.snapshot.as_deref().unwrap();
+        assert_eq!(preview[0].name, "github");
+
+        // A new preview drops the old result before its own reply arrives.
+        let snippet = SecretText::new("{}".into(), 1024).unwrap();
+        reduce(&mut state, UiAction::PreviewMcpSnippet(snippet), &mut ids).unwrap();
+        assert!(state.mcp_preview.snapshot.is_none());
+        assert!(state.mcp_preview.loading());
     }
 }

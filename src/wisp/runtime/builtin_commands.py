@@ -93,7 +93,7 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
         CommandDescriptor(
             name="mcp",
             title="MCP servers",
-            description="Show MCP server and tool status",
+            description="Show and manage MCP servers",
             category=CommandCategory.configuration,
             order=28,
         ),

@@ -1,6 +1,7 @@
-//! Skill selection and read-only MCP inspection over backend snapshots.
+//! Skill selection, MCP server management, and the `/permissions` picker.
 
 use crate::{
+    mcp_manager::McpView,
     mouse::Rows,
     reducer::{UiAction, UiState},
     session_picker::terminal_row,
@@ -18,8 +19,9 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::{McpServerStatus, SkillCatalogSnapshot};
+use wisp_protocol::events::SkillCatalogSnapshot;
 
+#[derive(Debug)]
 pub(crate) enum DiscoveryAction {
     None,
     Close,
@@ -29,7 +31,7 @@ pub(crate) enum DiscoveryAction {
 
 pub(crate) enum DiscoveryView {
     Skills(SkillsView),
-    Mcp(ReportView),
+    Mcp(Box<McpView>),
     Permissions(PermissionsView),
 }
 
@@ -69,7 +71,7 @@ impl DiscoveryView {
     }
 
     pub fn mcp() -> Self {
-        Self::Mcp(ReportView::default())
+        Self::Mcp(Box::default())
     }
 
     pub fn permissions() -> Self {
@@ -77,12 +79,18 @@ impl DiscoveryView {
     }
 
     pub fn key_activates(&self, key: KeyEvent) -> bool {
+        if let Self::Mcp(view) = self {
+            return view.key_activates(key);
+        }
         key.code == KeyCode::Enter
             || (matches!(self, Self::Permissions(_))
                 && matches!(key.code, KeyCode::Char('1' | '2')))
     }
 
     pub fn invalidate_selection(&mut self) {
+        if let Self::Mcp(view) = self {
+            view.invalidate();
+        }
         if let Self::Permissions(view) = self {
             view.painted = false;
             view.rendered = None;
@@ -119,7 +127,33 @@ impl DiscoveryView {
         true
     }
 
+    /// The MCP view, when it shows a panel docked above the composer.
+    pub fn docked_mcp(&mut self) -> Option<&mut McpView> {
+        match self {
+            Self::Mcp(view) if view.docked() => Some(view.as_mut()),
+            _ => None,
+        }
+    }
+
+    /// Move the MCP view past a finished snippet preview before it is measured.
+    pub fn sync_mcp(&mut self, state: &UiState) {
+        if let Self::Mcp(view) = self {
+            view.advance(state);
+        }
+    }
+
+    pub fn handle_paste(&mut self, text: &str, state: &UiState) -> DiscoveryAction {
+        match self {
+            Self::Mcp(view) => view.handle_paste(text, state),
+            _ => DiscoveryAction::None,
+        }
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent, state: &UiState) -> DiscoveryAction {
+        // The MCP view takes typed text (hidden values), so it handles every key.
+        if let Self::Mcp(view) = self {
+            return view.handle_key(key, state);
+        }
         if key.code == KeyCode::Esc
             || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
         {
@@ -131,7 +165,7 @@ impl DiscoveryView {
         if key.code == KeyCode::Char('r') {
             return DiscoveryAction::Refresh(match self {
                 Self::Skills(_) => UiAction::LoadSkills,
-                Self::Mcp(_) => UiAction::LoadMcpStatus,
+                Self::Mcp(_) => unreachable!("the MCP view handles its own keys"),
                 Self::Permissions(_) => UiAction::Permissions(None),
             });
         }
@@ -168,10 +202,7 @@ impl DiscoveryView {
                 DiscoveryAction::Refresh(UiAction::Permissions(Some(PERMISSION_CHOICES[choice].2)))
             }
             Self::Skills(view) => view.handle_key(key.code, state.skills.snapshot.as_deref()),
-            Self::Mcp(view) => {
-                view.scroll(key.code);
-                DiscoveryAction::None
-            }
+            Self::Mcp(_) => unreachable!("the MCP view handles its own keys"),
         }
     }
 
@@ -187,46 +218,7 @@ impl DiscoveryView {
             Self::Permissions(view) => view.render(frame, area, state, palette),
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(palette.border())
-                    .title(" MCP servers ")
-                    .title_bottom(" ↑↓ PgUp/PgDn · r refresh · Esc close ");
-                let inner = block.inner(area);
-                frame.render_widget(block, area);
-                let mut rows = Vec::new();
-                if state.mcp.loading() {
-                    rows.push("Refreshing MCP status…".into());
-                }
-                if let Some(error) = &state.mcp.error {
-                    rows.push(format!("Refresh failed: {error}"));
-                }
-                if let Some(status) = &state.mcp.snapshot {
-                    rows.push("Status at last refresh (r to update).".into());
-                    if status.servers.is_empty() {
-                        rows.push("No MCP servers configured.".into());
-                    }
-                    for server in &status.servers {
-                        rows.push(if server.status == McpServerStatus::Disabled {
-                            format!("{}: disabled", server.name)
-                        } else {
-                            format!(
-                                "{}: {} ({} registered tools)",
-                                server.name,
-                                server.status.as_str(),
-                                server.tool_names.len()
-                            )
-                        });
-                        if let Some(error) = &server.error {
-                            rows.push(error.clone());
-                        }
-                        rows.extend(server.tool_names.iter().map(|name| format!("  {name}")));
-                        rows.push(String::new());
-                    }
-                } else {
-                    rows.push("MCP status unavailable.".into());
-                }
-                view.render(frame, inner, &rows);
+                view.render(frame, area, state, palette);
                 Rows::default()
             }
         }
@@ -436,7 +428,7 @@ pub(crate) struct ReportView {
 }
 
 impl ReportView {
-    fn scroll(&mut self, key: KeyCode) {
+    pub(crate) fn scroll(&mut self, key: KeyCode) {
         self.offset = match key {
             KeyCode::Up => self.offset.saturating_sub(1),
             KeyCode::Down => self.offset.saturating_add(1),
@@ -449,7 +441,7 @@ impl ReportView {
         .min(self.rows.saturating_sub(self.page_height));
     }
 
-    fn render(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[String]) {
+    pub(crate) fn render(&mut self, frame: &mut Frame<'_>, area: Rect, rows: &[String]) {
         if area.width == 0 || area.height == 0 {
             return;
         }
@@ -692,14 +684,19 @@ mod tests {
             ],
         }));
         let mut view = DiscoveryView::mcp();
-        assert!(draw(&mut view, &state, 80, 24).contains("connected (1 registered tools)"));
+        assert!(draw(&mut view, &state, 80, 24).contains("connected-server  connected · 1 tools"));
+        // A long tool name stays reachable by scrolling the selected server's details.
+        view.handle_key(key(KeyCode::Down), &state);
         draw(&mut view, &state, 30, 8);
         view.handle_key(key(KeyCode::End), &state);
+        assert!(draw(&mut view, &state, 30, 8).contains("final-tool"));
+        view.handle_key(key(KeyCode::Down), &state);
         let rendered = draw(&mut view, &state, 30, 8);
         assert!(rendered.contains("unavailable"));
         assert!(rendered.contains("backend failed"));
-        assert!(rendered.contains("paused: disabled"));
         assert!(!rendered.contains('\u{1b}'));
+        view.handle_key(key(KeyCode::Down), &state);
+        assert!(draw(&mut view, &state, 30, 8).contains("paused  disabled"));
         assert!(matches!(
             view.handle_key(key(KeyCode::Char('r')), &state),
             DiscoveryAction::Refresh(UiAction::LoadMcpStatus)
@@ -724,7 +721,7 @@ mod tests {
         ));
         let rendered = draw(&mut DiscoveryView::mcp(), &state, 80, 12);
         assert!(rendered.contains("No MCP servers configured."));
-        assert!(rendered.contains("Refresh failed: request failed"));
+        assert!(rendered.contains("Error: request failed"));
         for (width, height) in [(0, 0), (1, 1), (10, 3)] {
             draw(&mut skills, &state, width, height);
         }

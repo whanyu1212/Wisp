@@ -132,6 +132,15 @@ impl BackendEvent {
                 let status = discovery_report(&value["status"], || event.mcp_status(&command_id));
                 return Ok(Self::McpStatusReported { command_id, status });
             }
+            "rpc.mcp.preview" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let servers =
+                    discovery_report(&value["servers"], || event.mcp_snippet_preview(&command_id));
+                return Ok(Self::McpSnippetPreviewed {
+                    command_id,
+                    servers,
+                });
+            }
             "session.stats" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let mut stats = event.session_stats(&command_id).ok_or_else(|| {
@@ -313,6 +322,7 @@ impl BackendEvent {
             | "rpc.skills"
             | "skill.catalog.updated"
             | "rpc.mcp"
+            | "rpc.mcp.preview"
             | "rpc.permissions"
             | "rpc.commands"
             | "rpc.state"

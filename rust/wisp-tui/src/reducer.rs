@@ -243,6 +243,48 @@ impl ApiKey {
     }
 }
 
+/// Text that must never be shown, logged, or kept in the transcript: an MCP
+/// environment value or a pasted config snippet. `Debug` is redacted.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SecretText(String);
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SecretText(<redacted>)")
+    }
+}
+
+impl SecretText {
+    /// Wrap `value` if it is non-empty and at most `max_bytes` long.
+    pub fn new(value: String, max_bytes: usize) -> Option<Self> {
+        (!value.is_empty() && value.len() <= max_bytes).then_some(Self(value))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// An MCP server change, answered with the resulting MCP status.
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpChange {
+    /// Save a server the user confirmed. `env` holds the values the user entered.
+    Add {
+        name: String,
+        launch: wisp_protocol::events::McpServerLaunch,
+        env: Vec<(String, SecretText)>,
+        replace: bool,
+    },
+    Remove(String),
+    /// Enabling carries the launch settings the user confirmed.
+    SetEnabled {
+        name: String,
+        enabled: bool,
+        expected: Option<wisp_protocol::events::McpServerLaunch>,
+    },
+    Reconnect,
+}
+
 pub struct SecretCommand(WispTypedClientRpcCommands);
 
 impl std::fmt::Debug for SecretCommand {
@@ -682,6 +724,7 @@ pub struct UiState {
     pub(crate) context: context::ContextState,
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
+    pub(crate) mcp_preview: discovery::Inspection<Vec<wisp_protocol::events::McpServerPreview>>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
@@ -747,6 +790,7 @@ impl UiState {
             context: context::ContextState::default(),
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
+            mcp_preview: discovery::Inspection::default(),
             permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
@@ -904,6 +948,8 @@ pub enum CommandKind {
     GetSessionStats,
     GetSkills,
     GetMcpStatus,
+    PreviewMcpSnippet,
+    ChangeMcpServers,
     Permissions,
     GetProjectFiles,
     GetSessions,
@@ -944,6 +990,8 @@ impl CommandKind {
             Self::GetSessionStats => "get_session_stats",
             Self::GetSkills => "get_skills",
             Self::GetMcpStatus => "get_mcp_status",
+            Self::PreviewMcpSnippet => "preview_mcp_snippet",
+            Self::ChangeMcpServers => "mcp_change",
             Self::Permissions => "permissions",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
@@ -1008,6 +1056,10 @@ pub enum BackendEvent {
     McpStatusReported {
         command_id: String,
         status: discovery::McpReport,
+    },
+    McpSnippetPreviewed {
+        command_id: String,
+        servers: discovery::McpPreviewReport,
     },
     SessionStatsReported {
         command_id: String,
@@ -1150,6 +1202,9 @@ pub enum UiAction {
     Init,
     LoadSkills,
     LoadMcpStatus,
+    /// Parse a pasted MCP config snippet without saving it.
+    PreviewMcpSnippet(SecretText),
+    ChangeMcpServers(McpChange),
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     SetProjectFilesOpen(bool),
     LoadContext,
@@ -1338,6 +1393,10 @@ pub fn reduce(
     let mut effects = match action {
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
+        UiAction::PreviewMcpSnippet(snippet) => {
+            Ok(discovery::preview_mcp_snippet(state, snippet, ids)?)
+        }
+        UiAction::ChangeMcpServers(change) => Ok(discovery::change_mcp(state, change, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
@@ -1443,6 +1502,7 @@ pub fn reduce(
             state.context.close();
             state.skills.close();
             state.mcp.close();
+            state.mcp_preview.close();
             state.permissions.close();
             state.project_files.close();
             state.model_operation = None;
@@ -4519,6 +4579,7 @@ fn handle_backend_event(
         | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)
         | BackendEvent::McpStatusReported { .. }
+        | BackendEvent::McpSnippetPreviewed { .. }
         | BackendEvent::PermissionsReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
