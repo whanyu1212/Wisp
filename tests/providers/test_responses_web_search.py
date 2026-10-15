@@ -217,3 +217,32 @@ def test_codex_reports_completed_web_search_calls(tmp_path: Path) -> None:
         ),
         ProviderWebSearch(),
     ]
+
+
+def test_openai_skips_search_shapes_it_cannot_read() -> None:
+    # A missing action or a source that is not a page must not end the turn.
+    provider, _ = _openai(
+        [
+            _web_search_done(None),
+            _web_search_done(
+                ActionSearch.model_construct(
+                    type="search",
+                    query="weather",
+                    sources=[
+                        ActionSearchSource.model_construct(type="api", name="oai-weather"),
+                        ActionSearchSource(type="url", url="https://weather.test/"),
+                    ],
+                )
+            ),
+        ]
+    )
+
+    events = _stream(provider, web_search=True)
+
+    assert [event for event in events if isinstance(event, ProviderWebSearch)] == [
+        ProviderWebSearch(),
+        ProviderWebSearch(
+            query="weather", sources=(ProviderWebSource(url="https://weather.test/"),)
+        ),
+    ]
+    assert isinstance(events[-1], ProviderResponseCompleted)

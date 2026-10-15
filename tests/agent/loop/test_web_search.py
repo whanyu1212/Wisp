@@ -9,7 +9,7 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.loop.model_response import ModelResponseStream
+from wisp.agent.loop.model_response import CompletedModelResponse, ModelResponseStream
 from wisp.agent.loop.provider_request import open_provider_stream
 from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
@@ -162,3 +162,27 @@ def test_a_search_before_the_response_starts_is_a_protocol_error() -> None:
 
     with pytest.raises(ProviderProtocolError, match="before response_started"):
         _response_events(provider)
+
+
+def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
+    stream = ModelResponseStream(
+        config=AgentLoopConfig(
+            provider=_SearchingProvider(  # type: ignore[arg-type]
+                [ProviderResponseStarted(model="searching"), ProviderWebSearch(query="q")]
+            ),
+            tool_executor=_NeverExecutor(),
+            web_search=True,
+        ),
+        messages=(Message(role="user", content="go"),),
+        tool_results=(),
+        extra_messages=(),
+        previous_response_id=None,
+    )
+
+    async def run() -> None:
+        _ = [event async for event in stream.events(turn=1)]
+
+    anyio.run(run)
+
+    assert isinstance(stream.outcome, CompletedModelResponse)
+    assert stream.outcome.had_streamed_delta is True

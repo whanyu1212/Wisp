@@ -685,7 +685,11 @@ def _web_search_from_openai(item: ResponseFunctionWebSearch) -> ProviderWebSearc
     """Report one completed web_search_call item as a provider search."""
 
     error = "failed" if item.status == "failed" else None
-    action = item.action
+    # Backends may omit the action or report sources that are not pages (an
+    # API, for example). A shape this cannot read still reports the search.
+    action = getattr(item, "action", None)
+    if action is None:
+        return ProviderWebSearch(error=error)
     if action.type == "open_page":
         sources = (ProviderWebSource(url=action.url),) if action.url else ()
         return ProviderWebSearch(action="open_page", sources=sources, error=error)
@@ -693,13 +697,17 @@ def _web_search_from_openai(item: ResponseFunctionWebSearch) -> ProviderWebSearc
         return ProviderWebSearch(
             action="find_in_page",
             query=action.pattern,
-            sources=(ProviderWebSource(url=action.url),),
+            sources=(ProviderWebSource(url=action.url),) if action.url else (),
             error=error,
         )
     query = action.query or "; ".join(action.queries or ()) or None
     return ProviderWebSearch(
         query=query,
-        sources=tuple(ProviderWebSource(url=source.url) for source in action.sources or ()),
+        sources=tuple(
+            ProviderWebSource(url=url)
+            for source in action.sources or ()
+            if isinstance(url := getattr(source, "url", None), str) and url
+        ),
         error=error,
     )
 

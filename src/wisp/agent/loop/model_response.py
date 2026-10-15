@@ -190,6 +190,9 @@ class ModelResponseStream:
                             lifecycle.add_tool_call(provider_event.tool_call)
                         elif isinstance(provider_event, ProviderWebSearch):
                             lifecycle.add_web_search()
+                            # A published search is visible, billed output: a
+                            # retry after overflow would run and record it again.
+                            attempt_had_streamed_delta = True
                             yield _web_search_event(
                                 provider_event,
                                 turn=turn,

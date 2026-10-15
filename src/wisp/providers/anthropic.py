@@ -117,8 +117,10 @@ _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 # run searches from code execution by default, which adds code-execution blocks
 # to every turn that the replay would have to keep.
 _WEB_SEARCH_TOOL_NAME = "web_search"
-# Searches allowed in one request. Past the cap the model gets a
-# max_uses_exceeded result instead of another search.
+# Searches allowed in one response. Past the cap the model gets a
+# max_uses_exceeded result instead of another search. Anthropic applies the cap
+# per request, so a resumed paused turn gets only what is left (at least one,
+# since the cap must be positive).
 _WEB_SEARCH_MAX_USES = 5
 # A long server-side search loop can stop with pause_turn. The adapter resends
 # the paused turn so the server can resume, at most this many times, and then
@@ -222,6 +224,14 @@ class _StreamedTurn:
         self.finish_reason = "stop"
         self.stream_completed = False
 
+    def searches_run(self) -> int:
+        """Return how many search results this turn has received so far."""
+
+        return sum(
+            accumulator.block_type == "web_search_tool_result"
+            for accumulator in self.blocks.values()
+        )
+
     def total_usage(self) -> ProviderUsage | None:
         """Return the usage of every request that built this turn."""
 
@@ -282,7 +292,8 @@ class _StreamedTurn:
         elif delta.type == "input_json_delta":
             accumulator.tool_use_json_chunks.append(delta.partial_json)
         elif delta.type == "citations_delta":
-            accumulator.citations.append(delta.citation.model_dump(mode="json", exclude_none=True))
+            # Not exclude_none: a citation's title is a required key even when null.
+            accumulator.citations.append(delta.citation.model_dump(mode="json"))
         return []
 
     def _search_query(self, tool_use_id: str) -> str | None:
@@ -401,6 +412,10 @@ class AnthropicProvider:
         for continuation in range(_MAX_PAUSE_CONTINUATIONS + 1):
             if continuation:
                 request["paused_turn"] = _replay_message_from_stream(turn.blocks)
+                if web_search:
+                    request["web_search_max_uses"] = max(
+                        1, _WEB_SEARCH_MAX_USES - turn.searches_run()
+                    )
             stream: AsyncIterator[RawMessageStreamEvent] | None = None
             # Retry progress may only precede the response start, so a resumed
             # request retries without reporting it.
@@ -613,6 +628,7 @@ class AnthropicProvider:
         effort: str | None = None,
         web_search: bool = False,
         paused_turn: MessageParam | None = None,
+        web_search_max_uses: int = _WEB_SEARCH_MAX_USES,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         client = await self._client_or_create()
         anthropic_messages = _messages_to_anthropic(messages)
@@ -633,7 +649,7 @@ class AnthropicProvider:
             web_search_tool: WebSearchTool20250305Param = {
                 "type": "web_search_20250305",
                 "name": "web_search",
-                "max_uses": _WEB_SEARCH_MAX_USES,
+                "max_uses": web_search_max_uses,
             }
             anthropic_tools.append(web_search_tool)
 

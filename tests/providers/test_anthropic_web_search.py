@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, cast
 
+import anthropic
 import anyio
+import httpx
 from anthropic import AsyncAnthropic
 from anthropic.types import (
     CitationsDelta,
@@ -36,6 +38,7 @@ from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderToolCallCompleted,
     ProviderUsage,
@@ -406,3 +409,98 @@ def test_a_turn_still_paused_after_every_resume_is_incomplete() -> None:
     assert isinstance(completed, ProviderResponseCompleted)
     assert completed.finish_reason == "length"
     assert len(resource.calls) == 4
+
+
+def test_a_citation_without_a_title_is_replayed_with_its_null_title() -> None:
+    # The API requires the title key on a replayed citation, even when null.
+    untitled = RawContentBlockDeltaEvent(
+        delta=CitationsDelta(
+            citation=CitationsWebSearchResultLocation(
+                cited_text="cited",
+                encrypted_index="ENCRYPTED-INDEX",
+                title=None,
+                url="https://example.test/",
+                type="web_search_result_location",
+            ),
+            type="citations_delta",
+        ),
+        index=0,
+        type="content_block_delta",
+    )
+    provider, resource = _provider(
+        [
+            message_start_event("msg-1"),
+            _block_start(TextBlock(text="", type="text"), index=0),
+            text_delta_event("Found it.", index=0),
+            untitled,
+            message_delta_event("end_turn"),
+        ],
+        [message_delta_event("end_turn")],
+    )
+
+    _stream(provider, web_search=True)
+    _stream(
+        provider,
+        web_search=True,
+        extra_messages=[WispMessage(role="user", content="thanks")],
+        previous_response_id="msg-1",
+    )
+
+    citation = resource.calls[1]["messages"][-2]["content"][0]["citations"][0]
+    assert "title" in citation
+    assert citation["title"] is None
+
+
+def test_a_resumed_turn_may_only_use_the_searches_left() -> None:
+    provider, resource = _provider(
+        [
+            *_search_request("srvtoolu_1", "linear", index=0),
+            _search_result("srvtoolu_1", index=1),
+            *_search_request("srvtoolu_2", "linear mcp", index=2),
+            _search_result("srvtoolu_2", index=3),
+            message_delta_event("pause_turn"),
+        ],
+        [message_delta_event("end_turn")],
+    )
+
+    _stream(provider, web_search=True)
+
+    assert resource.calls[0]["tools"][-1]["max_uses"] == 5
+    assert resource.calls[1]["tools"][-1]["max_uses"] == 3
+
+
+def test_a_resumed_request_that_fails_keeps_the_partial_answer_and_failure_kind() -> None:
+    class _OverflowOnResume(AnthropicProvider):
+        def __init__(self) -> None:
+            super().__init__(api_key="test-key")
+            self.requests = 0
+
+        async def _create_stream(self, messages: Any, **request: Any) -> Any:
+            self.requests += 1
+            if self.requests > 1:
+                raise anthropic.BadRequestError(
+                    "prompt is too long",
+                    response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+                    body=None,
+                )
+
+            async def stream() -> Any:
+                for event in [
+                    message_start_event("msg-1"),
+                    _block_start(TextBlock(text="", type="text"), index=0),
+                    text_delta_event("Searching.", index=0),
+                    *_search_request("srvtoolu_1", "linear", index=1),
+                    message_delta_event("pause_turn"),
+                ]:
+                    yield event
+
+            return stream()
+
+    events = _stream(_OverflowOnResume(), web_search=True)
+
+    failed = events[-1]
+    assert isinstance(failed, ProviderResponseFailed)
+    assert failed.failure_kind == "context_overflow"
+    assert failed.partial_content == "Searching."
+    assert failed.response_id == "msg-1"
+    assert sum(isinstance(event, ProviderResponseStarted) for event in events) == 1

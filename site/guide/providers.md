@@ -113,7 +113,7 @@ cannot turn it on.
 
 | Provider | Search tool |
 |---|---|
-| `anthropic` | Anthropic's web search (`web_search_20250305`), at most 5 searches per request |
+| `anthropic` | Anthropic's web search (`web_search_20250305`), at most 5 searches per reply (one more each time Anthropic pauses a long search, at most 3) |
 | `openai` | The Responses API `web_search` tool |
 | `openai-codex` | The same `web_search` tool, as the Codex CLI's search option uses |
 | `xai` | xAI's `web_search` tool |
