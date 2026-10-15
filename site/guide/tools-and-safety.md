@@ -136,6 +136,9 @@ starting it.
 
 Run `/mcp` in the TUI to inspect configured server status, registered tool names, and sanitized
 startup failures. The command reads the current runtime snapshot and does not reconnect servers.
+SDK and RPC clients can add, remove, enable, disable, and reconnect servers without restarting
+Wisp; see the [SDK reference](../reference/sdk). Changes made with `wisp mcp` still apply the next
+time Wisp starts, or after a reconnect.
 
 > [!TIP]
 > **Why 16 servers**

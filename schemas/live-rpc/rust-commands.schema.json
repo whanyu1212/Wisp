@@ -1,5 +1,89 @@
 {
   "$defs": {
+    "AddMcpServerCommand": {
+      "additionalProperties": false,
+      "description": "Save an MCP server to the user settings, then restart MCP servers.\n\nThe entry has the shape of one ``mcp_servers`` settings entry. ``env`` holds\nliteral values the user entered; they are written to the settings file and\nnever echoed in events, errors, or this model's repr. Adding a server that runs\na command is the user's decision: a frontend must show the exact command,\narguments, and ``env_from`` names and have the user confirm before sending it.",
+      "properties": {
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "AddMcpServerCommandArgs",
+          "type": "array"
+        },
+        "command": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "AddMcpServerCommandCommand"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "AddMcpServerCommandEnv",
+          "type": "object"
+        },
+        "env_from": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "AddMcpServerCommandEnvFrom",
+          "type": "array"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "AddMcpServerCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "AddMcpServerCommandName",
+          "type": "string"
+        },
+        "replace": {
+          "default": false,
+          "title": "AddMcpServerCommandReplace",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "add_mcp_server",
+          "default": "add_mcp_server",
+          "title": "AddMcpServerCommandType",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "AddMcpServerCommandUrl"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "args",
+        "env",
+        "env_from",
+        "replace"
+      ],
+      "title": "AddMcpServerCommand",
+      "type": "object"
+    },
     "AgentMode": {
       "enum": [
         "build",
@@ -1072,6 +1156,67 @@
       "title": "PromptCommand",
       "type": "object"
     },
+    "ReconnectMcpCommand": {
+      "additionalProperties": false,
+      "description": "Reload MCP servers from the user settings and restart them.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "ReconnectMcpCommandId"
+        },
+        "type": {
+          "const": "reconnect_mcp",
+          "default": "reconnect_mcp",
+          "title": "ReconnectMcpCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ReconnectMcpCommand",
+      "type": "object"
+    },
+    "RemoveMcpServerCommand": {
+      "additionalProperties": false,
+      "description": "Remove an MCP server from the user settings, then restart MCP servers.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "RemoveMcpServerCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "RemoveMcpServerCommandName",
+          "type": "string"
+        },
+        "type": {
+          "const": "remove_mcp_server",
+          "default": "remove_mcp_server",
+          "title": "RemoveMcpServerCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name"
+      ],
+      "title": "RemoveMcpServerCommand",
+      "type": "object"
+    },
     "SelectSessionCommand": {
       "additionalProperties": false,
       "description": "Select a persisted session as the active RPC session.",
@@ -1103,6 +1248,45 @@
         "session_id"
       ],
       "title": "SelectSessionCommand",
+      "type": "object"
+    },
+    "SetMcpServerEnabledCommand": {
+      "additionalProperties": false,
+      "description": "Enable or disable an MCP server in the user settings, then restart MCP servers.\n\nEnabling a server that runs a command is the user's decision, as adding one is.",
+      "properties": {
+        "enabled": {
+          "title": "SetMcpServerEnabledCommandEnabled",
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "SetMcpServerEnabledCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "SetMcpServerEnabledCommandName",
+          "type": "string"
+        },
+        "type": {
+          "const": "set_mcp_server_enabled",
+          "default": "set_mcp_server_enabled",
+          "title": "SetMcpServerEnabledCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "enabled"
+      ],
+      "title": "SetMcpServerEnabledCommand",
       "type": "object"
     },
     "SetPermissionsCommand": {
@@ -1418,6 +1602,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "discriminator": {
     "mapping": {
+      "add_mcp_server": "#/$defs/AddMcpServerCommand",
       "approval": "#/$defs/ApprovalCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
       "cancel": "#/$defs/CancelCommand",
@@ -1446,7 +1631,10 @@
       "new_session": "#/$defs/NewSessionCommand",
       "pop_queue": "#/$defs/PopQueueCommand",
       "prompt": "#/$defs/PromptCommand",
+      "reconnect_mcp": "#/$defs/ReconnectMcpCommand",
+      "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
       "select_session": "#/$defs/SelectSessionCommand",
+      "set_mcp_server_enabled": "#/$defs/SetMcpServerEnabledCommand",
       "set_permissions": "#/$defs/SetPermissionsCommand",
       "set_queue_mode": "#/$defs/SetQueueModeCommand",
       "set_session_name": "#/$defs/SetSessionNameCommand",
@@ -1506,6 +1694,18 @@
     },
     {
       "$ref": "#/$defs/GetMcpStatusCommand"
+    },
+    {
+      "$ref": "#/$defs/AddMcpServerCommand"
+    },
+    {
+      "$ref": "#/$defs/RemoveMcpServerCommand"
+    },
+    {
+      "$ref": "#/$defs/SetMcpServerEnabledCommand"
+    },
+    {
+      "$ref": "#/$defs/ReconnectMcpCommand"
     },
     {
       "$ref": "#/$defs/GetMessagesCommand"

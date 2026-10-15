@@ -11,6 +11,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from wisp.coding import CodingSession
 from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
+    AddMcpServerCommand,
     ApprovalCommand,
     BeginDeviceCodeCommand,
     CancelCommand,
@@ -40,7 +41,10 @@ from wisp.rpc.commands import (
     ParsedRpcCommand,
     PopQueueCommand,
     PromptCommand,
+    ReconnectMcpCommand,
+    RemoveMcpServerCommand,
     SelectSessionCommand,
+    SetMcpServerEnabledCommand,
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
@@ -50,6 +54,7 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
+from wisp.rpc.handlers.mcp import McpServerCommand, RpcMcpServers
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -142,9 +147,11 @@ class RpcCommandExecutor:
         defer_until_after_flush: Callable[[Callable[[], None]], None] | None = None,
         project_files: RpcProjectFiles | None = None,
         publish_project_files: ProjectFilesPublisher | None = None,
+        mcp_servers: RpcMcpServers | None = None,
         outbound_frame_limit: int | None = None,
     ) -> None:
         self.project_files = project_files
+        self.mcp_servers = mcp_servers
         self.publish_project_files = publish_project_files
         self.outbound_frame_limit = outbound_frame_limit
         self.agent = agent
@@ -244,6 +251,17 @@ class RpcCommandExecutor:
         if isinstance(known, GetMcpStatusCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_mcp_status(known, running_command)
+        if isinstance(
+            known,
+            (
+                AddMcpServerCommand,
+                RemoveMcpServerCommand,
+                SetMcpServerEnabledCommand,
+                ReconnectMcpCommand,
+            ),
+        ):
+            self.coordinator.running_command = running_command
+            return self._dispatch_mcp_servers(known, running_command)
         if isinstance(known, StoreApiKeyCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_store_api_key(known, running_command)
@@ -638,6 +656,29 @@ class RpcCommandExecutor:
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_mcp_servers(
+        self,
+        command: McpServerCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        if self.mcp_servers is None:
+            RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
+                "MCP server changes are unavailable"
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        return _RpcDispatchResult(
+            running_command=self.mcp_servers.start(
+                command,
+                running_command=running_command,
+                session_state=self.session_state,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
 
     def _dispatch_begin_device_code(
         self,

@@ -18,7 +18,7 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::SkillCatalogSnapshot;
+use wisp_protocol::events::{McpServerStatus, SkillCatalogSnapshot};
 
 pub(crate) enum DiscoveryAction {
     None,
@@ -207,12 +207,16 @@ impl DiscoveryView {
                         rows.push("No MCP servers configured.".into());
                     }
                     for server in &status.servers {
-                        rows.push(format!(
-                            "{}: {} ({} registered tools)",
-                            server.name,
-                            server.status.as_str(),
-                            server.tool_names.len()
-                        ));
+                        rows.push(if server.status == McpServerStatus::Disabled {
+                            format!("{}: disabled", server.name)
+                        } else {
+                            format!(
+                                "{}: {} ({} registered tools)",
+                                server.name,
+                                server.status.as_str(),
+                                server.tool_names.len()
+                            )
+                        });
                         if let Some(error) = &server.error {
                             rows.push(error.clone());
                         }
@@ -675,6 +679,12 @@ mod tests {
                     tool_names: vec![],
                     error: Some("\u{1b}[31mbackend failed".into()),
                 },
+                McpServerSnapshot {
+                    name: "paused".into(),
+                    status: McpServerStatus::Disabled,
+                    tool_names: vec![],
+                    error: None,
+                },
             ],
         }));
         let mut view = DiscoveryView::mcp();
@@ -684,6 +694,7 @@ mod tests {
         let rendered = draw(&mut view, &state, 30, 8);
         assert!(rendered.contains("unavailable"));
         assert!(rendered.contains("backend failed"));
+        assert!(rendered.contains("paused: disabled"));
         assert!(!rendered.contains('\u{1b}'));
         assert!(matches!(
             view.handle_key(key(KeyCode::Char('r')), &state),

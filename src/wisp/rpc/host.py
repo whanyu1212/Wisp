@@ -48,6 +48,7 @@ from wisp.rpc.execution import (
     rpc_session_state,
 )
 from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot
+from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
 from wisp.rpc.handlers.project_files import RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
@@ -132,6 +133,21 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
 
         self.approved_tools = self._baseline_approved_tools
         self.approved_safety = self._baseline_approved_safety
+
+    def revoke_session_tool_grants(self, prefix: str) -> None:
+        """Expire per-tool session grants for tools whose names start with ``prefix``.
+
+        Startup grants and the permission mode are kept.
+
+        Args:
+            prefix (str): Tool-name prefix, such as ``"mcp__"`` for MCP tools.
+        """
+
+        self.approved_tools = frozenset(
+            name
+            for name in self.approved_tools
+            if not name.startswith(prefix) or name in self._baseline_approved_tools
+        )
 
     def permissions_snapshot(self) -> PermissionState:
         """Return effective permissions without reading the preference store."""
@@ -445,11 +461,22 @@ class RpcHost:
         on_shutdown_dispatched: Callable[[], None] | None = None,
         on_shutdown_abandoned: Callable[[], None] | None = None,
         outbound_frame_limit: int | None = None,
+        tool_selection: RpcToolSelection | None = None,
     ) -> None:
         self.runtime = runtime
         self.sessions = sessions
         self.agent = agent
         self.project_files = RpcProjectFiles(agent.tool_context)
+        self.mcp_servers = (
+            RpcMcpServers(
+                runtime=runtime,
+                agent=agent,
+                tool_selection=tool_selection,
+                revoke_session_tool_grants=approval_policy.revoke_session_tool_grants,
+            )
+            if tool_selection is not None
+            else None
+        )
         self.approval_policy = approval_policy
         self.trust_gate = trust_gate
         self.configure_overrides = configure_overrides
@@ -620,6 +647,11 @@ class RpcHost:
             on_shutdown_dispatched=on_shutdown_dispatched,
             on_shutdown_abandoned=on_shutdown_abandoned,
             outbound_frame_limit=outbound_frame_limit,
+            tool_selection=RpcToolSelection(
+                all_tools=options.all_tools,
+                allow_read_tools=options.allow_read_tools,
+                allowed_tools=options.allowed_tools,
+            ),
         )
         for event in runtime.startup_events:
             write_event(event)
@@ -662,6 +694,7 @@ class RpcHost:
                 coordinator=self.coordinator,
                 project_files=self.project_files,
                 publish_project_files=self._publish_project_files,
+                mcp_servers=self.mcp_servers,
                 write_event=write_event,
                 render_events=self._render_event_stream,
                 defer_until_after_flush=after_flush.append,

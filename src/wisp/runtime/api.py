@@ -127,9 +127,16 @@ class WispRuntime:
         repr=False,
     )
     mcp_runtime: McpRuntime | None = field(default=None, repr=False)
+    # Configured servers that are not started because their settings disable them.
+    disabled_mcp_servers: tuple[str, ...] = ()
+    # Enabled servers left without a connection because a restart of the whole MCP
+    # runtime failed; per-server failures are in `mcp_runtime.diagnostics` instead.
+    failed_mcp_servers: tuple[str, ...] = ()
     auth_store: JsonAuthStore | None = field(default=None, repr=False)
     openai_compatible_provider: str | None = None
     openai_compatible_requires_api_key: bool = True
+    # Events from building this runtime. They are not refreshed when MCP servers
+    # restart; a restart reports its problems through MCP status instead.
     startup_events: tuple[WispEvent, ...] = ()
     unavailable_tool_prefixes: tuple[str, ...] = ()
     _configured_providers: dict[str, Provider] = field(default_factory=dict, repr=False)
@@ -146,6 +153,26 @@ class WispRuntime:
             object.__setattr__(self, "commands", self.api.commands)
         if not self._configured_names:
             self.capture_provider_configuration()
+
+    def replace_mcp_state(
+        self,
+        mcp_runtime: McpRuntime | None,
+        *,
+        disabled_mcp_servers: tuple[str, ...],
+        failed_mcp_servers: tuple[str, ...],
+        unavailable_tool_prefixes: tuple[str, ...],
+    ) -> None:
+        """Record the MCP connections now owned by this runtime.
+
+        Only :func:`wisp.runtime.extensions.restart_mcp_servers` calls this, after it
+        has closed the previous connections and changed the registered tools to
+        match. The caller owns closing whatever runtime this replaces.
+        """
+
+        object.__setattr__(self, "mcp_runtime", mcp_runtime)
+        object.__setattr__(self, "disabled_mcp_servers", disabled_mcp_servers)
+        object.__setattr__(self, "failed_mcp_servers", failed_mcp_servers)
+        object.__setattr__(self, "unavailable_tool_prefixes", unavailable_tool_prefixes)
 
     def capture_provider_configuration(self) -> None:
         """Record the providers owned by runtime configuration.

@@ -33,9 +33,14 @@ from wisp.validation import redact_validation_error_inputs
 type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project"]
 
 MAX_RPC_COMMAND_ID_CHARS = 256
+MAX_RPC_MCP_SERVER_NAME_CHARS = 64
 MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
 STORE_API_KEY_SECRET_FIELD = "_api_key"
+# Secret-bearing fields by command type. Before a command is queued, each one is
+# moved under its underscore-prefixed name and wrapped so the retained payload
+# never prints it; `provided_fields` reports it under its submitted name.
+_SECRET_FIELDS = {"store_api_key": "api_key", "add_mcp_server": "env"}
 
 
 @dataclass(frozen=True)
@@ -48,13 +53,14 @@ class _RpcSecretValue:
     __str__ = __repr__
 
 
-def detach_store_api_key(command: dict[str, object]) -> dict[str, object]:
-    """Move ``api_key`` into a redacted value before queueing or logging."""
+def detach_secret_fields(command: dict[str, object]) -> dict[str, object]:
+    """Move a command's secret field into a redacted value before queueing or logging."""
 
-    if command.get("type") != "store_api_key" or "api_key" not in command:
+    field = _SECRET_FIELDS.get(rpc_command_type(command))
+    if field is None or field not in command:
         return command
     detached = dict(command)
-    detached[STORE_API_KEY_SECRET_FIELD] = _RpcSecretValue(detached.pop("api_key"))
+    detached[f"_{field}"] = _RpcSecretValue(detached.pop(field))
     return detached
 
 
@@ -70,10 +76,10 @@ def take_store_api_key(command: dict[str, object]) -> object | None:
 def rpc_command_payload_size(command: Mapping[str, object]) -> int:
     """Return the wire-size equivalent without making secrets printable."""
 
-    sized = dict(command)
-    secret = sized.get(STORE_API_KEY_SECRET_FIELD)
-    if isinstance(secret, _RpcSecretValue):
-        sized[STORE_API_KEY_SECRET_FIELD] = secret.value
+    sized = {
+        key: value.value if isinstance(value, _RpcSecretValue) else value
+        for key, value in command.items()
+    }
     return len(
         json.dumps(
             sized,
@@ -231,6 +237,73 @@ class GetMcpStatusCommand(RpcCommandModel):
     """Return sanitized MCP server and registered-tool status."""
 
     type: Literal["get_mcp_status"] = "get_mcp_status"
+
+
+class AddMcpServerCommand(RpcCommandModel):
+    """Save an MCP server to the user settings, then restart MCP servers.
+
+    The entry has the shape of one ``mcp_servers`` settings entry. ``env`` holds
+    literal values the user entered; they are written to the settings file and
+    never echoed in events, errors, or this model's repr. Adding a server that runs
+    a command is the user's decision: a frontend must show the exact command,
+    arguments, and ``env_from`` names and have the user confirm before sending it.
+    """
+
+    type: Literal["add_mcp_server"] = "add_mcp_server"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+    command: str | None = Field(default=None, min_length=1)
+    # The wrap validator below sees JSON arrays as lists, which strict tuples reject.
+    args: tuple[str, ...] = Field(default=(), strict=False)
+    url: str | None = Field(default=None, min_length=1)
+    env: dict[str, str] = Field(default_factory=dict, repr=False)
+    env_from: tuple[str, ...] = Field(default=(), strict=False)
+    replace: bool = False
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_validation_errors(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        # Errors outside `env` can still carry the whole payload as their input.
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            raise redact_validation_error_inputs(exc) from None
+
+    def __repr__(self) -> str:
+        return (
+            f"AddMcpServerCommand(id={self.id!r}, name={self.name!r}, command={self.command!r}, "
+            f"args={self.args!r}, url={self.url!r}, env=<{len(self.env)} hidden>, "
+            f"env_from={self.env_from!r}, replace={self.replace!r})"
+        )
+
+    __str__ = __repr__
+
+
+class RemoveMcpServerCommand(RpcCommandModel):
+    """Remove an MCP server from the user settings, then restart MCP servers."""
+
+    type: Literal["remove_mcp_server"] = "remove_mcp_server"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+
+
+class SetMcpServerEnabledCommand(RpcCommandModel):
+    """Enable or disable an MCP server in the user settings, then restart MCP servers.
+
+    Enabling a server that runs a command is the user's decision, as adding one is.
+    """
+
+    type: Literal["set_mcp_server_enabled"] = "set_mcp_server_enabled"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+    enabled: bool
+
+
+class ReconnectMcpCommand(RpcCommandModel):
+    """Reload MCP servers from the user settings and restart them."""
+
+    type: Literal["reconnect_mcp"] = "reconnect_mcp"
 
 
 class GetMessagesCommand(RpcCommandModel):
@@ -493,6 +566,10 @@ type RpcCommand = Annotated[
     | GetSkillsCommand
     | GetProjectFilesCommand
     | GetMcpStatusCommand
+    | AddMcpServerCommand
+    | RemoveMcpServerCommand
+    | SetMcpServerEnabledCommand
+    | ReconnectMcpCommand
     | GetMessagesCommand
     | GetSessionsCommand
     | NewSessionCommand
@@ -569,7 +646,7 @@ class ParsedRpcCommand:
         value: RpcCommand | UnknownCommandEnvelope,
         payload: dict[str, object],
     ) -> ParsedRpcCommand:
-        detached = detach_store_api_key(payload)
+        detached = detach_secret_fields(payload)
         return cls(
             value=value,
             _payload=MappingProxyType(detached),
@@ -611,11 +688,8 @@ class ParsedRpcCommand:
     def provided_fields(self) -> frozenset[str]:
         """Return submitted payload field names without exposing their values."""
 
-        fields = set(self._payload)
-        if STORE_API_KEY_SECRET_FIELD in fields:
-            fields.remove(STORE_API_KEY_SECRET_FIELD)
-            fields.add("api_key")
-        return frozenset(fields)
+        secret_fields = {f"_{field}": field for field in _SECRET_FIELDS.values()}
+        return frozenset(secret_fields.get(field, field) for field in self._payload)
 
     def without_id(self) -> ParsedRpcCommand:
         payload = dict(self._payload)

@@ -2238,7 +2238,8 @@
           "enum": [
             "connected",
             "disconnected",
-            "unavailable"
+            "unavailable",
+            "disabled"
           ],
           "title": "Status",
           "type": "string"

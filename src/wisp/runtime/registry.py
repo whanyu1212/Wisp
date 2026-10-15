@@ -230,6 +230,17 @@ class ToolRegistry:
         else:
             self._prompt_metadata[tool.name] = prompt
 
+    def unregister(self, names: Iterable[str]) -> None:
+        """Remove tools and their metadata; names that are not registered are ignored.
+
+        The remaining tools keep their registration order.
+        """
+
+        for name in names:
+            self._tools.pop(name, None)
+            self._execution_metadata.pop(name, None)
+            self._prompt_metadata.pop(name, None)
+
     def get(self, name: str) -> Tool:
         """Return a registered tool by name."""
 

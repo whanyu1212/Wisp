@@ -34,6 +34,10 @@ type _SequentialRpcCommandType = Literal[
     "navigate_session_tree",
     "unrevert_session_tree",
     "set_session_name",
+    "add_mcp_server",
+    "remove_mcp_server",
+    "set_mcp_server_enabled",
+    "reconnect_mcp",
 ]
 
 

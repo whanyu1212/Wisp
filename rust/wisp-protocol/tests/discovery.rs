@@ -52,7 +52,8 @@ fn python_discovery_fixtures_preserve_sources_diagnostics_and_status() {
         [
             McpServerStatus::Connected,
             McpServerStatus::Disconnected,
-            McpServerStatus::Unavailable
+            McpServerStatus::Unavailable,
+            McpServerStatus::Disabled
         ]
     );
     assert_eq!(status.servers[1].tool_names, ["mcp__files__read"]);

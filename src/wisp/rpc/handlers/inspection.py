@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 from wisp.auth.connections import connection_catalog
 from wisp.auth.storage import AuthStorageError
 from wisp.coding.session import CodingSession
@@ -16,9 +14,7 @@ from wisp.events import (
     RpcConnectionCatalogSnapshot,
     RpcConnectionMethodSnapshot,
     RpcConnectionProviderSnapshot,
-    RpcMcpServerSnapshot,
     RpcMcpStatusReported,
-    RpcMcpStatusSnapshot,
     RpcModelCatalogEntry,
     RpcModelCatalogReported,
     RpcModelCatalogSnapshot,
@@ -47,6 +43,7 @@ from wisp.rpc.commands import (
     SteerCommand,
 )
 from wisp.rpc.coordinator import _RpcRunningCommand
+from wisp.rpc.handlers.mcp import rpc_mcp_status_snapshot
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.commands import CommandDescriptor
@@ -371,37 +368,12 @@ def handle_rpc_mcp_status_command(
     runtime: WispRuntime,
     write_event: RpcEventWriter,
 ) -> None:
-    """Return sanitized startup status without reconnecting MCP servers."""
+    """Return sanitized MCP server status without reconnecting servers."""
 
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_id = lifecycle.command_id
 
-    mcp_runtime = runtime.mcp_runtime
-    servers: tuple[RpcMcpServerSnapshot, ...] = ()
-    if mcp_runtime is not None:
-        diagnostics = {item.server_name: item for item in mcp_runtime.diagnostics}
-        snapshots: list[RpcMcpServerSnapshot] = []
-        for name in mcp_runtime.server_names:
-            registered_tools = mcp_runtime.tool_names_for(name)
-            diagnostic = diagnostics.get(name)
-            status: Literal["connected", "disconnected", "unavailable"]
-            if diagnostic is not None:
-                status = "unavailable"
-            elif mcp_runtime.is_connected(name):
-                status = "connected"
-            else:
-                status = "disconnected"
-            snapshots.append(
-                RpcMcpServerSnapshot(
-                    name=name,
-                    status=status,
-                    tool_names=registered_tools,
-                    error=diagnostic.message if diagnostic is not None else None,
-                )
-            )
-        servers = tuple(snapshots)
-
     write_event(
-        RpcMcpStatusReported(command_id=command_id, status=RpcMcpStatusSnapshot(servers=servers))
+        RpcMcpStatusReported(command_id=command_id, status=rpc_mcp_status_snapshot(runtime))
     )
     lifecycle.finish()

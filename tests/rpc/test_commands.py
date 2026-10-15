@@ -41,7 +41,7 @@ from wisp.rpc.commands import (
     PromptCommand,
     RpcCommand,
     TrustCommand,
-    detach_store_api_key,
+    detach_secret_fields,
     rpc_command_from_json,
     rpc_command_payload_size,
     take_store_api_key,
@@ -146,7 +146,7 @@ def test_store_api_key_command_serializes_but_redacts_repr() -> None:
     assert "sentinel-secret" not in str(command)
     assert rpc_command_from_json(command.to_json_line()) == command
 
-    detached = detach_store_api_key(command.model_dump(exclude_none=True))
+    detached = detach_secret_fields(command.model_dump(exclude_none=True))
     assert "sentinel-secret" not in repr(detached)
     assert rpc_command_payload_size(detached) > len("sentinel-secret")
     assert take_store_api_key(detached) == "sentinel-secret"
