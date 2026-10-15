@@ -197,6 +197,9 @@ def secret_like_argument(server: McpServerConfig) -> str | None:
         segments = re.split(r"[/?#&=]", server.url)
         if _secret_like(server.url, "") or any(_opaque(segment) for segment in segments):
             return "the URL"
+    for header, _template in server.headers_from:
+        if _secret_like(header, "") or _opaque(header):
+            return "a header name"
     return None
 
 

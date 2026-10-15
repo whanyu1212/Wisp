@@ -51,7 +51,7 @@ class McpStartupDiagnostic:
     def message(self) -> str:
         reasons: dict[McpDiagnosticCode, str] = {
             "missing-environment": "a configured environment variable is unavailable",
-            "invalid-header": "a header value contains a line break or control character",
+            "invalid-header": "a header value is empty or has invalid characters or spacing",
             "unavailable": "the server could not be started or initialized",
             "timeout": "startup or tool discovery timed out",
             "invalid-discovery": "the server returned an invalid tool catalog",

@@ -141,7 +141,8 @@ def add_command(
             {
                 **entry,
                 "env": dict.fromkeys(env or (), ""),
-                "headers": dict.fromkeys(header or (), ""),
+                # A placeholder: header values must be non-empty to validate.
+                "headers": dict.fromkeys(header or (), "hidden"),
             },
         ),
         action="Add",

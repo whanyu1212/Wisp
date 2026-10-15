@@ -96,20 +96,30 @@ def test_a_missing_token_variable_skips_the_server_without_naming_it(
     )
 
 
-def test_a_token_variable_with_a_line_break_is_never_sent(
-    monkeypatch: MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize(
+    "value",
+    [
+        # A newline would end the header and inject another one.
+        f"{TOKEN}\r\nX-Injected: yes",
+        # HTTP clients refuse surrounding spaces; a pasted token often has one.
+        f"{TOKEN} ",
+        f"\t{TOKEN}",
+        "",
+    ],
+)
+def test_a_token_variable_that_cannot_be_sent_is_reported_and_never_sent(
+    monkeypatch: MonkeyPatch, tmp_path: Path, value: str
 ) -> None:
-    # A newline in the value would end the header and inject another one.
     seen: list[httpx2.Request] = []
     _mock_http(monkeypatch, _protected(seen))
-    monkeypatch.setenv(VARIABLE, f"{TOKEN}\r\nX-Injected: yes")
+    monkeypatch.setenv(VARIABLE, value)
 
     text, messages = _start(_server(headers_from={"Authorization": f"${{{VARIABLE}}}"}), tmp_path)
 
     assert text is None
     assert seen == []
     assert len(messages) == 1
-    assert "line break or control character" in messages[0]
+    assert "a header value is empty or has invalid characters or spacing" in messages[0]
     assert TOKEN not in messages[0]
 
 

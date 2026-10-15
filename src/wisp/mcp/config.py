@@ -67,6 +67,7 @@ RESERVED_HEADER_NAMES = frozenset(
         "content-type",
         "host",
         "keep-alive",
+        "last-event-id",
         "mcp-protocol-version",
         "mcp-session-id",
         "proxy-authorization",
@@ -250,7 +251,10 @@ class McpServerConfig(BaseModel):
         cls, values: tuple[tuple[str, SecretStr], ...]
     ) -> tuple[tuple[str, SecretStr], ...]:
         if any(not is_valid_header_value(value.get_secret_value()) for _, value in values):
-            raise ValueError("header values must not contain line breaks or control characters")
+            raise ValueError(
+                "header values must not be empty, start or end with a space, or contain "
+                "line breaks or control characters"
+            )
         return tuple(sorted(values))
 
     @field_validator("headers_from")
@@ -302,10 +306,13 @@ def is_valid_header_value(value: str) -> bool:
         value (str): Literal value or resolved environment value.
 
     Returns:
-        bool: False for line breaks, NUL, and other control characters, which
-        could split the header or smuggle another one.
+        bool: False for an empty value, surrounding spaces or tabs (which HTTP
+        clients refuse to send), and line breaks, NUL, and other control
+        characters, which could split the header or smuggle another one.
     """
 
+    if not value or value != value.strip(" \t"):
+        return False
     return not any(
         (ord(character) < 32 and character != "\t") or ord(character) == 127 for character in value
     )

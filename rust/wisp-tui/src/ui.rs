@@ -2408,7 +2408,11 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
         _ => &[],
     };
     if arguments.keys().any(|key| !known.contains(&key.as_str())) {
-        return unshowable(format!("Change MCP server {server}?"));
+        return unshowable(match pending.name.as_str() {
+            "propose_mcp_server" => format!("Add MCP server {server}?"),
+            "propose_mcp_server_change" => format!("Change MCP server {server}?"),
+            name => format!("Confirm {}?", bounded_decision_preview(name)),
+        });
     }
     let (title, detail) = match pending.name.as_str() {
         "propose_mcp_server" => {

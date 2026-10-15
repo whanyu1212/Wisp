@@ -120,7 +120,8 @@ For HTTP servers that need authentication, `headers` holds literal header values
 and `headers_from` builds a header from an environment variable each time Wisp connects. A
 `headers_from` value is `"${VAR}"` or a scheme word and the variable, such as
 `"Bearer ${LINEAR_API_KEY}"`; nothing else, so the visible part can never hold a credential. If the
-variable is unset, or its value contains a line break or control character, the server is skipped.
+variable is unset, or its value is empty, starts or ends with a space, or contains a line break or
+control character, the server is skipped.
 Headers go only to the configured URL's origin (scheme, host, and port), never to another host, and
 cannot replace the headers the transport manages (such as `Host`, `Accept-Encoding`, or
 `Mcp-Session-Id`). Header values are never shown, logged, or sent to the model. A server's

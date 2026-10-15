@@ -269,10 +269,15 @@ def test_http_headers_keep_values_hidden_and_forwarded_templates_visible() -> No
         # Header injection through a line break or other control character.
         {"headers": {"X-Key": "abc\r\nX-Injected: yes"}},
         {"headers": {"X-Key": "abc\x00"}},
+        # Values HTTP clients refuse to send.
+        {"headers": {"Authorization": "Bearer "}},
+        {"headers": {"X-Key": " abc"}},
+        {"headers": {"X-Key": ""}},
         # Headers the transport or the MCP protocol manages.
         {"headers": {"Host": "evil.example"}},
         {"headers_from": {"mcp-session-id": "${SESSION}"}},
         {"headers": {"Accept-Encoding": "gzip"}},
+        {"headers_from": {"Last-Event-ID": "${EVENT}"}},
         # Not a header name.
         {"headers": {"Bad Name": "x"}},
         # The same header twice, in any case, across both maps.

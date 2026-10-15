@@ -361,6 +361,7 @@ def test_an_http_proposal_can_forward_a_token_variable_into_a_header() -> None:
         {"Authorization": f"Bearer {SECRET} ${{TOKEN}}"},
         {"Authorization‮": "${TOKEN}"},
         {"Host": "${TOKEN}"},
+        {"ghp_0123456789abcdef0123456789abcdef0123": "${HOME}"},
         ["Authorization"],
     ],
 )
