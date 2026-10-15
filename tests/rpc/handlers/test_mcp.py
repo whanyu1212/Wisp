@@ -294,8 +294,10 @@ def test_a_restart_after_the_run_waits_for_an_idle_session(tmp_path: Path) -> No
             agent._operation_active = True
             assert "after the next reply" in (await servers.restart_after_run() or "")
             agent._operation_active = False
-            assert await servers.restart_after_run() is None
-            # The restart ran: the saved (unreachable) server is reported.
+            # The restart ran, and the server that could not start is reported.
+            assert await servers.restart_after_run() == (
+                "MCP server docs is unavailable: the server could not be started or initialized"
+            )
             assert runtime.mcp_server_configs[0].name == "docs"
             assert await servers.restart_after_run() is None
         finally:

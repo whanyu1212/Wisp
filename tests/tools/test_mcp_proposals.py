@@ -156,6 +156,9 @@ def test_yolo_and_session_scopes_still_need_a_one_time_confirmation() -> None:
     policy.prepare_approval(tool, call_id="call-1", arguments=arguments)
     assert policy.has_pending_approval(call_id="call-1")
     assert policy.resolve_approval(call_id="call-1", approved=True, scope="all_session")
+    # Applied off the event loop, by the call that waits for the decision.
+    decision = anyio.run(lambda: policy.await_approval(tool, call_id="call-1", arguments={}))
+    assert decision.approved
     assert applied == [arguments]
     # The answer was a one-time confirmation: nothing was granted.
     assert tool.name not in policy.approved_tools

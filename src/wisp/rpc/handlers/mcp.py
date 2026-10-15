@@ -188,7 +188,17 @@ class RpcMcpServers:
             servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
         except McpSettingsError as exc:
             return f"MCP servers were not restarted: {exc}"
-        return await self._restart(servers)
+        error = await self._restart(servers)
+        if error is not None:
+            return error
+        # No status request is waiting for this restart, so a server that failed
+        # to start would otherwise go unnoticed after the user confirmed it.
+        failures = [
+            server.error
+            for server in rpc_mcp_status_snapshot(self._runtime).servers
+            if server.status == "unavailable" and server.error is not None
+        ]
+        return "; ".join(failures) or None
 
     def start(
         self,

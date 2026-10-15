@@ -7974,6 +7974,55 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn a_proposal_is_not_armed_while_its_server_name_is_cut() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let name = "a-very-long-server-name-of-32-ch";
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(projected(
+            "propose_mcp_server",
+            json!({"name": name, "command": "npx"}),
+        ));
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let mut narrow = Terminal::new(TestBackend::new(40, 24)).unwrap();
+        live_ui.draw(&mut narrow, &connection).unwrap();
+        assert!(!screen(&narrow).contains(name));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_err());
+
+        let mut wide = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        live_ui.draw(&mut wide, &connection).unwrap();
+        assert!(screen(&wide).contains(name));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_ok());
+    }
+
     #[test]
     fn a_proposals_second_choice_denies() {
         let pending = proposal("call-1", json!([]));

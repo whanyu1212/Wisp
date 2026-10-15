@@ -2306,6 +2306,11 @@ pub(crate) fn decision_panel_complete(state: &UiState, area: Rect, notice: Optio
     let DecisionDetail::Complete(content) = &panel.detail else {
         return true;
     };
+    // The title names what is confirmed (the server), so it must not be cut.
+    let tag_width = panel.tag.as_ref().map_or(0, |tag| tag.width() + 3);
+    if bounded_decision_preview(&panel.title).width() > width.saturating_sub(tag_width + 2) {
+        return false;
+    }
     let inner_height = usize::from(panel_area.height.saturating_sub(2));
     // Details, the separator, then every choice.
     complete_detail_rows(content, width).len() + 1 + panel.choices.len() <= inner_height

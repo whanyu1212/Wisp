@@ -243,6 +243,12 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         try:
             await pending.event.wait()
             approved = pending.approved is True
+            if approved and pending.confirm_only:
+                # Applied here, in the run's task and off the event loop: the
+                # handler takes a file lock and writes settings.
+                error = await anyio.to_thread.run_sync(self._apply_confirmation, pending)
+                if error is not None:
+                    return ToolApprovalDecision(approved=False, reason=error)
             reason = None if approved else pending.reason or "Tool execution was denied"
             return ToolApprovalDecision(approved=approved, reason=reason)
         finally:
@@ -272,12 +278,8 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             return False
         if pending.confirm_only:
             # A grant never covers these tools; any approval is a one-time
-            # confirmation, applied before the call may proceed.
-            if approved:
-                error = self._apply_confirmation(pending)
-                if error is not None:
-                    self._resolve_pending(pending, approved=False, reason=error)
-                    return True
+            # confirmation, which `await_approval` applies before the call may
+            # proceed.
             self._resolve_pending(pending, approved=approved, reason=reason)
             return True
         if approved and scope == "all_project":
