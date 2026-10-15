@@ -327,3 +327,14 @@ def test_import_rejects_unsupported_snippet(home: Path) -> None:
     assert "unsupported settings: headers" in result.output
     assert SECRET not in result.output
     assert _servers(home) == {}
+
+
+def test_import_of_a_deeply_nested_snippet_fails_cleanly(home: Path) -> None:
+    path = home / "deep.json"
+    path.write_text("[" * 100_000 + "]" * 100_000, encoding="utf-8")
+
+    result = _run(["import", str(path), "--yes"])
+
+    assert result.exit_code == 1
+    assert "nested too deeply" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)

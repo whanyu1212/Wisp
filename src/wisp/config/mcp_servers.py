@@ -12,6 +12,7 @@ user setting, not only the MCP ones).
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from wisp.config.settings import (
     user_settings_lock,
     user_settings_path,
 )
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import SERVER_NAME_PATTERN, McpServerConfig
 
 # Keys accepted from a pasted `{"mcpServers": {...}}` snippet. `type` is checked
 # against the transport and dropped; anything else (headers, cwd, ...) is rejected
@@ -176,13 +177,22 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         parsed = json.loads(text)
     except json.JSONDecodeError as exc:
         raise McpSettingsError(f"the snippet is not valid JSON: {exc.msg}") from None
+    except RecursionError:
+        raise McpSettingsError("the snippet is nested too deeply") from None
     servers = None
     if isinstance(parsed, Mapping):
         servers = parsed.get("mcpServers", parsed.get("mcp_servers"))
     if not isinstance(servers, Mapping) or not servers:
         raise McpSettingsError('the snippet must contain an "mcpServers" object with a server')
     configs: list[McpServerConfig] = []
-    for name, raw in servers.items():
+    for position, (name, raw) in enumerate(servers.items(), start=1):
+        # Names are checked first so that later messages only ever repeat a valid
+        # name; anything else in a snippet may be a secret.
+        if not isinstance(name, str) or re.fullmatch(SERVER_NAME_PATTERN, name) is None:
+            raise McpSettingsError(
+                f"server {position} has an invalid name: use lowercase letters, digits, "
+                "and '-', starting with a letter (at most 32 characters)"
+            )
         if not isinstance(raw, Mapping):
             raise McpSettingsError(f"server {name!r} must be a JSON object")
         unsupported = sorted(str(key) for key in raw if key not in _SNIPPET_KEYS)
@@ -199,7 +209,7 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
                 raise McpSettingsError(
                     f"server {name!r} has a type that does not match its transport"
                 )
-        configs.append(validated_mcp_server(str(name), entry))
+        configs.append(validated_mcp_server(name, entry))
     return tuple(configs)
 
 

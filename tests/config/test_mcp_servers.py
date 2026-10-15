@@ -292,7 +292,8 @@ def test_parse_snippet_accepts_published_shapes() -> None:
         ('{"mcpServers": {"a": {"command": "x", "type": []}}}', "does not match"),
         ('{"mcpServers": {"a": {"command": "x", "type": {"k": 1}}}}', "does not match"),
         ('{"mcpServers": {"a": "npx"}}', "must be a JSON object"),
-        ('{"mcpServers": {"Bad Name": {"command": "x"}}}', "is invalid"),
+        ('{"mcpServers": {"Bad Name": {"command": "x"}}}', "server 1 has an invalid name"),
+        ("[" * 100_000 + "]" * 100_000, "nested too deeply"),
     ],
 )
 def test_parse_snippet_rejects_unsupported_input(snippet: str, message: str) -> None:
@@ -300,8 +301,16 @@ def test_parse_snippet_rejects_unsupported_input(snippet: str, message: str) -> 
         parse_mcp_snippet(snippet)
 
 
-def test_snippet_errors_do_not_echo_values() -> None:
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        '{"mcpServers": {"a": {"command": "x", "type": "sentinel-secret"}}}',
+        '{"mcpServers": {"Sentinel-Secret": {"command": "x"}}}',
+        '{"mcpServers": {"Sentinel-Secret": "not an object"}}',
+    ],
+)
+def test_snippet_errors_do_not_echo_values_or_invalid_names(snippet: str) -> None:
     with pytest.raises(McpSettingsError) as error:
-        parse_mcp_snippet('{"mcpServers": {"a": {"command": "x", "type": "sentinel-secret"}}}')
+        parse_mcp_snippet(snippet)
 
-    assert "sentinel-secret" not in str(error.value)
+    assert "sentinel-secret" not in str(error.value).lower()
