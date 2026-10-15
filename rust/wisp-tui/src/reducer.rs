@@ -26,6 +26,7 @@ pub mod queue_management;
 mod session_catalog;
 use model_selection::ModelOperation;
 
+pub(crate) use discovery::McpSignInState;
 pub use event_projection::EventProjectionError;
 
 const DEFAULT_DENIAL_REASON: &str = "Denied from TUI";
@@ -274,11 +275,13 @@ impl SecretText {
 /// An MCP server change, answered with the resulting MCP status.
 #[derive(Clone, Debug, PartialEq)]
 pub enum McpChange {
-    /// Save a server the user confirmed. `env` holds the values the user entered.
+    /// Save a server the user confirmed. `env` and `headers` hold the values
+    /// the user entered.
     Add {
         name: String,
         launch: wisp_protocol::events::McpServerLaunch,
         env: Vec<(String, SecretText)>,
+        headers: Vec<(String, SecretText)>,
         replace: bool,
     },
     Remove(String),
@@ -289,6 +292,10 @@ pub enum McpChange {
         expected: Option<wisp_protocol::events::McpServerLaunch>,
     },
     Reconnect,
+    /// Sign in to an HTTP server with OAuth in the browser.
+    Login(String),
+    /// Forget an HTTP server's OAuth sign-in.
+    Logout(String),
 }
 
 pub struct SecretCommand(WispTypedClientRpcCommands);
@@ -734,6 +741,8 @@ pub struct UiState {
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
     pub(crate) mcp_preview: discovery::Inspection<Vec<wisp_protocol::events::McpServerPreview>>,
+    /// An MCP sign-in waiting for the user's browser.
+    pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
@@ -800,6 +809,7 @@ impl UiState {
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
             mcp_preview: discovery::Inspection::default(),
+            mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
@@ -1070,6 +1080,12 @@ pub enum BackendEvent {
         command_id: String,
         servers: discovery::McpPreviewReport,
     },
+    /// Signing in needs the user in their browser at `authorization_url`.
+    McpLoginStarted {
+        command_id: String,
+        name: String,
+        authorization_url: String,
+    },
     SessionStatsReported {
         command_id: String,
         stats: Box<wisp_protocol::events::SessionStats>,
@@ -1214,6 +1230,8 @@ pub enum UiAction {
     /// Parse a pasted MCP config snippet without saving it.
     PreviewMcpSnippet(SecretText),
     ChangeMcpServers(McpChange),
+    /// Stop waiting for an MCP sign-in.
+    CancelMcpSignIn,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     SetProjectFilesOpen(bool),
     LoadContext,
@@ -1406,6 +1424,7 @@ pub fn reduce(
             Ok(discovery::preview_mcp_snippet(state, snippet, ids)?)
         }
         UiAction::ChangeMcpServers(change) => Ok(discovery::change_mcp(state, change, ids)?),
+        UiAction::CancelMcpSignIn => Ok(discovery::cancel_mcp_sign_in(state, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
@@ -4589,6 +4608,7 @@ fn handle_backend_event(
         | BackendEvent::SkillCatalogUpdated(_)
         | BackendEvent::McpStatusReported { .. }
         | BackendEvent::McpSnippetPreviewed { .. }
+        | BackendEvent::McpLoginStarted { .. }
         | BackendEvent::PermissionsReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)

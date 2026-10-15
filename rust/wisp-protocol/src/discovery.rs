@@ -154,6 +154,21 @@ pub struct McpServerSnapshot {
     pub tool_names: Vec<String>,
     pub error: Option<String>,
     pub launch: Option<McpServerLaunch>,
+    /// OAuth sign-in for an HTTP server; None when the server cannot sign in.
+    #[serde(default)]
+    pub sign_in: Option<McpSignIn>,
+}
+
+/// Whether an HTTP MCP server is signed in with OAuth.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSignIn {
+    /// The server refused Wisp, or a saved sign-in no longer works.
+    Required,
+    /// The server started with a saved sign-in.
+    SignedIn,
+    /// The user could sign in.
+    Available,
 }
 
 /// One server parsed from a pasted config snippet, not yet saved.

@@ -320,7 +320,7 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
     ]
     finished = _finished(records)
     assert finished["bad"]["ok"] is False
-    assert "sets HTTP headers, which a snippet cannot add yet" in str(finished["bad"]["error"])
+    assert "do not accept headers" in str(finished["bad"]["error"])
     assert finished["not-json"]["ok"] is False
     # A non-string type fails the command instead of stopping the host.
     assert finished["odd-type"]["ok"] is False

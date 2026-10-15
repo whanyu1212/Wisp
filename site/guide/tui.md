@@ -426,15 +426,25 @@ error, and its tools. `PgUp`/`PgDn` scroll those details.
 | `a` | Add a server by pasting its config snippet |
 | `e` | Disable the selected server, or enable it after confirming what it runs |
 | `d` | Remove the selected server, after confirming |
+| `l` | Sign in to the selected HTTP server with OAuth, in your browser |
+| `o` | Sign out of the selected server |
 | `c` | Reconnect: reload servers from your settings file and restart them |
 | `r` | Refresh the status without reconnecting |
-| `Esc` | Close, or step back out of a panel |
+| `Esc` | Close, step back out of a panel, or cancel a sign-in in progress |
 
 To add a server, press `a` and paste the `{"mcpServers": {...}}` block from the server's README, one
 server at a time (use `wisp mcp import` for several). Wisp reads the snippet without saving it. For
 each environment variable the server needs, choose whether to forward it from Wisp's environment or
-enter a value; entered values are masked, never shown again, and saved to `~/.wisp/settings.json`.
-The snippet's own values are ignored, since published snippets usually hold placeholders.
+enter a value; then enter each HTTP header value the snippet sets. Entered values are masked, never
+shown again, and saved to `~/.wisp/settings.json`. The snippet's own values are ignored, since
+published snippets usually hold placeholders; a header written as `"Bearer ${VAR}"` forwards that
+variable instead and needs no value.
+
+A server that needs you to sign in shows "sign in required". Press `l`: Wisp opens the server's
+sign-in page in your browser and waits up to five minutes. The list shows the page's address in case
+no browser opens (for example over SSH), and `Esc` cancels. Once you finish, the server reconnects
+with its tools; the list shows "signed in", and `o` signs out. See
+[Signing in with OAuth](./tools-and-safety#signing-in-with-oauth).
 
 Adding, enabling, and removing end in a confirmation docked above the composer that shows exactly
 what will run. Like an approval, it has no default: choose with `1`/`2`, or highlight with `↑`/`↓`

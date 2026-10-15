@@ -150,6 +150,7 @@ fn mcp_management_builders_validate_and_redact_secrets() {
         "github",
         &launch,
         &[("TOKEN".into(), "sentinel-secret".into())],
+        &[],
         false,
     )
     .unwrap();
@@ -200,10 +201,11 @@ fn adding_an_http_server_sends_its_forwarded_headers_as_saved() {
         ..Default::default()
     };
 
-    let wire = WispTypedClientRpcCommands::add_mcp_server("add-1", "linear", &launch, &[], false)
-        .unwrap()
-        .to_value()
-        .unwrap();
+    let wire =
+        WispTypedClientRpcCommands::add_mcp_server("add-1", "linear", &launch, &[], &[], false)
+            .unwrap()
+            .to_value()
+            .unwrap();
 
     assert_eq!(
         wire["headers_from"],

@@ -172,7 +172,10 @@ def import_command(
         bool, typer.Option("--replace", help="Replace existing servers with the same names.")
     ] = False,
     yes: Annotated[
-        bool, typer.Option("--yes", "-y", help="Save without asking; keeps the snippet's env.")
+        bool,
+        typer.Option(
+            "--yes", "-y", help="Save without asking; keeps the snippet's env and header values."
+        ),
     ] = False,
 ) -> None:
     """Import servers from a config snippet copied from a server's README.
@@ -202,8 +205,8 @@ def import_command(
     ready: list[McpServerConfig] = []
     for server in servers:
         _show(server, action="Import")
-        if server.env and not yes:
-            server = _ask_for_env_values(server)
+        if (server.env or server.headers) and not yes:
+            server = _ask_for_values(server)
         ready.append(server)
     _confirm(yes=yes, question="Save it?" if len(ready) == 1 else f"Save all {len(ready)}?")
     _save(ready, replace=replace)
@@ -368,11 +371,11 @@ def _confirm(*, yes: bool, question: str = "Save it?") -> None:
         raise typer.Exit(1)
 
 
-def _ask_for_env_values(server: McpServerConfig) -> McpServerConfig:
-    """Replace a snippet's env values, which are usually placeholders, by asking.
+def _ask_for_values(server: McpServerConfig) -> McpServerConfig:
+    """Replace a snippet's env and header values, usually placeholders, by asking.
 
-    Each value is entered masked; leaving it empty forwards the variable from
-    Wisp's environment instead.
+    Each value is entered masked. Leaving an env value empty forwards the
+    variable from Wisp's environment instead; a header value is required.
     """
 
     _require_terminal()
@@ -389,8 +392,12 @@ def _ask_for_env_values(server: McpServerConfig) -> McpServerConfig:
             env[name] = value
         else:
             env_from.append(name)
-    data = server.model_dump(exclude={"name", "env", "env_from"})
-    return _validated(server.name, {**data, "env": env, "env_from": env_from})
+    headers = {
+        name: typer.prompt(f"Value for header {name}", hide_input=True)
+        for name, _ in server.headers
+    }
+    data = server.model_dump(exclude={"name", "env", "env_from", "headers"})
+    return _validated(server.name, {**data, "env": env, "env_from": env_from, "headers": headers})
 
 
 def _save(servers: Sequence[McpServerConfig], *, replace: bool) -> None:

@@ -27,13 +27,13 @@ from wisp.config.settings import (
     user_settings_lock,
     user_settings_path,
 )
-from wisp.mcp.config import SERVER_NAME_PATTERN, McpServerConfig
+from wisp.mcp.config import HEADER_TEMPLATE_PATTERN, SERVER_NAME_PATTERN, McpServerConfig
 from wisp.mcp.credentials import McpTokenStore, mcp_auth_path
 
 # Keys accepted from a pasted `{"mcpServers": {...}}` snippet. `type` is checked
-# against the transport and dropped; anything else (headers, cwd, ...) is rejected
-# by name because Wisp would not honour it.
-_SNIPPET_KEYS = frozenset({"command", "args", "env", "url", "type"})
+# against the transport and dropped; anything else (cwd, ...) is rejected by name
+# because Wisp would not honour it.
+_SNIPPET_KEYS = frozenset({"command", "args", "env", "url", "type", "headers"})
 _STDIO_TYPES = frozenset({"stdio"})
 _HTTP_TYPES = frozenset({"http", "streamable-http", "streamableHttp"})
 
@@ -171,7 +171,9 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
 
     Accepts the common ``{"mcpServers": {name: {...}}}`` shape (also
     ``mcp_servers``). Each entry may carry ``command``, ``args``, ``env``, ``url``,
-    and a ``type`` that must match its transport; any other key is rejected by name.
+    ``headers``, and a ``type`` that must match its transport; any other key is
+    rejected by name. A header written as ``"Bearer ${VAR}"`` forwards that
+    variable; any other header value is kept as a literal.
 
     Args:
         text (str): Snippet text, as copied from a server's README.
@@ -207,16 +209,13 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
         if not isinstance(raw, Mapping):
             raise McpSettingsError(f"server {name!r} must be a JSON object")
         unsupported = sorted(str(key) for key in raw if key not in _SNIPPET_KEYS)
-        if "headers" in unsupported:
-            raise McpSettingsError(
-                f"server {name!r} sets HTTP headers, which a snippet cannot add yet; "
-                "add it with `wisp mcp add NAME --url URL --header-from NAME=VAR`"
-            )
         if unsupported:
             raise McpSettingsError(
                 f"server {name!r} uses unsupported settings: {', '.join(unsupported)}"
             )
-        entry = {key: value for key, value in raw.items() if key != "type"}
+        entry = {key: value for key, value in raw.items() if key not in {"type", "headers"}}
+        if "headers" in raw:
+            entry.update(_snippet_headers(name, raw["headers"]))
         kind = raw.get("type")
         if kind is not None:
             expected = _STDIO_TYPES if "command" in raw else _HTTP_TYPES
@@ -227,6 +226,27 @@ def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
                 )
         configs.append(validated_mcp_server(name, entry))
     return tuple(configs)
+
+
+def _snippet_headers(name: str, headers: object) -> dict[str, dict[str, str]]:
+    """Split a snippet's headers into forwarded variables and literal values.
+
+    A value written as ``"${VAR}"`` or ``"Bearer ${VAR}"`` forwards that variable;
+    any other value is literal, usually a placeholder a frontend asks for again.
+    """
+
+    if not isinstance(headers, Mapping):
+        raise McpSettingsError(f"server {name!r} headers must be a JSON object")
+    literal: dict[str, str] = {}
+    forwarded: dict[str, str] = {}
+    for header, value in headers.items():
+        if not isinstance(header, str) or not isinstance(value, str):
+            raise McpSettingsError(f"server {name!r} headers must map names to strings")
+        if HEADER_TEMPLATE_PATTERN.fullmatch(value):
+            forwarded[header] = value
+        else:
+            literal[header] = value
+    return {"headers": literal, "headers_from": forwarded}
 
 
 def validated_mcp_server(name: str, entry: Mapping[str, object]) -> McpServerConfig:

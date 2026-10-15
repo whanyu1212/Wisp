@@ -341,3 +341,33 @@ def test_header_values_are_written_and_a_changed_forwarded_header_needs_a_new_co
         set_user_mcp_server_enabled(
             "linear", True, confirmed=lambda saved: same_launch(saved, shown), home_dir=tmp_path
         )
+
+
+def test_a_snippet_header_forwards_a_variable_or_keeps_a_value_to_ask_for() -> None:
+    (server,) = parse_mcp_snippet(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "linear": {
+                        "type": "http",
+                        "url": "https://mcp.linear.app/mcp",
+                        "headers": {
+                            "Authorization": "Bearer ${LINEAR_API_KEY}",
+                            "X-Team": "<your team id>",
+                        },
+                    }
+                }
+            }
+        )
+    )
+
+    assert server.headers_from == (("Authorization", "Bearer ${LINEAR_API_KEY}"),)
+    assert [name for name, _ in server.headers] == ["X-Team"]
+
+
+@pytest.mark.parametrize("headers", [["Authorization"], {"Authorization": 1}])
+def test_a_snippet_with_malformed_headers_is_rejected(headers: object) -> None:
+    with pytest.raises(McpSettingsError, match="headers must"):
+        parse_mcp_snippet(
+            json.dumps({"mcpServers": {"x": {"url": "https://e.test/mcp", "headers": headers}}})
+        )
