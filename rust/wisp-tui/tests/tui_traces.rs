@@ -529,6 +529,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
                 arguments: serde_json::json!({}),
                 detail_source: wisp_tui::reducer::ToolDetailSource::None,
                 safety: "unknown".into(),
+                grants_allowed: true,
             });
         }
         match (

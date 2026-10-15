@@ -21,8 +21,8 @@ from wisp.events import (
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.tool_types import ToolFailureCode
-from wisp.tools.approval import ToolApprovalPolicy
-from wisp.tools.base import Tool
+from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
+from wisp.tools.base import ArgumentCheckedTool, Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
@@ -195,9 +195,22 @@ class ConfiguredToolExecutor:
             except UnknownToolError as exc:
                 outcome = _failure_outcome(str(exc), failure_code="unknown_tool")
             else:
+                problem = (
+                    tool.check_arguments(arguments)
+                    if isinstance(tool, ArgumentCheckedTool)
+                    else None
+                )
                 if not self._policy.allows(tool):
                     outcome = _failure_outcome(
                         self._policy.block_reason(tool), failure_code="policy_denied"
+                    )
+                elif problem is not None:
+                    # Rejected before the user is asked, so a bad proposal never
+                    # reaches an approval panel.
+                    outcome = _failure_outcome(
+                        problem,
+                        failure_code="invalid_arguments",
+                        retryable=True,
                     )
                 elif self._approval_policy.requires_approval(
                     tool
@@ -214,6 +227,7 @@ class ConfiguredToolExecutor:
                             name=tool_call.name,
                             arguments=arguments,
                             safety=tool.safety,
+                            grants_allowed=not confirms_every_call(tool),
                         )
                         decision = await self._approval_policy.await_approval(
                             tool,

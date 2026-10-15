@@ -54,8 +54,9 @@ from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.skills.lifecycle import discover_skill_catalog
-from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
+from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import Tool, ToolSafety
+from wisp.tools.mcp_servers import PROPOSE_MCP_SERVER, PROPOSE_MCP_SERVER_CHANGE
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
 from wisp.trust.permissions import load_permission_mode, save_permission_mode
 from wisp.trust.records import is_trusted, record_trust, trust_override_from_env
@@ -109,6 +110,13 @@ class _PendingApproval:
     approved: bool | None = None
     reason: str | None = None
     resolved: bool = False
+    # Set for tools that confirm every call: only a one-time confirmation applies,
+    # and its arguments are what the confirmation handler acts on.
+    confirm_only: bool = False
+    arguments: Mapping[str, object] | None = None
+
+
+type ConfirmationHandler = Callable[[str, Mapping[str, object]], str | None]
 
 
 class RpcToolApprovalPolicy(ToolApprovalPolicy):
@@ -120,6 +128,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             approved_safety=fallback.approved_safety,
         )
         self._pending: dict[str, _PendingApproval] = {}
+        self._confirmations: dict[str, ConfirmationHandler] = {}
         self._input_closed_reason: str | None = None
         self._project_path = project_path
         self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
@@ -127,6 +136,21 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             self.approved_safety = self.approved_safety | {"mutating", "command"}
         self._baseline_approved_tools = self.approved_tools
         self._baseline_approved_safety = self.approved_safety
+
+    def register_confirmation(self, tool_name: str, handler: ConfirmationHandler) -> None:
+        """Apply a confirm-every-call tool's effect when the user confirms it.
+
+        The handler receives the tool name and the exact arguments the user was
+        shown, and returns an error to deny the call with, or None. A confirmed
+        call of such a tool without a handler is denied, so a tool can never
+        report an effect that nothing applied.
+
+        Args:
+            tool_name (str): Tool whose confirmation the handler applies.
+            handler (ConfirmationHandler): Applies the change; returns an error or None.
+        """
+
+        self._confirmations[tool_name] = handler
 
     def reset_session_grants(self) -> None:
         """Expire temporary grants while retaining the selected project/startup mode."""
@@ -187,14 +211,16 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         call_id: str,
         arguments: Mapping[str, object],
     ) -> None:
-        del arguments
         if self.approves(tool):
             return
+        confirm_only = confirms_every_call(tool)
         pending = _PendingApproval(
             call_id=call_id,
             tool_name=tool.name,
             tool_safety=tool.safety,
             event=anyio.Event(),
+            confirm_only=confirm_only,
+            arguments=dict(arguments) if confirm_only else None,
         )
         self._pending[call_id] = pending
         if self._input_closed_reason is not None:
@@ -244,6 +270,16 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         pending = self._pending.get(call_id)
         if pending is None or pending.resolved:
             return False
+        if pending.confirm_only:
+            # A grant never covers these tools; any approval is a one-time
+            # confirmation, applied before the call may proceed.
+            if approved:
+                error = self._apply_confirmation(pending)
+                if error is not None:
+                    self._resolve_pending(pending, approved=False, reason=error)
+                    return True
+            self._resolve_pending(pending, approved=approved, reason=reason)
+            return True
         if approved and scope == "all_project":
             try:
                 self.set_permissions("yolo")
@@ -263,12 +299,25 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             # A scoped grant also releases matching calls that are already waiting.
             # Explicit denials remain final, regardless of later mode changes.
             for other in self._pending.values():
-                if not other.resolved and (
-                    other.tool_name in self.approved_tools
-                    or other.tool_safety in self.approved_safety
+                if (
+                    not other.resolved
+                    and not other.confirm_only
+                    and (
+                        other.tool_name in self.approved_tools
+                        or other.tool_safety in self.approved_safety
+                    )
                 ):
                     self._resolve_pending(other, approved=True, reason=None)
         return True
+
+    def _apply_confirmation(self, pending: _PendingApproval) -> str | None:
+        handler = self._confirmations.get(pending.tool_name)
+        if handler is None or pending.arguments is None:
+            return f"This client cannot apply {pending.tool_name}"
+        try:
+            return handler(pending.tool_name, pending.arguments)
+        except Exception as exc:  # noqa: BLE001 - deny instead of failing the host
+            return f"{pending.tool_name} could not be applied: {type(exc).__name__}"
 
     def deny_pending_on_input_closed(self) -> None:
         reason = "RPC input closed before approval response"
@@ -477,6 +526,9 @@ class RpcHost:
             if tool_selection is not None
             else None
         )
+        if self.mcp_servers is not None:
+            for tool_name in (PROPOSE_MCP_SERVER, PROPOSE_MCP_SERVER_CHANGE):
+                approval_policy.register_confirmation(tool_name, self.mcp_servers.confirm_proposal)
         self.approval_policy = approval_policy
         self.trust_gate = trust_gate
         self.configure_overrides = configure_overrides

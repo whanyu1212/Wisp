@@ -336,6 +336,7 @@ class RpcCommandExecutor:
             render_events=self.render_events,
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
+            after_run=self._after_run(),
         )
         return _RpcDispatchResult(
             running_command=new_running_command,
@@ -360,6 +361,11 @@ class RpcCommandExecutor:
             running_command=new_running_command,
             selected_session=new_session,
         )
+
+    def _after_run(self) -> Callable[[], Awaitable[str | None]] | None:
+        """Work for the end of a run that may have confirmed MCP proposals."""
+
+        return self.mcp_servers.restart_after_run if self.mcp_servers is not None else None
 
     def _dispatch_compact(self, command: CompactCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(

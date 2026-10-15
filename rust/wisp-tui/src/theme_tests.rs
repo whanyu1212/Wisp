@@ -554,6 +554,7 @@ async fn theme_toggles_preserve_unsendable_approval_trust_and_cancellation_notic
                 arguments: json!({}),
                 detail_source: reducer::ToolDetailSource::None,
                 safety: "command".into(),
+                grants_allowed: true,
             })
         };
         ui.dispatch(UiAction::BackendEvent(event), &writer, 1)

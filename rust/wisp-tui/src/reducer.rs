@@ -504,6 +504,9 @@ pub struct PendingApproval {
     pub arguments: Value,
     pub detail_source: ToolDetailSource,
     pub safety: String,
+    /// False for tools that need a confirmation on every call: only a one-time
+    /// confirmation or a denial is offered.
+    pub grants_allowed: bool,
 }
 
 /// One queue item retained by the reducer.
@@ -5136,6 +5139,7 @@ mod tests {
                 arguments: serde_json::json!({}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
+                grants_allowed: true,
             });
             let mut ids = DeterministicIds::default();
             let effects = reduce(
@@ -5168,6 +5172,7 @@ mod tests {
             arguments: serde_json::json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
@@ -5220,6 +5225,7 @@ mod tests {
             arguments: serde_json::json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let before = state.clone();
         let mut ids = DeterministicIds::default();
@@ -5932,6 +5938,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "README.md"}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
+                grants_allowed: true,
             })),
             &mut ids,
         )
@@ -6140,6 +6147,7 @@ mod tests {
                 arguments: serde_json::json!({"path": "README.md"}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
+                grants_allowed: true,
             })),
             &mut ids,
         )
@@ -6353,6 +6361,7 @@ mod tests {
                 arguments: serde_json::json!({"command": "rm -rf /tmp/example"}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "ask".into(),
+                grants_allowed: true,
             })),
             &mut ids,
         )
@@ -6384,6 +6393,7 @@ mod tests {
             arguments: serde_json::json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let mut ids = DeterministicIds::default();
         let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();

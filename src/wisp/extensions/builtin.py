@@ -15,6 +15,12 @@ from wisp.runtime.builtin_commands import builtin_command_descriptors
 from wisp.skills.tool import SkillTool
 from wisp.tools.base import ToolExecutionMetadata, ToolPromptMetadata
 from wisp.tools.builtin import builtin_tools
+from wisp.tools.mcp_servers import (
+    MCP_PROPOSAL_PROMPT,
+    ListMcpServersTool,
+    ProposeMcpServerChangeTool,
+    ProposeMcpServerTool,
+)
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
@@ -147,5 +153,8 @@ def activate(
             prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name),
         )
     api.register_tool(SkillTool(), execution=_PARALLEL_TOOL_EXECUTION)
+    api.register_tool(ListMcpServersTool(), execution=_PARALLEL_TOOL_EXECUTION)
+    api.register_tool(ProposeMcpServerTool(), prompt=MCP_PROPOSAL_PROMPT)
+    api.register_tool(ProposeMcpServerChangeTool())
     for command in builtin_command_descriptors():
         api.register_command(command)

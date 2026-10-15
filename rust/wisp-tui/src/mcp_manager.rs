@@ -768,7 +768,7 @@ fn launch_rows(launch: &McpServerLaunch) -> Vec<String> {
 }
 
 /// Quote a command line the way a POSIX shell would read it back.
-fn shell_display(command: &str, args: &[String]) -> String {
+pub(crate) fn shell_display(command: &str, args: &[String]) -> String {
     std::iter::once(command)
         .chain(args.iter().map(String::as_str))
         .map(|word| {

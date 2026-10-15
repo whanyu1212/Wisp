@@ -35,6 +35,7 @@ fn approval(id: &str) -> UiAction {
         arguments: json!({}),
         detail_source: ToolDetailSource::None,
         safety: "command".into(),
+        grants_allowed: true,
     }))
 }
 fn draw(ui: &mut LiveUi) {

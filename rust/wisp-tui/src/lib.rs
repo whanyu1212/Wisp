@@ -1582,7 +1582,11 @@ impl LiveUi {
                 }
                 return;
             }
-            if ui::decision_context_visible(frame.area()) {
+            // A confirmation whose details did not fit is drawn with a hint, but
+            // is not armed: nothing may be confirmed while partly hidden.
+            if ui::decision_context_visible(frame.area())
+                && ui::decision_panel_complete(&self.state, frame.area(), self.notice.as_deref())
+            {
                 rendered_decision_context = self.current_decision_context();
                 rendered_decision_choice = self.decision_choice;
             }
@@ -4019,7 +4023,17 @@ impl LiveUi {
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
                 let context_visible =
                     self.rendered_approval_matches(self.state.pending_approval.as_ref());
-                let key = match self.decision_choice_key(key, &APPROVAL_CHOICE_KEYS) {
+                let confirmation = self
+                    .state
+                    .pending_approval
+                    .as_ref()
+                    .is_some_and(|pending| !pending.grants_allowed);
+                let choice_keys: &[char] = if confirmation {
+                    &CONFIRMATION_CHOICE_KEYS
+                } else {
+                    &APPROVAL_CHOICE_KEYS
+                };
+                let key = match self.decision_choice_key(key, choice_keys) {
                     Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
                     Some(DecisionChoiceKey::Confirm(choice)) => choice,
                     None => key,
@@ -4031,9 +4045,11 @@ impl LiveUi {
                     Some(action) => self.dispatch_decision(action, writer, limit).await,
                     None if key_can_edit(key) => {
                         if !self.unsendable_current_response() {
-                            self.notice = Some(
-                                "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into(),
-                            );
+                            self.notice = Some(if confirmation {
+                                "Choose 1 confirm or 2 deny.".into()
+                            } else {
+                                "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into()
+                            });
                         }
                         self.render_pending = true;
                         Ok(LoopControl::Continue)
@@ -4248,6 +4264,8 @@ fn printable_char(key: KeyEvent) -> Option<char> {
 
 /// Keys of the approval panel's choices, in panel order.
 const APPROVAL_CHOICE_KEYS: [char; ui::APPROVAL_CHOICES] = ['1', '2', '3', '4'];
+/// Keys of a confirm-every-call tool's choices: confirm once, or deny.
+const CONFIRMATION_CHOICE_KEYS: [char; ui::CONFIRMATION_CHOICES] = ['1', '2'];
 /// Keys of the trust panel's choices, in panel order.
 const TRUST_CHOICE_KEYS: [char; ui::TRUST_CHOICES] = ['y', 'n'];
 
@@ -4258,6 +4276,21 @@ enum DecisionChoiceKey {
 
 fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option<UiAction> {
     let pending = pending?;
+    if !pending.grants_allowed {
+        // No grant exists for these tools: `2` denies here, and the grant keys
+        // (`3`, `4`, `t`, `a`) do nothing.
+        let approved = match printable_char(key)?.to_ascii_lowercase() {
+            '1' | 'y' => true,
+            '2' | 'n' => false,
+            _ => return None,
+        };
+        return Some(UiAction::ApprovalDecision {
+            call_id: pending.call_id.clone(),
+            approved,
+            reason: None,
+            scope: approved.then_some(ApprovalScope::Once),
+        });
+    }
     let approved = match printable_char(key)?.to_ascii_lowercase() {
         '1' | 'y' => true,
         '2' | 't' => true,
@@ -7259,6 +7292,7 @@ mod tests {
             arguments: json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let mut live_ui = LiveUi {
             state,
@@ -7620,6 +7654,7 @@ mod tests {
             arguments: json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let mut live_ui = LiveUi {
             state,
@@ -7692,6 +7727,332 @@ mod tests {
         );
     }
 
+    fn proposal(call_id: &str, args: serde_json::Value) -> PendingApproval {
+        PendingApproval {
+            call_id: call_id.into(),
+            name: "propose_mcp_server".into(),
+            arguments: json!({
+                "name": "github",
+                "command": "npx",
+                "args": args,
+                "env_from": ["GITHUB_TOKEN"],
+            }),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: false,
+        }
+    }
+
+    fn screen(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn an_mcp_proposal_offers_only_confirm_or_deny() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(proposal("call-1", json!(["-y", "\u{1b}[31mred"])));
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.contains("Add MCP server github?"), "{rendered}");
+        assert!(rendered.contains("runs: npx -y"), "{rendered}");
+        assert!(rendered.contains("forwards from your environment: GITHUB_TOKEN"));
+        assert!(rendered.contains("1  Confirm") && rendered.contains("2  Deny"));
+        assert!(!rendered.contains("for this session") && !rendered.contains('\u{1b}'));
+
+        // Grant keys do nothing.
+        for key in ['3', '4', 't', 'a'] {
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            assert!(writer_rx.try_recv().is_err(), "{key}");
+        }
+
+        // A replacement proposal that has not been drawn cannot be confirmed.
+        live_ui.state.pending_approval = Some(proposal("call-2", json!(["other"])));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_err());
+
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+            panic!("confirmation must queue one frame");
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&payload).unwrap(),
+            json!({
+                "type": "approval",
+                "id": "approval-1",
+                "call_id": "call-2",
+                "approved": true
+            })
+        );
+    }
+
+    fn projected(name: &str, arguments: serde_json::Value) -> PendingApproval {
+        let event = json!({
+            "type": "tool.approval.requested",
+            "timestamp": "2026-10-15T00:00:00Z",
+            "call_id": "call-1",
+            "name": name,
+            "arguments": arguments,
+            "safety": "command",
+            "grants_allowed": false,
+        });
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolApprovalRequested(pending) => pending,
+            other => panic!("unexpected projection {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_projected_proposal_is_shown_whole_and_confirms_what_it_shows() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let long_arg = "a".repeat(120);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.pending_approval = Some(projected(
+            "propose_mcp_server",
+            json!({
+                "name": "github",
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-github", long_arg],
+                "env_from": ["GITHUB_TOKEN", "GITHUB_HOST"],
+            }),
+        ));
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        live_ui.draw(&mut terminal, &connection).unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.contains("Add MCP server github?"), "{rendered}");
+        let compact: String = rendered
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != '│')
+            .collect();
+        assert!(
+            compact.contains(&format!(
+                "runs:npx-y@modelcontextprotocol/server-github{long_arg}"
+            )),
+            "{rendered}"
+        );
+        assert!(rendered.contains("GITHUB_TOKEN, GITHUB_HOST"));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn a_projected_removal_is_titled_as_a_removal() {
+        let pending = projected(
+            "propose_mcp_server_change",
+            json!({"name": "github", "action": "remove"}),
+        );
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(pending);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let mut live_ui = LiveUi {
+            state,
+            ..LiveUi::default()
+        };
+        live_ui
+            .draw(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                },
+            )
+            .unwrap();
+        let rendered = screen(&terminal);
+        assert!(rendered.contains("Remove MCP server github?"), "{rendered}");
+        assert!(rendered.contains("including saved values"));
+    }
+
+    #[tokio::test]
+    async fn a_proposal_the_panel_cannot_show_is_never_armed() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        for arguments in [
+            // Too large to keep whole.
+            json!({"name": "x", "command": "npx", "args": ["a".repeat(70_000)]}),
+            // A shape the panel cannot describe faithfully.
+            json!({"name": "x", "command": "npx", "args": "not a list"}),
+            json!({"name": "x", "command": "npx", "url": "https://e.com"}),
+            json!({"name": "x", "command": "npx", "replace": "yes"}),
+        ] {
+            let mut state = UiState::unconfigured();
+            state.view_status = ViewStatus::WaitingForApproval;
+            state.current_command = Some(ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: ActiveCommandType::Prompt,
+            });
+            state.pending_approval = Some(projected("propose_mcp_server", arguments.clone()));
+            let mut live_ui = LiveUi {
+                state,
+                render_pending: false,
+                ..LiveUi::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            live_ui
+                .draw(
+                    &mut terminal,
+                    &ConnectionInfo {
+                        backend_version: "0.1.0".into(),
+                    },
+                )
+                .unwrap();
+            assert!(
+                screen(&terminal).contains("cannot be confirmed"),
+                "{arguments}"
+            );
+            live_ui
+                .handle_input(
+                    Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                    &writer_tx,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            assert!(writer_rx.try_recv().is_err(), "{arguments}");
+        }
+    }
+
+    #[test]
+    fn a_proposals_second_choice_denies() {
+        let pending = proposal("call-1", json!([]));
+        for (key, approved, scope) in [
+            ('1', true, Some(ApprovalScope::Once)),
+            ('y', true, Some(ApprovalScope::Once)),
+            ('2', false, None),
+            ('n', false, None),
+        ] {
+            assert_eq!(
+                approval_decision(
+                    KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE),
+                    Some(&pending)
+                ),
+                Some(UiAction::ApprovalDecision {
+                    call_id: "call-1".into(),
+                    approved,
+                    reason: None,
+                    scope,
+                }),
+                "{key}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proposal_cannot_be_confirmed_while_its_command_is_hidden() {
+        let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        let padding = "x".repeat(600);
+        state.pending_approval = Some(proposal("call-1", json!([padding, "/"])));
+        let mut live_ui = LiveUi {
+            state,
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let mut small = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        live_ui.draw(&mut small, &connection).unwrap();
+        assert!(
+            screen(&small).contains("Make the terminal larger"),
+            "{}",
+            screen(&small)
+        );
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_err());
+
+        let mut large = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        live_ui.draw(&mut large, &connection).unwrap();
+        let compact: String = screen(&large)
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != '│')
+            .collect();
+        assert!(compact.contains(&format!("{}/", "x".repeat(40))));
+        live_ui
+            .handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE)),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert!(writer_rx.try_recv().is_ok());
+    }
+
     #[tokio::test]
     async fn positive_decision_keys_require_visible_current_context() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
@@ -7707,6 +8068,7 @@ mod tests {
             arguments: json!({"path": "/sensitive"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let mut live_ui = LiveUi {
             state,
@@ -7828,6 +8190,7 @@ mod tests {
             arguments: json!({}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
+            grants_allowed: true,
         });
         let mut approval_ui = LiveUi {
             state: approval_state,
@@ -8004,6 +8367,7 @@ mod tests {
                 arguments: json!({}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "command".into(),
+                grants_allowed: true,
             }));
 
         let control = approval_ui
@@ -8609,6 +8973,7 @@ mod tests {
                     arguments: json!({"path": "README.md"}),
                     detail_source: tool_detail::ToolDetailSource::None,
                     safety: "read".into(),
+                    grants_allowed: true,
                 })),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,

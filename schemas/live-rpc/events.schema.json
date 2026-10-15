@@ -5214,6 +5214,11 @@
           "title": "Call Id",
           "type": "string"
         },
+        "grants_allowed": {
+          "default": true,
+          "title": "Grants Allowed",
+          "type": "boolean"
+        },
         "name": {
           "title": "Name",
           "type": "string"
@@ -5245,7 +5250,8 @@
         "call_id",
         "name",
         "arguments",
-        "safety"
+        "safety",
+        "grants_allowed"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"
@@ -7148,6 +7154,7 @@
     "tool.approval.requested": {
       "arguments": {},
       "call_id": "call-1",
+      "grants_allowed": true,
       "name": "read",
       "safety": "read",
       "timestamp": "2026-01-02T03:04:05Z",

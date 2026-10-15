@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from wisp.tool_types import ToolSafety as ToolSafety
 from wisp.tools.context import ToolContext
@@ -39,6 +39,17 @@ class ToolPromptMetadata:
         if any(type(guideline) is not str for guideline in guidelines):
             raise TypeError("Tool prompt guidelines must be strings")
         object.__setattr__(self, "guidelines", guidelines)
+
+
+@runtime_checkable
+class ArgumentCheckedTool(Protocol):
+    """A tool that rejects some arguments before the user is asked to approve.
+
+    ``check_arguments`` returns a model-facing problem, or None when the call may
+    proceed to approval. It must not echo argument values that could be secrets.
+    """
+
+    def check_arguments(self, arguments: ToolArguments) -> str | None: ...
 
 
 class Tool(Protocol):

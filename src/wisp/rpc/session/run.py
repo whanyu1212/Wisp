@@ -215,6 +215,7 @@ def start_rpc_prompt_command(
     completion_error: Callable[[], str | None] | None = None,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    after_run: Callable[[], Awaitable[str | None]] | None = None,
 ) -> tuple[_RpcRunningCommand, JsonlSession]:
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_type = command.type
@@ -244,6 +245,7 @@ def start_rpc_prompt_command(
         operation_tool_names,
         event_observer,
         completion_error,
+        after_run,
     )
     return (
         running_command_factory(
@@ -460,6 +462,7 @@ async def run_rpc_prompt_command(
     operation_tool_names: frozenset[str] | None = None,
     event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
+    after_run: Callable[[], Awaitable[str | None]] | None = None,
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -548,6 +551,16 @@ async def run_rpc_prompt_command(
                         f"RPC command cancelled: {command_id}; prompt entries were retained "
                         "because another writer appended to the session"
                     )
+    if after_run is not None:
+        # The run has ended and the prompt still holds the coordinator, so work
+        # that must not overlap a run (restarting MCP servers) happens here.
+        with anyio.CancelScope(shield=True):
+            try:
+                after_run_error = await after_run()
+            except Exception as exc:  # noqa: BLE001 - the prompt must still finish
+                after_run_error = f"Work after the run failed: {type(exc).__name__}"
+        if after_run_error is not None:
+            write_event(ErrorEvent(message=after_run_error))
     try:
         entry_count, updated_history = await _run_abandonable_session_read(
             updated_rpc_session_state,

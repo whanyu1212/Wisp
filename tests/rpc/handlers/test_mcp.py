@@ -270,3 +270,35 @@ def test_preview_command_never_shows_the_snippet() -> None:
     parsed = ParsedRpcCommand.from_known(command)
     assert SECRET not in repr(parsed._payload)
     assert "snippet" in parsed.provided_fields
+
+
+def test_a_restart_after_the_run_waits_for_an_idle_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime = await build_runtime()
+        try:
+            agent = CodingSession(
+                provider=ScriptedProvider(()), sessions=JsonlSessionStore(tmp_path)
+            )
+            servers = RpcMcpServers(
+                runtime=runtime,
+                agent=agent,
+                tool_selection=_ALL_TOOLS,
+                revoke_session_tool_grants=lambda _prefix: None,
+            )
+            assert (
+                servers.confirm_proposal(
+                    "propose_mcp_server", {"name": "docs", "url": "http://127.0.0.1:9/mcp"}
+                )
+                is None
+            )
+            agent._operation_active = True
+            assert "after the next reply" in (await servers.restart_after_run() or "")
+            agent._operation_active = False
+            assert await servers.restart_after_run() is None
+            # The restart ran: the saved (unreachable) server is reported.
+            assert runtime.mcp_server_configs[0].name == "docs"
+            assert await servers.restart_after_run() is None
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)

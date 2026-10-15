@@ -489,6 +489,7 @@ async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
                         arguments: json!({}),
                         detail_source: tool_detail::ToolDetailSource::None,
                         safety: "read".into(),
+                        grants_allowed: true,
                     })
                 };
                 let draft = ui.editor.clone();

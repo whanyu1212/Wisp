@@ -219,6 +219,9 @@ transaction rollback: do not blindly retry a pop or clear after an unknown outco
 
 `ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project"`.
 `all_project` saves YOLO for the current project; the other scopes remain temporary.
+When `ToolApprovalRequested.grants_allowed` is false (MCP server proposals), every call needs its
+own confirmation: any approval counts as `"once"` and grants nothing. Show the user the proposal's
+arguments before approving; see [Asking Wisp to set up a server](../guide/tools-and-safety#asking-wisp-to-set-up-a-server).
 `PermissionMode` is `"ask" | "yolo"`. `set_permissions` saves the default and clears temporary
 grants; it fails without changing permissions if an operation is running or saving fails.
 Saved defaults apply to future launches in the same canonical project directory. Match `request_id` from

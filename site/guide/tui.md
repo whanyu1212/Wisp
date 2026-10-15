@@ -400,7 +400,9 @@ Automatic notices, binary installation, rollback, and coordinated restart remain
 under [#469](https://github.com/whanyu1212/Wisp/issues/469).
 
 Unlike print mode, **the TUI exposes the full tool registry by default**. Mutating and
-command tools still pause for approval: approve once, allow that tool for the session, choose a saved
+command tools still pause for approval (MCP server proposals offer only Confirm or Deny; see
+[Asking Wisp to set up a server](./tools-and-safety#asking-wisp-to-set-up-a-server)): approve once,
+allow that tool for the session, choose a saved
 project YOLO default, or deny.
 
 Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
