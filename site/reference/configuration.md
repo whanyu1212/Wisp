@@ -21,6 +21,7 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
   "session_dir": "~/.wisp/sessions",
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
+  "web_search": false,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
@@ -32,7 +33,7 @@ Malformed settings files are skipped with a warning, never fatal.
 Some fields are **user-only** and a project file can never set them:
 
 `protected_paths` · `retry` · `effort` · `context_reserve_tokens` · `auto_compaction_enabled` ·
-`mcp_servers` · `openai_compatible`
+`web_search` · `mcp_servers` · `openai_compatible`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.

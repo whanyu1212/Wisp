@@ -49,6 +49,8 @@ class StubAnthropicProvider(AnthropicProvider):
         tool_results: Sequence[ToolCallResult] = (),
         previous_response_id: str | None = None,
         effort: str | None = None,
+        web_search: bool = False,
+        paused_turn: object = None,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         self.seen_model = model
         self.seen_messages = messages

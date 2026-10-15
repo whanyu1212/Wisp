@@ -31,6 +31,8 @@ from wisp.agent.messages import (
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.agent.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
+    WEB_SEARCH_GUIDANCE,
+    WEB_SEARCH_UNAVAILABLE_GUIDANCE,
     build_prompt_messages,
     read_repository_status,
     recover_repository_status,
@@ -101,6 +103,7 @@ from wisp.providers.base import (
     ToolSpec,
     prepare_provider_history,
     provider_native_output,
+    provider_supports_web_search,
 )
 from wisp.providers.catalog import ModelRegistry
 from wisp.runtime.event_bus import EventBus
@@ -138,6 +141,7 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "tool.execution.ended",
         "context.pressure",
         "context.overflow",
+        "web.search",
         "error",
     }
 )
@@ -189,6 +193,7 @@ class CodingSession:
         skill_catalog: SkillCatalog | None = None,
         context_reserve_tokens: int = 16_384,
         auto_compaction_enabled: bool = True,
+        web_search: bool = False,
         mode: AgentMode = DEFAULT_AGENT_MODE,
     ) -> None:
         self.sessions = sessions
@@ -236,6 +241,7 @@ class CodingSession:
                 trusted=trusted,
                 context_reserve_tokens=context_reserve_tokens,
                 auto_compaction_enabled=auto_compaction_enabled,
+                web_search=web_search,
             )
         )
 
@@ -277,6 +283,7 @@ class CodingSession:
             skill_catalog=configuration.skill_catalog,
             context_reserve_tokens=configuration.context_reserve_tokens,
             auto_compaction_enabled=configuration.auto_compaction_enabled,
+            web_search=configuration.web_search,
         )
 
     @property
@@ -299,6 +306,7 @@ class CodingSession:
             trusted=self.trusted,
             context_reserve_tokens=self.context_reserve_tokens,
             auto_compaction_enabled=self.auto_compaction_enabled,
+            web_search=self.web_search,
         )
 
     def reconfigure(self, configuration: CodingSessionConfiguration) -> None:
@@ -482,6 +490,7 @@ class CodingSession:
         self.trusted = configuration.trusted
         self.context_reserve_tokens = configuration.context_reserve_tokens
         self.auto_compaction_enabled = configuration.auto_compaction_enabled
+        self.web_search = configuration.web_search
 
     async def run(
         self,
@@ -1012,6 +1021,7 @@ class CodingSession:
                 max_tool_iterations=self.max_tool_iterations,
                 effort=self.effort,
                 prompt_cache_key=_prompt_cache_key(session.session_id),
+                web_search=self.web_search,
                 context_window=self._context_window(),
                 context_reserve_tokens=self._effective_context_reserve_tokens(),
                 cost_estimator=self._cost_estimator,
@@ -1523,6 +1533,15 @@ class CodingSession:
                 auto_compaction_enabled=self.auto_compaction_enabled,
             )
 
+    def _web_search_guidance(self) -> str:
+        """Return the prompt guidance for the web search setting, or "" when it is off."""
+
+        if not self.web_search:
+            return ""
+        if provider_supports_web_search(self.provider):
+            return WEB_SEARCH_GUIDANCE
+        return WEB_SEARCH_UNAVAILABLE_GUIDANCE
+
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
         return tuple(
             ToolSpec.from_tool(tool)
@@ -1597,7 +1616,9 @@ class CodingSession:
             )
             if effective_registry is not None
             else (),
-            additional_guidance=(skill_index,) if skill_index else (),
+            additional_guidance=tuple(
+                guidance for guidance in (skill_index, self._web_search_guidance()) if guidance
+            ),
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,

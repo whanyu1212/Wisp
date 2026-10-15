@@ -167,6 +167,9 @@ your files. Keep `bash` on ask when that matters.)
 | `propose_mcp_server` | command | Proposes adding (or replacing) a server: name, command and arguments or URL, and `env_from` names |
 | `propose_mcp_server_change` | command | Proposes removing or disabling a saved server |
 
+With [web search](./providers#web-search) on, Wisp can look up a server's command or URL itself,
+for example "add the Linear MCP server". What it finds is still only a proposal.
+
 Every proposal opens a confirmation that shows exactly what the server would run or connect to and
 which variables it forwards. Only **Confirm** or **Deny** is offered: no permission mode, `--yes`,
 or "allow for this session" answer ever approves a proposal, and a confirmation cannot be accepted

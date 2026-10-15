@@ -182,6 +182,15 @@ class ProviderResponseLifecycle:
         require_provider_response_started(self.started)
         del delta
 
+    def add_web_search(self) -> None:
+        """Validate a provider-run web search reported inside an active response.
+
+        Raises:
+            ProviderProtocolError: The response has not started or has terminated.
+        """
+        self.require_open()
+        require_provider_response_started(self.started)
+
     def add_tool_call(self, tool_call: ToolCall) -> None:
         """Record a completed tool call for terminal-response validation.
 

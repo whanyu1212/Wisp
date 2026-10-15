@@ -17,6 +17,7 @@
 | `WISP_RETRY_MAX_DELAY_SECONDS` | Maximum retry delay; defaults to `30` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
+| `WISP_WEB_SEARCH` | Offer the provider's built-in [web search](../guide/providers#web-search) to the model; defaults to `false` |
 
 ## Provider credentials
 

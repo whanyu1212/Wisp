@@ -139,6 +139,31 @@ class PromptCacheKeyProvider(Protocol):
         ...
 
 
+class WebSearchProvider(Protocol):
+    """Opt-in capability to offer the provider's own server-side web search.
+
+    The loop passes ``web_search=True`` only when the user enabled web search
+    and this capability is declared. The adapter then adds its native search
+    tool to the request, keeps any search blocks the provider requires in its
+    replay, and reports each search as a ``ProviderWebSearch`` event. Searches
+    never become ``ToolCall``s: the provider runs them, not Wisp.
+    """
+
+    supports_web_search: Literal[True]
+
+
+def provider_supports_web_search(provider: Provider) -> bool:
+    """Check whether an adapter explicitly offers provider-native web search.
+
+    Args:
+        provider (Provider): Adapter whose optional capability is inspected.
+
+    Returns:
+        bool: True only when supports_web_search is literally True.
+    """
+    return getattr(provider, "supports_web_search", False) is True
+
+
 class ContinuationMessageProvider(Protocol):
     """Opt-in capability to append user messages to an active continuation.
 

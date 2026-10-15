@@ -72,6 +72,31 @@ class ProviderToolCallCompleted:
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderWebSource:
+    """One page a provider-native web search returned or opened."""
+
+    url: str
+    title: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderWebSearch:
+    """A web search the provider ran on its own servers during the response.
+
+    The provider already gave the results to the model; this event only reports
+    what was searched so frontends can show it. ``action`` is ``"search"`` for
+    a query, ``"open_page"`` when the model opened a URL, and ``"find_in_page"``
+    when it searched within a page (``query`` then holds the pattern).
+    ``error`` carries the provider's error code when the search failed.
+    """
+
+    action: Literal["search", "open_page", "find_in_page"] = "search"
+    query: str | None = None
+    sources: tuple[ProviderWebSource, ...] = ()
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderUsage:
     """Provider-reported token usage for one successful API request."""
 
@@ -116,6 +141,7 @@ type ProviderEvent = (
     | ProviderTextDelta
     | ProviderThinkingDelta
     | ProviderToolCallCompleted
+    | ProviderWebSearch
     | ProviderResponseCompleted
     | ProviderResponseFailed
 )
@@ -134,6 +160,8 @@ __all__ = [
     "ProviderThinkingDelta",
     "ProviderToolCallCompleted",
     "ProviderUsage",
+    "ProviderWebSearch",
+    "ProviderWebSource",
     "ToolCall",
     "RetryReason",
 ]

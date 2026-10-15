@@ -39,6 +39,8 @@ from wisp.providers.events import (
     ProviderTextDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
+    ProviderWebSearch,
+    ProviderWebSource,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -73,6 +75,7 @@ class OpenAICodexProvider:
     supports_prompt_cache_key: Literal[True] = True
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
+    supports_web_search: Literal[True] = True
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Declare that portable call/result pairs can be reconstructed natively."""
@@ -110,12 +113,17 @@ class OpenAICodexProvider:
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
+        web_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized OpenAI Codex response lifecycle.
 
         ``effort`` maps to ``reasoning.effort`` on the Responses API request
         body (same shape as ``OpenAIProvider``) -- passed through
         unvalidated.
+
+        ``web_search`` adds the hosted ``web_search`` tool, as the Codex CLI's
+        own search option does. Each completed ``web_search_call`` item is
+        yielded as a ``ProviderWebSearch``; the item stays in the native replay.
         """
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_CODEX_MODEL
@@ -145,6 +153,7 @@ class OpenAICodexProvider:
             continuation_input=continuation_input,
             effort=effort,
             prompt_cache_key=prompt_cache_key,
+            web_search=web_search,
             native_output=lambda message: self._native_output(message, model=selected_model),
         )
         response_id: str | None = None
@@ -205,6 +214,11 @@ class OpenAICodexProvider:
                                 item_key = f"anonymous-{anonymous_output_item}"
                                 anonymous_output_item += 1
                             output_items[item_key] = deepcopy(item)
+                            if (
+                                item.get("type") == "web_search_call"
+                                and event_type == "response.output_item.done"
+                            ):
+                                yield _web_search_from_codex(item)
                             if item.get("type") == "function_call":
                                 item_id = _string_value(item.get("id"))
                                 if item_id is not None:
@@ -476,6 +490,7 @@ def _codex_request_body(
     continuation_input: Sequence[Mapping[str, object]],
     effort: str | None = None,
     prompt_cache_key: str | None = None,
+    web_search: bool = False,
     native_output: _NativeOutputLookup | None = None,
 ) -> dict[str, object]:
     body: dict[str, object] = {
@@ -494,13 +509,53 @@ def _codex_request_body(
     instructions = _instructions_from_messages(messages)
     if instructions:
         body["instructions"] = instructions
-    if tools:
-        body["tools"] = [_tool_spec_to_codex_tool(tool) for tool in tools]
+    codex_tools: list[dict[str, object]] = [_tool_spec_to_codex_tool(tool) for tool in tools]
+    if web_search:
+        codex_tools.append({"type": "web_search"})
+    if codex_tools:
+        body["tools"] = codex_tools
     if effort is not None:
         body["reasoning"] = {"effort": effort}
     if prompt_cache_key is not None:
         body["prompt_cache_key"] = prompt_cache_key
     return body
+
+
+def _web_search_from_codex(item: Mapping[str, object]) -> ProviderWebSearch:
+    """Report one completed web_search_call item as a provider search."""
+
+    error = "failed" if item.get("status") == "failed" else None
+    action = item.get("action")
+    if not isinstance(action, Mapping):
+        return ProviderWebSearch(error=error)
+    url = _string_value(action.get("url"))
+    if action.get("type") == "open_page":
+        sources = (ProviderWebSource(url=url),) if url else ()
+        return ProviderWebSearch(action="open_page", sources=sources, error=error)
+    if action.get("type") == "find_in_page":
+        return ProviderWebSearch(
+            action="find_in_page",
+            query=_string_value(action.get("pattern")),
+            sources=(ProviderWebSource(url=url),) if url else (),
+            error=error,
+        )
+    queries = action.get("queries")
+    query = _string_value(action.get("query")) or (
+        "; ".join(query for query in queries if isinstance(query, str))
+        if isinstance(queries, list)
+        else None
+    )
+    raw_sources = action.get("sources")
+    return ProviderWebSearch(
+        query=query or None,
+        sources=tuple(
+            ProviderWebSource(url=source_url)
+            for source in (raw_sources if isinstance(raw_sources, list) else ())
+            if isinstance(source, Mapping)
+            and (source_url := _string_value(source.get("url"))) is not None
+        ),
+        error=error,
+    )
 
 
 def _instructions_from_messages(messages: Sequence[Message]) -> str | None:

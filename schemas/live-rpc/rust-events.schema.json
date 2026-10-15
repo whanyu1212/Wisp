@@ -5865,6 +5865,113 @@
       ],
       "title": "UsageCostRates",
       "type": "object"
+    },
+    "WebSearchPerformed": {
+      "additionalProperties": false,
+      "description": "The provider searched the web on its own servers during a response.\n\nThe model already has the results; this event reports the search so\nfrontends can show it. Every text field comes from the web and is\nuntrusted: frontends must bound and sanitize it before display.\n``action`` is ``search`` for a query, ``open_page`` when the model opened a\nURL, and ``find_in_page`` when it searched within a page (``query`` holds\nthe pattern). ``error`` is the provider's error code for a failed search.",
+      "properties": {
+        "action": {
+          "default": "search",
+          "enum": [
+            "search",
+            "open_page",
+            "find_in_page"
+          ],
+          "title": "WebSearchPerformedAction",
+          "type": "string"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "WebSearchPerformedError"
+        },
+        "provider": {
+          "title": "WebSearchPerformedProvider",
+          "type": "string"
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "WebSearchPerformedQuery"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebSearchSource"
+          },
+          "title": "WebSearchPerformedSources",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "WebSearchPerformedTimestamp",
+          "type": "string"
+        },
+        "turn": {
+          "title": "WebSearchPerformedTurn",
+          "type": "integer"
+        },
+        "type": {
+          "const": "web.search",
+          "default": "web.search",
+          "title": "WebSearchPerformedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "turn",
+        "provider",
+        "action",
+        "query",
+        "sources",
+        "error"
+      ],
+      "title": "WebSearchPerformed",
+      "type": "object"
+    },
+    "WebSearchSource": {
+      "additionalProperties": false,
+      "description": "One page a provider-native web search returned or opened.",
+      "properties": {
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "WebSearchSourceTitle"
+        },
+        "url": {
+          "title": "WebSearchSourceUrl",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "title"
+      ],
+      "title": "WebSearchSource",
+      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5923,7 +6030,8 @@
       "trust.requested": "#/$defs/TrustRequested",
       "trust.resolved": "#/$defs/TrustResolved",
       "turn.completed": "#/$defs/TurnCompleted",
-      "turn.started": "#/$defs/TurnStarted"
+      "turn.started": "#/$defs/TurnStarted",
+      "web.search": "#/$defs/WebSearchPerformed"
     },
     "propertyName": "type"
   },
@@ -5942,6 +6050,9 @@
     },
     {
       "$ref": "#/$defs/MessageDelta"
+    },
+    {
+      "$ref": "#/$defs/WebSearchPerformed"
     },
     {
       "$ref": "#/$defs/MessageCompleted"

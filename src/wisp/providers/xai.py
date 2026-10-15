@@ -29,6 +29,9 @@ class XAIProvider(OpenAIProvider):
     # output items reaches the same cached prefix as chaining with
     # previous_response_id, while the portable rebuild does not.
     _replays_native_output = True
+    # xAI documents the web_search tool but not OpenAI's request for a
+    # search's sources, so none is asked for.
+    _web_search_includes = ()
 
     def __init__(
         self,

@@ -49,6 +49,8 @@ class AgentLoopConfig:
         tool_iteration_offset (int, optional): Tool batches already consumed.
         cost_estimator (UsageCostEstimator | None, optional): Optional usage-pricing callback.
         prompt_cache_key (str | None, optional): Cache key sent to supporting adapters.
+        web_search (bool, optional): Ask adapters that support provider-native web
+            search to offer it to the model. Defaults to False.
         request_boundary_hook (RequestBoundaryHook | None, optional): Policy consulted
             after a successful turn to stop, continue, or change request context.
         context_overflow_hook (ContextOverflowHook | None, optional): Policy that can
@@ -73,6 +75,7 @@ class AgentLoopConfig:
     tool_iteration_offset: int = 0
     cost_estimator: UsageCostEstimator | None = None
     prompt_cache_key: str | None = None
+    web_search: bool = False
     request_boundary_hook: RequestBoundaryHook | None = None
     context_overflow_hook: ContextOverflowHook | None = None
 

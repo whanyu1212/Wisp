@@ -20,6 +20,8 @@ from openai.types.responses import (
     ResponseFailedEvent,
     ResponseFunctionCallArgumentsDoneEvent,
     ResponseFunctionToolCall,
+    ResponseFunctionWebSearch,
+    ResponseIncludable,
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
@@ -28,6 +30,7 @@ from openai.types.responses import (
     ResponseRefusalDeltaEvent,
     ResponseStreamEvent,
     ResponseTextDeltaEvent,
+    ToolParam,
 )
 from openai.types.responses.response_input_param import ResponseInputItemParam, ResponseInputParam
 
@@ -51,6 +54,8 @@ from wisp.providers.events import (
     ProviderThinkingDelta,
     ProviderToolCallCompleted,
     ProviderUsage,
+    ProviderWebSearch,
+    ProviderWebSource,
     ToolCall,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
@@ -84,6 +89,10 @@ class OpenAIProvider:
     # prompt cache reaches the previous run's tail. Enabled per provider once
     # its backend has been checked to accept the replayed items.
     _replays_native_output: bool = False
+    supports_web_search: Literal[True] = True
+    # Extra output the request asks for when web search is on. OpenAI returns a
+    # search's sources only when asked; other Responses backends may not accept it.
+    _web_search_includes: tuple[ResponseIncludable, ...] = ("web_search_call.action.sources",)
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Declare that portable call/result pairs can be reconstructed natively."""
@@ -120,59 +129,36 @@ class OpenAIProvider:
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
+        web_search: bool = False,
     ) -> AsyncIterator[ProviderEvent]:
         """Stream a normalized OpenAI response lifecycle.
 
         ``effort`` maps to ``reasoning.effort`` on the Responses API
         (``"none"``/``"minimal"``/``"low"``/``"medium"``/``"high"``/
         ``"xhigh"``, model-dependent) -- passed through unvalidated.
+
+        ``web_search`` adds the provider's hosted ``web_search`` tool. Each
+        completed ``web_search_call`` item is yielded as a ``ProviderWebSearch``.
         """
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_MODEL
+        request: dict[str, object] = {
+            "model": selected_model,
+            "tools": tools,
+            "tool_results": tool_results,
+            "previous_response_id": previous_response_id,
+            "effort": effort,
+        }
+        if extra_messages:
+            request["extra_messages"] = extra_messages
+        if prompt_cache_key is not None:
+            request["prompt_cache_key"] = prompt_cache_key
+        if web_search:
+            request["web_search"] = True
         stream: AsyncIterator[ResponseStreamEvent] | None = None
         for retry_number in range(self._retry_policy.max_retries + 1):
             try:
-                if extra_messages:
-                    if prompt_cache_key is not None:
-                        stream = await self._create_stream(
-                            messages,
-                            model=selected_model,
-                            tools=tools,
-                            tool_results=tool_results,
-                            extra_messages=extra_messages,
-                            previous_response_id=previous_response_id,
-                            effort=effort,
-                            prompt_cache_key=prompt_cache_key,
-                        )
-                    else:
-                        stream = await self._create_stream(
-                            messages,
-                            model=selected_model,
-                            tools=tools,
-                            tool_results=tool_results,
-                            extra_messages=extra_messages,
-                            previous_response_id=previous_response_id,
-                            effort=effort,
-                        )
-                elif prompt_cache_key is not None:
-                    stream = await self._create_stream(
-                        messages,
-                        model=selected_model,
-                        tools=tools,
-                        tool_results=tool_results,
-                        previous_response_id=previous_response_id,
-                        effort=effort,
-                        prompt_cache_key=prompt_cache_key,
-                    )
-                else:
-                    stream = await self._create_stream(
-                        messages,
-                        model=selected_model,
-                        tools=tools,
-                        tool_results=tool_results,
-                        previous_response_id=previous_response_id,
-                        effort=effort,
-                    )
+                stream = await self._create_stream(messages, **request)  # type: ignore[arg-type]
                 break
             except OpenAIError as exc:
                 decision = _openai_retry_decision(exc)
@@ -256,6 +242,10 @@ class OpenAIProvider:
                         )
                         tool_calls.append(tool_call)
                         emitted_tool_item_ids.add(event.item_id)
+                elif isinstance(event, ResponseOutputItemDoneEvent) and isinstance(
+                    event.item, ResponseFunctionWebSearch
+                ):
+                    yield _web_search_from_openai(event.item)
                 elif isinstance(event, ResponseOutputItemAddedEvent | ResponseOutputItemDoneEvent):
                     if isinstance(event.item, ResponseFunctionToolCall):
                         item_id = event.item.id
@@ -373,9 +363,12 @@ class OpenAIProvider:
         previous_response_id: str | None = None,
         effort: str | None = None,
         prompt_cache_key: str | None = None,
+        web_search: bool = False,
     ) -> AsyncIterator[ResponseStreamEvent]:
         client = await self._client_or_create()
-        openai_tools = _tool_specs_to_openai_tools(tools)
+        openai_tools: list[ToolParam] = [*_tool_specs_to_openai_tools(tools)]
+        if web_search:
+            openai_tools.append({"type": "web_search"})
         explicit_prompt_cache = _uses_explicit_prompt_cache(
             messages,
             model=model,
@@ -424,8 +417,12 @@ class OpenAIProvider:
             kwargs["reasoning"] = {"effort": effort}
         if prompt_cache_key is not None:
             kwargs["prompt_cache_key"] = prompt_cache_key
-        if self._replays_native_output:
-            kwargs["include"] = ["reasoning.encrypted_content"]
+        include = [
+            *(("reasoning.encrypted_content",) if self._replays_native_output else ()),
+            *(self._web_search_includes if web_search else ()),
+        ]
+        if include:
+            kwargs["include"] = include
         if explicit_prompt_cache:
             # openai-python 2.44 does not yet expose GPT-5.6's request-wide
             # prompt_cache_options field, so use its documented forward-compatible
@@ -682,6 +679,29 @@ def _tool_results_to_response_input(tool_results: Sequence[ToolCallResult]) -> R
             }
         )
     return response_input
+
+
+def _web_search_from_openai(item: ResponseFunctionWebSearch) -> ProviderWebSearch:
+    """Report one completed web_search_call item as a provider search."""
+
+    error = "failed" if item.status == "failed" else None
+    action = item.action
+    if action.type == "open_page":
+        sources = (ProviderWebSource(url=action.url),) if action.url else ()
+        return ProviderWebSearch(action="open_page", sources=sources, error=error)
+    if action.type == "find_in_page":
+        return ProviderWebSearch(
+            action="find_in_page",
+            query=action.pattern,
+            sources=(ProviderWebSource(url=action.url),),
+            error=error,
+        )
+    query = action.query or "; ".join(action.queries or ()) or None
+    return ProviderWebSearch(
+        query=query,
+        sources=tuple(ProviderWebSource(url=source.url) for source in action.sources or ()),
+        error=error,
+    )
 
 
 def _tool_specs_to_openai_tools(tools: Sequence[ToolSpec]) -> list[FunctionToolParam]:

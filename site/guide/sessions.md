@@ -25,7 +25,7 @@ if a page cursor becomes stale. See [TUI controls](./tui) and the
 ## What a session file contains
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
-(tool calls, approvals, tool start/end, errors) for audit. They do **not** persist `message.delta`
+(tool calls, approvals, tool start/end, [web searches](./providers#web-search), errors) for audit. They do **not** persist `message.delta`
 events. Continuation replays only the selected path's messages and compactions, so audit events never
 become model-visible history.
 

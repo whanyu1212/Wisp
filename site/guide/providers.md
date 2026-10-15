@@ -38,8 +38,9 @@ rounds with xAI response IDs.
 
 Native HTTP continuation stores response state on xAI's servers. xAI documents a 30-day retention
 period for stored responses; Wisp explicitly enables storage to preserve reasoning and tool state
-across continued requests. Stateless/ZDR continuation over xAI's WebSocket transport and xAI-hosted
-web, X, code-execution, file-search, and MCP tools are not currently enabled by Wisp.
+across continued requests. xAI's hosted web search is available through the
+[web search setting](#web-search). Stateless/ZDR continuation over xAI's WebSocket transport and
+xAI-hosted X, code-execution, file-search, and MCP tools are not currently enabled by Wisp.
 
 ## OpenAI-compatible endpoints
 
@@ -97,6 +98,39 @@ Explicit model IDs pass through unchanged; add a user-only `~/.wisp/catalog.toml
 model-picker metadata, context limits, effort tiers, or pricing are desired. The catalog provider
 `name` must equal `provider_name`; list models in `models` and provider-native effort strings under
 `[providers.effort_levels]`.
+
+## Web search
+
+Several providers can search the web on their own servers. Wisp offers that search to the model
+when you turn it on; it is off by default. Add
+
+```json
+{ "web_search": true }
+```
+
+to `~/.wisp/settings.json`, or set `WISP_WEB_SEARCH=1` for one process. A project's settings file
+cannot turn it on.
+
+| Provider | Search tool |
+|---|---|
+| `anthropic` | Anthropic's web search (`web_search_20250305`), at most 5 searches per request |
+| `openai` | The Responses API `web_search` tool |
+| `openai-codex` | The same `web_search` tool, as the Codex CLI's search option uses |
+| `xai` | xAI's `web_search` tool |
+| `google`, `deepseek`, OpenAI-compatible endpoints | Not supported yet; the model is told it cannot search |
+
+**Cost.** Providers bill each search on top of tokens, and the pages a search returns count as input
+tokens for the rest of the conversation. Check your provider's pricing before turning search on. An
+Anthropic organization administrator can also disable web search, and a model without search support
+rejects the request; turn the setting off if that happens.
+
+**Safety.** Search results are untrusted web content. Wisp tells the model to treat them as data, not
+instructions, and nothing found through search bypasses a confirmation: an MCP server found this way
+is still added only through a [proposal you confirm](./tools-and-safety#asking-wisp-to-set-up-a-server).
+
+Each search is reported as a `WebSearchPerformed` event (`web.search`) with its query and the pages
+it returned or opened, and is kept in the session file for audit. Titles and URLs come from the web
+and are cut to a bounded length.
 
 ## Credential storage
 

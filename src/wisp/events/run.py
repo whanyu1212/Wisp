@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wisp.events._base import (
     FinishReason,
@@ -54,6 +54,35 @@ class MessageDelta(WispEvent):
     role: MessageRole = "assistant"
     content_index: int = 0
     content_kind: Literal["text", "thinking"] = "text"
+
+
+class WebSearchSource(BaseModel):
+    """One page a provider-native web search returned or opened."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    url: str
+    title: str | None = None
+
+
+class WebSearchPerformed(WispEvent):
+    """The provider searched the web on its own servers during a response.
+
+    The model already has the results; this event reports the search so
+    frontends can show it. Every text field comes from the web and is
+    untrusted: frontends must bound and sanitize it before display.
+    ``action`` is ``search`` for a query, ``open_page`` when the model opened a
+    URL, and ``find_in_page`` when it searched within a page (``query`` holds
+    the pattern). ``error`` is the provider's error code for a failed search.
+    """
+
+    type: Literal["web.search"] = "web.search"
+    turn: int
+    provider: str
+    action: Literal["search", "open_page", "find_in_page"] = "search"
+    query: str | None = None
+    sources: tuple[WebSearchSource, ...] = ()
+    error: str | None = None
 
 
 class MessageCompleted(_MessageOriginEvent):
