@@ -211,3 +211,25 @@ fn adding_an_http_server_sends_its_forwarded_headers_as_saved() {
     );
     assert_eq!(wire["headers"], json!({}));
 }
+
+#[test]
+fn enabling_a_server_with_a_bare_header_template_sends_no_null_scheme() {
+    let launch = McpServerLaunch {
+        url: Some("https://mcp.example.com/mcp".into()),
+        headers_from: vec![wisp_protocol::events::McpHeaderFrom {
+            header: "X-API-Key".into(),
+            variable: "TOKEN".into(),
+            scheme: None,
+        }],
+        ..Default::default()
+    };
+
+    let enable =
+        WispTypedClientRpcCommands::set_mcp_server_enabled("e-1", "docs", true, Some(&launch))
+            .unwrap();
+
+    assert_eq!(
+        enable.to_value().unwrap()["expected"]["headers_from"],
+        json!([{"header": "X-API-Key", "variable": "TOKEN"}])
+    );
+}

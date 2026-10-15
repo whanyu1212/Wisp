@@ -132,7 +132,8 @@ pub struct McpServerLaunch {
 pub struct McpHeaderFrom {
     pub header: String,
     pub variable: String,
-    #[serde(default)]
+    // Commands omit an absent scheme; their schema does not accept null.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheme: Option<String>,
 }
 
