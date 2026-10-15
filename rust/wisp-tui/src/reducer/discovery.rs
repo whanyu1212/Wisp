@@ -8,7 +8,8 @@ pub type SkillReport = Result<Arc<SkillCatalogSnapshot>, String>;
 pub type McpReport = Result<Arc<McpStatusSnapshot>, String>;
 pub type McpPreviewReport = Result<Arc<Vec<McpServerPreview>>, String>;
 
-/// Commands answered with an `rpc.mcp` status report under their own ID.
+/// Commands answered with an `rpc.mcp` status report under their own ID. A
+/// refresh reports nothing when it fails, so treating it as a change is harmless.
 const MCP_STATUS_COMMANDS: [&str; 5] = [
     "get_mcp_status",
     "add_mcp_server",
@@ -63,6 +64,23 @@ impl<T> Inspection<T> {
                 report.clone()
             });
         }
+    }
+
+    /// Finish a change that may have reported the state it reached before
+    /// failing: an MCP change can save its settings and then fail to restart.
+    /// That state replaces the older snapshot, alongside the error.
+    fn finish_change(&mut self, id: &str, ok: bool, error: Option<&str>) -> bool {
+        if !ok {
+            if let Some(Ok(snapshot)) = self
+                .pending
+                .as_ref()
+                .filter(|pending| pending.id == id && !pending.superseded)
+                .and_then(|pending| pending.report.clone())
+            {
+                self.snapshot = Some(snapshot);
+            }
+        }
+        self.finish(id, ok, error)
     }
 
     fn finish(&mut self, id: &str, ok: bool, error: Option<&str>) -> bool {
@@ -316,7 +334,7 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             ok,
             error,
         } if MCP_STATUS_COMMANDS.contains(&command_type.as_str())
-            && state.mcp.finish(command_id, *ok, error.as_deref()) =>
+            && state.mcp.finish_change(command_id, *ok, error.as_deref()) =>
         {
             Some(vec![UiEffect::RequestRender])
         }
@@ -672,5 +690,34 @@ mod tests {
         reduce(&mut state, UiAction::PreviewMcpSnippet(snippet), &mut ids).unwrap();
         assert!(state.mcp_preview.snapshot.is_none());
         assert!(state.mcp_preview.loading());
+    }
+
+    #[test]
+    fn a_change_that_failed_after_reporting_shows_the_reported_state() {
+        let mut state = ready_state();
+        let mut ids = Ids::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::ChangeMcpServers(McpChange::Reconnect),
+            &mut ids,
+        )
+        .unwrap();
+        let id = sent(&effects)["id"].as_str().unwrap().to_owned();
+        let mut report = fixture("rpc.mcp");
+        report["command_id"] = id.as_str().into();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::from_projection_value(&report).unwrap()),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "reconnect_mcp", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.mcp.snapshot.as_ref().unwrap().servers.len(), 4);
+        assert_eq!(state.mcp.error.as_deref(), Some("inspection failed"));
     }
 }

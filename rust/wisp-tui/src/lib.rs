@@ -740,6 +740,9 @@ impl LiveUi {
                                     | "get_state"
                                     | "get_skills"
                                     | "get_mcp_status"
+                                    | "remove_mcp_server"
+                                    | "set_mcp_server_enabled"
+                                    | "reconnect_mcp"
                                     | "get_project_files"
                                     | "get_sessions"
                             )
@@ -1610,11 +1613,29 @@ impl LiveUi {
             if let Some(view) = &mut self.discovery_view {
                 view.sync_mcp(&self.state);
             }
-            let docked_mcp_height = self
+            // Measure at the docked panel's real width, which the conversation
+            // surface's margins make narrower than the terminal.
+            let docked_mcp_height = if self
                 .discovery_view
                 .as_mut()
                 .and_then(DiscoveryView::docked_mcp)
-                .map(|view| view.panel_height(frame.area().width));
+                .is_some()
+            {
+                let width = ui::docked_popup_area(
+                    frame.area(),
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                    1,
+                )
+                .map_or(frame.area().width, |area| area.width);
+                self.discovery_view
+                    .as_mut()
+                    .and_then(DiscoveryView::docked_mcp)
+                    .map(|view| view.panel_height(width))
+            } else {
+                None
+            };
             let docked_height = if overlay == Some(OverlayKind::Discovery)
                 && matches!(self.discovery_view, Some(DiscoveryView::Permissions(_)))
             {
@@ -2899,10 +2920,14 @@ impl LiveUi {
         if let Some(command) = secret {
             let encoded_len = serde_json::to_vec(&command)?.len();
             if encoded_len > limit {
-                self.notice = Some(format!(
+                let notice = format!(
                     "The MCP request is {encoded_len} bytes, exceeding the negotiated \
                      {limit}-byte frame limit; nothing was sent."
-                ));
+                );
+                if let Some(view) = &mut self.discovery_view {
+                    view.mcp_request_rejected(&notice);
+                }
+                self.notice = Some(notice);
                 self.render_pending = true;
                 return Ok(LoopControl::Continue);
             }

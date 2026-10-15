@@ -142,6 +142,13 @@ impl DiscoveryView {
         }
     }
 
+    /// Tell the MCP view that its last request was not sent.
+    pub fn mcp_request_rejected(&mut self, notice: &str) {
+        if let Self::Mcp(view) = self {
+            view.request_rejected(notice);
+        }
+    }
+
     pub fn handle_paste(&mut self, text: &str, state: &UiState) -> DiscoveryAction {
         match self {
             Self::Mcp(view) => view.handle_paste(text, state),

@@ -137,7 +137,7 @@ main()
         wait_painted("fixture needs WISP_MCP_TEST_LITERAL (2 of 2)", "no second step")
 
         tui.send(b"2")
-        wait_painted("Value for WISP_MCP_TEST_LITERAL:", "value entry did not open")
+        wait_painted("Value for WISP_MCP_TEST_LITERAL.", "value entry did not open")
         tui.send(SECRET.encode())
         # Enter submits only after the typed value has been painted.
         wait_painted("•" * len(SECRET), "typed value was not shown masked")

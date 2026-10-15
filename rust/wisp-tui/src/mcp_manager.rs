@@ -36,8 +36,8 @@ pub(crate) const MCP_ENV_VALUE_MAX_BYTES: usize = 16_384;
 /// Largest snippet the backend accepts, counted in bytes so it also fits its
 /// character limit.
 pub(crate) const MCP_SNIPPET_MAX_BYTES: usize = 65_536;
-/// Rows a long launch line may wrap over in a confirmation before it is cut.
-const LAUNCH_MAX_ROWS: usize = 4;
+/// Shown instead of a confirmation's details when they do not all fit.
+const ENLARGE_HINT: &str = "Make the terminal larger to see everything before confirming.";
 
 #[derive(Default)]
 pub(crate) struct McpView {
@@ -168,6 +168,16 @@ impl ConfirmKind {
         }
     }
 
+    fn footnote(&self) -> Option<&'static str> {
+        match self {
+            Self::Add { launch, .. } | Self::Enable { launch, .. } if launch.command.is_some() => {
+                Some("Wisp runs this command every time it starts.")
+            }
+            Self::Remove { .. } => Some("Its settings are deleted and the server stops."),
+            _ => None,
+        }
+    }
+
     fn launch(&self) -> Option<&McpServerLaunch> {
         match self {
             Self::Add { launch, .. } | Self::Enable { launch, .. } => Some(launch),
@@ -280,6 +290,15 @@ impl McpView {
         action
     }
 
+    /// Show why the last request was not sent. A snippet that was not sent for
+    /// reading returns to the paste step instead of waiting for a reply.
+    pub fn request_rejected(&mut self, notice: &str) {
+        if matches!(self.flow, Some(Flow::Previewing)) {
+            self.flow = Some(Flow::Paste);
+        }
+        self.notice = Some(notice.to_owned());
+    }
+
     /// Take a pasted snippet, or paste into the value being typed.
     pub fn handle_paste(&mut self, text: &str, state: &UiState) -> DiscoveryAction {
         match &mut self.flow {
@@ -388,6 +407,8 @@ impl McpView {
                     current.saturating_sub(1)
                 };
                 self.selected = Some(names[next].to_owned());
+                // `e` and `d` must wait for the new selection to be painted.
+                self.rendered = None;
                 self.detail = ReportView::default();
                 DiscoveryAction::None
             }
@@ -511,16 +532,22 @@ impl McpView {
         }
     }
 
-    /// Rows the docked panel needs at `width`, borders included.
+    /// Rows the docked panel needs when it is `width` columns wide, borders
+    /// included. A confirmation asks for every wrapped detail row, so a long
+    /// command is shown whole whenever the terminal has room.
     pub fn panel_height(&self, width: u16) -> u16 {
         match &self.flow {
             None => 0,
-            Some(Flow::Paste | Flow::Previewing) => 6,
-            Some(Flow::Env(_)) => 7,
+            Some(Flow::Paste | Flow::Previewing | Flow::Env(_)) => 6,
             Some(Flow::Confirm(confirm)) => {
                 let rows = confirm_details(&confirm.kind, panel_width(width)).len();
-                // Borders, details, a gap, two choices, and the footnote with its gap.
-                u16::try_from(2 + rows + 1 + 2 + 2).unwrap_or(u16::MAX)
+                let footnote = if confirm.kind.footnote().is_some() {
+                    2
+                } else {
+                    0
+                };
+                // Borders, details and a gap, two choices, then the footnote.
+                u16::try_from(2 + rows + usize::from(rows > 0) + 2 + footnote).unwrap_or(u16::MAX)
             }
         }
     }
@@ -764,48 +791,30 @@ fn panel_width(width: u16) -> usize {
     usize::from(width.saturating_sub(4)).max(1)
 }
 
-/// The confirmation's detail rows at `width`: the launch line wraps so the whole
-/// command stays visible, up to a limit.
+/// The confirmation's detail rows at `width`, every one wrapped in full: a
+/// confirmation must never hide part of what it confirms.
 fn confirm_details(kind: &ConfirmKind, width: usize) -> Vec<String> {
-    let Some(launch) = kind.launch() else {
-        return vec![terminal_row(
-            "Its settings are deleted. Wisp stops it now.",
-            width,
-        )];
-    };
-    let mut rows = Vec::new();
-    for (index, row) in launch_rows(launch).into_iter().enumerate() {
-        if index == 0 {
-            rows.extend(wrapped(&row, width, LAUNCH_MAX_ROWS));
-        } else {
-            rows.push(terminal_row(&row, width));
-        }
-    }
+    let mut rows: Vec<String> = kind
+        .launch()
+        .map(launch_rows)
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|row| wrapped(row, width))
+        .collect();
     if matches!(kind, ConfirmKind::Add { replace: true, .. }) {
-        rows.push(terminal_row(
-            "Replaces the server saved under this name.",
-            width,
-        ));
+        rows.extend(wrapped("Replaces the server saved under this name.", width));
     }
     rows
 }
 
-/// Wrap sanitized text over at most `max_rows` rows, ending in `…` when cut.
-fn wrapped(content: &str, width: usize, max_rows: usize) -> Vec<String> {
+/// Wrap sanitized text over as many rows as it needs.
+fn wrapped(content: &str, width: usize) -> Vec<String> {
     let safe = sanitize_for_terminal(content).replace('\n', " ");
     let mut rows = vec![String::new()];
     let mut columns = 0;
     for grapheme in safe.graphemes(true) {
         let next = grapheme.width();
-        if columns + next > width {
-            if rows.len() == max_rows {
-                let last = rows.last_mut().expect("one row");
-                while last.width() + 1 > width {
-                    last.pop();
-                }
-                last.push('…');
-                return rows;
-            }
+        if columns + next > width && columns > 0 {
             rows.push(String::new());
             columns = 0;
         }
@@ -813,6 +822,11 @@ fn wrapped(content: &str, width: usize, max_rows: usize) -> Vec<String> {
         columns += next;
     }
     rows
+}
+
+/// Whether a docked panel's title is shown without being cut.
+fn title_fits(title: &str, area: Rect) -> bool {
+    sanitize_for_terminal(title).width() <= usize::from(area.width.saturating_sub(6))
 }
 
 fn docked_block(
@@ -900,6 +914,8 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
     frame.render_widget(block, area);
     let width = usize::from(inner.width);
     let muted = Style::default().fg(palette.muted);
+    // The input or the choices come first, so they stay usable in a small
+    // terminal; explanations follow.
     if let Some(value) = &step.input {
         step.pick.mark_painted(false);
         const PROMPT: &str = "› ";
@@ -912,12 +928,12 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
         };
         let cursor_x = inner.x + u16::try_from(PROMPT.width() + masked.width()).unwrap_or(0);
         let lines = vec![
-            Line::raw(terminal_row(&format!("Value for {name}:"), width)),
             Line::from(vec![
                 Span::styled(PROMPT, Style::default().fg(palette.primary)),
                 Span::raw(masked),
             ]),
             Line::default(),
+            Line::styled(terminal_row(&format!("Value for {name}."), width), muted),
             Line::styled(
                 terminal_row(
                     "It stays hidden and is saved to your Wisp settings file.",
@@ -927,8 +943,8 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
             ),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
-        if inner.height >= 2 && inner.width > 0 {
-            frame.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), inner.y + 1));
+        if inner.height >= 1 && inner.width > 0 {
+            frame.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), inner.y));
         }
         return;
     }
@@ -936,44 +952,65 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
         format!("Forward ${name} from Wisp's environment"),
         "Enter a value (hidden)".to_owned(),
     ];
-    let mut lines = vec![
-        Line::raw(terminal_row(
-            &format!("How should Wisp provide {name}?"),
-            width,
-        )),
-        Line::default(),
-    ];
-    lines.extend(choices.iter().enumerate().map(|(index, label)| {
-        choice_line(
-            &(index + 1).to_string(),
-            label,
-            step.pick.selected == Some(index),
-            width,
-            palette,
-        )
-    }));
+    let mut lines: Vec<Line<'static>> = choices
+        .iter()
+        .enumerate()
+        .map(|(index, label)| {
+            choice_line(
+                &(index + 1).to_string(),
+                label,
+                step.pick.selected == Some(index),
+                width,
+                palette,
+            )
+        })
+        .collect();
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        terminal_row(&format!("How should Wisp provide {name}?"), width),
+        muted,
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
+    // Both choices must be on screen. This step only chooses how a value is
+    // provided; the final confirmation shows the whole result.
     step.pick
-        .mark_painted(inner.height >= 4 && inner.width >= 12);
+        .mark_painted(inner.height >= 2 && inner.width >= 12);
 }
 
 fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &mut Confirm, palette: Palette) {
-    let width = panel_width(area.width);
-    let hint = if width >= 40 {
+    let hint = if panel_width(area.width) >= 40 {
         " ↑↓ select · Enter confirm · Esc cancel "
     } else {
         " ↑↓ Enter · Esc "
     };
-    let block = docked_block(&confirm.kind.title(), area, hint, true, palette);
+    let title = confirm.kind.title();
+    let block = docked_block(&title, area, hint, true, palette);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = usize::from(inner.width);
+    let height = usize::from(inner.height);
     let details = confirm_details(&confirm.kind, width);
     let choices = confirm.kind.choices();
-    // Keep the choices visible as the panel shrinks; details give way first.
-    let room = usize::from(inner.height).saturating_sub(choices.len() + 1);
-    let mut lines: Vec<Line<'static>> = details.iter().take(room).cloned().map(Line::raw).collect();
-    lines.push(Line::default());
+    // The choices always stay visible. The details need their own rows plus a
+    // gap; when they cannot all be shown, the panel says so instead of showing
+    // part of them, and the choices stay unarmed.
+    let detail_rows = details.len() + usize::from(!details.is_empty());
+    let complete = detail_rows + choices.len() <= height && title_fits(&title, area);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if complete {
+        lines.extend(details.into_iter().map(Line::raw));
+        if detail_rows > 0 {
+            lines.push(Line::default());
+        }
+    } else {
+        let room = height.saturating_sub(choices.len());
+        lines.extend(
+            wrapped(ENLARGE_HINT, width)
+                .into_iter()
+                .take(room)
+                .map(|row| Line::styled(row, Style::default().fg(palette.warning))),
+        );
+    }
     lines.extend(choices.iter().enumerate().map(|(index, label)| {
         choice_line(
             &(index + 1).to_string(),
@@ -983,15 +1020,11 @@ fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &mut Confirm, pale
             palette,
         )
     }));
-    let footnote = match &confirm.kind {
-        ConfirmKind::Add { launch, .. } | ConfirmKind::Enable { launch, .. }
-            if launch.command.is_some() =>
-        {
-            Some("Wisp runs this command every time it starts.")
-        }
-        _ => None,
-    };
-    if let Some(footnote) = footnote.filter(|_| lines.len() + 2 <= usize::from(inner.height)) {
+    if let Some(footnote) = confirm
+        .kind
+        .footnote()
+        .filter(|_| complete && lines.len() + 2 <= height)
+    {
         lines.push(Line::default());
         lines.push(Line::styled(
             terminal_row(footnote, width),
@@ -999,9 +1032,7 @@ fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &mut Confirm, pale
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
-    // Arm the choices only when every detail row was shown with them.
-    let visible = details.len() <= room && inner.width >= 12;
-    confirm.pick.mark_painted(visible);
+    confirm.pick.mark_painted(complete && inner.width >= 12);
 }
 
 #[cfg(test)]
@@ -1430,5 +1461,87 @@ mod tests {
             draw(&mut view, &busy, 100, 30)
                 .contains("Finish the current operation before changing MCP servers.")
         );
+    }
+
+    #[test]
+    fn a_confirmation_is_armed_only_when_the_whole_command_is_visible() {
+        let padding = "x".repeat(400);
+        let state = state(vec![server(
+            "files",
+            McpServerStatus::Disabled,
+            launch("npx", &["-y", "server-filesystem", &padding, "/"]),
+        )]);
+        let mut view = McpView::default();
+        draw(&mut view, &state, 100, 30);
+        press(&mut view, &state, KeyCode::Char('e'));
+
+        // Too short for the wrapped command: the panel says so and cannot confirm.
+        let short = draw(&mut view, &state, 100, 8);
+        assert!(short.contains("Make the terminal larger"), "{short}");
+        assert!(!short.contains("server-filesystem"));
+        assert!(change(press(&mut view, &state, KeyCode::Char('1'))).is_none());
+
+        // Tall enough: every row of the command, including its last argument, is shown.
+        let height = view.panel_height(100);
+        view.invalidate();
+        let whole = draw(&mut view, &state, 100, height);
+        let compact: String = whole
+            .chars()
+            .filter(|character| !character.is_whitespace() && *character != '│')
+            .collect();
+        assert!(compact.contains(&format!("{padding}/")), "{whole}");
+        assert!(change(press(&mut view, &state, KeyCode::Char('1'))).is_some());
+    }
+
+    #[test]
+    fn choices_stay_usable_in_the_smallest_docked_panel() {
+        // At 30×8 the composer leaves a docked panel five rows.
+        let state = sample_state();
+        let mut view = McpView::default();
+        draw(&mut view, &state, 30, 8);
+        press(&mut view, &state, KeyCode::Char('d'));
+        let remove = draw(&mut view, &state, 30, 5);
+        assert!(remove.contains("Remove MCP server github"), "{remove}");
+        assert_eq!(
+            change(press(&mut view, &state, KeyCode::Char('1'))),
+            Some(McpChange::Remove("github".into()))
+        );
+
+        let mut state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste("{}", &state);
+        let mut preview_launch = launch("npx", &["docs"]);
+        preview_launch.env_names = vec!["TOKEN".into()];
+        state.mcp_preview.snapshot = Some(Arc::new(vec![McpServerPreview {
+            name: "docs".into(),
+            launch: preview_launch,
+        }]));
+        view.advance(&state);
+        let env = draw(&mut view, &state, 30, 5);
+        assert!(env.contains("1  Forward"), "{env}");
+        assert!(env.contains("2  Enter a value"), "{env}");
+        press(&mut view, &state, KeyCode::Char('1'));
+        assert!(view.docked());
+        // The add confirmation's details do not fit five rows; it asks for room.
+        view.invalidate();
+        let confirm = draw(&mut view, &state, 30, 5);
+        assert!(confirm.contains("Make the"), "{confirm}");
+        assert!(change(press(&mut view, &state, KeyCode::Char('1'))).is_none());
+    }
+
+    #[test]
+    fn a_snippet_that_was_not_sent_returns_to_the_paste_step() {
+        let state = sample_state();
+        let mut view = McpView::default();
+        press(&mut view, &state, KeyCode::Char('a'));
+        view.handle_paste(r#"{"mcpServers": {}}"#, &state);
+        view.request_rejected("The MCP request is too large; nothing was sent.");
+        let rendered = draw(&mut view, &state, 100, 8);
+        assert!(
+            rendered.contains("Paste the server's config snippet."),
+            "{rendered}"
+        );
+        assert!(rendered.contains("nothing was sent"));
     }
 }
