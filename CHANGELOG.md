@@ -10,13 +10,31 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc8 — release preparation
+## 0.2.0rc9 — release preparation
+
+RC9 fixes two problems found while dogfooding RC8 with Linear's hosted MCP server. It changes no
+session, event, protocol, or settings format, so RC8 and RC9 read each other's sessions and
+settings. This section describes the candidate under preparation; publication requires a separate
+tagged release.
+
+- Fixed MCP servers with more than 64 tools being rejected whole: Linear's 68 tools showed as "the
+  server returned an invalid tool catalog". The per-server tool count is removed; the limits on
+  definition size per server and overall, discovery pages, and 256 MCP tools overall remain. A
+  rejected catalog now reports its real reason instead of the generic message. (#705)
+- Asking Wisp to add a hosted MCP server now proposes its URL and Wisp's own OAuth sign-in, preferred
+  over API keys. A proposal that wraps a Streamable HTTP URL in a local bridge such as `mcp-remote`,
+  which waits for its own sign-in and timed out at startup, is refused with the URL to propose
+  instead; a bridge to a legacy SSE-only server is still allowed. After you confirm an HTTP server,
+  Wisp tells you to press `l` in `/mcp` if it needs a sign-in. (#705)
+- `l` in `/mcp` on a command-based server explains how to add the server by URL to sign in, and on a
+  server with its own `Authorization` header why it cannot. (#705)
+
+## 0.2.0rc8 — 2026-10-16
 
 RC8 makes MCP servers manageable without editing `settings.json`, lets Wisp set one up on request,
 adds header and OAuth authentication for hosted MCP servers, and offers the providers' own web
 search. It changes the live RPC contract (new commands, events, and fields), so an RC8 backend and
-frontend must be paired. This section describes the candidate under preparation; publication
-requires a separate tagged release.
+frontend must be paired.
 
 ### MCP servers
 
