@@ -669,17 +669,17 @@ fn render_transcript(
                 conversation.width,
                 1,
             );
-            if offset == 0 && user_top_padding && row.role == TranscriptRole::User {
+            if offset == 0
+                && user_top_padding
+                && row.role == TranscriptRole::User
+                && row.anchor.position != RowPosition::UserLeadIn
+            {
                 frame.render_widget(
                     Block::default().style(palette.user_text()),
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
             }
-            let user_surface = row.role == TranscriptRole::User
-                || (row.kind == TranscriptRowKind::Spacer
-                    && rows.get(offset + 1).is_some_and(|next| {
-                        next.role == TranscriptRole::User && next.kind == TranscriptRowKind::Header
-                    }));
+            let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
                 && row_tool_in_progress(state, row))
             .then_some(activity_frame);

@@ -263,6 +263,30 @@ fn active_user_surface_keeps_one_highlighted_row_above_and_below() {
 }
 
 #[test]
+fn scrolled_back_user_surface_keeps_a_plain_gap_after_the_previous_reply() {
+    let mut ui = fixture("scrollback");
+    let palette = ui.palette();
+    let canvas = palette.base().bg.unwrap_or(Color::Reset);
+    let buffer = draw(&mut ui, 80, 40);
+    let prompt = row_containing(&buffer, "Now check the remaining edge cases.");
+    let label = prompt - 1;
+    assert_eq!(buffer[(3, label)].symbol(), "y");
+
+    assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
+    assert_eq!(buffer[(77, label - 1)].bg, palette.panel);
+    assert_eq!(screen_row(&buffer, label - 2).trim(), "");
+    assert_eq!(buffer[(2, label - 2)].bg, canvas);
+    assert_eq!(buffer[(77, label - 2)].bg, canvas);
+    assert!(screen_row(&buffer, label - 3).contains("Tests passed"));
+}
+
+fn screen_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
+#[test]
 fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
     for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
         let mut ui = fixture("conversation");
