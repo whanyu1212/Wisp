@@ -53,6 +53,9 @@ pub enum RowPosition {
     Markdown(MarkdownPosition),
     Card(CardPosition),
     Spacer,
+    /// Highlighted padding above the next user's prompt. The preceding entry owns it so its
+    /// `Spacer` stays a plain gap and every entry still starts at `Header`.
+    UserLeadIn,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -800,8 +803,20 @@ impl TranscriptRowCache {
                     String::new(),
                     entry.display_content().len(),
                 ),
-                next: next_entry(),
+                next: spacer_next(transcript, entry),
             },
+            RowPosition::UserLeadIn if user_lead_in(transcript, entry) == Some(anchor) => {
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        TranscriptRole::User,
+                        TranscriptRowKind::Spacer,
+                        String::new(),
+                        entry.display_content().len(),
+                    ),
+                    next: next_entry(),
+                }
+            }
             _ => return None,
         };
         Some(CachedRow {
@@ -1861,7 +1876,11 @@ impl TranscriptRowCache {
         let entry = transcript.entry(anchor.entry_id)?;
         match anchor.position {
             RowPosition::Header => transcript.entry_before(entry.id).map(|previous| {
-                if let Some(start) = collapsed_group_start(&self.fold, transcript, previous.id) {
+                if let Some(lead_in) = user_lead_in(transcript, previous) {
+                    lead_in
+                } else if let Some(start) =
+                    collapsed_group_start(&self.fold, transcript, previous.id)
+                {
                     RowAnchor {
                         entry_id: start,
                         position: RowPosition::Header,
@@ -1894,6 +1913,10 @@ impl TranscriptRowCache {
                 self.content_anchor_before(transcript, entry, position.output_offset, width)
             }
             RowPosition::Card(_) => self.card_anchor_before(transcript, entry, anchor, width),
+            RowPosition::UserLeadIn => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Spacer,
+            }),
             RowPosition::Spacer => {
                 if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
                     Some(RowAnchor {
@@ -2151,7 +2174,8 @@ impl TranscriptRowCache {
         self.rows.retain(|key, cached| {
             live(key.entry_id)
                 && cached.next.is_some_and(|next| {
-                    next.entry_id == key.entry_id && next.position != RowPosition::Spacer
+                    next.entry_id == key.entry_id
+                        && !matches!(next.position, RowPosition::Spacer | RowPosition::UserLeadIn)
                 })
         });
         let rows = &self.rows;
@@ -3061,7 +3085,7 @@ fn scroll_anchor_rank(
     };
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
-        RowPosition::Spacer => 1.0,
+        RowPosition::Spacer | RowPosition::UserLeadIn => 1.0,
         RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
@@ -3118,13 +3142,15 @@ fn cached_row_valid(
                 .next
                 .is_some_and(|next| next.entry_id == entry.id && next.position == expected)
         }
-        TranscriptRowKind::Spacer => {
-            cached.next
-                == transcript.entry_after(entry.id).map(|next| RowAnchor {
-                    entry_id: next.id,
-                    position: RowPosition::Header,
-                })
+        TranscriptRowKind::Spacer if cached.row.anchor.position == RowPosition::UserLeadIn => {
+            user_lead_in(transcript, entry) == Some(cached.row.anchor)
+                && cached.next
+                    == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                        entry_id: next.id,
+                        position: RowPosition::Header,
+                    })
         }
+        TranscriptRowKind::Spacer => cached.next == spacer_next(transcript, entry),
         TranscriptRowKind::Content if uses_markdown(entry) => {
             let Some(snapshot) = markdown else {
                 return false;
@@ -3316,9 +3342,11 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         RowPosition::Content(offset) => Some(offset),
         RowPosition::Markdown(position) => Some(position.output_offset),
         RowPosition::ThoughtContent(offset) => Some(offset),
-        RowPosition::Header | RowPosition::Thought | RowPosition::Card(_) | RowPosition::Spacer => {
-            None
-        }
+        RowPosition::Header
+        | RowPosition::Thought
+        | RowPosition::Card(_)
+        | RowPosition::Spacer
+        | RowPosition::UserLeadIn => None,
     }
 }
 
@@ -3353,6 +3381,30 @@ fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<R
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
+    })
+}
+
+/// The lead-in row owned by `entry` when a user's prompt follows a non-user entry.
+///
+/// A prompt that follows another prompt continues the same highlighted surface, so it needs no
+/// lead-in: the earlier prompt's spacer already pads it.
+fn user_lead_in(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    transcript
+        .entry_after(entry.id)
+        .filter(|next| next.role == TranscriptRole::User && entry.role != TranscriptRole::User)
+        .map(|_| RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::UserLeadIn,
+        })
+}
+
+/// The row after `entry`'s spacer: its lead-in when one is due, else the next entry's header.
+fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    user_lead_in(transcript, entry).or_else(|| {
+        transcript.entry_after(entry.id).map(|next| RowAnchor {
+            entry_id: next.id,
+            position: RowPosition::Header,
+        })
     })
 }
 
@@ -4546,6 +4598,73 @@ mod tests {
             assert!(texts.iter().any(|text| text == "newer"), "{texts:?}");
             assert_eq!(texts.iter().any(|text| text == "live"), live_suffix);
         }
+    }
+
+    #[test]
+    fn user_lead_in_links_both_ways_after_a_history_page_adds_the_prompt() {
+        let mut transcript = Transcript::default();
+        let older = transcript.append_prompt("older".into());
+        let answer = transcript.complete_message(1, "answer".into()).unwrap();
+        transcript.mark_history_entries(0, "older-entry");
+        let mut cache = TranscriptRowCache::default();
+        let top = RowAnchor {
+            entry_id: older,
+            position: RowPosition::Header,
+        };
+        let _ = collect_rows(&transcript, &mut cache, top, 40, 20);
+
+        let mut page = Transcript::default();
+        page.append_prompt("newer".into());
+        page.mark_history_entries(0, "newer-entry");
+        assert!(transcript.append_history_page(&page));
+        cache.retain_entries(&transcript);
+
+        let rows = collect_rows(&transcript, &mut cache, top, 40, 20);
+        let prompt = rows
+            .iter()
+            .position(|row| row.plain_text() == "newer")
+            .expect("appended prompt");
+        let [reply, spacer, lead_in, header] = &rows[prompt - 4..prompt] else {
+            unreachable!()
+        };
+        assert_eq!(reply.plain_text(), "answer");
+        assert_eq!(
+            (spacer.anchor.entry_id, spacer.anchor.position, spacer.role),
+            (answer, RowPosition::Spacer, TranscriptRole::Assistant)
+        );
+        assert_eq!(
+            (
+                lead_in.anchor.entry_id,
+                lead_in.anchor.position,
+                lead_in.role
+            ),
+            (answer, RowPosition::UserLeadIn, TranscriptRole::User)
+        );
+        assert_eq!(header.plain_text(), "you");
+
+        let mut anchor = header.anchor;
+        for expected in [lead_in, spacer, reply] {
+            anchor = cache.previous_anchor(&transcript, anchor, 40).unwrap();
+            assert_eq!(anchor, expected.anchor);
+        }
+    }
+
+    #[test]
+    fn consecutive_prompts_share_one_spacer_without_a_lead_in() {
+        let mut transcript = Transcript::default();
+        let first = transcript.append_prompt("first".into());
+        transcript.append_prompt("second".into());
+        let mut cache = TranscriptRowCache::default();
+        let top = RowAnchor {
+            entry_id: first,
+            position: RowPosition::Header,
+        };
+        let positions = collect_rows(&transcript, &mut cache, top, 40, 20)
+            .iter()
+            .map(|row| row.anchor.position)
+            .collect::<Vec<_>>();
+        assert!(positions.contains(&RowPosition::Spacer));
+        assert!(!positions.contains(&RowPosition::UserLeadIn));
     }
 
     #[test]
