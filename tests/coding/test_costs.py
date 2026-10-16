@@ -16,7 +16,7 @@ from wisp.coding.costs import (
     format_usd,
 )
 from wisp.coding.stats import build_session_stats
-from wisp.events import MessageCompleted, TokenUsage, wisp_event_from_json
+from wisp.events import MessageCompleted, TokenUsage, UsageCost, wisp_event_from_json
 from wisp.providers.catalog import (
     ModelCatalog,
     ModelCatalogProviderEntry,
@@ -634,3 +634,21 @@ def test_cost_events_require_schema_v12_and_round_trip() -> None:
     )
 
     assert wisp_event_from_json(event.model_dump_json()) == event
+
+
+def test_a_cost_without_searches_is_saved_without_the_search_field() -> None:
+    # Sessions where no search ran stay readable by releases that predate the field.
+    cost = CostEstimator(_models())(
+        "openai",
+        "model",
+        "model",
+        TokenUsage(input_tokens=100, output_tokens=100, total_tokens=200),
+    )
+
+    assert "web_searches" not in cost.model_dump(mode="json", exclude_none=True)
+    searched = cost.model_copy(update={"web_searches": 1})
+    assert searched.model_dump(mode="json", exclude_none=True)["web_searches"] == 1
+    # Sessions saved by builds before 0.2.0rc8 carry a zero count; they still load.
+    legacy = UsageCost.model_validate({**cost.model_dump(mode="json"), "web_searches": 0})
+    assert legacy.web_searches == 0
+    assert aggregate_session_cost((legacy,)).complete is True
