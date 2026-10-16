@@ -270,7 +270,11 @@ impl BackendEvent {
                 }),
             "rpc.state" => event
                 .agent_mode(&command_id)
-                .map(|mode| Self::ModeReported { command_id, mode })
+                .map(|mode| Self::ModeReported {
+                    command_id,
+                    mode,
+                    web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
+                })
                 .ok_or(EventProjectionError::InvalidField {
                     event_type,
                     field: "state.mode",
@@ -369,9 +373,14 @@ impl BackendEvent {
                     content_kind,
                 }
             }
+            "web.search" => Self::WebSearch {
+                turn: u64_field(value, &event_type, "turn")?,
+                text: crate::web_search::search(value),
+            },
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
+                cost: crate::web_search::cost(&value["cost"]),
             },
             "tool.call" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;

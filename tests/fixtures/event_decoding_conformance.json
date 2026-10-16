@@ -2999,6 +2999,15 @@
   },
   {
    "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "web_search"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
    "operation": "add_unknown",
    "path": [
     "state"

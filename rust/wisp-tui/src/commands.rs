@@ -34,6 +34,7 @@ pub(crate) enum Command {
     Mcp,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     AutoCompaction(bool),
+    Search(Option<bool>),
     Compact(Option<String>),
     Quit,
     Model(ModelCommand),
@@ -53,6 +54,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
+        "search" => "/search [on|off]",
         "queue" => "/queue",
         "skills" => "/skills",
         "mcp" => "/mcp",
@@ -148,6 +150,12 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
                 ),
             },
             _ => Command::Invalid("Usage: /logo [name]".into()),
+        },
+        "search" => match tail.trim() {
+            "" => Command::Search(None),
+            "on" => Command::Search(Some(true)),
+            "off" => Command::Search(Some(false)),
+            _ => Command::Invalid(format!("Usage: {syntax}")),
         },
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
@@ -575,6 +583,26 @@ pub(crate) fn session_command(prompt: &str) -> SessionCommand {
 pub(crate) mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn search_command_accepts_only_on_off_or_status() {
+        assert!(matches!(
+            classify("/search", None),
+            Some(Command::Search(None))
+        ));
+        assert!(matches!(
+            classify("/search on", None),
+            Some(Command::Search(Some(true)))
+        ));
+        assert!(matches!(
+            classify("/search off", None),
+            Some(Command::Search(Some(false)))
+        ));
+        assert!(matches!(
+            classify("/search maybe", None),
+            Some(Command::Invalid(_))
+        ));
+    }
 
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [

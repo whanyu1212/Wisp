@@ -12,7 +12,7 @@ from tests.coding.session_support import CapturingProvider
 from wisp.agent.messages import Message
 from wisp.agent.prompt import WEB_SEARCH_GUIDANCE, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding import CodingSession
-from wisp.events import WebSearchPerformed, WispEvent
+from wisp.events import WebSearchPerformed, WebSearchSource, WispEvent
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
@@ -84,6 +84,11 @@ def test_enabled_search_reaches_the_provider_and_is_saved_with_the_session(
     ]
     assert len(saved) == 1
     assert saved[0]["sources"] == [{"url": "https://linear.app/docs/mcp", "title": "Linear"}]
+    page = session.read_message_page(limit=1)
+    assert len(page.messages) == 1
+    assert page.messages[0].web_searches == tuple(searches)
+    exact = session.read_message_page(entry_ids=(page.messages[0].entry_id,))
+    assert exact.messages[0].web_searches == tuple(searches)
 
 
 def test_search_stays_off_by_default(tmp_path: Path) -> None:
@@ -116,3 +121,42 @@ def test_a_provider_without_search_tells_the_model_it_cannot_search(tmp_path: Pa
     system = _system_text(provider.seen_messages)
     assert WEB_SEARCH_UNAVAILABLE_GUIDANCE in system
     assert WEB_SEARCH_GUIDANCE not in system
+
+
+def test_history_searches_are_bounded_and_do_not_cross_runs(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run() -> None:
+        await session.append_message(Message(role="user", content="first"), operation_id="a")
+        for _ in range(40):
+            await session.append_event(
+                WebSearchPerformed(
+                    turn=1,
+                    provider="test",
+                    query="q" * 5000,
+                    sources=tuple(
+                        WebSearchSource(url="https://example.com/" + "x" * 2000, title="t" * 5000)
+                        for _ in range(20)
+                    ),
+                ),
+                operation_id="a",
+            )
+        await session.append_message(
+            Message(role="assistant", content="first reply"), operation_id="a"
+        )
+        await session.append_event(
+            WebSearchPerformed(turn=2, provider="test", query="orphan"), operation_id="a"
+        )
+        await session.append_message(Message(role="user", content="next"), operation_id="b")
+        await session.append_message(
+            Message(role="assistant", content="next reply"), operation_id="b"
+        )
+
+    anyio.run(run)
+    page = session.read_message_page()
+    searches = page.messages[1].web_searches
+    assert len(searches) == 32
+    assert len(searches[0].query.encode()) <= 1024
+    assert len(searches[0].sources) == 8
+    assert len(searches[0].sources[0].title.encode()) <= 1024
+    assert not page.messages[-1].web_searches

@@ -19,6 +19,7 @@ pub(super) struct PendingModeChange {
 impl UiState {
     pub(crate) fn configuration_active(&self) -> bool {
         self.mode_change.is_some()
+            || self.search_change.is_some()
             || self.model_configuration_active()
             || self.context.configuring()
             || self.permissions.loading()
@@ -81,6 +82,43 @@ pub(super) fn configure_mode(
     ])
 }
 
+fn search_notice(enabled: bool) -> String {
+    format!(
+        "Provider-native web search {} for this session (supported providers only; MCP tools unchanged).",
+        if enabled { "on" } else { "off" }
+    )
+}
+
+pub(super) fn search(
+    state: &mut UiState,
+    enabled: Option<bool>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if !state.can_select_model()
+        || super::session_sync_pending(state)
+        || state.search_read.is_some()
+    {
+        return Ok(vec![UiEffect::Notice(
+            "Wait for the current operation before changing web search.".into(),
+        )]);
+    }
+    let command = if let Some(enabled) = enabled {
+        let id = ids.next_id(CommandKind::Configure);
+        let command = WispTypedClientRpcCommands::configure_search(&id, enabled)?;
+        state.search_change = Some((id, enabled));
+        command
+    } else {
+        let id = ids.next_id(CommandKind::GetState);
+        let command = WispTypedClientRpcCommands::get_state(&id)?;
+        state.search_read = Some(PendingRead { id, report: None });
+        command
+    };
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
 pub(super) fn observe(
     state: &mut UiState,
     event: &BackendEvent,
@@ -98,7 +136,16 @@ pub(super) fn observe(
             }
             return Ok(Some(Vec::new()));
         }
-        BackendEvent::ModeReported { command_id, mode } => {
+        BackendEvent::ModeReported {
+            command_id,
+            mode,
+            web_search,
+        } => {
+            if let Some(read) = &mut state.search_read {
+                if read.id == *command_id {
+                    read.report = Some(*web_search);
+                }
+            }
             if let Some(read) = &mut state.mode_read {
                 if read.id == *command_id {
                     read.report = Some(*mode);
@@ -117,6 +164,42 @@ pub(super) fn observe(
     else {
         return Ok(None);
     };
+    if command_type == "get_state"
+        && state
+            .search_read
+            .as_ref()
+            .is_some_and(|read| read.id == *command_id)
+    {
+        let read = state.search_read.take().expect("matched search read");
+        let notice = match read.report.filter(|_| *ok) {
+            Some(enabled) => search_notice(enabled),
+            None => "Could not read web-search state.".into(),
+        };
+        return Ok(Some(vec![
+            UiEffect::Notice(notice),
+            UiEffect::RequestRender,
+        ]));
+    }
+    if command_type == "configure"
+        && state
+            .search_change
+            .as_ref()
+            .is_some_and(|(id, _)| id == command_id)
+    {
+        let (_, enabled) = state.search_change.take().expect("matched search change");
+        let notice = if *ok {
+            search_notice(enabled)
+        } else {
+            bounded_session_text(
+                error.as_deref().unwrap_or("Web-search change failed."),
+                SESSION_NOTICE_MAX_BYTES,
+            )
+        };
+        return Ok(Some(vec![
+            UiEffect::Notice(notice),
+            UiEffect::RequestRender,
+        ]));
+    }
     if command_type == "get_commands"
         && state
             .command_catalog_read
@@ -213,6 +296,55 @@ mod tests {
         effects
             .iter()
             .any(|effect| matches!(effect, UiEffect::SendCommand(_)))
+    }
+
+    #[test]
+    fn search_is_confirmed_and_explicit_false_is_sent() {
+        let mut state = UiState::unconfigured();
+        let mut ids = Ids::default();
+        let effects = search(&mut state, Some(false), &mut ids).unwrap();
+        let command = effects
+            .iter()
+            .find_map(|effect| match effect {
+                UiEffect::SendCommand(command) => Some(serde_json::to_value(command).unwrap()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(command["web_search"], false);
+        assert!(state.configuration_active());
+        assert!(!sends(&search(&mut state, Some(true), &mut ids).unwrap()));
+        let effects = observe(
+            &mut state,
+            &finished("configure-1", "configure", true),
+            &mut ids,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!state.configuration_active());
+        assert!(effects.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("web search off"))
+        ));
+        search(&mut state, None, &mut ids).unwrap();
+        observe(
+            &mut state,
+            &BackendEvent::ModeReported {
+                command_id: "get_state-2".into(),
+                mode: AgentMode::Build,
+                web_search: true,
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let effects = observe(
+            &mut state,
+            &finished("get_state-2", "get_state", true),
+            &mut ids,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(effects.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("web search on"))
+        ));
     }
 
     #[test]
@@ -323,6 +455,7 @@ mod tests {
             &BackendEvent::ModeReported {
                 command_id: "get_state-1".into(),
                 mode: AgentMode::Plan,
+                web_search: false,
             },
             &mut ids,
         )
@@ -383,6 +516,7 @@ mod tests {
             &BackendEvent::ModeReported {
                 command_id: "get_state-1".into(),
                 mode: AgentMode::Build,
+                web_search: false,
             },
             &mut ids,
         )

@@ -2571,6 +2571,14 @@
           ],
           "default": null,
           "title": "RpcMessageSnapshotUsage"
+        },
+        "web_searches": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebSearchPerformed"
+          },
+          "title": "RpcMessageSnapshotWebSearches",
+          "type": "array"
         }
       },
       "required": [
@@ -2592,6 +2600,7 @@
         "is_error",
         "usage",
         "cost",
+        "web_searches",
         "tool_result",
         "skill_invocation"
       ],
@@ -4471,6 +4480,11 @@
           ],
           "title": "RpcStateSnapshotSteeringMode",
           "type": "string"
+        },
+        "web_search": {
+          "default": false,
+          "title": "RpcStateSnapshotWebSearch",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4479,6 +4493,7 @@
         "mode",
         "effort",
         "auto_compaction_enabled",
+        "web_search",
         "steering_mode",
         "follow_up_mode",
         "pending_steering_count",

@@ -584,6 +584,7 @@ class ConfigureCommand(RpcCommandModel):
         max_length=MAX_RPC_MODEL_EFFORT_CHARS,
     )
     auto_compaction_enabled: bool | None = None
+    web_search: bool | None = None
     mode: AgentMode | None = None
     # `to_json_line()` uses `exclude_none=True`, so a bare `effort=None` is
     # indistinguishable on the wire from never having set `effort` at all --
@@ -604,6 +605,7 @@ class ConfigureCommand(RpcCommandModel):
                 self.model,
                 self.effort,
                 self.auto_compaction_enabled,
+                self.web_search,
                 self.mode,
             )
         ):

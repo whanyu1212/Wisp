@@ -663,6 +663,7 @@ class RpcController:
         clear_effort: bool = False,
         persist_model_selection: bool = False,
         auto_compaction_enabled: bool | None = None,
+        web_search: bool | None = None,
         mode: AgentMode | None = None,
         command_id: str | None = None,
     ) -> str:
@@ -670,6 +671,10 @@ class RpcController:
 
         The RPC host preserves sequential command order: configuration waits
         behind active sequential work and is applied before later prompts.
+
+        ``web_search`` enables or disables provider-native search for subsequent
+        prompts in this process. It does not persist user defaults or change MCP
+        tools. ``None`` leaves the setting unchanged.
 
         A model-only update keeps the current provider when it offers that
         model, otherwise it auto-switches to a unique catalog owner. If multiple
@@ -699,6 +704,7 @@ class RpcController:
                 clear_effort=clear_effort,
                 persist_model_selection=persist_model_selection,
                 auto_compaction_enabled=auto_compaction_enabled,
+                web_search=web_search,
                 mode=mode,
             )
         )

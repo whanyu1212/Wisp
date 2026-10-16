@@ -45,6 +45,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=20,
         ),
         CommandDescriptor(
+            name="search",
+            title="Web search",
+            description="Show or toggle provider-native web search for this session",
+            category=CommandCategory.configuration,
+            arguments=(CommandArgument(name="state", description="Optional on or off"),),
+            accepts_arguments=True,
+            order=23,
+        ),
+        CommandDescriptor(
             name="context",
             title="Context",
             description="Show context and automatic-compaction status",

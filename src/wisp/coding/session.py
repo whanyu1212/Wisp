@@ -391,6 +391,7 @@ class CodingSession:
             mode=self.mode,
             effort=self.effort,
             auto_compaction_enabled=self.auto_compaction_enabled,
+            web_search=self.web_search,
             steering_mode=queue.steering_mode,
             follow_up_mode=queue.follow_up_mode,
             pending_steering_count=len(queue.steering),

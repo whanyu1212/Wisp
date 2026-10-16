@@ -316,6 +316,7 @@ async fn decision_arrow_keys_survive_tool_output_during_the_same_decision() {
         UiAction::BackendEvent(BackendEvent::MessageCompleted {
             turn: 2,
             content: "parallel tool output".into(),
+            cost: None,
         }),
         &writer,
         8192,
@@ -368,6 +369,7 @@ async fn ordinary_typing_and_paste_survive_unrelated_workflow_revision_changes()
             UiAction::BackendEvent(BackendEvent::MessageCompleted {
                 turn: 1,
                 content: "tool output".into(),
+                cost: None,
             }),
             &writer,
             8192,
@@ -412,6 +414,7 @@ async fn wheel_scroll_survives_workflow_revision_changes_during_a_run() {
             UiAction::BackendEvent(BackendEvent::MessageCompleted {
                 turn: 2,
                 content: "tool output".into(),
+                cost: None,
             }),
             &writer,
             8192,
@@ -481,6 +484,7 @@ async fn selection_with_file_completion_survives_workflow_revision_changes() {
         UiAction::BackendEvent(BackendEvent::MessageCompleted {
             turn: 1,
             content: "tool output".into(),
+            cost: None,
         }),
         &writer,
         8192,

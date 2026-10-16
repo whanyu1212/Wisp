@@ -641,3 +641,14 @@ print(json.dumps({
         assert events[0].ok is True
 
     anyio.run(run)
+
+
+def test_search_toggle_serializes_false() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(transport, command_id_factory=lambda prefix: f"{prefix}-id")
+        await controller.configure(web_search=False)
+        assert transport.commands == [ConfigureCommand(id="configure-id", web_search=False)]
+        assert json.loads(transport.commands[0].to_json_line())["web_search"] is False
+
+    anyio.run(run)

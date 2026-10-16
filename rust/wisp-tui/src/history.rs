@@ -179,10 +179,29 @@ fn project_assistant(
     {
         return Err(HistoryProjectionError::TooManyToolCalls { index });
     }
+    if let Some(searches) = message.get("web_searches").and_then(Value::as_array) {
+        for search in searches.iter().take(32) {
+            transcript.observe_search(turn(index), crate::web_search::search(search));
+        }
+    }
     if !content.is_empty() {
-        transcript.complete_message(turn(index), content);
-    } else if tool_calls.is_empty() {
-        transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
+        transcript.complete_message_with_cost(
+            turn(index),
+            content,
+            crate::web_search::cost(&message["cost"]),
+        );
+    } else if tool_calls.is_empty()
+        || message
+            .get("web_searches")
+            .and_then(Value::as_array)
+            .is_some_and(|searches| !searches.is_empty())
+        || !message["cost"].is_null()
+    {
+        transcript.complete_message_with_cost(
+            turn(index),
+            EMPTY_ASSISTANT_MESSAGE.into(),
+            crate::web_search::cost(&message["cost"]),
+        );
     }
     let mut entries = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
@@ -634,6 +653,27 @@ mod tests {
             "tool_call_id": null,
             "tool_result": null,
         })
+    }
+
+    #[test]
+    fn search_metadata_matches_live_and_hydrated_replies() {
+        let search = json!({"action":"search", "query":"docs", "sources":[{"title":"Docs", "url":"https://example.com/docs"}]});
+        let cost = json!({"estimated_usd":"0.02", "web_searches":1});
+        let mut reply = message("assistant", "answer");
+        reply["web_searches"] = json!([search.clone()]);
+        reply["cost"] = cost.clone();
+        let restored = project_rpc_messages(&[reply]).unwrap();
+        let mut live = SharedTranscript::default();
+        live.begin_message(1);
+        live.observe_search(1, crate::web_search::search(&search));
+        live.append_message_delta(1, "ans");
+        live.complete_message_with_cost(1, "answer".into(), crate::web_search::cost(&cost));
+        assert_eq!(
+            live.entries()[0].display_content(),
+            restored.entries()[0].display_content()
+        );
+        assert_eq!(live.entries()[0].content, "answer");
+        assert!(live.entries()[0].display_content().contains("cost ≥$0.020"));
     }
 
     #[test]

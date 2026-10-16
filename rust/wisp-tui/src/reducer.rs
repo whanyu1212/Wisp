@@ -715,6 +715,8 @@ pub struct UiState {
     pub(crate) command_catalog_error: Option<String>,
     command_catalog_read: Option<PendingRead<CommandCatalog>>,
     mode_read: Option<PendingRead<AgentMode>>,
+    search_read: Option<PendingRead<bool>>,
+    search_change: Option<(String, bool)>,
     mode_change: Option<PendingModeChange>,
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
@@ -784,6 +786,8 @@ impl UiState {
             command_catalog_error: None,
             command_catalog_read: None,
             mode_read: None,
+            search_read: None,
+            search_change: None,
             mode_change: None,
             last_session: None,
             selected_session: None,
@@ -1104,9 +1108,14 @@ pub enum BackendEvent {
         delta: String,
         content_kind: MessageContentKind,
     },
+    WebSearch {
+        turn: u64,
+        text: String,
+    },
     MessageCompleted {
         turn: u64,
         content: String,
+        cost: Option<String>,
     },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
@@ -1141,6 +1150,7 @@ pub enum BackendEvent {
     ModeReported {
         command_id: String,
         mode: AgentMode,
+        web_search: bool,
     },
     Diagnostic(String),
     DeviceCodeReported {
@@ -1239,6 +1249,7 @@ pub enum UiAction {
     SetProjectFilesOpen(bool),
     LoadContext,
     ConfigureAutoCompaction(bool),
+    Search(Option<bool>),
     Compact(Option<String>),
     Steer(String),
     SteerPresented {
@@ -1434,6 +1445,7 @@ pub fn reduce(
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
         }
         UiAction::LoadContext => Ok(context::request(state)),
+        UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
         }
@@ -1539,6 +1551,8 @@ pub fn reduce(
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
+            state.search_read = None;
+            state.search_change = None;
             state.command_catalog_read = None;
             state.queue.clear_local_presentations();
             for pending in state.pending_queue_submissions.values_mut() {
@@ -4420,9 +4434,15 @@ fn handle_backend_event(
         } => {
             let assistant = matches!(event.as_ref(), BackendEvent::MessageCompleted { .. });
             let target = match event.as_ref() {
-                BackendEvent::MessageCompleted { turn, content } => {
-                    state.transcript.complete_message(*turn, content.clone())
-                }
+                BackendEvent::MessageCompleted {
+                    turn,
+                    content,
+                    cost,
+                } => state.transcript.complete_message_with_cost(
+                    *turn,
+                    content.clone(),
+                    cost.clone(),
+                ),
                 BackendEvent::ToolResult(input) => {
                     let target = state.transcript.observe_tool_result(*input.clone());
                     state
@@ -4484,11 +4504,21 @@ fn handle_backend_event(
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::WebSearch { turn, text } => {
+            state.transcript.observe_search(turn, text);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::MessageDelta { .. }
         | BackendEvent::ToolExecutionEnded { .. }
         | BackendEvent::Other { .. } => Ok(Vec::new()),
-        BackendEvent::MessageCompleted { turn, content } => {
-            state.transcript.complete_message(turn, content);
+        BackendEvent::MessageCompleted {
+            turn,
+            content,
+            cost,
+        } => {
+            state
+                .transcript
+                .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolCall(input) => {
@@ -4812,6 +4842,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::MessageCompleted {
                 turn: 1,
                 content: "authoritative".into(),
+                cost: None,
             }),
             &mut ids,
         )
@@ -8082,6 +8113,7 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::MessageCompleted {
                     turn: 1,
                     content: "new reply".into(),
+                    cost: None,
                 }),
                 &mut ids,
             )

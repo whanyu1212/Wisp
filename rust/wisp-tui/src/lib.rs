@@ -61,6 +61,7 @@ mod transport;
 mod ui;
 #[cfg(test)]
 mod visual_tests;
+mod web_search;
 
 use bytes::Bytes;
 use clap::Parser;
@@ -751,7 +752,8 @@ impl LiveUi {
                             )
                         ) || (command_type == Some("configure")
                             && (value.get("mode").is_some()
-                                || value.get("auto_compaction_enabled").is_some())))
+                                || value.get("auto_compaction_enabled").is_some()
+                                || value.get("web_search").is_some())))
                     {
                         pending.extend(reducer::reduce(&mut self.state, UiAction::BackendEvent(BackendEvent::CommandFinished {
                             command_id: value["id"].as_str().expect("control request ID").into(),
@@ -2598,6 +2600,11 @@ impl LiveUi {
                 self.notice = None;
                 self.render_pending = true;
                 self.dispatch(action, writer, limit).await
+            }
+            Command::Search(enabled) => {
+                self.editor.clear();
+                self.dispatch(UiAction::Search(enabled), writer, limit)
+                    .await
             }
             Command::AutoCompaction(enabled) => {
                 self.notice = None;

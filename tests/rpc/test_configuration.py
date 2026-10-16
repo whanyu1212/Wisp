@@ -107,8 +107,10 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
             runtime_builder=unexpected_builder,
         )
 
+        transition.configure_overrides.web_search = True
         event = await transition.apply_trusted_project(runtime=runtime, agent=agent)
 
+        assert agent.web_search is True
         assert event is None
         assert agent.trusted is True
         assert agent.tool_context.cwd == workspace

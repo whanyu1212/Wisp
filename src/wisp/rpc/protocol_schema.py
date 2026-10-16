@@ -684,6 +684,7 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
                     {"required": ["model"]},
                     {"required": ["effort"]},
                     {"required": ["auto_compaction_enabled"]},
+                    {"required": ["web_search"]},
                     {"required": ["mode"]},
                     {
                         "properties": {"clear_effort": {"const": True}},

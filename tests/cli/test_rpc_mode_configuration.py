@@ -30,6 +30,7 @@ def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
         "mode": "build",
         "effort": None,
         "auto_compaction_enabled": True,
+        "web_search": False,
         "steering_mode": "one_at_a_time",
         "follow_up_mode": "one_at_a_time",
         "pending_steering_count": 0,

@@ -880,6 +880,17 @@ pub mod commands {
             deserialize(command)
         }
 
+        /// Change provider-native search for the current process only.
+        pub fn configure_search(
+            id: &str,
+            enabled: bool,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "configure", "id": id, "web_search": enabled,
+                "clear_effort": false, "persist_model_selection": false}),
+            )
+        }
+
         /// Change automatic compaction for the current process only.
         pub fn configure_auto_compaction(
             id: &str,
