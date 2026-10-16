@@ -1293,11 +1293,8 @@ impl LiveUi {
             let effects = self.request_pending_history_navigation(limit)?;
             control = self.apply_effects(effects, writer, limit).await?;
         }
-        if self.notice.as_deref() == Some(LIVE_HISTORY_WAITS_NOTICE) && !self.prompt_running() {
-            // The reply finished, so the pending scroll is requesting its history now.
-            self.notice = None;
-            self.render_pending = true;
-        }
+        // Once the reply finishes, the pending scroll requests its history.
+        self.clear_stale_live_history_notice();
         if control != LoopControl::Exit {
             self.sync_file_picker(writer, limit).await?;
             if self
@@ -3306,6 +3303,18 @@ impl LiveUi {
         Ok(reducer::reduce(&mut self.state, action, &mut self.ids)?)
     }
 
+    /// Drop the live-history wait notice unless a recovery is still queued behind a reply.
+    fn clear_stale_live_history_notice(&mut self) {
+        let waiting = self.prompt_running()
+            && self
+                .pending_history_navigation
+                .is_some_and(|pending| pending.live_recovery);
+        if !waiting && self.notice.as_deref() == Some(LIVE_HISTORY_WAITS_NOTICE) {
+            self.notice = None;
+            self.render_pending = true;
+        }
+    }
+
     fn prompt_running(&self) -> bool {
         self.state
             .current_command
@@ -3314,6 +3323,20 @@ impl LiveUi {
     }
 
     async fn navigate_transcript_action(
+        &mut self,
+        action: TranscriptViewAction,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let control = self
+            .apply_transcript_navigation(action, writer, limit)
+            .await?;
+        // Scrolling back down or following the tail cancels a queued recovery.
+        self.clear_stale_live_history_notice();
+        Ok(control)
+    }
+
+    async fn apply_transcript_navigation(
         &mut self,
         action: TranscriptViewAction,
         writer: &mpsc::Sender<WriterMessage>,
@@ -9484,9 +9507,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn live_recovery_during_a_reply_says_it_waits_and_continues_afterwards() {
-        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+    /// A long session whose live history was evicted, scrolled to its oldest row while a reply runs.
+    fn live_gap_during_a_reply() -> LiveUi {
         let mut ui = LiveUi::default();
         for index in 0..1_203 {
             let id = ui
@@ -9513,6 +9535,40 @@ mod tests {
             id: "prompt-1".into(),
             command_type: reducer::ActiveCommandType::Prompt,
         });
+        ui
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_live_recovery_clears_its_notice() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = live_gap_during_a_reply();
+        ui.navigate_transcript_action(
+            TranscriptViewAction::ScrollLines(-12),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.notice.as_deref(), Some(LIVE_HISTORY_WAITS_NOTICE));
+
+        // Following the tail cancels the queued recovery, so the promise goes too.
+        ui.navigate_transcript_action(
+            TranscriptViewAction::FollowTail,
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert!(ui.pending_history_navigation.is_none());
+        assert_eq!(ui.notice, None);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn live_recovery_during_a_reply_says_it_waits_and_continues_afterwards() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = live_gap_during_a_reply();
 
         ui.navigate_transcript_action(
             TranscriptViewAction::ScrollLines(-12),
