@@ -171,8 +171,10 @@ tool name exactly.
 
 Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event
 while healthy servers and built-in tools remain available. Wisp accepts at most 16 configured
-servers, 64 discovery pages and 64 tools per server, 256 MCP tools overall, 1 MiB of definitions per
-server, 4 MiB overall, and 2 MiB per protocol frame before parsing. Connection and discovery have a
+servers, 64 discovery pages per server, 256 MCP tools overall, 1 MiB of definitions per server,
+4 MiB overall, and 2 MiB per protocol frame before parsing. One server may bring any number of tools
+within those limits. Every tool's definition is sent with every model request, so a large catalog
+(Linear's 68 tools are about 100 KB) adds to each request's size and cost. Connection and discovery have a
 10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
 duplicate names, collisions, or limit violations expose none of that server's tools.
 
@@ -213,7 +215,10 @@ your files. Keep `bash` on ask when that matters.)
 | `propose_mcp_server_change` | command | Proposes removing or disabling a saved server |
 
 With [web search](./providers#web-search) on, Wisp can look up a server's command or URL itself,
-for example "add the Linear MCP server". What it finds is still only a proposal.
+for example "add the Linear MCP server". What it finds is still only a proposal. For a hosted server,
+Wisp proposes its URL and [signs in with OAuth](#signing-in-with-oauth) itself, which it prefers
+over API keys; a proposal that wraps a URL in a local bridge such as `mcp-remote` is refused with a
+pointer to the URL instead. After you confirm one, press `l` in `/mcp` if it shows "sign in required".
 
 Every proposal opens a confirmation that shows exactly what the server would run or connect to and
 which variables it forwards. A header built from a variable is shown with the host that receives

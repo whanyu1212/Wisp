@@ -411,3 +411,54 @@ def test_http_real_socket_discovery_and_call(tmp_path: Path) -> None:
                     await runtime.aclose()
 
     anyio.run(scenario)
+
+
+def _catalog(count: int) -> Callable[[httpx2.Request], httpx2.Response]:
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and json.loads(request.content).get("method") == "tools/list":
+            message = json.loads(request.content)
+            tools = [
+                {"name": f"tool_{index}", "inputSchema": {"type": "object"}}
+                for index in range(count)
+            ]
+            return httpx2.Response(
+                200,
+                headers={"content-type": "application/json", "mcp-session-id": "fixture-session"},
+                json={"jsonrpc": "2.0", "id": message["id"], "result": {"tools": tools}},
+            )
+        return _reply(request)
+
+    return handle
+
+
+def test_a_server_with_many_tools_registers_them_all(monkeypatch: MonkeyPatch) -> None:
+    # Hosted servers such as Linear's expose more than 64 tools.
+    _mock_http(monkeypatch, _catalog(70))
+
+    async def scenario() -> tuple[int, tuple[str, ...]]:
+        runtime = await build_runtime(mcp_servers=(_server(),))
+        try:
+            names = [name for name in runtime.tools.names() if name.startswith("mcp__fixture__")]
+            return len(names), tuple(event.message for event in runtime.startup_events)
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(scenario) == (70, ())
+
+
+def test_a_catalog_over_wisps_limit_says_so_through_the_real_client(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The client's task group wraps the rejection; the reason must survive.
+    _mock_http(monkeypatch, _catalog(mcp_runtime.MAX_MCP_TOOLS + 1))
+
+    async def scenario() -> tuple[str, ...]:
+        runtime = await build_runtime(mcp_servers=(_server(),))
+        try:
+            return tuple(event.message for event in runtime.startup_events)
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(scenario) == (
+        "MCP server fixture is unavailable: the discovered tool catalog exceeded Wisp's limits",
+    )

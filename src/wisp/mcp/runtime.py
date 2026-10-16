@@ -25,7 +25,6 @@ from wisp.tools.base import Tool
 
 MCP_STARTUP_TIMEOUT_SECONDS = 10.0
 MAX_MCP_DISCOVERY_PAGES = 64
-MAX_MCP_TOOLS_PER_SERVER = 64
 MAX_MCP_TOOL_DEFINITION_BYTES_PER_SERVER = 1_048_576
 MAX_MCP_TOOLS = 256
 MAX_MCP_TOOL_DEFINITION_BYTES = 4_194_304
@@ -308,7 +307,7 @@ class McpRuntime:
             if reported:
                 # A failed live connection is isolated. Explicit shutdown still reports
                 # cleanup failures through the runtime's redacted close error.
-                if unauthorized or _raised(exc, McpLoginRequired):
+                if unauthorized or _found(exc, McpLoginRequired) is not None:
                     # A sign-in that stopped working mid-session is reported as
                     # needing a new one, not as a failure to shut down.
                     self._sign_in_required_server_names.add(server.name)
@@ -316,12 +315,14 @@ class McpRuntime:
                     self._close_error = exc
             else:
                 code: McpDiagnosticCode
-                if unauthorized or _raised(exc, McpLoginRequired):
+                # The MCP client's task group can wrap what discovery raised.
+                rejected = _found(exc, _DiscoveryRejected)
+                if unauthorized or _found(exc, McpLoginRequired) is not None:
                     code = "login-required"
-                elif isinstance(exc, TimeoutError):
+                elif rejected is not None:
+                    code = rejected.code
+                elif _found(exc, TimeoutError) is not None:
                     code = "timeout"
-                elif isinstance(exc, _DiscoveryRejected):
-                    code = exc.code
                 else:
                     code = "unavailable" if stage == "connect" else "invalid-discovery"
                 await send.send(_FailedServer(McpStartupDiagnostic(server.name, code)))
@@ -392,7 +393,9 @@ async def _discover_tools(client: Client) -> tuple[tuple[McpToolDefinition, ...]
 
     for _ in range(MAX_MCP_DISCOVERY_PAGES):
         page = await client.list_tools(cursor=cursor)
-        if len(definitions) + len(page.tools) > MAX_MCP_TOOLS_PER_SERVER:
+        # A server has no tool count of its own: its definition bytes are bounded
+        # below, and no server can contribute more tools than all servers may.
+        if len(definitions) + len(page.tools) > MAX_MCP_TOOLS:
             raise _DiscoveryRejected("resource-limit")
         for definition in page.tools:
             if definition.name in names:
@@ -433,19 +436,19 @@ def _server_headers(server: McpServerConfig) -> dict[str, str]:
         raise _DiscoveryRejected(exc.code) from None
 
 
-def _raised(exc: BaseException, kind: type[BaseException], depth: int = 0) -> bool:
-    """Return whether ``kind`` was raised anywhere in ``exc``, including task groups."""
+def _found[E: BaseException](exc: BaseException, kind: type[E], depth: int = 0) -> E | None:
+    """Return the first ``kind`` raised anywhere in ``exc``, including task groups."""
 
     if depth > 16:
-        return False
+        return None
     if isinstance(exc, kind):
-        return True
-    if isinstance(exc, BaseExceptionGroup) and any(
-        _raised(inner, kind, depth + 1) for inner in exc.exceptions
-    ):
-        return True
+        return exc
+    if isinstance(exc, BaseExceptionGroup):
+        for inner in exc.exceptions:
+            if (found := _found(inner, kind, depth + 1)) is not None:
+                return found
     cause = exc.__cause__ or exc.__context__
-    return cause is not None and _raised(cause, kind, depth + 1)
+    return _found(cause, kind, depth + 1) if cause is not None else None
 
 
 def _safe_server_cwd() -> Path:
