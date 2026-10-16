@@ -490,6 +490,7 @@ async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
                         detail_source: tool_detail::ToolDetailSource::None,
                         safety: "read".into(),
                         grants_allowed: true,
+                        session_only_yolo: false,
                     })
                 };
                 let draft = ui.editor.clone();

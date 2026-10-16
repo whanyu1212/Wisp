@@ -1121,12 +1121,18 @@
           ],
           "default": null,
           "title": "PermissionStateSavedMode"
+        },
+        "session_only_yolo": {
+          "default": false,
+          "title": "PermissionStateSessionOnlyYolo",
+          "type": "boolean"
         }
       },
       "required": [
         "mode",
         "saved_mode",
-        "project_path"
+        "project_path",
+        "session_only_yolo"
       ],
       "title": "PermissionState",
       "type": "object"
@@ -4940,6 +4946,11 @@
           "title": "ToolApprovalRequestedSafety",
           "type": "string"
         },
+        "session_only_yolo": {
+          "default": false,
+          "title": "ToolApprovalRequestedSessionOnlyYolo",
+          "type": "boolean"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolApprovalRequestedTimestamp",
@@ -4959,7 +4970,8 @@
         "name",
         "arguments",
         "safety",
-        "grants_allowed"
+        "grants_allowed",
+        "session_only_yolo"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"

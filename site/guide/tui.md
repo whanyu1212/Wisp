@@ -105,7 +105,8 @@ conversation that led to it stays visible; your draft is kept. The title names t
 safety category sits at the top right, and the body shows the built-in `bash` tool's command as
 `$ command`, with any other arguments after it. Every other tool, including MCP tools with a
 `command` argument, shows its complete arguments. It offers four choices: `1` allow
-once, `2` allow that tool for this session, `3` YOLO for this project, or `4` deny. The
+once, `2` allow that tool for this session, `3` YOLO for this project (YOLO for this session in
+the home folder or a folder above it, where YOLO is never saved), or `4` deny. The
 `y`/`t`/`a`/`n` aliases also work, or highlight a choice with `↑`/`↓` and press `Enter`. There is
 no default choice: `Enter` only confirms a highlighted choice that has been drawn, so an `Enter`
 meant for the composer cannot answer a request. `Esc` denies. Project trust uses the same panel
@@ -412,7 +413,8 @@ saving a mode also clears temporary grants). Saved defaults apply to subsequent 
 project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
-is not saved. These choices do not change project trust or protected paths.
+is not saved. These choices do not change project trust or protected paths. In the home folder or a
+folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
 ### Managing MCP servers
 

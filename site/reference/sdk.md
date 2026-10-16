@@ -230,7 +230,10 @@ transaction rollback: do not blindly retry a pop or clear after an unknown outco
 | `approve` | `(call_id: str, *, approved: bool = True, reason: str \| None = None, scope: ApprovalScope \| None = None, command_id: str \| None = None)` |
 
 `ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project"`.
-`all_project` saves YOLO for the current project; the other scopes remain temporary.
+`all_project` saves YOLO for the current project; the other scopes remain temporary. In the home
+folder or a folder above it YOLO is never saved: `ToolApprovalRequested.session_only_yolo` and
+`PermissionState.session_only_yolo` are true, and `all_project` or `set_permissions("yolo")` applies
+YOLO for the session only.
 When `ToolApprovalRequested.grants_allowed` is false (MCP server proposals), every call needs its
 own confirmation: any approval counts as `"once"` and grants nothing. Show the user the proposal's
 arguments before approving; see [Asking Wisp to set up a server](../guide/tools-and-safety#asking-wisp-to-set-up-a-server).

@@ -393,6 +393,8 @@ impl BackendEvent {
                 let arguments = object_field(value, &event_type, "arguments")?;
                 // Sessions saved before this field existed only hold grantable tools.
                 let grants_allowed = bool_field_or(value, &event_type, "grants_allowed", true)?;
+                let session_only_yolo =
+                    bool_field_or(value, &event_type, "session_only_yolo", false)?;
                 Self::ToolApprovalRequested(PendingApproval {
                     call_id: string_field(value, &event_type, "call_id")?,
                     detail_source: project_tool_detail_source(
@@ -412,6 +414,7 @@ impl BackendEvent {
                     name: bounded_tool_name(raw_name),
                     safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
                     grants_allowed,
+                    session_only_yolo,
                 })
             }
             "tool.approval.resolved" => Self::ToolApprovalResolved {

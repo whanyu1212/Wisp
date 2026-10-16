@@ -7298,6 +7298,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mut live_ui = LiveUi {
             state,
@@ -7660,6 +7661,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mut live_ui = LiveUi {
             state,
@@ -7745,6 +7747,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: false,
+            session_only_yolo: false,
         }
     }
 
@@ -7833,6 +7836,31 @@ mod tests {
                 "approved": true
             })
         );
+    }
+
+    #[test]
+    fn approval_projection_reads_session_only_yolo() {
+        let event = |extra: Option<bool>| {
+            let mut event = json!({
+                "type": "tool.approval.requested",
+                "timestamp": "2026-10-15T00:00:00Z",
+                "call_id": "call-1",
+                "name": "bash",
+                "arguments": {},
+                "safety": "command",
+            });
+            if let Some(value) = extra {
+                event["session_only_yolo"] = json!(value);
+            }
+            match BackendEvent::from_projection_value(&event).unwrap() {
+                BackendEvent::ToolApprovalRequested(pending) => pending.session_only_yolo,
+                other => panic!("unexpected projection {other:?}"),
+            }
+        };
+        // Sessions saved before the field existed offered a saved project YOLO.
+        assert!(!event(None));
+        assert!(event(Some(true)));
+        assert!(!event(Some(false)));
     }
 
     fn projected(name: &str, arguments: serde_json::Value) -> PendingApproval {
@@ -8206,6 +8234,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mut live_ui = LiveUi {
             state,
@@ -8328,6 +8357,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mut approval_ui = LiveUi {
             state: approval_state,
@@ -8505,6 +8535,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "command".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             }));
 
         let control = approval_ui
@@ -9111,6 +9142,7 @@ mod tests {
                     detail_source: tool_detail::ToolDetailSource::None,
                     safety: "read".into(),
                     grants_allowed: true,
+                    session_only_yolo: false,
                 })),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,

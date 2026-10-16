@@ -21,6 +21,7 @@ from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.config.runtime import WispConfig
 from wisp.events import (
+    ErrorEvent,
     PermissionMode,
     PermissionState,
     RpcCommandFinished,
@@ -58,8 +59,18 @@ from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy, confir
 from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.mcp_servers import PROPOSE_MCP_SERVER, PROPOSE_MCP_SERVER_CHANGE
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
-from wisp.trust.permissions import load_permission_mode, save_permission_mode
-from wisp.trust.records import is_trusted, record_trust, trust_override_from_env
+from wisp.trust.permissions import (
+    ignored_broad_root_yolo,
+    load_permission_mode,
+    save_permission_mode,
+)
+from wisp.trust.records import (
+    ignored_broad_root_trust,
+    is_trusted,
+    record_trust,
+    trust_override_from_env,
+)
+from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
 
 if TYPE_CHECKING:
     from wisp.providers.anthropic import AnthropicCacheTtl
@@ -119,6 +130,35 @@ class _PendingApproval:
 type ConfirmationHandler = Callable[[str, Mapping[str, object]], str | None]
 
 
+def _broad_root_notices(project: Path) -> tuple[str, ...]:
+    """Explain at startup that YOLO and trust are not kept for ``project``.
+
+    Args:
+        project (Path): The session's project folder.
+
+    Returns:
+        tuple[str, ...]: Notices to show, empty for an ordinary project folder.
+    """
+
+    if not is_broad_root(project):
+        return ()
+    notices = [
+        f"Working in {project}, {BROAD_FOLDER_DESCRIPTION}: YOLO and trust are not saved "
+        "for it and last for this session only. Start Wisp in a project folder to keep them."
+    ]
+    if ignored_broad_root_yolo(project):
+        notices.append(
+            f"YOLO saved for {project} by an earlier Wisp no longer applies. Choose Ask in "
+            "/permissions to remove that setting."
+        )
+    if ignored_broad_root_trust(project):
+        notices.append(
+            f"A trust decision saved for {project} by an earlier Wisp no longer applies. "
+            f"Run `wisp trust forget {project}` to remove it."
+        )
+    return tuple(notices)
+
+
 class RpcToolApprovalPolicy(ToolApprovalPolicy):
     """Approval policy resolved by typed ``approval`` commands."""
 
@@ -131,6 +171,9 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         self._confirmations: dict[str, ConfirmationHandler] = {}
         self._input_closed_reason: str | None = None
         self._project_path = project_path
+        # YOLO is never saved for the home folder or a folder above it, so there it
+        # is granted for this session only (see ``wisp.trust.scope``).
+        self.session_only_yolo = project_path is not None and is_broad_root(project_path)
         self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
         if self._saved_mode == "yolo":
             self.approved_safety = self.approved_safety | {"mutating", "command"}
@@ -180,10 +223,15 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             mode="yolo" if {"mutating", "command"} <= self.approved_safety else "ask",
             saved_mode=self._saved_mode,
             project_path=self._project_path,
+            session_only_yolo=self.session_only_yolo,
         )
 
     def set_permissions(self, mode: PermissionMode) -> None:
         """Save the new default before applying it and clearing temporary grants.
+
+        In the home folder or a folder above it, YOLO is not saved: it becomes a
+        session grant, which a new session clears, and the saved mode is unchanged.
+        Saving Ask there still replaces a YOLO record an earlier release saved.
 
         Args:
             mode (PermissionMode): Explicit user choice, overriding startup defaults
@@ -193,6 +241,10 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             OSError: Saving fails; current approvals remain unchanged.
         """
 
+        if mode == "yolo" and self.session_only_yolo:
+            self.approved_tools = self._baseline_approved_tools
+            self.approved_safety = self.approved_safety | {"read", "mutating", "command"}
+            return
         if self._project_path is None:
             raise OSError("No project is available for saving permissions")
         save_permission_mode(self._project_path, mode)
@@ -401,7 +453,11 @@ class RpcTrustGate:
             self.deny_pending_on_input_closed()
         await pending.event.wait()
         trusted = pending.trusted is True
-        if trusted:
+        if is_broad_root(self._project_path):
+            # The home folder or a folder above it keeps no decision; this
+            # session's answer is not saved, so the next session asks again.
+            pass
+        elif trusted:
             await anyio.to_thread.run_sync(
                 record_trust,
                 self._project_path,
@@ -709,6 +765,8 @@ class RpcHost:
         )
         for event in runtime.startup_events:
             write_event(event)
+        for notice in _broad_root_notices(project_context_root):
+            write_event(ErrorEvent(message=notice))
         return host
 
     async def run_with_streams(

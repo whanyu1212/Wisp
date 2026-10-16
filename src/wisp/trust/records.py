@@ -10,6 +10,11 @@ the canonical (resolved, absolute) project path. It is deliberately never read f
 the project directory — otherwise an untrusted project could mark *itself* trusted
 and defeat the boundary. This mirrors editor "workspace trust" models.
 
+No decision is kept for a broad folder such as the home folder (see
+:mod:`wisp.trust.scope`): trusting it would extend to everything below it. Such a
+folder always reads as undecided, so every session asks again, and recording a
+decision for it is refused.
+
 The store degrades gracefully: a missing file means "nothing trusted yet", and a
 malformed file is treated the same way (with a warning) rather than crashing
 startup. Writes are atomic (temp file + rename) so a crash mid-write cannot corrupt
@@ -24,10 +29,16 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
+
 GLOBAL_TRUST_PATH = Path("~/.wisp/trust.json")
 
 _TRUSTY_ENV_VALUES = frozenset({"1", "true", "yes", "on", "trust"})
 _FALSY_ENV_VALUES = frozenset({"0", "false", "no", "off", "untrust"})
+
+
+class BroadRootTrustError(ValueError):
+    """Trust cannot be recorded for a broad folder such as the home folder."""
 
 
 def trust_override_from_env() -> bool | None:
@@ -105,15 +116,38 @@ def is_trusted(project_path: Path, *, trust_path: Path | None = None) -> bool | 
     """Return the recorded trust decision for ``project_path``.
 
     ``True``/``False`` is an explicit prior decision; ``None`` means undecided (no
-    record yet), which callers surface as a first-run prompt.
+    record yet), which callers surface as a first-run prompt. A broad folder is
+    always undecided, whatever an older release recorded for it.
     """
 
+    if is_broad_root(project_path):
+        return None
     records = _load_trust_records(trust_path if trust_path is not None else _default_trust_path())
     entry = records.get(_canonical_key(project_path))
     if not isinstance(entry, dict):
         return None
     trusted = entry.get("trusted")
     return trusted if isinstance(trusted, bool) else None
+
+
+def ignored_broad_root_trust(project_path: Path, *, trust_path: Path | None = None) -> bool:
+    """Return whether a trust record saved for a broad folder is being ignored.
+
+    Older releases could record trust for the home folder. Callers use this to
+    tell the user that it no longer applies and how to remove it.
+
+    Args:
+        project_path (Path): Project directory.
+        trust_path (Path | None): Trust store; defaults to the global one.
+
+    Returns:
+        bool: True when ``project_path`` is broad and has a trust record.
+    """
+
+    if not is_broad_root(project_path):
+        return False
+    records = _load_trust_records(trust_path if trust_path is not None else _default_trust_path())
+    return _canonical_key(project_path) in records
 
 
 def record_trust(
@@ -130,8 +164,17 @@ def record_trust(
     user-driven events, so this narrow read-merge-write is sufficient; the residual
     race (two processes deciding the *same* project simultaneously) simply resolves
     to one of the two identical-in-intent writes.
+
+    Raises:
+        BroadRootTrustError: ``project_path`` is a broad folder; decide for this
+            session only instead.
     """
 
+    if is_broad_root(project_path):
+        raise BroadRootTrustError(
+            f"trust is not saved for {project_path}: it is {BROAD_FOLDER_DESCRIPTION}, "
+            "so Wisp asks each session"
+        )
     path = trust_path if trust_path is not None else _default_trust_path()
     records = _load_trust_records(path)
     records[_canonical_key(project_path)] = {

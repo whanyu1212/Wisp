@@ -514,6 +514,9 @@ pub struct PendingApproval {
     /// False for tools that need a confirmation on every call: only a one-time
     /// confirmation or a denial is offered.
     pub grants_allowed: bool,
+    /// True in the home folder or a folder above it, where choosing YOLO lasts
+    /// for the session and is not saved.
+    pub session_only_yolo: bool,
 }
 
 /// One queue item retained by the reducer.
@@ -5169,6 +5172,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             });
             let mut ids = DeterministicIds::default();
             let effects = reduce(
@@ -5202,6 +5206,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
@@ -5255,6 +5260,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let before = state.clone();
         let mut ids = DeterministicIds::default();
@@ -5968,6 +5974,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             })),
             &mut ids,
         )
@@ -6177,6 +6184,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "read".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             })),
             &mut ids,
         )
@@ -6391,6 +6399,7 @@ mod tests {
                 detail_source: crate::tool_detail::ToolDetailSource::None,
                 safety: "ask".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             })),
             &mut ids,
         )
@@ -6423,6 +6432,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "read".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mut ids = DeterministicIds::default();
         let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();

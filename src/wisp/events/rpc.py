@@ -362,6 +362,9 @@ class PermissionState(BaseModel):
     mode: PermissionMode
     saved_mode: PermissionMode | None = None
     project_path: Path | None = None
+    # True in the home folder or a folder above it, where YOLO is never saved
+    # and lasts for the session only.
+    session_only_yolo: bool = False
 
 
 class RpcPermissionsReported(WispEvent):

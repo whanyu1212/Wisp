@@ -545,21 +545,26 @@ impl PermissionsView {
         } else {
             snapshot
                 .filter(|snapshot| snapshot.saved_mode != Some(snapshot.mode))
-                .map(|_| {
+                .map(|snapshot| {
+                    let text =
+                        if snapshot.session_only_yolo && snapshot.mode == PermissionMode::Yolo {
+                            "YOLO lasts for this session; it is not saved here."
+                        } else {
+                            "Current mode is not saved; choose one to save it."
+                        };
                     Line::styled(
-                        terminal_row("Current mode is not saved; choose one to save it.", width),
+                        terminal_row(text, width),
                         Style::default().fg(palette.warning),
                     )
                 })
         };
         lines.extend(status);
-        lines.push(Line::styled(
-            terminal_row(
-                "Saved for this project. Changing mode clears temporary grants.",
-                width,
-            ),
-            muted,
-        ));
+        let scope = if snapshot.is_some_and(|snapshot| snapshot.session_only_yolo) {
+            "YOLO is never saved in this folder. Changing mode clears grants."
+        } else {
+            "Saved for this project. Changing mode clears temporary grants."
+        };
+        lines.push(Line::styled(terminal_row(scope, width), muted));
         if let Some(project) = snapshot.and_then(|snapshot| snapshot.project_path.as_deref()) {
             lines.push(Line::styled(
                 crate::ui::tail_row(&format!("Project: {project}"), width),

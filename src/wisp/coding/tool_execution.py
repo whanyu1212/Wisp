@@ -228,6 +228,7 @@ class ConfiguredToolExecutor:
                             arguments=arguments,
                             safety=tool.safety,
                             grants_allowed=not confirms_every_call(tool),
+                            session_only_yolo=self._approval_policy.session_only_yolo,
                         )
                         decision = await self._approval_policy.await_approval(
                             tool,

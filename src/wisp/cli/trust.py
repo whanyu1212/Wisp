@@ -19,8 +19,10 @@ import typer
 from wisp.agent.prompt import resolve_project_context_root
 from wisp.trust.flow import TrustDecision, resolve_trust
 from wisp.trust.records import (
+    BroadRootTrustError,
     _canonical_key,
     forget_trust,
+    ignored_broad_root_trust,
     is_trusted,
     record_trust,
 )
@@ -30,6 +32,7 @@ from wisp.trust.records import (
 from wisp.trust.records import (
     trusted_noninteractive as _trusted_noninteractive,
 )
+from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
 
 trust_app = typer.Typer(help="Manage Wisp project trust decisions.")
 
@@ -54,6 +57,14 @@ def trust_status(
 
     selected = _selected_project_root(project)
     canonical = _canonical_project(selected)
+    if is_broad_root(selected):
+        typer.echo(f"asked each session ({BROAD_FOLDER_DESCRIPTION}): {canonical}")
+        if ignored_broad_root_trust(selected):
+            typer.echo(
+                "an earlier Wisp saved a decision for it, which is ignored; "
+                "`wisp trust forget` removes it"
+            )
+        return
     trusted = is_trusted(selected)
     if trusted is True:
         typer.echo(f"trusted: {canonical}")
@@ -73,7 +84,7 @@ def trust_allow(
     """Persistently trust a project."""
 
     selected = _selected_project_root(project)
-    record_trust(selected, True)
+    _record_or_exit(selected, True)
     typer.echo(f"trusted: {_canonical_project(selected)}")
 
 
@@ -87,8 +98,20 @@ def trust_revoke(
     """Persistently mark a project as untrusted."""
 
     selected = _selected_project_root(project)
-    record_trust(selected, False)
+    _record_or_exit(selected, False)
     typer.echo(f"untrusted: {_canonical_project(selected)}")
+
+
+def _record_or_exit(project: Path, trusted: bool) -> None:
+    try:
+        record_trust(project, trusted)
+    except BroadRootTrustError as exc:
+        typer.echo(
+            f"wisp trust: {exc}. Set WISP_TRUST=1 to trust it for one run, or run Wisp "
+            "in a project folder.",
+            err=True,
+        )
+        raise typer.Exit(1) from None
 
 
 @trust_app.command("forget")

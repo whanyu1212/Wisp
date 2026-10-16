@@ -65,6 +65,21 @@ wisp trust forget [path]   # remove the decision so Wisp can prompt again
   are rejected in favor of `~/.wisp/trust.json`; an absolute path is otherwise accepted even when
   it points inside the repository, so choose a user-controlled location.
 
+### Home folder and broad folders
+
+Trust and YOLO are never saved for your home folder, any folder above it (including `/`), a drive
+root, or the system's temporary folder: a decision saved there would carry to every project below
+it. Wisp still starts there, but asks for trust each session, `wisp trust allow` and `revoke` refuse
+such a folder, and YOLO chosen there lasts for the session only. The TUI, RPC, and SDK show a
+startup notice naming the folder.
+Decisions an earlier release saved for such a folder are ignored but kept; `wisp trust forget`
+removes a trust record, and choosing Ask in `/permissions` replaces a saved YOLO.
+
+Wisp finds the project folder from a Git repository or a marker file such as `pyproject.toml` or
+`AGENTS.md`, searching upward from the working directory. That search stops below the home folder,
+so a stray marker or a dotfiles repository in your home folder does not make it the project for
+every folder beneath it.
+
 ## MCP tools
 
 Wisp can connect to user-configured [Model Context Protocol](https://modelcontextprotocol.io/)
@@ -245,4 +260,6 @@ changes it. Defaults are stored outside the repository in `~/.wisp/permissions/`
 canonical project directory, and survive restarts. Changing the default clears temporary grants.
 One-time and session grants are not saved, and starting or switching sessions expires session
 grants. YOLO allows mutating and command tools without approval; protected paths, project trust,
-and tool availability still apply. `--yes` alone remains a temporary startup choice.
+and tool availability still apply. `--yes` alone remains a temporary startup choice. In the home
+folder or a folder above it, YOLO is not saved and lasts for the session; see
+[Home folder and broad folders](#home-folder-and-broad-folders).

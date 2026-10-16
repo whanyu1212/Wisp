@@ -530,6 +530,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
                 detail_source: wisp_tui::reducer::ToolDetailSource::None,
                 safety: "unknown".into(),
                 grants_allowed: true,
+                session_only_yolo: false,
             });
         }
         match (

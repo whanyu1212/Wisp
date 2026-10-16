@@ -1235,6 +1235,9 @@ pub mod events {
         pub mode: crate::commands::PermissionMode,
         pub saved_mode: Option<crate::commands::PermissionMode>,
         pub project_path: Option<String>,
+        /// True in the home folder or a folder above it, where YOLO is never saved.
+        #[serde(default)]
+        pub session_only_yolo: bool,
     }
 
     pub use crate::context::{

@@ -61,6 +61,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
                 mode: PermissionMode::Yolo,
                 saved_mode: Some(PermissionMode::Yolo),
                 project_path: Some("/project".into()),
+                session_only_yolo: false,
             })),
         }),
         &writer,
@@ -116,6 +117,55 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
 }
 
 #[tokio::test]
+async fn permissions_in_the_home_folder_say_yolo_is_not_saved() {
+    use wisp_protocol::{commands::PermissionMode, events::PermissionState};
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let id = frame(&mut receiver)["id"].as_str().unwrap().to_string();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::PermissionsReported {
+            command_id: id.clone(),
+            permissions: Ok(Arc::new(PermissionState {
+                mode: PermissionMode::Yolo,
+                saved_mode: None,
+                project_path: Some("/Users/me".into()),
+                session_only_yolo: true,
+            })),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: id,
+            command_type: "get_permissions".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let painted = draw(&mut ui, 80, 24);
+    assert!(
+        painted.contains("YOLO lasts for this session; it is not saved here."),
+        "{painted}"
+    );
+    assert!(
+        painted.contains("YOLO is never saved in this folder. Changing mode clears grants."),
+        "{painted}"
+    );
+    assert!(!painted.contains("choose one to save it"), "{painted}");
+    assert!(!painted.contains("Saved for this project"), "{painted}");
+}
+
+#[tokio::test]
 async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     use wisp_protocol::{commands::PermissionMode, events::PermissionState};
     let (writer, mut receiver) = mpsc::channel(16);
@@ -137,6 +187,7 @@ async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
                 mode: PermissionMode::Ask,
                 saved_mode: None,
                 project_path: Some("/project".into()),
+                session_only_yolo: false,
             })),
         }),
         &writer,
@@ -210,6 +261,7 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
             arguments: serde_json::json!({"command":"echo hi"}),
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
             detail_source: tool_detail::ToolDetailSource::None,
         });
         if approved {
@@ -249,6 +301,7 @@ fn approval_ui() -> LiveUi {
         arguments: serde_json::json!({"command":"echo hi"}),
         safety: "command".into(),
         grants_allowed: true,
+        session_only_yolo: false,
         detail_source: tool_detail::ToolDetailSource::None,
     });
     ui

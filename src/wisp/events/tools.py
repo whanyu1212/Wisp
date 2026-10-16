@@ -34,6 +34,9 @@ class ToolApprovalRequested(WispEvent):
     # False for tools that need the user's confirmation on every call: the
     # frontend offers only a one-time confirmation or a denial, never a grant.
     grants_allowed: bool = True
+    # True in the home folder or a folder above it: choosing YOLO applies for this
+    # session and is not saved for the project.
+    session_only_yolo: bool = False
 
 
 class ToolApprovalResolved(WispEvent):
