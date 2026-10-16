@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wisp.trust.records import is_trusted, record_trust
+from wisp.trust.scope import is_broad_root
 
 # A prompter shows the trust question and returns the user's yes/no answer. Returns
 # None when no answer can be obtained (e.g. a non-interactive stream), which is
@@ -44,7 +45,8 @@ def resolve_trust(
 
     1. A stored decision (trusted/untrusted) is honored without prompting.
     2. Otherwise, if a ``prompter`` is given and returns an answer, that answer is
-       recorded and used.
+       recorded and used. For a broad folder such as the home folder it is used
+       for this run only.
     3. Otherwise (no record, no prompt, or a prompt that yielded no answer) the
        project is treated as **untrusted** for this run, and nothing is persisted
        — so a later interactive run still gets the first-run prompt.
@@ -57,7 +59,10 @@ def resolve_trust(
     if prompter is not None:
         answer = prompter(project_path)
         if answer is not None:
-            record_trust(project_path, answer, trust_path=trust_path)
+            # A broad folder such as the home folder keeps no decision: the answer
+            # holds for this run, and the next one asks again.
+            if not is_broad_root(project_path):
+                record_trust(project_path, answer, trust_path=trust_path)
             return TrustDecision(project_path=project_path, trusted=answer, newly_decided=True)
 
     return TrustDecision(project_path=project_path, trusted=False)

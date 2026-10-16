@@ -1208,12 +1208,18 @@
             }
           ],
           "default": null
+        },
+        "session_only_yolo": {
+          "default": false,
+          "title": "Session Only Yolo",
+          "type": "boolean"
         }
       },
       "required": [
         "mode",
         "saved_mode",
-        "project_path"
+        "project_path",
+        "session_only_yolo"
       ],
       "title": "PermissionState",
       "type": "object"
@@ -5344,6 +5350,11 @@
           "title": "Safety",
           "type": "string"
         },
+        "session_only_yolo": {
+          "default": false,
+          "title": "Session Only Yolo",
+          "type": "boolean"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -5363,7 +5374,8 @@
         "name",
         "arguments",
         "safety",
-        "grants_allowed"
+        "grants_allowed",
+        "session_only_yolo"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"
@@ -7184,7 +7196,8 @@
       "permissions": {
         "mode": "ask",
         "project_path": null,
-        "saved_mode": null
+        "saved_mode": null,
+        "session_only_yolo": false
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.permissions"
@@ -7407,6 +7420,7 @@
       "grants_allowed": true,
       "name": "read",
       "safety": "read",
+      "session_only_yolo": false,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.approval.requested"
     },

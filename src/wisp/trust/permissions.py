@@ -1,4 +1,9 @@
-"""User-owned permission defaults, isolated by canonical project directory."""
+"""User-owned permission defaults, isolated by canonical project directory.
+
+YOLO is never kept for a broad folder such as the home folder (see
+:mod:`wisp.trust.scope`): saving it there is refused, and a record already
+saved there is ignored, so YOLO in such a folder lasts one session at most.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,8 @@ import stat
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
 
 if TYPE_CHECKING:
     # Type-only: ``wisp.config`` loads this module while ``wisp.events`` may still be
@@ -38,6 +45,10 @@ def _private_directory(path: Path) -> bool:
     )
 
 
+class BroadRootYoloError(PermissionError):
+    """YOLO cannot be saved for a broad folder such as the home folder."""
+
+
 def load_permission_mode(project: Path) -> PermissionMode | None:
     """Read this project's saved mode, failing closed on invalid or unsafe files.
 
@@ -46,9 +57,33 @@ def load_permission_mode(project: Path) -> PermissionMode | None:
 
     Returns:
         PermissionMode | None: Explicit saved mode, or None when no usable record exists.
-            Callers must use approval prompts when there is no saved mode.
+            Callers must use approval prompts when there is no saved mode. A saved
+            YOLO for a broad folder is ignored and reads as None.
     """
 
+    mode = _read_saved_mode(project)
+    if mode == "yolo" and is_broad_root(project):
+        return None
+    return mode
+
+
+def ignored_broad_root_yolo(project: Path) -> bool:
+    """Return whether a YOLO record saved for a broad folder is being ignored.
+
+    Older releases could save YOLO for the home folder. Callers use this to tell
+    the user once that it no longer applies.
+
+    Args:
+        project (Path): Project directory.
+
+    Returns:
+        bool: True when ``project`` is broad and has a saved YOLO record.
+    """
+
+    return is_broad_root(project) and _read_saved_mode(project) == "yolo"
+
+
+def _read_saved_mode(project: Path) -> PermissionMode | None:
     path = _preference_path(project)
     try:
         if not _private_directory(path.parent) or path.is_symlink():
@@ -87,12 +122,17 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
 
     Raises:
         ValueError: The mode is unsupported.
+        BroadRootYoloError: ``mode`` is YOLO and ``project`` is a broad folder.
         OSError: The preference cannot be saved securely. Callers must not claim or
             apply a persistent permission change when this write fails.
     """
 
     if mode not in ("ask", "yolo"):
         raise ValueError(f"Unsupported permission mode: {mode!r}")
+    if mode == "yolo" and is_broad_root(project):
+        raise BroadRootYoloError(
+            f"YOLO is not saved for {project}: it is {BROAD_FOLDER_DESCRIPTION}"
+        )
     path = _preference_path(project)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not _private_directory(path.parent):

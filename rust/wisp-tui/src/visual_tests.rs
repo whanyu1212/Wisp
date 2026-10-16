@@ -155,6 +155,7 @@ fn fixture(scenario: &str) -> LiveUi {
             detail_source: tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
     }
     if scenario == "permissions" {
@@ -162,6 +163,7 @@ fn fixture(scenario: &str) -> LiveUi {
             mode: wisp_protocol::commands::PermissionMode::Ask,
             saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
             project_path: Some("/projects/wisp".into()),
+            session_only_yolo: false,
         }));
         ui.discovery_view = Some(DiscoveryView::permissions());
     }

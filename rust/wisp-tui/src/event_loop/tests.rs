@@ -36,6 +36,7 @@ fn approval(id: &str) -> UiAction {
         detail_source: ToolDetailSource::None,
         safety: "command".into(),
         grants_allowed: true,
+        session_only_yolo: false,
     }))
 }
 fn draw(ui: &mut LiveUi) {

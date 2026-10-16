@@ -12,6 +12,7 @@ from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.providers.base import ToolSpec
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
+from wisp.trust.scope import is_broad_root
 
 from .text_budget import truncate_text
 
@@ -225,20 +226,51 @@ def build_untrusted_project_context(
 def _project_root(cwd: Path) -> Path:
     git_root = _run_git(cwd, "rev-parse", "--show-toplevel")
     if git_root:
-        return Path(git_root).expanduser().resolve(strict=False)
+        resolved_git_root = Path(git_root).expanduser().resolve(strict=False)
+        # A repository at the home folder (such as tracked dotfiles) would make
+        # every folder below it one project, sharing its trust and permissions.
+        if not is_broad_root(resolved_git_root):
+            return resolved_git_root
 
-    for candidate in (cwd, *cwd.parents):
+    candidates = _folders_below_broad_root(cwd)
+    for candidate in candidates:
         if any((candidate / name).exists() for name in PROJECT_FILE_CANDIDATES):
             return candidate
 
-    for candidate in (cwd, *cwd.parents):
+    for candidate in candidates:
         if any((candidate / name).exists() for name in PROJECT_CONTEXT_FILE_CANDIDATES):
             return candidate
     return cwd
 
 
+def _folders_below_broad_root(cwd: Path) -> tuple[Path, ...]:
+    """Return ``cwd`` and its parents, stopping before the home folder or above.
+
+    A marker file in the home folder, such as a stray ``package.json``, must not
+    turn the home folder into the project for every folder below it.
+
+    Args:
+        cwd (Path): Resolved working directory.
+
+    Returns:
+        tuple[Path, ...]: Folders to search for project markers, nearest first;
+        empty when ``cwd`` is itself a broad folder.
+    """
+
+    folders: list[Path] = []
+    for candidate in (cwd, *cwd.parents):
+        if is_broad_root(candidate):
+            break
+        folders.append(candidate)
+    return tuple(folders)
+
+
 def resolve_project_context_root(cwd: Path) -> Path:
     """Resolve the project root used for trust and instruction discovery.
+
+    The search never settles on the home folder or a folder above it: a Git
+    repository or marker file there is ignored, so the result is a folder below
+    it, or ``cwd`` itself.
 
     Args:
         cwd (Path): Directory from which to search for a Git or project root.

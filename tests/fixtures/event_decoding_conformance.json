@@ -2090,6 +2090,15 @@
   },
   {
    "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions",
+    "session_only_yolo"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.permissions",
    "operation": "add_unknown",
    "path": [
     "permissions"
@@ -3660,6 +3669,14 @@
     "safety"
    ],
    "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "session_only_yolo"
+   ],
+   "accepted": true
   },
   {
    "event": "tool.approval.requested",

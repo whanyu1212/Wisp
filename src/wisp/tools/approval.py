@@ -40,6 +40,9 @@ class ToolApprovalPolicy:
 
     approved_tools: frozenset[str] = field(default_factory=frozenset)
     approved_safety: frozenset[ToolSafety] = field(default_factory=frozenset)
+    # Set when choosing YOLO applies for the session only rather than being saved
+    # for the project, as in the home folder.
+    session_only_yolo: bool = field(default=False, kw_only=True)
 
     @classmethod
     def require_approval(cls) -> ToolApprovalPolicy:

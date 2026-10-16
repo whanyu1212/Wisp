@@ -2331,7 +2331,7 @@ fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
             title: "Allow tool?".into(),
             tag: None,
             detail: DecisionDetail::Wrapped("Tool details unavailable · args: unavailable".into()),
-            choices: approval_choices("Allow for session".into(), &fitting),
+            choices: approval_choices("Allow for session".into(), false, &fitting),
             footnote: Some(APPROVAL_FOOTNOTE),
             confirmable: true,
         };
@@ -2349,14 +2349,21 @@ fn approval_panel(state: &UiState, width: usize) -> DecisionPanel {
                 format!("Allow {name} for this session"),
                 "Allow for session",
             ),
+            pending.session_only_yolo,
             &fitting,
         ),
-        footnote: Some(APPROVAL_FOOTNOTE),
+        footnote: Some(if pending.session_only_yolo {
+            SESSION_ONLY_YOLO_FOOTNOTE
+        } else {
+            APPROVAL_FOOTNOTE
+        }),
         confirmable: true,
     }
 }
 
 const APPROVAL_FOOTNOTE: &str = "YOLO is saved for this project. Change with /permissions.";
+const SESSION_ONLY_YOLO_FOOTNOTE: &str =
+    "YOLO lasts for this session; it is never saved in this folder.";
 
 /// Choices of a tool that needs a confirmation on every call.
 pub(crate) const CONFIRMATION_CHOICES: usize = 2;
@@ -2499,12 +2506,18 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
 
 fn approval_choices(
     tool_session: String,
+    session_only_yolo: bool,
     fitting: &dyn Fn(String, &str) -> String,
 ) -> Vec<(&'static str, String)> {
+    let yolo = if session_only_yolo {
+        fitting("YOLO for this session".into(), "YOLO (session)")
+    } else {
+        fitting("YOLO for this project".into(), "YOLO (saved)")
+    };
     vec![
         ("1", "Allow once".into()),
         ("2", tool_session),
-        ("3", fitting("YOLO for this project".into(), "YOLO (saved)")),
+        ("3", yolo),
         ("4", "Deny".into()),
     ]
 }
@@ -3692,6 +3705,26 @@ mod tests {
 
     #[test]
     fn approval_and_trust_are_truthful_blocking_states() {
+        let mut home = UiState::unconfigured();
+        home.view_status = ViewStatus::WaitingForApproval;
+        home.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: true,
+        });
+        let approval = render_to_string(80, 18, &home, &PromptEditor::default());
+        // In the home folder YOLO is a session grant; the panel must not promise
+        // that it is saved for the project.
+        assert!(approval.contains("3  YOLO for this session"), "{approval}");
+        assert!(!approval.contains("for this project"), "{approval}");
+        assert!(
+            approval.contains("YOLO lasts for this session; it is never saved in this folder.")
+        );
+
         let mut state = UiState::unconfigured();
         state.view_status = ViewStatus::WaitingForApproval;
         state.pending_approval = Some(PendingApproval {
@@ -3701,6 +3734,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let approval = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(approval.contains("approval"));
@@ -3727,6 +3761,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let with_other_arguments = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(with_other_arguments.contains("$ ls"));
@@ -3744,6 +3779,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let mcp = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!mcp.contains("$ promote"), "{mcp}");
@@ -3759,6 +3795,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask\u{2066}safe".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let adversarial = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(!adversarial.contains('\u{1b}'));
@@ -3774,6 +3811,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let bounded = wrapped_decision_rows(
             &approval_detail("bash", &state.pending_approval.as_ref().unwrap().arguments),
@@ -3791,6 +3829,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let narrow = render_to_string(30, 14, &state, &PromptEditor::default());
         assert!(narrow.contains("3  YOLO (saved)"));
@@ -3977,6 +4016,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         state
             .transcript
@@ -4011,6 +4051,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let palette = crate::theme::resolve("glass").unwrap().palette(true);
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
@@ -4046,6 +4087,7 @@ mod tests {
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "ask".into(),
             grants_allowed: true,
+            session_only_yolo: false,
         });
         let palette = crate::theme::resolve("glass").unwrap().palette(false);
         assert_eq!(palette.base().bg, None);

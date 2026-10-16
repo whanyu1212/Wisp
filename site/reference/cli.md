@@ -108,7 +108,9 @@ wisp trust forget [PROJECT]
 ```
 
 The project defaults to the current directory. `allow` and `revoke` persist a decision; `forget`
-returns it to undecided. `WISP_TRUST=1` or `0` overrides the decision for one process without
+returns it to undecided. `allow` and `revoke` exit with status 1 for the home folder or a folder
+above it, where Wisp asks each session instead; `status` reports such a folder as asked each
+session. `WISP_TRUST=1` or `0` overrides the decision for one process without
 persisting it.
 
 ### MCP servers
