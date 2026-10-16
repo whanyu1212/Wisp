@@ -219,6 +219,20 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
+        if let (Layer::Conversation, Some(lines)) = (self.mouse_layer(), scroll_lines) {
+            // Scrolling activates nothing and needs no hit regions, so it moves the
+            // transcript wherever the pointer is (over the composer too) and also in
+            // the window between a resize, which clears the painted frame, and the
+            // next paint. Before the first paint there is nothing to scroll.
+            if !self.transcript_viewport.is_sized() {
+                return Ok(LoopControl::Continue);
+            }
+            let control = self
+                .navigate_transcript_action(TranscriptViewAction::ScrollLines(lines), writer, limit)
+                .await?;
+            self.reconcile_browse_selection();
+            return Ok(control);
+        }
         let Some(frame) = self
             .mouse_frame
             .as_ref()
@@ -317,21 +331,8 @@ impl LiveUi {
                 }
             }
             Layer::Conversation => {
-                if wheel.is_some() {
-                    if contains(frame.conversation.transcript, event) {
-                        let control = self
-                            .navigate_transcript_action(
-                                TranscriptViewAction::ScrollLines(
-                                    scroll_lines.expect("wheel input has a row delta"),
-                                ),
-                                writer,
-                                limit,
-                            )
-                            .await?;
-                        self.reconcile_browse_selection();
-                        return Ok(control);
-                    }
-                } else if self.state.editor_editable() {
+                // Wheel input was handled above, so this is a click.
+                if self.state.editor_editable() {
                     if let Some(index) = frame.conversation.completion.hit(event) {
                         let count = self
                             .completion
