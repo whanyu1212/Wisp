@@ -184,24 +184,17 @@ fn project_assistant(
             transcript.observe_search(turn(index), crate::web_search::search(search));
         }
     }
-    if !content.is_empty() {
-        transcript.complete_message_with_cost(
-            turn(index),
-            content,
-            crate::web_search::cost(&message["cost"]),
-        );
-    } else if tool_calls.is_empty()
-        || message
-            .get("web_searches")
-            .and_then(Value::as_array)
-            .is_some_and(|searches| !searches.is_empty())
-        || !message["cost"].is_null()
-    {
-        transcript.complete_message_with_cost(
-            turn(index),
-            EMPTY_ASSISTANT_MESSAGE.into(),
-            crate::web_search::cost(&message["cost"]),
-        );
+    let has_searches = message
+        .get("web_searches")
+        .and_then(Value::as_array)
+        .is_some_and(|searches| !searches.is_empty());
+    let cost = crate::web_search::cost(&message["cost"]);
+    if !content.is_empty() || has_searches || cost.is_some() {
+        // Display-only evidence can be the entire reply before local tool calls.
+        // Keep its authoritative empty text identical to the live projection.
+        transcript.complete_message_with_cost(turn(index), content, cost);
+    } else if tool_calls.is_empty() {
+        transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
     }
     let mut entries = Vec::with_capacity(tool_calls.len());
     for tool_call in tool_calls {
@@ -674,6 +667,29 @@ mod tests {
         );
         assert_eq!(live.entries()[0].content, "answer");
         assert!(live.entries()[0].display_content().contains("cost ≥$0.020"));
+    }
+
+    #[test]
+    fn empty_searched_replies_match_live_before_tool_calls() {
+        for with_tool in [false, true] {
+            let search = json!({"action":"search", "query":"docs", "sources":[]});
+            let mut reply = message("assistant", "");
+            reply["web_searches"] = json!([search.clone()]);
+            if with_tool {
+                reply["tool_calls"] =
+                    json!([{"call_id":"read-1", "name":"read", "arguments":{"path":"README.md"}}]);
+            }
+            let restored = project_rpc_messages(&[reply]).unwrap();
+            let mut live = SharedTranscript::default();
+            live.begin_message(1);
+            live.observe_search(1, crate::web_search::search(&search));
+            live.complete_message_with_cost(1, String::new(), None);
+            assert_eq!(
+                live.entries()[0].display_content(),
+                restored.entries()[0].display_content()
+            );
+            assert!(restored.entries()[0].content.is_empty());
+        }
     }
 
     #[test]
