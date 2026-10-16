@@ -78,14 +78,9 @@ def test_a_proposal_that_seems_to_carry_a_secret_is_rejected(args: list[str]) ->
         _proposal(args=["--project", "123e4567-e89b-12d3-a456-426614174000"]),
         _proposal(args=["--token-file", "/home/me/.config/token"]),
         _proposal(args=["--pass-through", "stdio"]),
+        # A placeholder the server expands itself is not a secret.
         _proposal(
-            args=[
-                "-y",
-                "mcp-remote",
-                "https://e.com/mcp",
-                "--header",
-                "Authorization: Bearer ${AUTH}",
-            ],
+            args=["-y", "some-mcp-proxy", "--header", "Authorization: Bearer ${AUTH}"],
             env_from=["AUTH"],
         ),
         _proposal(
@@ -404,3 +399,52 @@ def test_listing_names_the_variable_a_header_sends() -> None:
         "sends $LINEAR_API_KEY in header Authorization"
     ) in result.text
     assert SECRET not in result.text
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"command": "npx", "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]},
+        {"command": "npx", "args": ["mcp-remote@0.1.29", "https://mcp.linear.app/mcp"]},
+        {"command": "/usr/local/bin/mcp-remote", "args": ["https://mcp.linear.app/mcp"]},
+        {
+            "command": "npx",
+            "args": ["-y", "supergateway", "--streamableHttp", "https://e.test/mcp"],
+        },
+    ],
+)
+def test_a_remote_bridge_is_refused_in_favour_of_the_url(arguments: dict[str, object]) -> None:
+    problem = ProposeMcpServerTool().check_arguments({"name": "linear", **arguments})
+
+    assert problem is not None
+    assert "signs in to them with OAuth itself" in problem
+    assert "url='https://" in problem
+
+
+def test_a_confirmed_http_server_tells_the_model_how_to_sign_in() -> None:
+    url_result = anyio.run(
+        ProposeMcpServerTool().run,
+        {"name": "linear", "url": "https://mcp.linear.app/mcp"},
+        ToolContext(cwd=Path.cwd()),
+    )
+    command_result = anyio.run(ProposeMcpServerTool().run, _proposal(), ToolContext(cwd=Path.cwd()))
+
+    assert "press l" in url_result.text and "wisp mcp login linear" in url_result.text
+    assert "press l" not in command_result.text
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-y", "supergateway", "--sse", "https://e.test/events"],
+        ["-y", "mcp-remote", "https://e.test/sse"],
+        ["-y", "mcp-remote", "https://e.test/mcp", "--transport", "sse-only"],
+    ],
+)
+def test_a_bridge_to_a_legacy_sse_server_is_allowed(args: list[str]) -> None:
+    # Wisp does not speak SSE, so the bridge is the only way to reach such a server.
+    problem = ProposeMcpServerTool().check_arguments(
+        {"name": "legacy", "command": "npx", "args": args}
+    )
+
+    assert problem is None

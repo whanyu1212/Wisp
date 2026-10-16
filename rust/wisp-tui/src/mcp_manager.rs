@@ -432,10 +432,18 @@ impl McpView {
                     // A disabled or failed server may still have a saved sign-in.
                     ('o', Some(_)) => McpChange::Logout(server.name.clone()),
                     ('l', None) => {
-                        self.notice = Some(
-                            "Only an HTTP server without its own Authorization header signs in."
-                                .into(),
-                        );
+                        let has_url = server
+                            .launch
+                            .as_ref()
+                            .is_some_and(|launch| launch.url.is_some());
+                        self.notice = Some(if has_url {
+                            "This server sends its own Authorization header, so it does not sign in."
+                                .into()
+                        } else {
+                            "Only servers added by URL sign in. To use a hosted server's OAuth, \
+                             remove this one and add the server by its URL."
+                                .into()
+                        });
                         return DiscoveryAction::None;
                     }
                     _ => {
@@ -1968,7 +1976,7 @@ mod tests {
         let mut view = McpView::default();
         draw(&mut view, &stdio, 100, 20);
         assert_eq!(change(press(&mut view, &stdio, KeyCode::Char('l'))), None);
-        assert!(draw(&mut view, &stdio, 100, 20).contains("Only an HTTP server"));
+        assert!(draw(&mut view, &stdio, 100, 20).contains("Only servers added by URL sign in"));
     }
 
     fn signing_in(url: &str, cancel_requested: bool) -> UiState {
