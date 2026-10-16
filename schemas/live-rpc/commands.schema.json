@@ -436,6 +436,11 @@
             },
             {
               "required": [
+                "web_search"
+              ]
+            },
+            {
+              "required": [
                 "mode"
               ]
             },
@@ -537,6 +542,14 @@
           "default": "configure",
           "title": "Type",
           "type": "string"
+        },
+        "web_search": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Web Search"
         }
       },
       "required": [

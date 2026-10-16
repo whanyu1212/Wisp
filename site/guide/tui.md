@@ -640,3 +640,20 @@ grayscale presentation.
 
 `wisp --mode tui` launches the same TUI and accepts the top-level options, including `--provider`
 and `--model`.
+
+### Provider-native web search
+
+Use `/search` to show the current setting and `/search on` or `/search off` to
+change it for this running session. Wait for the current operation to finish
+before changing it. The toggle applies to subsequent prompts, does not save user
+defaults, and does not change separately configured MCP search tools such as Exa.
+Persistent defaults remain available through the user-only `web_search` setting
+or `WISP_WEB_SEARCH`.
+
+When enabled, supported providers can choose to search; not every request will
+search. Google Search grounding is not yet supported. Search queries, opened pages,
+within-page searches, and failures appear with the reply, with bounded source
+titles and hosts. This metadata is restored when loading saved replies.
+
+Reply costs marked `cost ≥…` exclude provider search fees and are lower bounds,
+not complete prices. An unavailable token estimate is shown as `cost unknown`.

@@ -539,6 +539,33 @@ mod tests {
     }
 
     #[test]
+    fn searched_reply_keeps_its_origin_and_matches_restored_history() {
+        use crate::reducer::{BackendEvent, UiAction, UiState, reduce};
+        use serde_json::json;
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = crate::SequentialCommandIds::default();
+        let search = json!({"type":"web.search", "turn":1, "query":"docs", "sources":[]});
+        for event in [
+            json!({"type":"message.started", "turn":1}),
+            search.clone(),
+            json!({"type":"message.completed", "turn":1, "content":"answer", "message_entry_id":"reply", "cost":{"estimated_usd":"0.01", "web_searches":1}}),
+        ] {
+            let event = BackendEvent::from_projection_value(&event).unwrap();
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+        let restored = crate::history::project_rpc_messages(&[json!({
+            "entry_id":"reply", "role":"assistant", "content":"answer", "content_truncated":false,
+            "tool_calls":[], "web_searches":[search], "cost":{"estimated_usd":"0.01", "web_searches":1}
+        })]).unwrap();
+        let live = &state.transcript.entries()[0];
+        assert_eq!(live.live_message_origins, ["reply"]);
+        assert_eq!(
+            live.display_content(),
+            restored.entries()[0].display_content()
+        );
+    }
+
+    #[test]
     fn sequential_tool_results_keep_each_assistant_origin() {
         use crate::reducer::{BackendEvent, UiAction, UiState, reduce};
         use serde_json::json;

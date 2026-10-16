@@ -179,8 +179,20 @@ fn project_assistant(
     {
         return Err(HistoryProjectionError::TooManyToolCalls { index });
     }
-    if !content.is_empty() {
-        transcript.complete_message(turn(index), content);
+    if let Some(searches) = message.get("web_searches").and_then(Value::as_array) {
+        for search in searches.iter().take(32) {
+            transcript.observe_search(turn(index), crate::web_search::search(search));
+        }
+    }
+    let has_searches = message
+        .get("web_searches")
+        .and_then(Value::as_array)
+        .is_some_and(|searches| !searches.is_empty());
+    let cost = crate::web_search::cost(&message["cost"]);
+    if !content.is_empty() || has_searches || cost.is_some() {
+        // Display-only evidence can be the entire reply before local tool calls.
+        // Keep its authoritative empty text identical to the live projection.
+        transcript.complete_message_with_cost(turn(index), content, cost);
     } else if tool_calls.is_empty() {
         transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
     }
@@ -634,6 +646,50 @@ mod tests {
             "tool_call_id": null,
             "tool_result": null,
         })
+    }
+
+    #[test]
+    fn search_metadata_matches_live_and_hydrated_replies() {
+        let search = json!({"action":"search", "query":"docs", "sources":[{"title":"Docs", "url":"https://example.com/docs"}]});
+        let cost = json!({"estimated_usd":"0.02", "web_searches":1});
+        let mut reply = message("assistant", "answer");
+        reply["web_searches"] = json!([search.clone()]);
+        reply["cost"] = cost.clone();
+        let restored = project_rpc_messages(&[reply]).unwrap();
+        let mut live = SharedTranscript::default();
+        live.begin_message(1);
+        live.observe_search(1, crate::web_search::search(&search));
+        live.append_message_delta(1, "ans");
+        live.complete_message_with_cost(1, "answer".into(), crate::web_search::cost(&cost));
+        assert_eq!(
+            live.entries()[0].display_content(),
+            restored.entries()[0].display_content()
+        );
+        assert_eq!(live.entries()[0].content, "answer");
+        assert!(live.entries()[0].display_content().contains("cost ≥$0.020"));
+    }
+
+    #[test]
+    fn empty_searched_replies_match_live_before_tool_calls() {
+        for with_tool in [false, true] {
+            let search = json!({"action":"search", "query":"docs", "sources":[]});
+            let mut reply = message("assistant", "");
+            reply["web_searches"] = json!([search.clone()]);
+            if with_tool {
+                reply["tool_calls"] =
+                    json!([{"call_id":"read-1", "name":"read", "arguments":{"path":"README.md"}}]);
+            }
+            let restored = project_rpc_messages(&[reply]).unwrap();
+            let mut live = SharedTranscript::default();
+            live.begin_message(1);
+            live.observe_search(1, crate::web_search::search(&search));
+            live.complete_message_with_cost(1, String::new(), None);
+            assert_eq!(
+                live.entries()[0].display_content(),
+                restored.entries()[0].display_content()
+            );
+            assert!(restored.entries()[0].content.is_empty());
+        }
     }
 
     #[test]

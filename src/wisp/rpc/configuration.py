@@ -51,6 +51,7 @@ class _RpcConfigureOverrides:
     has_effort: bool = False
     auto_compaction_enabled: bool | None = None
     has_auto_compaction_enabled: bool = False
+    web_search: bool | None = None
 
     def effective_provider(self, default: str) -> str:
         return self.provider or default
@@ -169,6 +170,8 @@ class RpcProjectConfiguration:
                 configuration,
                 auto_compaction_enabled=overrides.auto_compaction_enabled,
             )
+        if overrides.web_search is not None:
+            configuration = replace(configuration, web_search=overrides.web_search)
         agent.reconfigure(configuration)
         if trusted_config == self.startup_config:
             return None

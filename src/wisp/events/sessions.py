@@ -18,6 +18,7 @@ from wisp.events._base import (
     WispEvent,
     _MessageOriginEvent,
 )
+from wisp.events.run import WebSearchPerformed
 from wisp.events.usage import TokenUsage, UsageCost
 from wisp.skills.models import SkillInvocationEvidence
 
@@ -88,6 +89,7 @@ class RpcMessageSnapshot(BaseModel):
     is_error: bool | None = None
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
+    web_searches: tuple[WebSearchPerformed, ...] = ()
     tool_result: RpcMessageToolResultSnapshot | None = None
     skill_invocation: RpcSkillInvocationSnapshot | None = None
 

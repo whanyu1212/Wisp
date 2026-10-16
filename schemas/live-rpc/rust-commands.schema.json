@@ -423,6 +423,14 @@
           "default": "configure",
           "title": "ConfigureCommandType",
           "type": "string"
+        },
+        "web_search": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "ConfigureCommandWebSearch"
         }
       },
       "required": [

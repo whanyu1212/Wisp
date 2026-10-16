@@ -102,6 +102,9 @@ pub struct TranscriptEntry {
     local_display: Option<String>,
     /// Display-only reasoning streamed for this assistant turn.
     thinking: String,
+    searches: Vec<String>,
+    cost: Option<String>,
+    decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
     revision: u64,
@@ -117,6 +120,22 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
+    /// Compose display-only search evidence and cost without changing model text.
+    fn decorate(&mut self) {
+        if self.searches.is_empty() && self.cost.is_none() {
+            return;
+        }
+        let mut text = self.searches.join("\n\n");
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&self.content);
+        if let Some(cost) = &self.cost {
+            text.push_str(&format!("\n\n{cost}"));
+        }
+        self.decorated_content = Some(text);
+    }
+
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -131,7 +150,10 @@ impl TranscriptEntry {
     /// entries and messages without local presentation metadata display that
     /// source verbatim.
     pub(crate) fn display_content(&self) -> &str {
-        self.local_display.as_deref().unwrap_or(&self.content)
+        self.local_display
+            .as_deref()
+            .or(self.decorated_content.as_deref())
+            .unwrap_or(&self.content)
     }
 
     pub fn thinking(&self) -> &str {
@@ -174,6 +196,9 @@ impl TranscriptEntry {
             .len()
             .saturating_add(self.local_display.as_ref().map_or(0, String::len))
             .saturating_add(self.thinking.len())
+            .saturating_add(self.searches.iter().map(String::len).sum::<usize>())
+            .saturating_add(self.cost.as_ref().map_or(0, String::len))
+            .saturating_add(self.decorated_content.as_ref().map_or(0, String::len))
             .saturating_add(kind_bytes)
             .saturating_add(
                 self.live_message_origins
@@ -315,6 +340,7 @@ impl Transcript {
         if !delta.is_empty() {
             let entry = self.entry_mut(entry_id);
             entry.content.push_str(delta);
+            entry.decorate();
             Self::bump_revision(entry);
             self.bump_generation();
         }
@@ -341,6 +367,34 @@ impl Transcript {
         entry_id
     }
 
+    pub(crate) fn observe_search(&mut self, turn: u64, text: String) {
+        let id = self.response_for_turn(turn);
+        let entry = self.entry_mut(id);
+        if entry.searches.len() < 32 {
+            entry.searches.push(text);
+            entry.decorate();
+            entry.layout_epoch += 1;
+            Self::bump_revision(entry);
+            self.bump_generation();
+        }
+    }
+
+    pub(crate) fn complete_message_with_cost(
+        &mut self,
+        turn: u64,
+        content: String,
+        cost: Option<String>,
+    ) -> Option<TranscriptEntryId> {
+        if cost.is_some() {
+            let id = self.response_for_turn(turn);
+            let entry = self.entry_mut(id);
+            entry.cost = cost;
+            entry.decorate();
+            Self::bump_revision(entry);
+        }
+        self.complete_message(turn, content)
+    }
+
     pub fn complete_message(&mut self, turn: u64, content: String) -> Option<TranscriptEntryId> {
         if content.is_empty()
             && self.active_response.is_none()
@@ -363,6 +417,7 @@ impl Transcript {
             }
             entry.content = content;
             entry.state = TranscriptEntryState::Complete;
+            entry.decorate();
             Self::bump_revision(entry);
             self.bump_generation();
         }
@@ -1352,6 +1407,9 @@ impl Transcript {
                 content: LIVE_RETENTION_OMISSION_MARKER.into(),
                 local_display: None,
                 thinking: String::new(),
+                searches: Vec::new(),
+                cost: None,
+                decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
                 revision: 0,
@@ -2033,6 +2091,9 @@ impl Transcript {
             content,
             local_display,
             thinking: String::new(),
+            searches: Vec::new(),
+            cost: None,
+            decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
             revision: 0,
@@ -2117,6 +2178,9 @@ impl Transcript {
             content: String::new(),
             local_display: None,
             thinking: String::new(),
+            searches: Vec::new(),
+            cost: None,
+            decorated_content: None,
             state,
             kind,
             revision: 0,

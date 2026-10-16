@@ -55,6 +55,9 @@ def handle_rpc_configure_command(
     if has_auto_compaction_enabled and auto_compaction_enabled is None:
         lifecycle.fail("RPC configure command field auto_compaction_enabled must be a boolean")
         return
+    if "web_search" in provided_fields and command.web_search is None:
+        lifecycle.fail("RPC configure command field web_search must be a boolean")
+        return
     configuration = agent.configuration
     selected_provider = configuration.provider
     selected_model = configuration.model
@@ -128,6 +131,9 @@ def handle_rpc_configure_command(
                 effort=selected_effort,
                 models=runtime.models,
                 auto_compaction_enabled=selected_auto_compaction_enabled,
+                web_search=(
+                    configuration.web_search if command.web_search is None else command.web_search
+                ),
             )
         )
     except RuntimeError as exc:
@@ -144,6 +150,8 @@ def handle_rpc_configure_command(
             )
         )
     if configure_overrides is not None:
+        if command.web_search is not None:
+            configure_overrides.web_search = command.web_search
         if has_provider or selected_provider.name != configuration.provider.name:
             configure_overrides.provider = selected_provider.name
         if has_model or has_provider:

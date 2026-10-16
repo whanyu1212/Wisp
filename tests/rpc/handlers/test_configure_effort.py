@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 
+import pytest
+
 from tests.coding.session_support import CapturingProvider
 from tests.support.cli import *
 from tests.support.cli import _test_model_registry
@@ -518,3 +520,23 @@ def test_configure_model_only_auto_switch_filters_unsupported_explicit_effort(
 
     assert agent.provider is openai_provider
     assert agent.effort is None
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_search_toggle_updates_session_and_overrides(tmp_path: Path, enabled: bool) -> None:
+    provider = CapturingProvider()
+    runtime = _runtime_with_capturing_provider(provider)
+    agent = CodingSession(
+        provider=provider, sessions=JsonlSessionStore(tmp_path), web_search=not enabled
+    )
+    overrides = _RpcConfigureOverrides()
+    _configure_rpc(
+        {"web_search": enabled},
+        command_id="search",
+        agent=agent,
+        runtime=runtime,
+        configure_overrides=overrides,
+    )
+    assert agent.web_search is enabled
+    assert agent.state_snapshot().web_search is enabled
+    assert overrides.web_search is enabled

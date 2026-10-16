@@ -2772,6 +2772,14 @@
             }
           ],
           "default": null
+        },
+        "web_searches": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WebSearchPerformed"
+          },
+          "title": "Web Searches",
+          "type": "array"
         }
       },
       "required": [
@@ -2793,6 +2801,7 @@
         "is_error",
         "usage",
         "cost",
+        "web_searches",
         "tool_result",
         "skill_invocation"
       ],
@@ -4882,6 +4891,11 @@
           ],
           "title": "Steering Mode",
           "type": "string"
+        },
+        "web_search": {
+          "default": false,
+          "title": "Web Search",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4890,6 +4904,7 @@
         "mode",
         "effort",
         "auto_compaction_enabled",
+        "web_search",
         "steering_mode",
         "follow_up_mode",
         "pending_steering_count",
@@ -7332,7 +7347,8 @@
         "session_id": null,
         "session_name": null,
         "session_path": null,
-        "steering_mode": "one_at_a_time"
+        "steering_mode": "one_at_a_time",
+        "web_search": false
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.state"

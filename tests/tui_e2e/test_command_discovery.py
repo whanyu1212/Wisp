@@ -18,6 +18,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    frame_cursor,
     rendered_without_spacing,
     welcome_ready,
 )
@@ -54,6 +55,7 @@ log_path = Path(sys.argv[1])
 mode = "plan"
 active = None
 auto_compaction = True
+web_search = False
 refresh_after_cancel = False
 refresh_after_auto_configure = False
 command_catalog_requests = 0
@@ -127,11 +129,12 @@ for line in sys.stdin:
         continue
     elif kind == "get_state":
         emit(RpcStateReported(command_id=command["id"], state=RpcStateSnapshot(
-            provider="fake", mode=mode, auto_compaction_enabled=True,
+            provider="fake", mode=mode, auto_compaction_enabled=True, web_search=web_search,
             steering_mode="one_at_a_time", follow_up_mode="one_at_a_time",
             pending_steering_count=0, pending_follow_up_count=0,
         )))
     elif kind == "configure":
+        web_search = command.get("web_search", web_search)
         mode = command.get("mode", mode)
         auto_compaction = command.get("auto_compaction_enabled", auto_compaction)
         refresh_after_auto_configure = "auto_compaction_enabled" in command
@@ -238,18 +241,34 @@ for line in sys.stdin:
                 # Send Escape on its own and resize only after the popup closes.
                 # crossterm's input sources are edge-triggered, so a resize signal
                 # ready in the same wake-up can leave a key unread until the next
-                # keypress. Closing repaints the welcome tagline the popup covered; its
-                # words can arrive between cursor moves, so match it without spacing.
+                # keypress. Wait for the complete frame to return the cursor to
+                # the composer; unchanged tagline cells need not be repainted.
                 os.write(terminal_fd, b"\x1b")
                 phase = "closing help"
                 output.clear()
-            elif phase == "closing help" and b"staysinsync" in rendered_without_spacing(output):
+            elif phase == "closing help" and frame_cursor(output) == (22, 6):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 phase = "closed"
                 output.clear()
             elif phase == "closed" and welcome_ready(output):
+                os.write(terminal_fd, b"/search on\r")
+                phase = "search on"
+                output.clear()
+            elif phase == "search on" and b"websearchon" in rendered_without_spacing(output):
+                os.write(terminal_fd, b"/search off\r")
+                phase = "search off"
+                output.clear()
+            elif phase == "search off" and any(
+                command.get("web_search") is False for command in commands
+            ):
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
+                phase = "search off confirmed"
+                output.clear()
+            elif phase == "search off confirmed" and b"websearchoff" in rendered_without_spacing(
+                output
+            ):
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()

@@ -48,6 +48,7 @@ class CodingSessionState(BaseModel):
     mode: AgentMode = "build"
     effort: str | None = None
     auto_compaction_enabled: bool
+    web_search: bool = False
     steering_mode: QueueMode
     follow_up_mode: QueueMode
     pending_steering_count: int = Field(ge=0)

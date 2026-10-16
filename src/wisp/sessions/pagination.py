@@ -22,6 +22,8 @@ from wisp.events import (
     RpcMessageToolResultSnapshot,
     RpcSkillInvocationSnapshot,
     ToolCallSnapshot,
+    WebSearchPerformed,
+    WebSearchSource,
 )
 from wisp.sessions.entries import (
     CompactionSessionEntry,
@@ -66,6 +68,7 @@ class MessagePageIndex:
     active_leaf_id: str | None
     messages: tuple[MessageSessionEntry, ...]
     positions: dict[str, int]
+    web_searches: dict[str, tuple[WebSearchPerformed, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,10 +115,33 @@ def message_page_index_from_entries(
 ) -> MessagePageIndex:
     tree = resolve_session_tree(tuple(entries))
     messages = tuple(entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry))
+    searches: dict[str, tuple[WebSearchPerformed, ...]] = {}
+    pending: list[WebSearchPerformed] = []
+    operation_id: str | None = None
+    # Searches precede their assistant completion on the active branch. Never
+    # carry evidence from an interrupted response into a later run or message.
+    for entry in tree.active_path:
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "user":
+            pending.clear()
+        if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") in {
+            "message.started",
+            "turn.started",
+        }:
+            pending.clear()
+        if entry.operation_id != operation_id:
+            pending.clear()
+            operation_id = entry.operation_id
+        if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") == "web.search":
+            if len(pending) < 32:
+                pending.append(WebSearchPerformed.model_validate(entry.event.payload))
+        elif isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant":
+            searches[entry.id] = tuple(pending)
+            pending.clear()
     return MessagePageIndex(
         active_leaf_id=tree.active_leaf_id,
         messages=messages,
         positions={entry.id: index for index, entry in enumerate(messages)},
+        web_searches=searches,
     )
 
 
@@ -178,6 +204,7 @@ def message_page_from_index(
         _rpc_message_snapshot(
             entry,
             text_budget=text_budget,
+            web_searches=index.web_searches.get(entry.id, ()),
             complete_structure=complete_structure or full_content,
         )
         for entry in reversed(selected)
@@ -206,6 +233,7 @@ def _rpc_message_snapshot(
     *,
     text_budget: _MessagePageTextBudget | None,
     complete_structure: bool = False,
+    web_searches: tuple[WebSearchPerformed, ...] = (),
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
@@ -254,8 +282,42 @@ def _rpc_message_snapshot(
         is_error=message.is_error,
         usage=message.usage,
         cost=message.cost,
+        web_searches=tuple(_bounded_search(search, text_budget) for search in web_searches),
         tool_result=tool_result,
         skill_invocation=skill_invocation,
+    )
+
+
+def _bounded_search(
+    search: WebSearchPerformed, budget: _MessagePageTextBudget | None
+) -> WebSearchPerformed:
+    """Bound web metadata independently, sharing the page text budget when present.
+
+    Args:
+        search (WebSearchPerformed): Persisted search evidence on the active branch.
+        budget (_MessagePageTextBudget | None): Shared page allowance, if bounded.
+
+    Returns:
+        WebSearchPerformed: Display-only snapshot with bounded strings and sources.
+    """
+
+    def clip(text: str | None) -> str | None:
+        if text is None:
+            return None
+        return _clip_text_with_budget(
+            text, limit=1024, text_budget=budget or _MessagePageTextBudget(1024)
+        )[0]
+
+    return search.model_copy(
+        update={
+            "provider": clip(search.provider),
+            "query": clip(search.query),
+            "error": clip(search.error),
+            "sources": tuple(
+                WebSearchSource(url=clip(source.url) or "", title=clip(source.title))
+                for source in search.sources[:8]
+            ),
+        }
     )
 
 
