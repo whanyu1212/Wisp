@@ -10,12 +10,45 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc9 — release preparation
+## 0.2.0rc10 — release preparation
+
+RC10 stops YOLO and trust from carrying to every project under your home folder, and fixes
+trackpad scrolling that did nothing with the pointer over the composer. It adds two event fields,
+so an RC10 backend and frontend must be paired. This section describes the candidate under
+preparation; publication requires a separate tagged release.
+
+### Trust and permissions
+
+- YOLO and project trust are never saved for your home folder, any folder above it (including
+  `/`), a drive root, or the system's temporary folder. Wisp still starts there; trust is asked each
+  session, and YOLO chosen there (approval choice 3 or `/permissions yolo`) lasts for the session.
+  `wisp trust allow` and `revoke` exit 1 for such a folder. Records an earlier release saved for one
+  are ignored, not deleted, and a startup notice names the folder and how to remove them. (HY-252,
+  #707)
+- The project folder is no longer found by walking up into your home folder: a Git repository or a
+  marker such as `package.json` or `AGENTS.md` there no longer makes the home folder the project
+  for everything below it. A folder below home with no repository or marker is now its own project,
+  so `~/AGENTS.md` no longer loads as its project context. (HY-252, #707)
+
+### Rust TUI
+
+- Wheel and trackpad scrolling moves the conversation wherever the pointer is, including over the
+  composer, and right after a resize; before, such gestures were dropped. (HY-246, #708)
+- In a long session, scrolling into history that must be reloaded while a reply runs now shows
+  "Earlier history loads when this reply finishes." instead of stopping silently. (HY-246, #708)
+
+### Event contract
+
+- `ToolApprovalRequested.session_only_yolo` and `PermissionState.session_only_yolo` (default
+  `false`) say that choosing YOLO lasts for the session only. Sessions keep approval requests, so
+  RC9's `read_typed_events()` rejects an RC10 session in which one was made; resuming, listing, and
+  reading messages are unaffected. (#707)
+
+## 0.2.0rc9 — 2026-10-16
 
 RC9 fixes two problems found while dogfooding RC8 with Linear's hosted MCP server. It changes no
 session, event, protocol, or settings format, so RC8 and RC9 read each other's sessions and
-settings. This section describes the candidate under preparation; publication requires a separate
-tagged release.
+settings.
 
 - Fixed MCP servers with more than 64 tools being rejected whole: Linear's 68 tools showed as "the
   server returned an invalid tool catalog". The per-server tool count is removed; the limits on
