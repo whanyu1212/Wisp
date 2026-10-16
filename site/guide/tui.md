@@ -252,9 +252,12 @@ Unset enables capture. `1`, `true`, and `on` also enable it (case-insensitive); 
 an empty value, and unknown values disable it. This is Rust-local presentation state, not a backend
 setting or persisted preference.
 
-- Wheel/trackpad reports over the conversation scroll three lines without moving composer focus.
-  Reading earlier content remains anchored while output streams; paging uses the existing bounded
-  history requests. Over an open popup, the wheel moves its selection or scrolls its report instead.
+- Each wheel/trackpad report scrolls the conversation one line, without moving composer focus;
+  a trackpad swipe sends many. It scrolls wherever the pointer is in the conversation, including
+  over the composer. Reading earlier content remains anchored while output streams; paging uses
+  the existing bounded history requests. In a long session, history from earlier in the live view
+  is reloaded only while Wisp is idle: scrolling into it during a reply shows "Earlier history
+  loads when this reply finishes" and continues once the reply ends. Over an open popup, the wheel moves its selection or scrolls its report instead.
   It does not scroll the conversation behind the popup. The session tree requests its next page
   when wheeling past the last retained node.
 - Left-click a visible picker row to select it. **Clicks do not activate choices**: use `Enter` to

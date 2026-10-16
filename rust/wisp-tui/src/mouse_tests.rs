@@ -1038,3 +1038,88 @@ async fn clicking_unchanged_empty_composer_returns_focus_from_card_browse() {
     assert!(ui.browse_selected.is_none());
     assert!(ui.editor.text().is_empty());
 }
+
+#[tokio::test]
+async fn wheel_scrolls_the_transcript_after_a_resize_and_from_any_conversation_row() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state.transcript.start_message(1);
+    ui.state
+        .transcript
+        .append_message_delta(1, &"long transcript line\n".repeat(120));
+
+    // Nothing is painted yet, so there is no viewport to scroll.
+    ui.handle_input(
+        Input::Mouse(event(MouseEventKind::ScrollUp, 2, 2)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_viewport.follows_tail());
+
+    draw(&mut ui, 80, 24);
+    let editor = ui.editor.clone();
+    let composer_row = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .transcript
+        .bottom()
+        + 1;
+    // A resize clears the painted frame until the next paint; a trackpad
+    // gesture in that window still scrolls.
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    assert!(ui.mouse_frame.is_none());
+    ui.handle_input(
+        Input::Scroll(mouse::Scroll {
+            event: event(MouseEventKind::ScrollUp, 2, 2),
+            lines: -3,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.transcript_viewport.follows_tail());
+
+    // With the pointer over the composer the gesture scrolls the transcript too,
+    // and the draft and its focus are untouched.
+    draw(&mut ui, 80, 24);
+    let before = ui.transcript_viewport.clone();
+    ui.handle_input(
+        Input::Mouse(event(MouseEventKind::ScrollUp, 2, composer_row)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_ne!(ui.transcript_viewport, before);
+    assert_eq!(ui.editor, editor);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn wheel_never_scrolls_the_transcript_behind_key_help() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state.transcript.start_message(1);
+    ui.state
+        .transcript
+        .append_message_delta(1, &"long transcript line\n".repeat(120));
+    draw(&mut ui, 80, 24);
+    ui.key_help = Some(key_help::KeyHelp::new(key_help::Owner::Composer));
+    draw(&mut ui, 80, 24);
+    let before = ui.transcript_viewport.clone();
+
+    ui.handle_input(
+        Input::Mouse(event(MouseEventKind::ScrollUp, 2, 2)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(ui.transcript_viewport, before);
+}

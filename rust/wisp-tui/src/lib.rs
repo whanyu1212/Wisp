@@ -633,6 +633,9 @@ impl Default for LiveUi {
     }
 }
 
+/// Shown when scrolling reaches live history evicted from memory while a reply runs.
+const LIVE_HISTORY_WAITS_NOTICE: &str = "Earlier history loads when this reply finishes.";
+
 impl LiveUi {
     fn reset_transcript_presentation(&mut self) {
         self.mouse_frame = None;
@@ -1289,6 +1292,11 @@ impl LiveUi {
         if control != LoopControl::Exit {
             let effects = self.request_pending_history_navigation(limit)?;
             control = self.apply_effects(effects, writer, limit).await?;
+        }
+        if self.notice.as_deref() == Some(LIVE_HISTORY_WAITS_NOTICE) && !self.prompt_running() {
+            // The reply finished, so the pending scroll is requesting its history now.
+            self.notice = None;
+            self.render_pending = true;
         }
         if control != LoopControl::Exit {
             self.sync_file_picker(writer, limit).await?;
@@ -3298,6 +3306,13 @@ impl LiveUi {
         Ok(reducer::reduce(&mut self.state, action, &mut self.ids)?)
     }
 
+    fn prompt_running(&self) -> bool {
+        self.state
+            .current_command
+            .as_ref()
+            .is_some_and(|command| command.command_type == reducer::ActiveCommandType::Prompt)
+    }
+
     async fn navigate_transcript_action(
         &mut self,
         action: TranscriptViewAction,
@@ -3370,6 +3385,12 @@ impl LiveUi {
                     intent,
                     reader_generation: outcome.reader_generation,
                 });
+            }
+            if live_recovery && self.prompt_running() {
+                // Evicted live history is not recovered while a reply runs. The
+                // movement stays pending and continues once the reply finishes, so
+                // say so instead of leaving the scroll stopped without feedback.
+                self.notice = Some(LIVE_HISTORY_WAITS_NOTICE.into());
             }
             if same_active_request {
                 return Ok(LoopControl::Continue);
@@ -9461,6 +9482,98 @@ mod tests {
                 .cursor
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn live_recovery_during_a_reply_says_it_waits_and_continues_afterwards() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = LiveUi::default();
+        for index in 0..1_203 {
+            let id = ui
+                .state
+                .transcript
+                .append_prompt(format!("message {index}"));
+            ui.state
+                .transcript
+                .add_live_origin(id, &format!("message-{index}"));
+        }
+        ui.state.transcript.enforce_live_retention(None);
+        ui.transcript_viewport.set_geometry(
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+            40,
+            6,
+        );
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        ui.state.current_command = Some(reducer::ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: reducer::ActiveCommandType::Prompt,
+        });
+
+        ui.navigate_transcript_action(
+            TranscriptViewAction::ScrollLines(-12),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        // No request while the reply runs, but the scroll is not silently lost.
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(ui.notice.as_deref(), Some(LIVE_HISTORY_WAITS_NOTICE));
+        assert!(
+            ui.pending_history_navigation
+                .is_some_and(|pending| pending.live_recovery)
+        );
+
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "prompt-1".into(),
+                command_type: "prompt".into(),
+                ok: true,
+                error: None,
+            }),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        // The finished reply first refreshes session statistics; the history
+        // request follows once that command completes.
+        let mut sent = Vec::new();
+        for _ in 0..4 {
+            let Ok(WriterMessage::Frame { payload, .. }) = receiver.try_recv() else {
+                break;
+            };
+            let frame: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            let kind = frame["type"].as_str().unwrap().to_owned();
+            if kind == "get_session_stats" {
+                ui.dispatch(
+                    UiAction::BackendEvent(BackendEvent::CommandFinished {
+                        command_id: frame["id"].as_str().unwrap().into(),
+                        command_type: kind.clone(),
+                        ok: false,
+                        error: Some("unavailable".into()),
+                    }),
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+            }
+            sent.push(kind);
+        }
+        assert!(
+            sent.iter()
+                .any(|kind| kind == "get_messages" || kind == "get_message_snapshot"),
+            "{sent:?}"
+        );
+        assert_eq!(ui.notice, None);
     }
 
     #[tokio::test]

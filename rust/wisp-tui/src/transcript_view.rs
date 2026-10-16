@@ -2603,6 +2603,8 @@ pub struct TranscriptViewport {
     width: usize,
     height: usize,
     reader_generation: u64,
+    // False until a paint gives the viewport its real size.
+    sized: bool,
 }
 
 impl Default for TranscriptViewport {
@@ -2614,6 +2616,7 @@ impl Default for TranscriptViewport {
             width: 1,
             height: 1,
             reader_generation: 0,
+            sized: false,
         }
     }
 }
@@ -2640,6 +2643,11 @@ impl TranscriptViewport {
         self.reader_generation
     }
 
+    /// Whether a paint has given this viewport its size, so scrolling it is meaningful.
+    pub fn is_sized(&self) -> bool {
+        self.sized
+    }
+
     pub fn set_geometry(
         &mut self,
         transcript: &Transcript,
@@ -2649,6 +2657,7 @@ impl TranscriptViewport {
     ) {
         let width = width.max(1);
         let height = height.max(1);
+        self.sized = true;
         if self.width == width && self.height == height {
             return;
         }
@@ -4238,6 +4247,7 @@ mod tests {
             width: 40,
             height: 5,
             reader_generation: 0,
+            sized: true,
         };
         let mut cache = TranscriptRowCache::default();
         cache.fold_mut().expand(card_id);
@@ -4313,6 +4323,7 @@ mod tests {
             width: 10,
             height: 4,
             reader_generation: 0,
+            sized: true,
         };
         let mut cache = TranscriptRowCache::default();
         cache.fold_mut().expand(card_id);
