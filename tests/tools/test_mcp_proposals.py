@@ -407,7 +407,10 @@ def test_listing_names_the_variable_a_header_sends() -> None:
         {"command": "npx", "args": ["-y", "mcp-remote", "https://mcp.linear.app/mcp"]},
         {"command": "npx", "args": ["mcp-remote@0.1.29", "https://mcp.linear.app/mcp"]},
         {"command": "/usr/local/bin/mcp-remote", "args": ["https://mcp.linear.app/mcp"]},
-        {"command": "npx", "args": ["-y", "supergateway", "--sse", "https://e.test/sse"]},
+        {
+            "command": "npx",
+            "args": ["-y", "supergateway", "--streamableHttp", "https://e.test/mcp"],
+        },
     ],
 )
 def test_a_remote_bridge_is_refused_in_favour_of_the_url(arguments: dict[str, object]) -> None:
@@ -428,3 +431,20 @@ def test_a_confirmed_http_server_tells_the_model_how_to_sign_in() -> None:
 
     assert "press l" in url_result.text and "wisp mcp login linear" in url_result.text
     assert "press l" not in command_result.text
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-y", "supergateway", "--sse", "https://e.test/events"],
+        ["-y", "mcp-remote", "https://e.test/sse"],
+        ["-y", "mcp-remote", "https://e.test/mcp", "--transport", "sse-only"],
+    ],
+)
+def test_a_bridge_to_a_legacy_sse_server_is_allowed(args: list[str]) -> None:
+    # Wisp does not speak SSE, so the bridge is the only way to reach such a server.
+    problem = ProposeMcpServerTool().check_arguments(
+        {"name": "legacy", "command": "npx", "args": args}
+    )
+
+    assert problem is None

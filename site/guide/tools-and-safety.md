@@ -217,8 +217,9 @@ your files. Keep `bash` on ask when that matters.)
 With [web search](./providers#web-search) on, Wisp can look up a server's command or URL itself,
 for example "add the Linear MCP server". What it finds is still only a proposal. For a hosted server,
 Wisp proposes its URL and [signs in with OAuth](#signing-in-with-oauth) itself, which it prefers
-over API keys; a proposal that wraps a URL in a local bridge such as `mcp-remote` is refused with a
-pointer to the URL instead. After you confirm one, press `l` in `/mcp` if it shows "sign in required".
+over API keys; a proposal that wraps a Streamable HTTP URL in a local bridge such as `mcp-remote` is
+refused with a pointer to the URL instead. A bridge is still allowed for a server that only offers a
+legacy SSE endpoint, which Wisp cannot reach directly. After you confirm one, press `l` in `/mcp` if it shows "sign in required".
 
 Every proposal opens a confirmation that shows exactly what the server would run or connect to and
 which variables it forwards. A header built from a variable is shown with the host that receives

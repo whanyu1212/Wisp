@@ -208,17 +208,24 @@ def secret_like_argument(server: McpServerConfig) -> str | None:
 # Wisp connects and signs in itself, so a proposal names the URL instead.
 _REMOTE_BRIDGES = re.compile(r"^(?:@[\w.-]+/)?(?:mcp-remote|supergateway)(?:@[\w.^~-]+)?$")
 _REMOTE_URL = re.compile(r"^https://\S+$")
+# supergateway's `--sse URL` and mcp-remote's `--transport sse-only` (or
+# `sse-first`) bridge a legacy SSE server, which Wisp cannot reach directly.
+_SSE_MODE = re.compile(r"^(?:--sse|sse-only|sse-first|--transport=sse-(?:only|first))$")
 
 
 def remote_bridge_url(server: McpServerConfig) -> str | None:
-    """Return the URL a proposal wraps in a remote bridge such as mcp-remote.
+    """Return the URL a proposal needlessly wraps in a bridge such as mcp-remote.
+
+    A bridge is needless when it targets a Streamable HTTP endpoint, which Wisp
+    connects to (and signs in to) itself. A legacy SSE endpoint is different:
+    Wisp does not speak SSE, so a bridge is the only way to reach it.
 
     Args:
         server (McpServerConfig): A validated proposal.
 
     Returns:
         str | None: The first HTTPS URL among the arguments when the command runs
-        a known bridge, or None.
+        a known bridge to a Streamable HTTP endpoint, or None.
     """
 
     if server.command is None:
@@ -226,7 +233,12 @@ def remote_bridge_url(server: McpServerConfig) -> str | None:
     words = [Path(server.command).name, *server.args]
     if not any(_REMOTE_BRIDGES.match(word) for word in words):
         return None
-    return next((word for word in server.args if _REMOTE_URL.match(word)), None)
+    if any(_SSE_MODE.match(word) for word in server.args):
+        return None
+    url = next((word for word in server.args if _REMOTE_URL.match(word)), None)
+    if url is None or urlsplit(url).path.rstrip("/").endswith("/sse"):
+        return None
+    return url
 
 
 def control_characters(server: McpServerConfig) -> bool:
@@ -356,8 +368,8 @@ class ProposeMcpServerTool:
             return (
                 "Wisp connects to remote MCP servers and signs in to them with OAuth itself, "
                 "so it needs no bridge such as mcp-remote. Propose the server's URL instead: "
-                f"url={url!r}, without command or args. Wisp speaks Streamable HTTP, so use "
-                "that endpoint (usually ending in /mcp), not a legacy /sse one."
+                f"url={url!r}, without command or args. (A bridge is still right for a "
+                "server that only offers a legacy SSE endpoint, which Wisp cannot reach.)"
             )
         return None
 
@@ -466,7 +478,8 @@ MCP_PROPOSAL_PROMPT = ToolPromptMetadata(
         "Before proposing, explain what the server does and what access it would get.",
         "For a hosted server, propose its HTTPS endpoint as url. Wisp signs in with "
         "OAuth itself (the user presses l in /mcp), so prefer that over API keys and "
-        "over local bridges such as mcp-remote.",
+        "over local bridges such as mcp-remote; a bridge is only for a server that "
+        "offers just a legacy SSE endpoint.",
         "Never put secret values in a proposal. Forward them with env_from, or with "
         "headers_from for a hosted server that has no OAuth, and tell the user which "
         "environment variables to set.",
