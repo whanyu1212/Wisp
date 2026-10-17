@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import os
+import shlex
 import signal
 import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import anyio
@@ -376,8 +380,11 @@ def test_posix_recorded_job_verification_runs_off_event_loop(
     def fake_record(_process: object) -> bool:
         return True
 
-    def fake_signal_group(_process: object, _selected_signal: signal.Signals) -> bool:
-        return True
+    def fake_signal_group(
+        _process: object,
+        _selected_signal: signal.Signals,
+    ) -> process_tools_module._PosixGroupSignal:
+        return process_tools_module._PosixGroupSignal.SENT  # noqa: SLF001
 
     def fake_signal_recorded(_process: object, _selected_signal: signal.Signals) -> bool:
         worker_thread_ids.append(threading.get_ident())
@@ -510,7 +517,9 @@ def test_posix_group_signal_skips_exited_leader_pid(
         pid = 123
         returncode = 0
 
-    def fail_killpg(_pid: int, _signal: int) -> None:
+    def fail_killpg(_pid: int, selected_signal: int) -> None:
+        if selected_signal == 0:
+            raise ProcessLookupError
         raise AssertionError("exited leader pid must not be signaled as a process group")
 
     monkeypatch.setattr(process_tools_module.os, "killpg", fail_killpg)
@@ -520,7 +529,7 @@ def test_posix_group_signal_skips_exited_leader_pid(
             DummyProcess(),
             signal.SIGKILL,
         )
-        is True
+        is process_tools_module._PosixGroupSignal.NO_MEMBERS  # noqa: SLF001
     )
 
 
@@ -546,6 +555,7 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     monkeypatch.setattr(process_tools_module.os, "name", "posix")
     monkeypatch.setattr(process_tools_module.sys, "platform", "darwin")
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_open_posix_exit_pipe", lambda: (7, 124))
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(
         process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
@@ -557,9 +567,12 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     result = anyio.run(run)
 
     assert result is process
-    assert creation_calls[0]["pass_fds"] == (123,)
+    assert creation_calls[0]["pass_fds"] == (123, 124)
     assert creation_calls[0]["start_new_session"] is True
-    assert closed_fds == [123]
+    assert closed_fds == [123, 124]
+    exit_pipe = getattr(process, process_tools_module._POSIX_EXIT_PIPE_ATTR)  # noqa: SLF001
+    assert exit_pipe.read_fd == 7
+    assert exit_pipe.close.alive
     process_tools_module._remove_posix_jobs_file(  # noqa: SLF001
         getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR),  # noqa: SLF001
     )
@@ -586,6 +599,7 @@ def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
     monkeypatch.setattr(process_tools_module.os, "name", "posix")
     monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_open_posix_exit_pipe", lambda: (7, 124))
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", create_exec)
     monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_shell", fail_shell)
@@ -607,9 +621,9 @@ def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
     )
     assert "echo hi" in command[3]
     assert "preexec_fn" not in kwargs
-    assert kwargs["pass_fds"] == (123,)
+    assert kwargs["pass_fds"] == (123, 124)
     assert kwargs["start_new_session"] is True
-    assert closed_fds == [123]
+    assert closed_fds == [123, 124]
 
 
 def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
@@ -631,6 +645,7 @@ def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     monkeypatch.setattr(process_tools_module.os, "name", "posix")
     monkeypatch.setattr(process_tools_module.sys, "platform", "linux")
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
+    monkeypatch.setattr(process_tools_module, "_open_posix_exit_pipe", lambda: (7, 124))
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(
         process_tools_module, "_remove_posix_jobs_file", lambda path: removed_files.append(path)
@@ -652,5 +667,151 @@ def test_posix_shell_spawn_cancellation_cleans_tracking_resources(
     with pytest.raises(asyncio.CancelledError):
         anyio.run(run)
 
-    assert closed_fds == [123]
+    assert closed_fds == [123, 124, 7]
     assert len(removed_files) == 1
+
+
+def test_posix_group_probe_skips_process_scan_for_empty_group(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    def empty_group(_pgid: int, selected_signal: int) -> None:
+        assert selected_signal == 0
+        raise ProcessLookupError
+
+    def fail_process_scan(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("an empty process group needs no process scan")
+
+    monkeypatch.setattr(process_tools_module.os, "killpg", empty_group)
+    monkeypatch.setattr(process_tools_module.subprocess, "run", fail_process_scan)
+
+    assert process_tools_module._posix_group_has_members_without_live_leader(123) is False  # noqa: SLF001
+
+
+def test_posix_termination_skips_grace_when_group_had_no_members(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    class DummyProcess:
+        pid = 123
+        returncode = 0
+
+    group_signals: list[signal.Signals] = []
+
+    def no_group_members(
+        _process: object,
+        selected_signal: signal.Signals,
+    ) -> process_tools_module._PosixGroupSignal:
+        group_signals.append(selected_signal)
+        return process_tools_module._PosixGroupSignal.NO_MEMBERS  # noqa: SLF001
+
+    monkeypatch.setattr(process_tools_module, "_POSIX_TERMINATION_GRACE_SECONDS", 30)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_process_group", no_group_members)
+    monkeypatch.setattr(process_tools_module, "_record_posix_descendant_pids", lambda _p: True)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_recorded_jobs", lambda _p, _s: True)
+
+    async def run() -> bool:
+        with anyio.fail_after(5):
+            return await process_tools_module._terminate_posix_process_tree(DummyProcess())  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert anyio.run(run) is True
+    assert group_signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX exit-pipe tracking")
+def test_posix_clean_exit_skips_jobs_file_holder_scan(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def fail_holder_scan(_jobs_file: Path) -> tuple[int, ...] | None:
+        raise AssertionError("a closed exit pipe must make the holder scan unnecessary")
+
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", fail_holder_scan)
+
+    async def run() -> tuple[bool, object, Path]:
+        process = await process_tools_module._create_shell_process("true", cwd=tmp_path)  # noqa: SLF001
+        await process.communicate()
+        terminated = await process_tools_module._terminate_process_tree(process)  # noqa: SLF001
+        return (
+            terminated,
+            getattr(process, process_tools_module._POSIX_EXIT_PIPE_ATTR),  # noqa: SLF001
+            getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR),  # noqa: SLF001
+        )
+
+    terminated, exit_pipe, jobs_file = anyio.run(run)
+
+    assert terminated is True
+    assert isinstance(exit_pipe, process_tools_module._PosixExitPipe)  # noqa: SLF001
+    assert not exit_pipe.close.alive
+    assert not jobs_file.exists()
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX exit-pipe tracking")
+def test_posix_live_inheritor_keeps_jobs_file_holder_scan(
+    monkeypatch: MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    source = (
+        "import os, pathlib, time\n"
+        "os.setsid()\n"
+        f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    command = (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(source)} >/dev/null 2>&1 & "
+        f"while [ ! -s {shlex.quote(str(pid_path))} ]; do sleep 0.01; done"
+    )
+    real_holder_scan = process_tools_module._posix_jobs_file_holder_pids  # noqa: SLF001
+    scanned_holders: list[tuple[int, ...] | None] = []
+
+    def spy_holder_scan(jobs_file: Path) -> tuple[int, ...] | None:
+        holders = real_holder_scan(jobs_file)
+        scanned_holders.append(holders)
+        return holders
+
+    monkeypatch.setattr(process_tools_module, "_posix_jobs_file_holder_pids", spy_holder_scan)
+
+    async def run() -> bool:
+        process = await process_tools_module._create_shell_process(command, cwd=tmp_path)  # noqa: SLF001
+        await process.communicate()
+        return await process_tools_module._terminate_process_tree(process)  # noqa: SLF001
+
+    terminated = anyio.run(run)
+    daemon_pid = int(pid_path.read_text())
+
+    assert terminated is True
+    assert any(holders and daemon_pid in holders for holders in scanned_holders)
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        try:
+            os.kill(daemon_pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.01)
+    os.kill(daemon_pid, signal.SIGKILL)
+    pytest.fail("detached jobs-file holder survived cleanup")
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell wrapper")
+@pytest.mark.parametrize("command", ["true", "sleep 0.4"])
+def test_posix_wrapper_leaves_no_group_member_when_it_exits(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    # The job recorder must reap its interval sleep before the wrapper exits; an
+    # orphaned sleep would stay in the group, hold the output pipes, and delay EOF.
+    jobs_file = tmp_path / "jobs"
+    jobs_file.touch()
+    wrapped = process_tools_module._wrap_posix_shell_command(command, jobs_file)  # noqa: SLF001
+    wrapper = subprocess.Popen(
+        ["/bin/sh", "-c", wrapped],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    assert wrapper.wait(timeout=10) == 0
+
+    with pytest.raises(ProcessLookupError):
+        os.killpg(wrapper.pid, 0)
