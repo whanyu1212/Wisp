@@ -271,20 +271,21 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
                 os.write(terminal_fd, b"\r")
                 phase = "submitted"
                 output.clear()
-            elif phase == "submitted" and b"idle" in output:
-                entries = [
-                    entry
-                    for path in session_dir.glob("*.jsonl")
-                    for entry in complete_logged_commands(path)
-                ]
-                if any(
-                    entry.get("kind") == "message"
-                    and isinstance(message := entry.get("message"), dict)
-                    and message.get("role") == "assistant"
-                    for entry in entries
-                ):
-                    os.write(terminal_fd, b"\x03")
-                    phase = "quit"
+            elif phase == "submitted" and any(
+                entry.get("kind") == "message"
+                and isinstance(message := entry.get("message"), dict)
+                and message.get("role") == "assistant"
+                for path in session_dir.glob("*.jsonl")
+                for entry in complete_logged_commands(path)
+            ):
+                # The fake reply can finish before "working" is painted, leaving the idle
+                # footer unchanged and never redrawn. A resize repaints the whole frame.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 122, 0, 0))
+                phase = "settling"
+                output.clear()
+            elif phase == "settling" and b"idle" in output:
+                os.write(terminal_fd, b"\x03")
+                phase = "quit"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
                 status = waited_status
