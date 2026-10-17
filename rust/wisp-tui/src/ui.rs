@@ -799,12 +799,8 @@ fn waiting_for_output(state: &UiState) -> bool {
     }
     // message.completed can be painted before command.finished. Keep the reply
     // visible without briefly inserting a working row and shrinking its viewport.
-    // A later tool card or textless response restores the between-steps indicator.
-    let visible_reply =
-        state.transcript.entries().last().is_some_and(|entry| {
-            entry.role == TranscriptRole::Assistant && !entry.content.is_empty()
-        });
-    !visible_reply && !state.transcript.has_unresolved_tool_calls()
+    // Response/tool boundaries, not card order, restore the between-steps indicator.
+    !state.transcript.has_visible_response() && !state.transcript.has_unresolved_tool_calls()
 }
 
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
@@ -5759,6 +5755,28 @@ mod tests {
             process_between_steps.contains("⠸ Working"),
             "{process_between_steps}"
         );
+
+        // Polling the same process updates its earlier card in place. A reply
+        // after that card must not hide activity once the later poll settles.
+        state.transcript.append_message_delta(3, "Checking again.");
+        state
+            .transcript
+            .complete_message(3, "Checking again.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "process-poll-again".into(),
+                name: "bash".into(),
+                arguments: json!({"operation": "poll", "process_id": "process-1"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let mut result = tool_result("process-poll-again", "still running");
+        result.name = "bash".into();
+        result.process_id = Some("process-1".into());
+        result.process_state = Some("running".into());
+        state.transcript.observe_tool_result(result);
+        let after_poll = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(after_poll.contains("⠸ Working"), "{after_poll}");
 
         for status in [
             ViewStatus::Idle,

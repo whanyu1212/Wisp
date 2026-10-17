@@ -253,6 +253,9 @@ pub struct Transcript {
     pending_response: Option<TranscriptEntryId>,
     started_turn: Option<u64>,
     active_response: Option<(u64, TranscriptEntryId)>,
+    // Keep a completed reply visible until the next response/tool/prompt boundary,
+    // including when a tool updates an older process card rather than appending.
+    completed_response: Option<TranscriptEntryId>,
     call_entries: HashMap<String, ToolBinding>,
     resolved_call_order: VecDeque<String>,
     call_index_bytes: usize,
@@ -326,6 +329,7 @@ impl Transcript {
         } else {
             self.started_turn = None;
         }
+        self.completed_response = None;
         self.started_turn = Some(turn);
     }
 
@@ -396,6 +400,7 @@ impl Transcript {
     }
 
     pub fn complete_message(&mut self, turn: u64, content: String) -> Option<TranscriptEntryId> {
+        self.completed_response = None;
         if content.is_empty()
             && self.active_response.is_none()
             && (self.started_turn == Some(turn) || self.started_turn.is_none())
@@ -421,6 +426,7 @@ impl Transcript {
             Self::bump_revision(entry);
             self.bump_generation();
         }
+        self.completed_response = Some(entry_id);
         if self.active_response == Some((turn, entry_id)) {
             self.active_response = None;
         }
@@ -708,6 +714,7 @@ impl Transcript {
     }
 
     pub fn finish_active_response(&mut self) {
+        self.completed_response = None;
         self.started_turn = None;
         let entry_id = self
             .active_response
@@ -717,6 +724,14 @@ impl Transcript {
         if let Some(entry_id) = entry_id {
             self.set_entry_state(entry_id, TranscriptEntryState::Complete);
         }
+    }
+
+    pub(crate) fn has_visible_response(&self) -> bool {
+        self.active_response
+            .map(|(_, entry_id)| entry_id)
+            .or(self.completed_response)
+            .and_then(|entry_id| self.entry(entry_id))
+            .is_some_and(|entry| !entry.content.is_empty())
     }
 
     pub fn is_streaming_text(&self) -> bool {
@@ -2063,6 +2078,9 @@ impl Transcript {
         self.active_response = self
             .active_response
             .filter(|(_, entry_id)| self.entry_indexes.contains_key(entry_id));
+        self.completed_response = self
+            .completed_response
+            .filter(|entry_id| self.entry_indexes.contains_key(entry_id));
         if self.active_response.is_none() {
             self.started_turn = None;
         }
