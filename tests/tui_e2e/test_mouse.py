@@ -124,7 +124,7 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
         assert phase == "quit", bytes(output)
         assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
         assert termios.tcgetattr(terminal_fd) == initial_terminal
-        for mode in (1000, 1006):
+        for mode in (1000, 1002, 1006):
             assert (f"\x1b[?{mode}h".encode() in all_output) is mouse_enabled
             if mouse_enabled:
                 assert f"\x1b[?{mode}l".encode() in all_output

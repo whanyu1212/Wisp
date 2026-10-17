@@ -200,7 +200,7 @@ def test_rust_tui_cross_language_smoke(
 
     assert prompt_sent, bytes(output)
     assert quit_sent, bytes(output)
-    for mode in (1000, 1006):
+    for mode in (1000, 1002, 1006):
         assert (f"\x1b[?{mode}h".encode() in terminal_output) is mouse_enabled
         if mouse_enabled:
             assert f"\x1b[?{mode}l".encode() in terminal_output

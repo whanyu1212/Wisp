@@ -280,6 +280,59 @@ fn scrolled_back_user_surface_keeps_a_plain_gap_after_the_previous_reply() {
     assert!(screen_row(&buffer, label - 3).contains("Tests passed"));
 }
 
+#[test]
+fn scrolling_up_from_the_live_view_keeps_the_prompt_until_it_is_reached() {
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        ..LiveUi::default()
+    };
+    ui.state.transcript.append_prompt("first".into());
+    ui.state.transcript.complete_message(1, "short".into());
+    let prompt = ui
+        .state
+        .transcript
+        .append_prompt("Check the edge cases.".into());
+    let mut reply = String::new();
+    for line in 0..30 {
+        reply.push_str(&format!("reply line {line}\n"));
+    }
+    ui.state.transcript.complete_message(2, reply);
+    let last_reply_line = |buffer: &ratatui::buffer::Buffer| {
+        (0..buffer.area.height)
+            .filter_map(|y| {
+                let row = screen_row(buffer, y);
+                row.trim()
+                    .strip_prefix("reply line ")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .max()
+    };
+
+    let mut buffer = draw(&mut ui, 60, 14);
+    let mut last = last_reply_line(&buffer);
+    assert_eq!(last, Some(29));
+    let prompt_header = crate::transcript_view::RowAnchor {
+        entry_id: prompt,
+        position: RowPosition::Header,
+    };
+    while ui.transcript_viewport.scrolled_top() != Some(prompt_header) {
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::ScrollLines(-1),
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        buffer = draw(&mut ui, 60, 14);
+        row_containing(&buffer, "Check the edge cases.");
+        let next = last_reply_line(&buffer);
+        assert_eq!(next, last.and_then(|line| line.checked_sub(1)));
+        last = next;
+    }
+    assert!(row_containing(&buffer, "reply line 0") > row_containing(&buffer, "Check the edge"));
+}
+
 fn screen_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
     (0..buffer.area.width)
         .map(|x| buffer[(x, y)].symbol())

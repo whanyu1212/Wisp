@@ -2,7 +2,7 @@
 
 use super::*;
 use crossterm::event::{MouseButton, MouseEventKind};
-use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect};
+use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, style::Modifier};
 use serde_json::Value;
 use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
 
@@ -90,9 +90,18 @@ fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
         assert!(mouse::enabled(Some(value)));
     }
     for kind in [
-        MouseEventKind::Moved,
+        MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Drag(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::ScrollUp,
+        MouseEventKind::ScrollDown,
+    ] {
+        assert!(mouse::supported(event(kind, 1, 1)));
+    }
+    for kind in [
+        MouseEventKind::Moved,
+        MouseEventKind::Drag(MouseButton::Right),
+        MouseEventKind::Up(MouseButton::Right),
         MouseEventKind::Down(MouseButton::Right),
         MouseEventKind::ScrollLeft,
         MouseEventKind::ScrollRight,
@@ -102,6 +111,10 @@ fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
     let mut shifted = event(MouseEventKind::Down(MouseButton::Left), 1, 1);
     shifted.modifiers = KeyModifiers::SHIFT;
     assert!(!mouse::supported(shifted));
+    // A release with a key held still ends the selection its press started.
+    let mut released = event(MouseEventKind::Up(MouseButton::Left), 1, 1);
+    released.modifiers = KeyModifiers::CONTROL;
+    assert!(mouse::supported(released));
 }
 
 #[test]
@@ -1122,4 +1135,406 @@ async fn wheel_never_scrolls_the_transcript_behind_key_help() {
     .unwrap();
 
     assert_eq!(ui.transcript_viewport, before);
+}
+
+fn drag(kind: MouseEventKind, x: u16, y: u16) -> Input {
+    Input::Mouse(event(kind, x, y))
+}
+
+/// The screen cell where `text` starts.
+fn cell_of(buffer: &Buffer, text: &str) -> (u16, u16) {
+    for y in 0..buffer.area.height {
+        let row = row_text(buffer, y);
+        if let Some(byte) = row.find(text) {
+            return (u16::try_from(row[..byte].chars().count()).unwrap(), y);
+        }
+    }
+    panic!("missing {text:?}");
+}
+
+fn transcript_ui() -> (
+    LiveUi,
+    std::sync::Arc<std::sync::Mutex<clipboard::TestClipboardState>>,
+) {
+    let mut ui = ui("");
+    let (clipboard, copied) = clipboard::test_clipboard();
+    ui.clipboard = clipboard;
+    ui.state.transcript.append_prompt("show me".into());
+    ui.state
+        .transcript
+        .complete_message(1, "alpha line\n\nbeta line".into());
+    (ui, copied)
+}
+
+#[tokio::test]
+async fn dragging_over_the_transcript_highlights_and_copies_the_painted_text() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 60, 20);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    let (end_x, end_y) = cell_of(&buffer, "beta line");
+
+    ui.handle_input(click(x + 6, y), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Drag(MouseButton::Left), end_x + 3, end_y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let highlighted = draw(&mut ui, 60, 20);
+    assert!(
+        highlighted[(x + 6, y)]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert!(
+        !highlighted[(x + 5, y)]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert!(
+        highlighted[(end_x + 3, end_y)]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+    assert!(
+        !highlighted[(end_x + 4, end_y)]
+            .modifier
+            .contains(Modifier::REVERSED)
+    );
+
+    // Releasing past the painted text still copies what the user saw, without a new paint.
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), end_x + 3, end_y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(copied.lock().unwrap().copied, ["line\nbeta"]);
+    assert_eq!(ui.notice.as_deref(), Some("Copied 9 chars to clipboard."));
+    let cleared = draw(&mut ui, 60, 20);
+    assert!(!cleared[(x + 6, y)].modifier.contains(Modifier::REVERSED));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn dragging_upward_selects_in_reading_order() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 60, 20);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    let (end_x, end_y) = cell_of(&buffer, "beta line");
+    ui.handle_input(click(end_x + 3, end_y), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 60, 20);
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x + 6, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(copied.lock().unwrap().copied, ["line\nbeta"]);
+}
+
+#[tokio::test]
+async fn plain_clicks_wheel_and_resize_copy_nothing() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 60, 20);
+    let (x, y) = cell_of(&buffer, "alpha line");
+
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    draw(&mut ui, 60, 20);
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+
+    for interrupt in [
+        Input::Scroll(mouse::Scroll {
+            event: event(MouseEventKind::ScrollUp, x, y),
+            lines: -1,
+        }),
+        Input::Redraw,
+    ] {
+        draw(&mut ui, 60, 20);
+        ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+        ui.handle_input(
+            drag(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw(&mut ui, 60, 20);
+        ui.handle_input(interrupt, &writer, 8192).await.unwrap();
+        ui.handle_input(
+            drag(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(copied.lock().unwrap().copied.is_empty());
+    assert_eq!(ui.notice, None);
+}
+
+#[tokio::test]
+async fn a_release_after_closing_a_popup_never_acts_as_a_second_click() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    ui.editor.insert_paste("keep draft");
+    ui.theme_picker = Some(ThemePicker::new(ui.theme.active));
+    draw(&mut ui, 80, 24);
+    let editor = ui.editor.clone();
+    let area = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .editor
+        .as_ref()
+        .unwrap()
+        .area;
+    ui.handle_input(click(area.x, area.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.theme_picker.is_none());
+    draw(&mut ui, 80, 24);
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), area.x, area.y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor, editor);
+    assert!(copied.lock().unwrap().copied.is_empty());
+}
+
+#[tokio::test]
+async fn an_approval_arriving_mid_drag_ends_the_selection_without_copying() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Drag(MouseButton::Left), 70, 22),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "approval".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        })),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+    assert!(
+        ui.transcript_selection.is_none(),
+        "the stale selection must not be painted over the approval"
+    );
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), 70, 22),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(copied.lock().unwrap().copied.is_empty());
+    assert!(ui.state.pending_approval.is_some());
+}
+
+#[tokio::test]
+async fn a_consumed_press_ends_a_selection_whose_release_was_lost() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+    // The release never arrives; a popup then opens and consumes the next press.
+    ui.theme_picker = Some(ThemePicker::new(ui.theme.active));
+    draw(&mut ui, 80, 24);
+    let (row_x, row_y) = row_point(&ui, 1);
+    ui.handle_input(click(row_x, row_y), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), row_x, row_y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(copied.lock().unwrap().copied.is_empty());
+}
+
+#[tokio::test]
+async fn scrolling_during_a_decision_never_replaces_its_notice() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state.view_status = ViewStatus::Running;
+    ui.state.current_command = Some(reducer::ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: reducer::ActiveCommandType::Prompt,
+    });
+    // The approval answer fits the frame limit; an older-history request does not.
+    ui.state.history.oldest_cursor = Some("c".repeat(400));
+    ui.state.transcript.append_prompt("retained".into());
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "approval".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        })),
+        &writer,
+        300,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.unsendable_current_response());
+    let notice = ui.notice.clone();
+    draw(&mut ui, 80, 24);
+    for input in [
+        Input::Mouse(event(MouseEventKind::ScrollUp, 2, 5)),
+        key(KeyCode::PageUp),
+    ] {
+        ui.handle_input(input, &writer, 300).await.unwrap();
+        assert_eq!(ui.notice, notice);
+    }
+    assert!(ui.state.pending_approval.is_some());
+    assert!(receiver.try_recv().is_err());
+}
+
+fn scrolled_back_ui() -> LiveUi {
+    let mut ui = ui("draft");
+    ui.state.transcript.append_prompt("earlier".into());
+    ui.state
+        .transcript
+        .complete_message(1, "earlier reply line\n".repeat(60));
+    ui
+}
+
+async fn scroll_up(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>) {
+    ui.handle_input(
+        Input::Mouse(event(MouseEventKind::ScrollUp, 4, 4)),
+        writer,
+        8192,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn clicking_the_jump_label_above_the_composer_returns_to_the_latest_output() {
+    for (width, label) in [(100, " ↓ latest · Ctrl+End "), (30, " ↓ latest ")] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = scrolled_back_ui();
+        let live = draw(&mut ui, width, 24);
+        assert!((0..24).all(|y| !row_text(&live, y).contains('↓')));
+        scroll_up(&mut ui, &writer).await;
+        let buffer = draw(&mut ui, width, 24);
+        let (x, y) = cell_of(&buffer, label.trim());
+        // It sits on the blank row right above the composer, not in the footer.
+        assert!(row_text(&buffer, y + 1).contains('╭'), "{width}");
+        assert!(!row_text(&buffer, 23).contains("scrolled"));
+        let frame = &ui.mouse_frame.as_ref().unwrap().conversation;
+        assert!(
+            frame.selectable.bottom() <= y,
+            "the label is never selectable"
+        );
+        let editor = ui.editor.clone();
+
+        ui.handle_input(click(x - 3, y), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(!ui.transcript_viewport.follows_tail(), "outside the label");
+        ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+        assert!(ui.transcript_viewport.follows_tail(), "{width}");
+        assert_eq!(ui.editor, editor);
+        assert!(!row_text(&draw(&mut ui, width, 24), y).contains('↓'));
+        assert!(receiver.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn without_room_above_the_composer_the_footer_marks_the_scroll() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = scrolled_back_ui();
+    draw(&mut ui, 60, 10);
+    scroll_up(&mut ui, &writer).await;
+    let buffer = draw(&mut ui, 60, 10);
+    assert!((0..10).all(|y| !row_text(&buffer, y).contains('↓')));
+    assert!(row_text(&buffer, 9).contains("scrolled"));
+    assert!(
+        ui.mouse_frame
+            .as_ref()
+            .unwrap()
+            .conversation
+            .jump_to_latest
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn the_jump_label_is_inert_while_a_decision_is_docked() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = scrolled_back_ui();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "approval".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        })),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 100, 30);
+    scroll_up(&mut ui, &writer).await;
+    let buffer = draw(&mut ui, 100, 30);
+    let (x, y) = cell_of(&buffer, "↓ latest");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(!ui.transcript_viewport.follows_tail());
+    assert!(ui.state.pending_approval.is_some());
 }

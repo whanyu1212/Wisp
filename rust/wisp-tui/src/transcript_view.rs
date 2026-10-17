@@ -2659,6 +2659,11 @@ impl TranscriptViewport {
         self.follow_tail
     }
 
+    /// The first row of a scrolled-back view, or `None` while following the tail.
+    pub(crate) fn scrolled_top(&self) -> Option<RowAnchor> {
+        self.top.filter(|_| !self.follow_tail)
+    }
+
     pub fn has_unseen_output(&self) -> bool {
         self.unseen_output
     }
@@ -3328,6 +3333,22 @@ fn normalize_anchor(
                     position: RowPosition::Header,
                 })
             }
+        }
+        // The lead-in exists only while a prompt directly follows its owner. A history page or
+        // recovery can splice entries between them, which would leave an unbuildable top row
+        // and a blank viewport, so resume at the owner's own gap instead. A page of explore
+        // cards can fold the owner into a collapsed group, which is drawn from its start.
+        RowPosition::UserLeadIn if user_lead_in(transcript, entry) != Some(anchor) => {
+            if let Some(start) = collapsed_group_start(&cache.fold, transcript, entry.id) {
+                return Some(RowAnchor {
+                    entry_id: start,
+                    position: RowPosition::Header,
+                });
+            }
+            Some(match separator_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.last_anchor(transcript, entry, width),
+            })
         }
         _ => Some(anchor),
     }
@@ -4665,6 +4686,71 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(positions.contains(&RowPosition::Spacer));
         assert!(!positions.contains(&RowPosition::UserLeadIn));
+    }
+
+    #[test]
+    fn scrolled_lead_in_survives_a_history_page_landing_before_its_prompt() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("older".into());
+        let answer = transcript.complete_message(1, "answer".into()).unwrap();
+        transcript.mark_history_entries(0, "older-entry");
+        transcript.append_prompt("live".into());
+        transcript.complete_message(2, "live answer".into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 3);
+        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+        let lead_in = RowAnchor {
+            entry_id: answer,
+            position: RowPosition::UserLeadIn,
+        };
+        while viewport.scrolled_top() != Some(lead_in) {
+            let moved = viewport
+                .reduce(
+                    TranscriptViewAction::ScrollLines(1),
+                    &transcript,
+                    &mut cache,
+                )
+                .consumed_rows;
+            assert_eq!(moved, 1, "never reached the lead-in");
+        }
+
+        // A page that starts with a reply lands between the answer and the live prompt.
+        let mut page = Transcript::default();
+        page.complete_message(9, "middle".into());
+        page.mark_history_entries(0, "middle-entry");
+        assert!(transcript.append_history_page(&page));
+        cache.retain_entries(&transcript);
+        viewport.reduce(
+            TranscriptViewAction::HistoryChanged,
+            &transcript,
+            &mut cache,
+        );
+
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert_eq!(
+            rows.first().map(|row| row.anchor),
+            Some(RowAnchor {
+                entry_id: answer,
+                position: RowPosition::Spacer,
+            })
+        );
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            seen.extend(
+                viewport
+                    .visible_rows(&transcript, &mut cache)
+                    .iter()
+                    .map(TranscriptRow::plain_text),
+            );
+            viewport.reduce(
+                TranscriptViewAction::ScrollLines(1),
+                &transcript,
+                &mut cache,
+            );
+        }
+        assert!(seen.iter().any(|text| text == "middle"));
+        assert!(seen.iter().any(|text| text == "live"));
     }
 
     #[test]

@@ -542,6 +542,9 @@ struct LiveUi {
     no_color: bool,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
+    /// A drag selection over the transcript and the last frame painted while it was active,
+    /// which a release copies from.
+    transcript_selection: Option<(mouse::Selection, Option<ratatui::buffer::Buffer>)>,
     transcript_viewport: TranscriptViewport,
     transcript_row_cache: TranscriptRowCache,
     pending_history_navigation: Option<PendingHistoryNavigation>,
@@ -596,6 +599,7 @@ impl Default for LiveUi {
             no_color: false,
             mouse_enabled: false,
             mouse_frame: None,
+            transcript_selection: None,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
             pending_history_navigation: None,
@@ -640,6 +644,7 @@ const LIVE_HISTORY_WAITS_NOTICE: &str = "Earlier history loads when this reply f
 impl LiveUi {
     fn reset_transcript_presentation(&mut self) {
         self.mouse_frame = None;
+        self.transcript_selection = None;
         self.transcript_viewport = TranscriptViewport::default();
         self.transcript_row_cache = TranscriptRowCache::default();
         self.pending_history_navigation = None;
@@ -1583,6 +1588,25 @@ impl LiveUi {
                 self.decision_choice,
                 activity_elapsed,
             );
+            // A selection belongs to the transcript layout it started in. An approval panel,
+            // completion rows, help, or a popup changes or covers that layout, and highlighting
+            // or copying the same cells would then mark text that is not the transcript.
+            if self
+                .transcript_selection
+                .as_ref()
+                .is_some_and(|(selection, _)| {
+                    painted.layer != mouse::Layer::Conversation
+                        || self.key_help.is_some()
+                        || selection.area() != painted.conversation.selectable
+                })
+            {
+                self.transcript_selection = None;
+            }
+            if let Some((selection, screen)) = &mut self.transcript_selection {
+                // Popups are drawn after this point; the checks above mean none is open.
+                selection.highlight(frame.buffer_mut());
+                *screen = Some(frame.buffer_mut().clone());
+            }
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
                     help.render(frame, area, &self.bindings, palette, Some(connection));
@@ -3335,11 +3359,21 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        // A docked decision owns the notice line: the panel shows some notices in place of
+        // its choices, and a history notice there would hide what Enter would confirm.
+        let decision_notice = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        )
+        .then(|| self.notice.clone());
         let control = self
             .apply_transcript_navigation(action, writer, limit)
             .await?;
         // Scrolling back down or following the tail cancels a queued recovery.
         self.clear_stale_live_history_notice();
+        if let Some(notice) = decision_notice {
+            self.notice = notice;
+        }
         Ok(control)
     }
 
@@ -3496,6 +3530,22 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if let Input::Mouse(event) = &input {
+            if matches!(
+                event.kind,
+                crossterm::event::MouseEventKind::Drag(_) | crossterm::event::MouseEventKind::Up(_)
+            ) {
+                // Ahead of every other route: a drag must end even if help or a popup opened
+                // meanwhile, and a release is never a second click.
+                self.continue_transcript_selection(*event);
+                return Ok(LoopControl::Continue);
+            }
+            // Every press ends an earlier selection, including presses that popups, approvals,
+            // or gates consume; a lost release must not let a later one copy stale cells.
+            if self.transcript_selection.take().is_some() {
+                self.render_pending = true;
+            }
+        }
         if matches!(&input, Input::Key(key) if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL)
         {
             self.key_help = if self.key_help.is_some() {
@@ -4069,11 +4119,11 @@ impl LiveUi {
             Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
             Input::Key(key)
                 if self.bound_transcript_action(key).is_some()
-                    && !matches!(
-                        self.state.view_status,
-                        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-                    ) =>
+                    && !(decision_pending
+                        && (answers_decision(key) || self.unsendable_current_response())) =>
             {
+                // A docked approval or trust prompt leaves the transcript scrollable, but
+                // never through a key the prompt itself uses.
                 self.navigate_transcript(key, writer, limit).await
             }
             Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
@@ -4237,6 +4287,7 @@ impl LiveUi {
             }
             Input::Redraw => {
                 self.mouse_frame = None;
+                self.transcript_selection = None;
                 self.rendered_overlay = None;
                 self.completion.invalidate();
                 self.file_picker.invalidate();
@@ -4381,6 +4432,19 @@ fn trust_decision(key: KeyEvent, request_id: Option<&str>) -> Option<UiAction> {
         reason: None,
         transient: Some(false),
     })
+}
+
+/// Whether `key` can choose, move, confirm, or cancel an approval or trust choice.
+///
+/// Transcript bindings are configurable, so one could share a key with the prompt; while a
+/// decision is docked, such a key keeps its decision meaning.
+fn answers_decision(key: KeyEvent) -> bool {
+    printable_char(key).is_some()
+        || (key.modifiers == KeyModifiers::NONE
+            && matches!(
+                key.code,
+                KeyCode::Up | KeyCode::Down | KeyCode::Enter | KeyCode::Esc
+            ))
 }
 
 fn key_can_edit(key: KeyEvent) -> bool {
