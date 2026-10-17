@@ -729,9 +729,9 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
         assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
         assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
         assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
-        for parallel_name in ("find", "grep", "ls", "read", "skill"):
+        for parallel_name in ("ls", "read", "skill"):
             assert runtime.tools.execution_metadata_for(parallel_name).parallel_safe
-        for sequential_name in ("bash", "edit", "write"):
+        for sequential_name in ("bash", "edit", "write", "find", "grep"):
             assert not runtime.tools.execution_metadata_for(sequential_name).parallel_safe
 
         await runtime.aclose()

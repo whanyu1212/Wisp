@@ -28,7 +28,10 @@ if TYPE_CHECKING:
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
 _PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)
-_PARALLEL_SAFE_TOOL_NAMES = frozenset({"find", "grep", "ls", "read"})
+# grep and find stay sequential although they only read: their scans are CPU-bound Python
+# threads, and concurrent scans contend for the GIL. Benchmarks on `src/` ran a batch of
+# 2-8 such calls up to 1.9x (ignore-case grep 3.5x) slower in parallel than one at a time.
+_PARALLEL_SAFE_TOOL_NAMES = frozenset({"ls", "read"})
 _BUILTIN_TOOL_PROMPTS = {
     "read": ToolPromptMetadata(
         prompt_snippet="Use read with offset and limit instead of loading a large file at once.",
