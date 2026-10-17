@@ -30,8 +30,10 @@ For each invocation, the harness:
 the loop configuration. `_run` calls it after entering the guarded lifetime and accepting the prompt.
 
 `AgentHarness._next_loop_step` advances the loop within the cancellation scope and returns either
-an event or a control outcome. It interrupts the first cancelled advance and shields later advances
-to let tool settlement finish. `_HarnessRunState` retains that drain state across turns. `_run` owns
+an event or a control outcome. A run is either running or draining a cancellation, and each
+advance runs in one `_AdvanceMode`: interruptible while no cancellation is requested, delivering a
+pending cancellation to an open tool batch, or shielded so outstanding tool results settle. Its
+docstring tabulates the transitions. `_HarnessRunState` retains the phase across turns. `_run` owns
 every event yield, transcript update, queue injection, and boundary arm; no cancellation scope spans
 its public event yields.
 

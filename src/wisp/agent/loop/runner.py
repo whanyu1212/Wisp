@@ -306,13 +306,13 @@ async def run_agent_loop(
             if config.cancellation_requested():
                 for event in lifecycle.cancelled_events():
                     yield event
-                break
+                return
             turn = state.begin_turn()
             yield lifecycle.start(turn)
             if config.cancellation_requested():
                 for event in lifecycle.cancelled_events():
                     yield event
-                break
+                return
             request_messages = (*messages, *state.continuation.continuation_messages)
             context_budget = _estimate_request_context(config, request_messages)
             yield ContextEstimated(
@@ -416,7 +416,7 @@ async def run_agent_loop(
                 if config.cancellation_requested():
                     for event in lifecycle.cancelled_events():
                         yield event
-                    break
+                    return
                 state.begin_tool_round(config.max_tool_iterations)
                 tool_batch = ToolBatch(
                     tool_executor=config.tool_executor,

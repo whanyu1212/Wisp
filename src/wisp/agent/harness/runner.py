@@ -68,18 +68,37 @@ class SimpleCancellationToken:
 
 @dataclass(slots=True)
 class _HarnessRunState:
-    """Turn lifecycle and cancellation drain state for one primary loop invocation."""
+    """Turn lifecycle and cancellation phase for one primary loop invocation.
+
+    A run is either running or draining a cancellation. It starts draining once a
+    loop advance's cancel scope has been cancelled, and never returns to running.
+    """
 
     turns: TurnLifecycle = field(default_factory=TurnLifecycle)
     draining_cancellation: bool = False
 
 
+class _AdvanceMode(Enum):
+    """How one loop advance runs relative to cancellation."""
+
+    # No cancellation requested: cancel() can interrupt the advance via its scope.
+    INTERRUPTIBLE = auto()
+    # Cancellation requested between advances while a tool batch is open: run one
+    # pre-cancelled, unshielded advance so the cancellation reaches the batch.
+    DELIVER_CANCELLATION = auto()
+    # Cancellation delivered: shield the advance so outstanding tool results settle.
+    SETTLE = auto()
+
+
 class _LoopStepAction(Enum):
     """Control outcomes when advancing the loop produces no event to publish."""
 
+    # Publish any missing cancellation terminals and end the run.
     CANCEL_AND_STOP = auto()
+    # The loop finished normally.
     STREAM_ENDED = auto()
-    RETRY = auto()
+    # A cancelled advance produced no event; advance again to keep settling.
+    ADVANCE_AGAIN = auto()
 
 
 class AgentHarness:
@@ -449,7 +468,7 @@ class AgentHarness:
                     return
                 if step is _LoopStepAction.STREAM_ENDED:
                     break
-                if step is _LoopStepAction.RETRY:
+                if step is _LoopStepAction.ADVANCE_AGAIN:
                     continue
 
                 event = step
@@ -526,43 +545,48 @@ class AgentHarness:
         token: SimpleCancellationToken,
         run: _HarnessRunState,
     ) -> AgentLoopEvent | _LoopStepAction:
-        """Advance the loop once, interrupting or draining cancellation as needed.
+        """Advance the loop once under the cancellation rules for this point in the run.
 
-        The first cancellation interrupts an unshielded advance; later advances
-        are shielded so outstanding tool results can settle. Draining lasts for
-        the invocation, independently of per-turn state. The scope exits before
-        returning, leaving retention, publication, and final cleanup to _run.
+        Each advance runs in the `_AdvanceMode` chosen from the run's phase and the token:
+
+        | Phase    | Token     | Open tool batch | Advance                                   |
+        | -------- | --------- | --------------- | ----------------------------------------- |
+        | running  | clear     | any             | INTERRUPTIBLE                             |
+        | running  | cancelled | yes             | DELIVER_CANCELLATION                      |
+        | running  | cancelled | no              | none; return CANCEL_AND_STOP immediately  |
+        | draining | cancelled | any             | SETTLE                                    |
+
+        The run starts draining when the advance's scope was cancelled, either by
+        `cancel()` during an interruptible advance or by a delivering advance. When the
+        loop publishes cancellation terminals itself, `_run` observes them and returns;
+        otherwise CANCEL_AND_STOP makes `_run` publish the missing ones. The scope exits
+        before returning, leaving retention, publication, and final cleanup to `_run`.
 
         Args:
             loop_events (AsyncGenerator[AgentLoopEvent, None]): Owned primary loop stream.
             token (SimpleCancellationToken): Cancellation state for this invocation.
-            run (_HarnessRunState): Observed turn state and mutable cancellation drain state.
+            run (_HarnessRunState): Observed turn state and mutable cancellation phase.
 
         Returns:
             AgentLoopEvent | _LoopStepAction: An event to retain and publish, or an
-            action to retry advancement, stop normally, or emit cancellation terminals.
+            action to advance again, stop normally, or emit cancellation terminals.
 
         Raises:
             RuntimeError: Advancement produced no event outside cancellation draining.
             Exception: Loop advancement failures propagate to the caller's cleanup.
         """
-        if (
-            token.is_cancelled()
-            and not run.draining_cancellation
-            and (not run.turns.had_tool_calls or run.turns.open_turn is None)
-        ):
-            # A completed tool turn has no outstanding batch to settle.
+        mode = self._advance_mode(token, run)
+        if mode is None:
             return _LoopStepAction.CANCEL_AND_STOP
-        start_cancellation = token.is_cancelled() and not run.draining_cancellation
-        if start_cancellation:
-            run.draining_cancellation = True
 
-        scope = anyio.CancelScope(shield=run.draining_cancellation and not start_cancellation)
-        self._current_scope = None if run.draining_cancellation else scope
+        # A delivering advance stays unshielded so its own cancellation reaches the batch.
+        scope = anyio.CancelScope(shield=mode is _AdvanceMode.SETTLE)
+        # Once cancellation is being delivered, a later cancel() only sets the token.
+        self._current_scope = scope if mode is _AdvanceMode.INTERRUPTIBLE else None
         event: AgentLoopEvent | None = None
         stream_ended = False
         with scope:
-            if start_cancellation:
+            if mode is _AdvanceMode.DELIVER_CANCELLATION:
                 scope.cancel()
             try:
                 event = await anext(loop_events)
@@ -579,9 +603,30 @@ class AgentHarness:
             return _LoopStepAction.STREAM_ENDED
         if event is None:
             if run.draining_cancellation:
-                return _LoopStepAction.RETRY
+                return _LoopStepAction.ADVANCE_AGAIN
             raise RuntimeError("Agent loop produced no event")
         return event
+
+    @staticmethod
+    def _advance_mode(token: SimpleCancellationToken, run: _HarnessRunState) -> _AdvanceMode | None:
+        """Choose how the next loop advance runs.
+
+        Args:
+            token (SimpleCancellationToken): Cancellation state for this invocation.
+            run (_HarnessRunState): Observed turn state and cancellation phase.
+
+        Returns:
+            _AdvanceMode | None: The advance mode, or None when cancellation was
+                requested and nothing is in flight to settle, so the run stops
+                without advancing the loop.
+        """
+        if not token.is_cancelled():
+            return _AdvanceMode.INTERRUPTIBLE
+        if run.draining_cancellation:
+            return _AdvanceMode.SETTLE
+        if run.turns.open_turn is not None and run.turns.had_tool_calls:
+            return _AdvanceMode.DELIVER_CANCELLATION
+        return None
 
     def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
         queue = self._queue_for(kind)
