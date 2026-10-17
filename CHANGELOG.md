@@ -10,14 +10,43 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc11 — release preparation
+## 0.2.0rc12 — release preparation
+
+RC12 is a Rust TUI candidate. Scrolling back no longer loses prompts, dragging over the transcript
+copies it, the conversation scrolls while an approval or trust prompt waits, and a label above the
+composer jumps back to the latest output. It changes no command, event, or session format; as
+always, the backend and frontend must come from the same release, which the handshake enforces.
+RC11 resumes, lists, and reads RC12 sessions. This section describes the candidate under
+preparation; publication requires a separate tagged release.
+
+### Rust TUI
+
+- Scrolling back no longer blanks the view when an older history page loads just as the row
+  above an earlier prompt reaches the top. (#722)
+- The latest prompt stays pinned above its reply while you scroll back through that reply; before,
+  the first wheel tick up dropped it from view. (#722)
+- Dragging over transcript text highlights it, and releasing copies it to the clipboard (natively
+  and through OSC 52) with a "Copied N chars" notice. A plain click copies nothing; wheel scrolling,
+  a resize, or an approval or popup appearing ends the selection. Mouse capture now also requests
+  button-drag reports (`?1002h`), never all-motion tracking. The terminal's own selection still
+  works with its bypass modifier, such as Shift-drag in Ghostty, or with `WISP_TUI_MOUSE=0`. (#722)
+- While an approval or trust prompt is docked, the wheel and the transcript scroll keys (`PgUp`/
+  `PgDn`, `Ctrl+Up`/`Ctrl+Down`, `Ctrl+Home`/`Ctrl+End`) move the conversation. Clicks are still
+  ignored, and a custom binding never takes a key the prompt uses. (#722)
+- When scrolled back, a `↓ latest · Ctrl+End` label (`↓ new output` once output arrives) sits on
+  the blank row above the composer; clicking it returns to the latest output. Terminals too short
+  for that row keep the footer's `scrolled` / `new ↓` marker. (#722)
+- The footer no longer shows the session name or path. (#722)
+- Tool-call responses without text no longer show a standalone `cost unknown` label, live or after
+  reload; priced estimates and saved cost data are unchanged. (#721)
+
+## 0.2.0rc11 — 2026-10-17
 
 RC11 shows and controls the providers' own web search in the TUI, and cuts local overhead from
 tool calls: bash returns sooner after a command exits, large output decodes faster, and the Codex
 provider keeps one connection across turns. It adds a command field and two event fields, so an
 RC11 backend and frontend must be paired. Session files keep their format: RC10 resumes, lists, and
-reads RC11 sessions, including with `read_typed_events()`. This section describes the candidate
-under preparation; publication requires a separate tagged release.
+reads RC11 sessions, including with `read_typed_events()`.
 
 ### Rust TUI
 
