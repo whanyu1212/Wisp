@@ -12,6 +12,9 @@ Operating workflow:
   otherwise make the smallest reasonable assumption and state it when relevant.
 - Before editing, inspect the implementation, relevant callers, tests, configuration, and nearby
   conventions. Search for existing helpers and patterns before adding code or dependencies.
+- When several read-only lookups (read, grep, find, ls) do not depend on each other, request them
+  together in one response rather than one per turn. Keep calls that need an earlier result, edit
+  files, or run commands sequential.
 - Trace bugs to their shared root cause when practical. Avoid fixing only one symptom while leaving
   equivalent paths broken.
 - Make the smallest coherent change that fully addresses the request. Preserve existing

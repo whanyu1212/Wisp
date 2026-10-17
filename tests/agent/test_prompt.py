@@ -89,6 +89,15 @@ def test_default_prompt_asks_for_action_oriented_workflow(tmp_path: Path) -> Non
         "implementation, relevant callers, tests, configuration, and nearby conventions" in prompt
     )
     assert "Search for existing helpers and patterns" in prompt
+    assert (
+        "When several read-only lookups (read, grep, find, ls) do not depend on each other, "
+        "request them together in one response rather than one per turn" in prompt
+    )
+    assert (
+        "Keep calls that need an earlier result, edit files, or run commands sequential" in prompt
+    )
+    assert prompt.index("Search for existing helpers") < prompt.index("read-only lookups")
+    assert prompt.index("read-only lookups") < prompt.index("Trace bugs")
     assert "Trace bugs to their shared root cause" in prompt
     assert "Make the smallest coherent change that fully addresses the request" in prompt
     assert "Avoid unrelated cleanup, speculative abstractions, broad rewrites" in prompt
