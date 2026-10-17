@@ -9,8 +9,8 @@ from pathlib import Path
 import anyio
 
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
-from wisp.agent.prompt import build_prompt_messages
 from wisp.agent.tool_contracts import ToolExecutionEvent
+from wisp.coding.prompt import build_prompt_messages
 from wisp.events import MessageCompleted, ToolExecutionEnded, ToolResultReady
 from wisp.providers.base import ToolSpec
 from wisp.providers.events import (

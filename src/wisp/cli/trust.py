@@ -16,7 +16,7 @@ from typing import Annotated
 
 import typer
 
-from wisp.agent.prompt import resolve_project_context_root
+from wisp.coding.prompt import resolve_project_context_root
 from wisp.trust.flow import TrustDecision, resolve_trust
 from wisp.trust.records import (
     BroadRootTrustError,

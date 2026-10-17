@@ -302,11 +302,11 @@ current behavior.
 
 ### Follow the implementation
 
-- [`prompt/builder.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/prompt/builder.py):
+- [`prompt/builder.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/builder.py):
   instruction ordering and bounded, deduplicated tool guidance.
-- [`prompt/project_context.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/prompt/project_context.py):
+- [`prompt/project_context.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/project_context.py):
   project-root discovery, Git summary, directory-chain instructions, and shared budgets.
-- [`prompt/text_budget.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/prompt/text_budget.py):
+- [`prompt/text_budget.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/text_budget.py):
   character limits and truncation markers.
 - [`coding/session.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/session.py):
   `_prompt_messages` supplies trust and effective tool policy to the builder.

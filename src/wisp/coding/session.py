@@ -29,14 +29,6 @@ from wisp.agent.messages import (
     message_from_completion_event,
 )
 from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
-from wisp.agent.prompt import (
-    DEFAULT_CONTEXT_MAX_CHARS,
-    WEB_SEARCH_GUIDANCE,
-    WEB_SEARCH_UNAVAILABLE_GUIDANCE,
-    build_prompt_messages,
-    read_repository_status,
-    recover_repository_status,
-)
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -66,6 +58,14 @@ from wisp.coding.compaction import (
 from wisp.coding.configuration import CodingSessionConfiguration
 from wisp.coding.costs import CostEstimator
 from wisp.coding.persistence import PendingSessionEntry, RunPersistence
+from wisp.coding.prompt import (
+    DEFAULT_CONTEXT_MAX_CHARS,
+    WEB_SEARCH_GUIDANCE,
+    WEB_SEARCH_UNAVAILABLE_GUIDANCE,
+    build_prompt_messages,
+    read_repository_status,
+    recover_repository_status,
+)
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (

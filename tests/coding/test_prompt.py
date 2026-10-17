@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.agent.prompt import (
+from wisp.coding.prompt import (
     build_project_context,
     build_prompt_messages,
     build_untrusted_project_context,
@@ -15,8 +15,8 @@ from wisp.agent.prompt import (
     recover_repository_status,
     resolve_project_context_root,
 )
-from wisp.agent.prompt import project_context as project_context_module
-from wisp.agent.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
+from wisp.coding.prompt import project_context as project_context_module
+from wisp.coding.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 

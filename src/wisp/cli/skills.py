@@ -7,8 +7,8 @@ from typing import Annotated
 
 import typer
 
-from wisp.agent.prompt import resolve_project_context_root
 from wisp.cli.trust import resolve_cli_trust
+from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
 from wisp.skills import SkillCatalog, SkillDiagnostic, discover_skills
 from wisp.skills.package import bundled_skills_root

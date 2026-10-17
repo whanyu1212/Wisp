@@ -14,7 +14,7 @@ from tests.coding.session_support import (
     CapturingProvider,
 )
 from wisp.agent.messages import Message
-from wisp.agent.prompt import build_prompt_messages
+from wisp.coding.prompt import build_prompt_messages
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,

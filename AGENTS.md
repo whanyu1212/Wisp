@@ -109,9 +109,6 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   provider events, `provider_request.py` opens capability-aware requests, `provider_lifecycle.py`
   validates them, and `response_projection.py` builds completed messages. `tool_execution.py`,
   `tool_lifecycle.py`, `prepared_tools.py`, and `continuation.py` cover the remaining phases.
-- `prompt/builder.py` assembles instructions in order; `prompt/instructions.py` holds core instruction
-  text; `prompt/project_context.py` discovers trusted files and bounded Git/project context.
-  `prompt/text_budget.py` applies shared character limits to context and tool guidance.
 - `src/wisp/events/` is the typed event vocabulary shared by every interface. Import from
   `wisp.events` (the package root re-exports everything); the lifecycle submodules `run.py`,
   `usage.py`, `tools.py`, `sessions.py`, `rpc.py`, and `errors.py` only group the models, and
@@ -128,6 +125,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   holds compaction planning, summarization, budget checks, and transcript comparison helpers;
   `persistence.py` holds the branch-pinned writer a run uses to append entries;
   `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
+  In `prompt/`, `builder.py` assembles instructions in order; `instructions.py` holds core
+  instruction text; `project_context.py` discovers trusted files and bounded Git/project context;
+  `text_budget.py` applies shared character limits to context and tool guidance.
 - For session persistence, start with `src/wisp/sessions/jsonl.py`: `JsonlSessionStore` and
   `JsonlSession` own the append/read lifecycle and the public result models. `file_io.py` holds the
   durable-file boundary (fsync ordering, cross-process locking, private modes, tail recovery);
@@ -156,7 +156,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`);
   configuration, connection, control, inspection, and project-file handlers live in
   `rpc/handlers/`. Both subpackages re-export nothing; import from the defining module.
-- Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.agent.prompt` as their public import surfaces.
+- Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.coding.prompt` as their public import
+  surfaces; prompt building is coding-layer code, so do not restore `wisp.agent.prompt`.
   Within each package, import from defining modules. Use the current shared module names above;
   do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`
   import shims. Import history helpers directly from `wisp.agent.history` and concrete session-entry
