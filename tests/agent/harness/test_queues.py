@@ -33,6 +33,45 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 
+_QUEUE_CHANGES = {
+    "steer": lambda harness: harness.steer("new"),
+    "follow_up": lambda harness: harness.follow_up("new"),
+    "pop_steering": lambda harness: harness.pop_latest_steering(),
+    "pop_follow_up": lambda harness: harness.pop_latest_follow_up(),
+    "clear_one": lambda harness: harness.clear_queue("steering"),
+    "clear_all": lambda harness: harness.clear_queues(),
+    "steering_mode": lambda harness: harness.set_steering_mode("all"),
+    "follow_up_mode": lambda harness: harness.set_follow_up_mode("all"),
+    "replace_config": lambda harness: harness.replace_config(harness.config),
+    "drain": lambda harness: harness.drain_steering(),
+}
+
+
+@pytest.mark.parametrize("change", sorted(_QUEUE_CHANGES))
+def test_every_queue_change_replaces_token(change: str) -> None:
+    harness = build_harness(ScriptedProvider([]))
+    harness.steer("steering")
+    harness.follow_up("follow-up")
+    before = harness.queue_updated_event().token
+
+    _QUEUE_CHANGES[change](harness)
+
+    assert harness.queue_updated_event().token != before
+
+
+def test_queue_reads_keep_token() -> None:
+    harness = build_harness(ScriptedProvider([]))
+    harness.steer("steering")
+    before = harness.queue_updated_event().token
+
+    assert harness.queued_messages.count == 1
+    assert harness.pending_message_count == 1
+    assert harness.pending_message_bytes > 0
+    assert harness.has_queued_messages()
+    assert harness.pop_latest_follow_up() is None
+
+    assert harness.queue_updated_event().token == before
+
 
 @pytest.mark.parametrize("kind", ["steering", "follow_up"])
 def test_queue_inputs_and_snapshots_are_detached(kind: QueueKind) -> None:
