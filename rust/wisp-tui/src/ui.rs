@@ -797,18 +797,14 @@ fn waiting_for_output(state: &UiState) -> bool {
     if state.configuration_active() || state.view_status != ViewStatus::Running {
         return false;
     }
-    let visible_assistant_stream = state
-        .transcript
-        .entries()
-        .iter()
-        .rev()
-        .take_while(|entry| entry.role != TranscriptRole::User)
-        .any(|entry| {
-            entry.role == TranscriptRole::Assistant
-                && entry.state == crate::transcript::TranscriptEntryState::Streaming
-                && !entry.content.is_empty()
+    // message.completed can be painted before command.finished. Keep the reply
+    // visible without briefly inserting a working row and shrinking its viewport.
+    // A later tool card or textless response restores the between-steps indicator.
+    let visible_reply =
+        state.transcript.entries().last().is_some_and(|entry| {
+            entry.role == TranscriptRole::Assistant && !entry.content.is_empty()
         });
-    !visible_assistant_stream && !state.transcript.has_unresolved_tool_calls()
+    !visible_reply && !state.transcript.has_unresolved_tool_calls()
 }
 
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
@@ -5710,6 +5706,11 @@ mod tests {
         state
             .transcript
             .complete_message(1, "I will check that.".into());
+        let completed = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(!completed.contains("Working"), "{completed}");
+        state.transcript.append_thinking_delta(2, "Next step");
+        let thinking = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(thinking.contains("⠙ Thinking"), "{thinking}");
         for index in 0..20 {
             state
                 .transcript

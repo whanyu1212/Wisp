@@ -477,6 +477,87 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
     }
 }
 
+#[tokio::test]
+async fn completed_reply_keeps_its_layout_until_command_finishes() {
+    use std::fmt::Write as _;
+
+    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+        let mut ui = fixture("new-turn");
+        ui.mouse_enabled = true;
+        let (writer, _commands) = mpsc::channel(32);
+        let mut content = String::new();
+        for index in 0..40 {
+            writeln!(content, "Response line {index}.\n").unwrap();
+        }
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                turn: 2,
+                delta: content.clone(),
+                content_kind: reducer::MessageContentKind::Text,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        let streaming = draw(&mut ui, width, height);
+        let composer_top = ui
+            .mouse_frame
+            .as_ref()
+            .unwrap()
+            .conversation
+            .editor
+            .as_ref()
+            .unwrap()
+            .area
+            .y
+            - u16::from(height >= 16);
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageCompleted {
+                turn: 2,
+                content,
+                cost: None,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        // Paint the real intermediate state, even if command.finished is delayed
+        // by persistence or transport. Neither a spinner nor a smaller viewport
+        // should briefly replace the finished reply.
+        let completed = draw(&mut ui, width, height);
+        assert!(!screen_text(&completed).contains("Working"));
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: "visual-next-prompt".into(),
+                command_type: "prompt".into(),
+                ok: true,
+                error: None,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        let idle = draw(&mut ui, width, height);
+        for y in 0..composer_top {
+            for x in 0..width {
+                assert_eq!(
+                    streaming[(x, y)],
+                    completed[(x, y)],
+                    "{width}x{height} at {x},{y}"
+                );
+                assert_eq!(
+                    completed[(x, y)],
+                    idle[(x, y)],
+                    "{width}x{height} at {x},{y}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     let mut ui = fixture("new-turn");
