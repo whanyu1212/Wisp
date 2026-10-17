@@ -31,6 +31,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
 )
+from wisp.extensions import builtin
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
@@ -38,6 +39,7 @@ from wisp.providers.events import (
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
+from wisp.runtime import EventBus, ExtensionAPI, ProviderRegistry
 from wisp.runtime.registry import ToolRegistry
 from wisp.tool_types import ToolSafety
 from wisp.tools.approval import ToolApprovalPolicy
@@ -1001,3 +1003,136 @@ def test_valid_side_effecting_call_keeps_batch_serial(first_call: ToolCall) -> N
     assert [event.call_id for event in events if isinstance(event, ToolExecutionEnded)] == [
         call.call_id for call in calls
     ]
+
+
+def _builtin_metadata_executor(
+    callback: Callable[[str], Awaitable[None]],
+) -> ConfiguredToolExecutor:
+    """Build an executor of read-only label tools that carry the builtin execution metadata.
+
+    Each label tool takes the name of a builtin read-only tool and the parallel-safe
+    metadata the builtin extension registers for it, so batches schedule as the real
+    tools would without scanning the filesystem.
+    """
+
+    builtin_registry = ToolRegistry()
+    builtin.activate(
+        ExtensionAPI(providers=ProviderRegistry(), tools=builtin_registry, events=EventBus())
+    )
+    names = ("find", "grep", "ls", "read")
+    registry = ToolRegistry()
+    for name in names:
+        registry.register(
+            _LabelTool(name, "read", callback),
+            execution=builtin_registry.execution_metadata_for(name),
+        )
+    return ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        policy=ToolPolicy.allow_tool_names(set(names)),
+        approval_policy=ToolApprovalPolicy.approve_tool_names(set(names)),
+    )
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        pytest.param(
+            tuple(_labelled_call(f"grep-{index}", "grep") for index in range(1, 4)),
+            id="grep-only",
+        ),
+        pytest.param(
+            tuple(_labelled_call(f"find-{index}", "find") for index in range(1, 4)),
+            id="find-only",
+        ),
+        pytest.param(
+            (
+                _labelled_call("read-1", "read"),
+                _labelled_call("grep-1", "grep"),
+                _labelled_call("ls-1", "ls"),
+                _labelled_call("find-1", "find"),
+            ),
+            id="mixed-with-read-and-ls",
+        ),
+    ],
+)
+def test_builtin_search_calls_run_one_at_a_time(calls: tuple[ToolCall, ...]) -> None:
+    """Concurrent grep and find scans contend for the GIL, so a batch with them runs serially.
+
+    A grep or find call also serializes read and ls siblings, because a batch only runs
+    concurrently when every call is parallel safe.
+    """
+
+    async def run() -> tuple[list[object], list[str], int]:
+        started: list[str] = []
+        active = 0
+        max_active = 0
+
+        async def callback(label: str) -> None:
+            nonlocal active, max_active
+            started.append(label)
+            active += 1
+            max_active = max(max_active, active)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            active -= 1
+
+        events = await _run_tool_batch(calls, _builtin_metadata_executor(callback))
+        return events, started, max_active
+
+    events, started, max_active = anyio.run(run)
+
+    call_ids = [call.call_id for call in calls]
+    assert started == call_ids
+    assert max_active == 1
+    published = [
+        (type(event).__name__, event.call_id)
+        for event in events
+        if isinstance(event, ToolExecutionEnded | ToolResultReady)
+    ]
+    assert published == [
+        (kind, call_id)
+        for call_id in call_ids
+        for kind in ("ToolExecutionEnded", "ToolResultReady")
+    ]
+    assert_settled_tool_calls(events, tuple(call_ids))
+
+
+def test_builtin_read_and_ls_calls_overlap() -> None:
+    calls = (
+        _labelled_call("read-1", "read"),
+        _labelled_call("ls-1", "ls"),
+        _labelled_call("read-2", "read"),
+    )
+
+    async def run() -> tuple[list[object], list[str]]:
+        started: list[str] = []
+        completed: list[str] = []
+        all_started = anyio.Event()
+
+        async def callback(label: str) -> None:
+            # Every call must be running at once to pass the barrier, so a serial
+            # batch times out. read-1 then finishes last.
+            started.append(label)
+            if len(started) == len(calls):
+                all_started.set()
+            await all_started.wait()
+            if label == "read-1":
+                await anyio.sleep(0.01)
+            completed.append(label)
+
+        events = await _run_tool_batch(calls, _builtin_metadata_executor(callback))
+        return events, completed
+
+    events, completed = anyio.run(run)
+
+    assert completed[-1] == "read-1"
+    published = [
+        (type(event).__name__, event.call_id)
+        for event in events
+        if isinstance(event, ToolExecutionEnded | ToolResultReady)
+    ]
+    assert published == [
+        (kind, call.call_id) for call in calls for kind in ("ToolExecutionEnded", "ToolResultReady")
+    ]
+    assert_settled_tool_calls(events, tuple(call.call_id for call in calls))
