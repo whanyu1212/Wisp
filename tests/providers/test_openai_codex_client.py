@@ -541,3 +541,32 @@ def test_openai_codex_provider_reads_completed_stream_to_eof(tmp_path: Path) -> 
 
     assert stream.reached_eof
     assert events[-1] == ProviderResponseCompleted(content="done")
+
+
+class _HeldOpenStream(httpx.AsyncByteStream):
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield _COMPLETED_SSE.encode()
+        await anyio.sleep_forever()
+        yield b""
+
+
+def test_openai_codex_provider_stops_draining_held_open_stream_at_bound(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    monkeypatch.setattr(openai_codex_module, "_STREAM_DRAIN_SECONDS", 0.01)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, stream=_HeldOpenStream(), headers={"content-type": "text/event-stream"}
+        )
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+                client=client,
+            )
+            with anyio.fail_after(5):
+                return await _collect(provider)
+
+    assert anyio.run(run)[-1] == ProviderResponseCompleted(content="done")
