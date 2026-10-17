@@ -10,12 +10,71 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc10 — release preparation
+## 0.2.0rc11 — release preparation
+
+RC11 shows and controls the providers' own web search in the TUI, and cuts local overhead from
+tool calls: bash returns sooner after a command exits, large output decodes faster, and the Codex
+provider keeps one connection across turns. It adds a command field and two event fields, so an
+RC11 backend and frontend must be paired. Session files keep their format: RC10 resumes, lists, and
+reads RC11 sessions, including with `read_typed_events()`. This section describes the candidate
+under preparation; publication requires a separate tagged release.
+
+### Rust TUI
+
+- `/search` shows whether provider-native web search is on, and `/search on` or `/search off`
+  changes it for the running session. The toggle applies to later prompts; it saves no default and
+  does not change MCP search tools. The `web_search` setting and `WISP_WEB_SEARCH` still set the
+  default. (HY-265, #710)
+- Replies show the searches, opened pages, within-page searches, and failures behind them, with
+  bounded source titles and hosts, also when a saved session is loaded. A reply whose cost excludes
+  provider search fees shows `cost ≥…` as a lower bound; one without a token estimate shows
+  `cost unknown`. (HY-265, #710)
+- Scrolled-back prompts keep a blank row between the previous reply and their highlighted block;
+  the reply's last line no longer touches it. (#711)
+
+### Tool execution
+
+- A bash command that exits cleanly with nothing left running returns in about 40 ms on macOS
+  instead of about 360 ms: Wisp skips the post-exit process scans and the termination grace period
+  when no process survived. Survivors are still found and killed as before. (#712)
+- Bash output that is valid UTF-8 decodes several times faster; 1 MiB of short lines went from about
+  790 ms to 150 ms end to end. Invalid bytes are replaced exactly as before. (#716)
+- The core instructions ask the model to request independent read-only lookups together in one
+  response instead of one per turn. The prompt-cache prefix changes once. (#713)
+- `grep` and `find` calls in one batch now run one at a time: their scans contend for Python's GIL,
+  so running them together was up to 1.9× slower (3.5× for case-insensitive grep). `read` and `ls`
+  batches still run in parallel; a batch mixing them with `grep` or `find` runs serially. (#718)
+- A call rejected before it runs (unknown tool, invalid arguments, policy denial, denied approval)
+  no longer forces its batch to run serially. Results stay in call order. (#714)
+- A `grep` regex that exceeds its 50 ms per-line limit on a busy machine gets one retry from a
+  1-second budget per search before the pattern is reported as too slow, so a benign regex is no
+  longer rejected because the thread was starved. Catastrophic patterns still fail, after about a
+  second. (#719)
+
+### Providers
+
+- The ChatGPT/Codex provider reuses one HTTP client for the life of the runtime and reads each
+  response to its end (for at most 0.25 s after completion) so the connection is kept. Requests
+  within httpx's 5-second keep-alive window reuse it; later ones reconnect as before. (#717)
+
+### Event contract
+
+- `ConfigureCommand.web_search` turns provider-native search on or off for later prompts;
+  `RpcController.configure(web_search=...)` sends it. `CodingSessionState.web_search` (`rpc.state`,
+  default `false`) reports the setting, and `RpcMessageSnapshot.web_searches` (`rpc.messages`,
+  default empty) carries the bounded search evidence of an assistant message. Neither is written to
+  session files, which already held `web.search` events. (HY-265, #710)
+
+### Development
+
+- `benchmarks/builtin_tools.py` measures tool batches against a serial baseline, searches a real
+  tree with `--root`, compares with `rg`, and times bash end to end. (#715)
+
+## 0.2.0rc10 — 2026-10-16
 
 RC10 stops YOLO and trust from carrying to every project under your home folder, and fixes
 trackpad scrolling that did nothing with the pointer over the composer. It adds two event fields,
-so an RC10 backend and frontend must be paired. This section describes the candidate under
-preparation; publication requires a separate tagged release.
+so an RC10 backend and frontend must be paired.
 
 ### Trust and permissions
 

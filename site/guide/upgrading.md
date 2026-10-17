@@ -11,7 +11,8 @@ as one sent without credentials, instead of requiring an exit. RC8 manages MCP s
 offers the providers' own web search. RC9 fixes hosted MCP servers with many tools (such as Linear's)
 and has Wisp propose a hosted server's URL and OAuth sign-in instead of a local bridge. RC10 never
 saves YOLO or trust for your home folder or a folder above it, and lets the trackpad scroll the
-conversation wherever the pointer is.
+conversation wherever the pointer is. RC11 shows and toggles the providers' own web search in the
+TUI with `/search`, and cuts local overhead from bash, `grep`, `find`, and Codex requests.
 Check the
 [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
@@ -78,11 +79,11 @@ checkout; native wheels are built and published in lockstep with the Python rele
 
 ## Trying a published candidate
 
-After RC10's artifacts are published and verified, use its exact version in an explicit pin:
+After RC11's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --python 3.12 --from "wisp-ai==0.2.0rc10" wisp --version
-uvx --python 3.12 --from "wisp-ai==0.2.0rc10" wisp
+uvx --python 3.12 --from "wisp-ai==0.2.0rc11" wisp --version
+uvx --python 3.12 --from "wisp-ai==0.2.0rc11" wisp
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
@@ -94,20 +95,24 @@ still uses normal Wisp configuration and session locations. Use a disposable pro
 important state when testing. Continue using [0.1.0 installation instructions](./installation)
 if you do not want to opt into prerelease testing.
 
-To return a persistent `uv tool` installation to the published RC9 after an RC10 regression, exit
+To return a persistent `uv tool` installation to the published RC10 after an RC11 regression, exit
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.2.0rc9"
+uv tool install --force --python 3.12 "wisp-ai==0.2.0rc10"
 wisp --version
 ```
 
-RC9 resumes and lists RC10 sessions, but `read_typed_events()` in RC9's SDK rejects an RC10 session
-in which a tool approval was requested. RC9 also applies YOLO or trust that a release before RC10
+RC10 resumes, lists, and reads RC11 sessions, including with `read_typed_events()`; it does not
+show the web search evidence that RC11 displays with saved replies. `/search` does not exist in
+RC10, and a toggle made with it in RC11 was never saved; set the default with the `web_search`
+setting or `WISP_WEB_SEARCH`, which RC10 reads as before. Going back further to RC9: RC9 resumes
+and lists RC10 and RC11 sessions, but `read_typed_events()` in RC9's SDK rejects one in which a tool
+approval was requested. RC9 also applies YOLO or trust that a release before RC10
 saved for your home folder again; RC10 ignores those records but does not delete them, so remove
 them first with `wisp trust forget ~` and Ask in `/permissions` (from your home folder) if you have
 any. RC8 and RC9 read each other's sessions and settings, but RC8 rejects an MCP server with more
-than 64 tools. Going back further to RC7: RC7 reads RC8 through RC10 sessions in which no web search
+than 64 tools. Going back further to RC7: RC7 reads RC8 through RC11 sessions in which no web search
 ran, and
 reports a session where one did as malformed. RC7 also ignores the whole `~/.wisp/settings.json` if
 any MCP server in it uses `headers` or `headers_from`, so remove those entries (or note them and
@@ -122,7 +127,7 @@ sessions before going back to RC3, and test session resume before relying on a d
 
 ## Before promoting to 0.2.0
 
-Use the [RC10 release checklist](../contributing/rc10-release) for candidate publication, platform
+Use the [RC11 release checklist](../contributing/rc11-release) for candidate publication, platform
 installation, long-session measurements, and rollback gates.
 
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.
