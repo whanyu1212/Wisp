@@ -380,6 +380,27 @@ def _apply_continuation(
 ) -> Sequence[Message]:
     """Continue natively or fold a clean cursor-less response into portable history.
 
+    The outcome depends on four inputs: whether `extra_messages` is non-empty, whether a
+    usable cursor exists (the provider accepts continuation messages and
+    `previous_response_id` is set), whether the continuation already holds tool history,
+    and whether this is the boundary right after a tool batch (`had_tool_calls`, which
+    implies tool history):
+
+    | Extras | Cursor | Tool history | After tools | Result                                 |
+    | ------ | ------ | ------------ | ----------- | -------------------------------------- |
+    | yes    | yes    | any          | any         | Queue extras natively; base unchanged  |
+    | yes    | no     | yes          | any         | Raise                                  |
+    | yes    | no     | no           | no          | Fold the clean tail, append extras     |
+    | no     | any    | yes          | yes         | Base unchanged; tool results go next   |
+    | no     | yes    | any          | no          | Base unchanged; continue from cursor   |
+    | no     | no     | yes          | no          | Raise                                  |
+    | no     | no     | no           | no          | Fold the clean tail                    |
+
+    Folding moves the continuation into the base and clears the cursor and pending inputs,
+    so the next request starts fresh. Except right after a tool batch, pending tool results
+    are consumed first because the previous request already carried them; this happens
+    even on the paths that then raise.
+
     Args:
         config (AgentLoopConfig): Provider continuation capabilities.
         state (ContinuationState): Live cursor, pending inputs, and replay tail.
