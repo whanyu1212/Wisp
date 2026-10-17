@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
@@ -44,6 +43,8 @@ _ABSENT_REGEX = "wisp-bench" + r"mark-absent-\d+-token"
 # The same read-only tools the runtime marks parallel safe (`wisp.extensions.builtin`).
 _PARALLEL_SAFE = ToolExecutionMetadata(parallel_safe=True)
 _PARALLEL_SAFE_TOOL_NAMES = frozenset({"find", "grep", "ls", "read"})
+# Upper bound on files listed when sizing a repository run.
+_DISCOVERY_MAX_FILES = 1_000_000
 _BASH_COMMANDS = (
     ("bash_true", "true"),
     ("bash_short_lines_1mib", "seq 1 160000"),
@@ -176,7 +177,7 @@ async def run_benchmark_async(config: BenchmarkConfig | None = None) -> Benchmar
     with TemporaryDirectory(prefix="wisp-builtin-tools-") as temporary:
         temporary_root = Path(temporary)
         if selected.root is not None:
-            workloads = [_repository_workload(selected.root, selected)]
+            workloads = [await _repository_workload(selected.root, selected)]
         else:
             workloads = [
                 _synthetic_workload(temporary_root / f"scale-{count}", count, selected)
@@ -431,25 +432,43 @@ def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, .
     )
 
 
-def _repository_workload(root: Path, config: BenchmarkConfig) -> _Workload:
-    """Search an existing tree, such as `src/`, with the default protected paths."""
+async def _repository_workload(root: Path, config: BenchmarkConfig) -> _Workload:
+    """Search an existing tree, such as `src/`, with the default protected paths.
+
+    The recorded file count and input bytes cover only the files the search tools
+    scan, and the read scenario is omitted when no scanned file is valid UTF-8.
+    """
 
     cwd = root.resolve()
-    files = _regular_files(cwd)
-    # Read pages a text file; the largest Python source is a stable, decodable choice.
-    sources = [path for path in files if path.suffix == ".py"] or files
-    largest = max(sources, key=lambda path: path.stat().st_size)
+    context = ToolContext(
+        cwd=cwd,
+        max_output_bytes=config.max_output_bytes,
+        max_output_lines=config.max_output_lines,
+    )
+    files = await _searchable_files(context)
     grep_tool = GrepTool(_scanner_backend=config.grep_backend)
     input_bytes = sum(path.stat().st_size for path in files)
+    read_target = _largest_utf8_file(files)
+    read_scenarios = (
+        ()
+        if read_target is None
+        else (
+            _Scenario(
+                name="read_first_page",
+                tool=ReadTool(),
+                arguments={
+                    "path": str(read_target.relative_to(cwd)),
+                    "offset": 1,
+                    "limit": _PAGE_LINES,
+                },
+                input_bytes=read_target.stat().st_size,
+                expected_count=None,
+                expected_truncated=None,
+            ),
+        )
+    )
     scenarios = (
-        _Scenario(
-            name="read_first_page",
-            tool=ReadTool(),
-            arguments={"path": str(largest.relative_to(cwd)), "offset": 1, "limit": _PAGE_LINES},
-            input_bytes=largest.stat().st_size,
-            expected_count=None,
-            expected_truncated=None,
-        ),
+        *read_scenarios,
         _Scenario(
             name="find_sorted_prefix",
             tool=FindTool(),
@@ -508,26 +527,41 @@ def _repository_workload(root: Path, config: BenchmarkConfig) -> _Workload:
             expected_truncated=None,
         ),
     )
-    return _Workload(
-        cwd=cwd,
-        file_count=len(files),
-        context=ToolContext(
-            cwd=cwd,
-            max_output_bytes=config.max_output_bytes,
-            max_output_lines=config.max_output_lines,
-        ),
-        scenarios=scenarios,
+    return _Workload(cwd=cwd, file_count=len(files), context=context, scenarios=scenarios)
+
+
+async def _searchable_files(context: ToolContext) -> list[Path]:
+    """List the files `find` and `grep` scan below the context root.
+
+    Uses the production find tool, so ignore files, protected paths, and no-follow
+    rules exclude exactly what the measured searches skip.
+    """
+
+    result = await FindTool().run(
+        {"path": ".", "pattern": "*", "max_results": _DISCOVERY_MAX_FILES}, context
     )
+    files = result.data.get("files")
+    count = result.data.get("count")
+    if not isinstance(files, list) or not isinstance(count, int):
+        raise RuntimeError("find did not report its matched files")
+    if count > _DISCOVERY_MAX_FILES:
+        raise ValueError(f"root has more than {_DISCOVERY_MAX_FILES} searchable files")
+    return [context.cwd / str(path) for path in files]
 
 
-def _regular_files(root: Path) -> list[Path]:
-    """List regular files below root, skipping `.git`, before any ignore rules apply."""
+def _largest_utf8_file(files: Sequence[Path]) -> Path | None:
+    """Pick the largest Python source, else the largest file, that decodes as UTF-8."""
 
-    files: list[Path] = []
-    for directory, directories, names in os.walk(root):
-        directories[:] = [name for name in directories if name != ".git"]
-        files.extend(path for name in names if (path := Path(directory, name)).is_file())
-    return files
+    by_preference = sorted(
+        files, key=lambda path: (path.suffix == ".py", path.stat().st_size), reverse=True
+    )
+    for path in by_preference:
+        try:
+            path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        return path
+    return None
 
 
 async def _measure_direct(
@@ -729,7 +763,9 @@ async def _measure_bash(cwd: Path, config: BenchmarkConfig) -> list[BenchmarkSam
                 return completed.stdout
 
             await run_tool()
-            result, tool_measurement = await measure_async(run_tool, iterations=config.iterations)
+            result, tool_measurement = await measure_async(
+                run_tool, iterations=config.iterations, track_memory=config.track_memory
+            )
             samples.append(
                 BenchmarkSample(
                     scenario=name,
@@ -743,7 +779,9 @@ async def _measure_bash(cwd: Path, config: BenchmarkConfig) -> list[BenchmarkSam
                 )
             )
             await run_shell()
-            stdout, shell_measurement = await measure_async(run_shell, iterations=config.iterations)
+            stdout, shell_measurement = await measure_async(
+                run_shell, iterations=config.iterations, track_memory=config.track_memory
+            )
             samples.append(
                 BenchmarkSample(
                     scenario=name,

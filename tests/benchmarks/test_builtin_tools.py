@@ -157,6 +157,8 @@ def test_builtin_tools_benchmark_searches_an_existing_root(
     package.mkdir(parents=True)
     (package / "module.py").write_text("def first():\n    pass\n\ndef second():\n    pass\n")
     (package / "notes.txt").write_text("plain text\n")
+    # Protected by default, so the searches skip it and it must not inflate the counts.
+    (package / ".env").write_text("SECRET=" + "x" * 10_000 + "\n")
 
     report = run_benchmark(
         BenchmarkConfig(root=Path("project"), iterations=1, include_executor=False)
@@ -173,6 +175,8 @@ def test_builtin_tools_benchmark_searches_an_existing_root(
         "grep_literal_capped",
     }
     assert all(sample.file_count == 2 for sample in report.samples)
+    module_and_notes = len("def first():\n    pass\n\ndef second():\n    pass\n") + 11
+    assert direct["grep_literal_miss"].input_bytes == module_and_notes
     assert direct["find_sorted_prefix"].result_count == 1
     assert direct["grep_regex_capped"].result_count == 2
     assert direct["grep_literal_miss"].result_count == 0
@@ -183,3 +187,20 @@ def test_builtin_tools_benchmark_rejects_a_root_outside_the_working_directory(
 ) -> None:
     with pytest.raises(ValueError, match="inside the current working directory"):
         run_benchmark(BenchmarkConfig(root=tmp_path, iterations=1))
+
+
+def test_builtin_tools_benchmark_skips_the_read_scenario_without_a_utf8_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "image.bin").write_bytes(b"\xff\xfe\x00binary")
+
+    report = run_benchmark(
+        BenchmarkConfig(root=Path("assets"), iterations=1, include_executor=False)
+    )
+
+    scenarios = {sample.scenario for sample in report.samples}
+    assert "read_first_page" not in scenarios
+    assert "grep_literal_miss" in scenarios
