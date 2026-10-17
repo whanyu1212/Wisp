@@ -7,10 +7,10 @@ from .boundaries import (
     HarnessBoundaryPreparer,
 )
 from .config import AgentHarnessConfig
+from .queues import QueuedMessages
 from .runner import (
     AgentHarness,
     AgentHarnessEvent,
-    QueuedMessages,
     SimpleCancellationToken,
 )
 
