@@ -8,8 +8,8 @@ from typing import Annotated
 
 import typer
 
-from wisp.agent.prompt import resolve_project_context_root
 from wisp.auth.storage import ApiKeyCredential, AuthCredential, JsonAuthStore, OAuthCredential
+from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
 
 from . import trust as _cli_trust

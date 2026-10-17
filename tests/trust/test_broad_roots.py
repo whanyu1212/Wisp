@@ -16,11 +16,11 @@ import anyio
 import pytest
 from typer.testing import CliRunner
 
-import wisp.agent.prompt.project_context as project_context_module
+import wisp.coding.prompt.project_context as project_context_module
 from tests.support.cli import CliRunner as RpcCliRunner
 from tests.support.cli import DangerTool, ToolCallingProvider, app
-from wisp.agent.prompt import resolve_project_context_root
 from wisp.coding import CodingSession
+from wisp.coding.prompt import resolve_project_context_root
 from wisp.events import ToolApprovalRequested
 from wisp.rpc.host import RpcToolApprovalPolicy, RpcTrustGate, _broad_root_notices
 from wisp.runtime.registry import ToolRegistry

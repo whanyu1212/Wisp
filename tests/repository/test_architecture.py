@@ -41,7 +41,6 @@ _PURE_AGENT_MODULES = (
 )
 _FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
-    "wisp.agent.prompt",
     "wisp.cli",
     "wisp.coding",
     "wisp.config",
@@ -63,13 +62,13 @@ _CODING_FORBIDDEN_IMPORTS = (
 _FRONTEND_MODULES = (Path("cli/application.py"),)
 _FRESH_IMPORT_MODULES = (
     "wisp.agent.harness",
-    "wisp.agent.prompt",
     "wisp.agent.history",
     "wisp.agent.messages",
     "wisp.agent.request_boundary",
     "wisp.agent.tool_contracts",
     "wisp.coding.compaction",
     "wisp.coding.persistence",
+    "wisp.coding.prompt",
     "wisp.coding.session",
     "wisp.coding.tool_execution",
     # The config root re-exports eagerly; importing an MCP module first must not
@@ -225,7 +224,6 @@ def test_prepared_tools_depend_on_shared_lifecycle_not_tool_execution() -> None:
     [
         ("harness", "harness.config", "AgentHarnessConfig"),
         ("harness", "harness.runner", "AgentHarness"),
-        ("prompt", "prompt.builder", "build_prompt_messages"),
     ],
 )
 def test_agent_public_packages_export_the_implementation(
@@ -242,6 +240,23 @@ def test_obsolete_agent_compatibility_modules_are_removed() -> None:
 
     for filename in ("configuration.py", "context.py", "execution.py", "transcript.py"):
         assert not (agent_dir / filename).exists()
+
+
+def test_prompt_package_lives_in_the_coding_layer() -> None:
+    import wisp.coding.prompt as prompt
+    import wisp.coding.prompt.builder as builder
+
+    assert prompt.build_prompt_messages is builder.build_prompt_messages
+    assert not (REPO_ROOT / "src" / "wisp" / "agent" / "prompt").exists()
+    importers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in (REPO_ROOT / "src" / "wisp").rglob("*.py")
+        if any(
+            imported == "wisp.agent.prompt" or imported.startswith("wisp.agent.prompt.")
+            for imported in _module_imports(path)
+        )
+    )
+    assert importers == []
 
 
 def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> None:

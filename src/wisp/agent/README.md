@@ -1,11 +1,12 @@
 # Agent runtime
 
-`wisp.agent` contains the provider-neutral core of Wisp's agent runtime. It builds the model's
-instructions, keeps an in-memory conversation across requests, and runs the model/tool cycle. The
-CLI, TUI, RPC, and SDK all reach this code through the same `CodingSession` path.
+`wisp.agent` contains the provider-neutral core of Wisp's agent runtime. It keeps an in-memory
+conversation across requests and runs the model/tool cycle. The CLI, TUI, RPC, and SDK all reach
+this code through the same `CodingSession` path. The model's instructions are built by the coding
+layer, in [`wisp.coding.prompt`](../coding/prompt/).
 
-The package root intentionally re-exports nothing. Import the public `harness`, `loop`, and `prompt`
-APIs from their package roots, and shared contracts from the module that defines them.
+The package root intentionally re-exports nothing. Import the public `harness` and `loop` APIs from
+their package roots, and shared contracts from the module that defines them.
 
 ## Big picture
 
@@ -13,9 +14,9 @@ APIs from their package roots, and shared contracts from the module that defines
 flowchart LR
   Interfaces["CLI / TUI / RPC / SDK"] --> Host["RPC command host"]
   Host --> Session["CodingSession<br/>persistence and policy"]
+  Prompt["wisp.coding.prompt<br/>instructions and project context"]
 
   subgraph Agent["wisp.agent"]
-    Prompt["prompt/<br/>instructions and project context"]
     Harness["AgentHarness<br/>transcript and live controls"]
     Loop["run_agent_loop<br/>one invocation"]
     Contracts["shared contracts<br/>messages, boundaries, tools, budgets"]
@@ -152,7 +153,6 @@ history synchronized.
 
 | Path | Responsibility |
 | --- | --- |
-| [`prompt/`](./prompt/) | Builds ordered system instructions, trusted or untrusted project context, tool guidance, and plan-mode restrictions. Start with `builder.build_prompt_messages`. |
 | [`harness/`](./harness/) | Owns the transcript across invocations, live queues, cancellation, and boundary coordination. Start with `runner.AgentHarness._run`. |
 | [`loop/`](./loop/) | Implements the provider/tool cycle and emits ordered events for one invocation. Start with `runner.run_agent_loop`. |
 | [`messages.py`](./messages.py) | Defines provider-facing `Message` and compaction records, and projects completion events into detached transcript rows. |
@@ -169,7 +169,7 @@ history synchronized.
 
 | Change | Start here |
 | --- | --- |
-| System instructions or project-file discovery | [`prompt/`](./prompt/) |
+| System instructions or project-file discovery | [`wisp/coding/prompt/`](../coding/prompt/) |
 | Transcript retention, queues, or cancellation across calls | [`harness/`](./harness/) |
 | Turn sequencing, provider stream validation, or tool scheduling | [`loop/`](./loop/) |
 | Provider-specific request or continuation behavior | [`wisp/providers/`](../providers/) |
@@ -185,7 +185,6 @@ shared loop.
 ```python
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.prompt import build_prompt_messages
 
 from wisp.agent.messages import Message
 from wisp.agent.request_boundary import RequestBoundaryDecision

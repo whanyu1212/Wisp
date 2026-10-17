@@ -10,8 +10,8 @@ import anyio
 
 from tests.coding.session_support import CapturingProvider
 from wisp.agent.messages import Message
-from wisp.agent.prompt import WEB_SEARCH_GUIDANCE, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding import CodingSession
+from wisp.coding.prompt import WEB_SEARCH_GUIDANCE, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.events import WebSearchPerformed, WebSearchSource, WispEvent
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
