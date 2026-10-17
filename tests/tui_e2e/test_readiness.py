@@ -389,9 +389,18 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         offset = len(tui.output)
         tui.send(b"\r")
         tui.wait_until(
-            lambda output: run_settled(output, offset, b"idle", b"END", *marker_fragments),
+            lambda output: _has_fragments(output, offset, b"END", *marker_fragments),
             timeout=20,
             failure="large pasted prompt did not complete with compact echo",
+        )
+        # The fake reply can finish before "working" is painted, leaving the idle footer
+        # unchanged and never redrawn. A resize repaints the whole frame, footer included.
+        offset = len(tui.output)
+        tui.resize(width=101)
+        tui.wait_until(
+            lambda output: run_settled(output, offset, b"idle"),
+            timeout=20,
+            failure="large pasted prompt did not return to idle",
         )
         tui.quit()
     finally:
