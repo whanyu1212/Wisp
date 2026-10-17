@@ -797,18 +797,10 @@ fn waiting_for_output(state: &UiState) -> bool {
     if state.configuration_active() || state.view_status != ViewStatus::Running {
         return false;
     }
-    let visible_assistant_stream = state
-        .transcript
-        .entries()
-        .iter()
-        .rev()
-        .take_while(|entry| entry.role != TranscriptRole::User)
-        .any(|entry| {
-            entry.role == TranscriptRole::Assistant
-                && entry.state == crate::transcript::TranscriptEntryState::Streaming
-                && !entry.content.is_empty()
-        });
-    !visible_assistant_stream && !state.transcript.has_unresolved_tool_calls()
+    // message.completed can be painted before command.finished. Keep the reply
+    // visible without briefly inserting a working row and shrinking its viewport.
+    // Response/tool boundaries, not card order, restore the between-steps indicator.
+    !state.transcript.has_visible_response() && !state.transcript.has_unresolved_tool_calls()
 }
 
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
@@ -5710,6 +5702,11 @@ mod tests {
         state
             .transcript
             .complete_message(1, "I will check that.".into());
+        let completed = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(!completed.contains("Working"), "{completed}");
+        state.transcript.append_thinking_delta(2, "Next step");
+        let thinking = render_to_string_with_activity(80, 18, &state, 1);
+        assert!(thinking.contains("⠙ Thinking"), "{thinking}");
         for index in 0..20 {
             state
                 .transcript
@@ -5758,6 +5755,28 @@ mod tests {
             process_between_steps.contains("⠸ Working"),
             "{process_between_steps}"
         );
+
+        // Polling the same process updates its earlier card in place. A reply
+        // after that card must not hide activity once the later poll settles.
+        state.transcript.append_message_delta(3, "Checking again.");
+        state
+            .transcript
+            .complete_message(3, "Checking again.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "process-poll-again".into(),
+                name: "bash".into(),
+                arguments: json!({"operation": "poll", "process_id": "process-1"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let mut result = tool_result("process-poll-again", "still running");
+        result.name = "bash".into();
+        result.process_id = Some("process-1".into());
+        result.process_state = Some("running".into());
+        state.transcript.observe_tool_result(result);
+        let after_poll = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(after_poll.contains("⠸ Working"), "{after_poll}");
 
         for status in [
             ViewStatus::Idle,
