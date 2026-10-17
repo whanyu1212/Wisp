@@ -106,6 +106,21 @@ The loop does not mutate its input `messages`. It keeps only the continuation da
 current invocation: the provider cursor, pending tool results, injected user messages, and the
 assistant/tool tail produced so far.
 
+### History and continuation terms
+
+- **Portable history** (the *base*): provider-neutral `Message` rows that any adapter can send
+  as a fresh request.
+- **Provider cursor**: the `previous_response_id` from the last response. Each adapter decides what
+  it points to: server-side state for stateful APIs, or a local replay key for stateless ones.
+- **Native continuation**: continuing from the cursor instead of resending everything. Appending
+  user messages to it needs an adapter that declares `supports_continuation_messages`.
+- **Continuation tail**: the assistant and tool rows, plus any injected user messages, produced
+  since the current base. Each request sends the base followed by this tail.
+- **Folding**: with no usable cursor, the loop moves a text-only tail into the base and sends a
+  fresh request. A tail containing tool calls is never flattened; that boundary is rejected
+  instead. `_apply_continuation` in [`loop/continuation.py`](./loop/continuation.py) tabulates
+  every case.
+
 ## Request boundaries and live input
 
 After a completed turn, the loop consults the request-boundary hook before sampling the provider
@@ -114,16 +129,16 @@ again. A decision can:
 | Decision field | Effect |
 | --- | --- |
 | `stop` | End the invocation; this takes precedence over every other field. |
-| `extra_messages` | Inject plain user messages into the continued request. |
-| `messages` | Replace the portable history and clear native continuation. |
-| `context_rebase` | Replace the portable base while retaining an accepted native continuation tail. |
+| `extra_messages` | Inject plain user messages into the continued request. Context-overflow recovery cannot add them. |
+| `messages` | Replace the portable history and clear native continuation. Cannot be combined with `context_rebase`. |
+| `context_rebase` | Replace the portable base while keeping the native continuation tail. Requires an adapter that declares `supports_context_rebase`, a provider cursor, and `expected_continuation_messages` that exactly match the loop's current tail. |
 
 The harness uses this boundary for live input:
 
 - **Steering** is eligible after every successfully completed turn and has priority.
 - **Follow-up** is eligible only when a tool-free turn would otherwise stop.
-- Both queues are FIFO and may drain one message or the current queue snapshot, depending on their
-  configured mode.
+- Both queues are FIFO. `steering_mode` and `follow_up_mode` on `AgentHarnessConfig` choose whether
+  a drain injects one message (`"one_at_a_time"`, the default) or the whole current queue (`"all"`).
 
 `CodingSession` also uses the same handshake for compaction and context-overflow recovery. The loop
 applies the decision to its next provider request; the harness waits for the matching `TurnStarted`
@@ -139,6 +154,7 @@ history synchronized.
 | [`loop/`](./loop/) | Implements the provider/tool cycle and emits ordered events for one invocation. Start with `runner.run_agent_loop`. |
 | [`messages.py`](./messages.py) | Defines provider-facing `Message` and compaction records, and projects completion events into detached transcript rows. |
 | [`request_boundary.py`](./request_boundary.py) | Defines snapshots, replace/rebase decisions, and boundary and overflow hook protocols. |
+| [`turn_lifecycle.py`](./turn_lifecycle.py) | Tracks the open turn so each started turn ends exactly once. The loop publishes turns through it; the harness and session use it to build the terminal events they publish themselves. |
 | [`tool_contracts.py`](./tool_contracts.py) | Defines ordinary and prepared tool-executor protocols and their lifecycle errors. |
 | [`context_budget.py`](./context_budget.py) | Estimates request context, records provider observations, and builds context-pressure budgets. |
 | [`history.py`](./history.py) | Normalizes historical tool exchanges into provider-safe portable history. |
