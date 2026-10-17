@@ -1,9 +1,11 @@
-"""Measure public built-in tool paths and executor normalization overhead."""
+"""Measure public built-in tool paths, executor overhead, batching, and external ceilings."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -15,28 +17,55 @@ from typing import Literal
 import anyio
 
 from benchmarks.support import Measurement, environment, measure_async
+from wisp.agent.loop.tool_execution import ToolBatch
 from wisp.coding.tool_execution import ConfiguredToolExecutor
-from wisp.events import ToolExecutionEnded
+from wisp.events import ToolExecutionEnded, ToolResultReady
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry
 from wisp.tools.approval import ToolApprovalPolicy
-from wisp.tools.base import Tool, ToolArguments
+from wisp.tools.base import Tool, ToolArguments, ToolExecutionMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.files.operations import ReadTool
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
 from wisp.tools.search.tools import FindTool, GrepTool, LsTool
+from wisp.tools.shell.supervisor import ProcessSupervisor
+from wisp.tools.shell.tool import BashTool
 
 _KIBIBYTE = 1024
+_MEBIBYTE = 1024 * _KIBIBYTE
 _PAGE_LINES = 100
 _MAX_RESULTS = 100
 _LARGE_FILE_LINE = b"large-file benchmark line " + b"x" * 99 + b"\n"
 _MIN_OUTPUT_BYTES = _PAGE_LINES * len(_LARGE_FILE_LINE)
+# Built at runtime so a repository run never finds this module's own source as a match.
+_ABSENT_TOKEN = "wisp-bench" + "mark-absent-token"
+_ABSENT_REGEX = "wisp-bench" + r"mark-absent-\d+-token"
+# The same read-only tools the runtime marks parallel safe (`wisp.extensions.builtin`).
+_PARALLEL_SAFE = ToolExecutionMetadata(parallel_safe=True)
+_PARALLEL_SAFE_TOOL_NAMES = frozenset({"find", "grep", "ls", "read"})
+_BASH_COMMANDS = (
+    ("bash_true", "true"),
+    ("bash_short_lines_1mib", "seq 1 160000"),
+    ("bash_long_line_1mib", f"head -c {_MEBIBYTE} /dev/zero | tr '\\000' x"),
+)
 
 
 @dataclass(frozen=True)
 class BenchmarkConfig:
-    """Workload sizes for deterministic temporary project fixtures."""
+    """Workload sizes and optional measurement layers.
+
+    Attributes:
+        root (Path | None): Existing directory to search instead of synthetic fixtures.
+            It must be inside the current working directory. Repository runs have no
+            result oracle beyond "misses find nothing", and use the default protected paths.
+        batch_size (int): When positive, also run each scenario as one model tool batch
+            of this many identical calls through the production prepared scheduler.
+        external_ceiling (bool): Also time `rg` doing the same full-tree scan, as an
+            all-native upper bound. Skipped when `rg` is not installed.
+        include_bash (bool): Also time end-to-end `bash` tool calls against a bare
+            `/bin/sh -c` subprocess running the same command.
+    """
 
     file_counts: tuple[int, ...] = (1_000, 5_000)
     file_bytes: int = 4 * _KIBIBYTE
@@ -46,11 +75,20 @@ class BenchmarkConfig:
     include_executor: bool = True
     track_memory: bool = False
     grep_backend: Literal["auto", "python", "native"] = "auto"
+    root: Path | None = None
+    batch_size: int = 0
+    external_ceiling: bool = False
+    include_bash: bool = False
 
 
 @dataclass(frozen=True)
 class BenchmarkSample:
-    """One measured production path for one fixture scale."""
+    """One measured production path for one fixture scale.
+
+    `layer` names the path: `tool.run`, `executor`, `batch` (batch_size concurrent calls
+    per iteration), `batch.serial` (the same batch run one call at a time), `ripgrep`
+    (external ceiling), or `sh` (bare subprocess baseline).
+    """
 
     scenario: str
     layer: str
@@ -73,7 +111,7 @@ class BenchmarkReport:
     def to_json(self) -> str:
         """Serialize this report for local comparison and evidence capture."""
 
-        return json.dumps(asdict(self), indent=2, sort_keys=True)
+        return json.dumps(asdict(self), indent=2, sort_keys=True, default=str)
 
 
 @dataclass(frozen=True)
@@ -90,26 +128,45 @@ class _Fixture:
 
 @dataclass(frozen=True)
 class _Scenario:
+    """One tool call to measure.
+
+    `expected_count` and `expected_truncated` are the fixture oracle; None skips that
+    check for repository runs. `ripgrep` holds the `rg` arguments for an equivalent
+    full-tree scan, when one exists.
+    """
+
     name: str
     tool: Tool
     arguments: ToolArguments
     input_bytes: int
-    expected_count: int
-    expected_truncated: bool
+    expected_count: int | None
+    expected_truncated: bool | None
+    ripgrep: tuple[str, ...] | None = None
+
+
+@dataclass(frozen=True)
+class _Workload:
+    """A directory to run scenarios in, with the scale recorded on its samples."""
+
+    cwd: Path
+    file_count: int
+    context: ToolContext
+    scenarios: tuple[_Scenario, ...]
 
 
 async def run_benchmark_async(config: BenchmarkConfig | None = None) -> BenchmarkReport:
     """Build deterministic fixtures, then measure public tool and executor paths.
 
     Args:
-        config: Optional workload configuration. Fixture construction and warmup happen
-            outside every measured interval.
+        config (BenchmarkConfig | None, optional): Workload configuration. Fixture
+            construction and warmup happen outside every measured interval.
 
     Returns:
-        A serializable report with one sample for each scenario, scale, and layer.
+        BenchmarkReport: One sample for each scenario, scale, and enabled layer, followed
+            by the bash samples when enabled.
 
     Raises:
-        ValueError: The benchmark configuration contains an invalid size or output budget.
+        ValueError: The configuration contains an invalid size, budget, or root.
         RuntimeError: A production tool returns a result that violates the fixture oracle.
     """
 
@@ -118,37 +175,17 @@ async def run_benchmark_async(config: BenchmarkConfig | None = None) -> Benchmar
     samples: list[BenchmarkSample] = []
     with TemporaryDirectory(prefix="wisp-builtin-tools-") as temporary:
         temporary_root = Path(temporary)
-        for file_count in selected.file_counts:
-            fixture = _build_fixture(temporary_root / f"scale-{file_count}", file_count, selected)
-            context = ToolContext(
-                cwd=fixture.root,
-                max_output_bytes=selected.max_output_bytes,
-                max_output_lines=selected.max_output_lines,
-                protected_paths=(),
-            )
-            scenarios = _scenarios(fixture, selected)
-            registry = ToolRegistry()
-            for tool in {scenario.tool.name: scenario.tool for scenario in scenarios}.values():
-                registry.register(tool)
-            executor = ConfiguredToolExecutor(
-                registry=registry,
-                context=context,
-                policy=ToolPolicy.allow_all_tools(),
-                approval_policy=ToolApprovalPolicy.approve_all(),
-            )
-
-            try:
-                for scenario in scenarios:
-                    samples.append(await _measure_direct(scenario, fixture, context, selected))
-                    if selected.include_executor:
-                        samples.append(
-                            await _measure_executor(scenario, fixture, executor, selected)
-                        )
-            finally:
-                for tool in registry.all():
-                    close = getattr(tool, "aclose", None)
-                    if close is not None:
-                        await close()
+        if selected.root is not None:
+            workloads = [_repository_workload(selected.root, selected)]
+        else:
+            workloads = [
+                _synthetic_workload(temporary_root / f"scale-{count}", count, selected)
+                for count in selected.file_counts
+            ]
+        for workload in workloads:
+            samples.extend(await _measure_workload(workload, selected))
+        if selected.include_bash:
+            samples.extend(await _measure_bash(temporary_root, selected))
 
     return BenchmarkReport(
         config=selected,
@@ -174,6 +211,80 @@ def _validate_config(config: BenchmarkConfig) -> None:
         raise ValueError(f"max_output_lines must be at least {_PAGE_LINES}")
     if config.iterations < 1:
         raise ValueError("iterations must be positive")
+    if config.batch_size < 0:
+        raise ValueError("batch_size must not be negative")
+    if config.root is not None:
+        root = config.root.resolve()
+        if not root.is_dir():
+            raise ValueError(f"root is not a directory: {config.root}")
+        if not root.is_relative_to(Path.cwd().resolve()):
+            raise ValueError("root must be inside the current working directory")
+
+
+async def _measure_workload(workload: _Workload, config: BenchmarkConfig) -> list[BenchmarkSample]:
+    """Measure every enabled layer for each scenario of one workload, in scenario order."""
+
+    tools = {scenario.tool.name: scenario.tool for scenario in workload.scenarios}.values()
+    registry = ToolRegistry()
+    # Same tool instances without parallel-safe metadata: the prepared scheduler then runs
+    # a batch one call at a time, giving a measured serial baseline through identical code.
+    serial_registry = ToolRegistry()
+    for tool in tools:
+        registry.register(
+            tool,
+            execution=_PARALLEL_SAFE if tool.name in _PARALLEL_SAFE_TOOL_NAMES else None,
+        )
+        serial_registry.register(tool)
+    executor = _approving_executor(registry, workload.context)
+    serial_executor = _approving_executor(serial_registry, workload.context)
+    ripgrep = shutil.which("rg") if config.external_ceiling else None
+    samples: list[BenchmarkSample] = []
+    try:
+        for scenario in workload.scenarios:
+            samples.append(await _measure_direct(scenario, workload, config))
+            if config.include_executor:
+                samples.append(await _measure_executor(scenario, workload, executor, config))
+            if config.batch_size:
+                samples.append(
+                    await _measure_batch(scenario, workload, executor, config, layer="batch")
+                )
+                samples.append(
+                    await _measure_batch(
+                        scenario, workload, serial_executor, config, layer="batch.serial"
+                    )
+                )
+            if ripgrep is not None and scenario.ripgrep is not None:
+                samples.append(await _measure_ripgrep(ripgrep, scenario, workload, config))
+    finally:
+        for tool in registry.all():
+            close = getattr(tool, "aclose", None)
+            if close is not None:
+                await close()
+    return samples
+
+
+def _approving_executor(registry: ToolRegistry, context: ToolContext) -> ConfiguredToolExecutor:
+    return ConfiguredToolExecutor(
+        registry=registry,
+        context=context,
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+
+
+def _synthetic_workload(root: Path, file_count: int, config: BenchmarkConfig) -> _Workload:
+    fixture = _build_fixture(root, file_count, config)
+    return _Workload(
+        cwd=fixture.root,
+        file_count=fixture.file_count,
+        context=ToolContext(
+            cwd=fixture.root,
+            max_output_bytes=config.max_output_bytes,
+            max_output_lines=config.max_output_lines,
+            protected_paths=(),
+        ),
+        scenarios=_scenarios(fixture, config),
+    )
 
 
 def _build_fixture(root: Path, file_count: int, config: BenchmarkConfig) -> _Fixture:
@@ -263,6 +374,7 @@ def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, .
             input_bytes=0,
             expected_count=min(fixture.file_count, _MAX_RESULTS + 1),
             expected_truncated=fixture.file_count > _MAX_RESULTS,
+            ripgrep=("--files", "--glob", "*.txt", "tree"),
         ),
         _Scenario(
             name="grep_literal_miss",
@@ -271,6 +383,25 @@ def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, .
             input_bytes=fixture.input_bytes,
             expected_count=0,
             expected_truncated=False,
+            ripgrep=("--fixed-strings", "absent-token", "tree"),
+        ),
+        _Scenario(
+            name="grep_regex_miss",
+            tool=grep_tool,
+            arguments={"path": "tree", "pattern": r"absent-\d+-token"},
+            input_bytes=fixture.input_bytes,
+            expected_count=0,
+            expected_truncated=False,
+            ripgrep=(r"absent-\d+-token", "tree"),
+        ),
+        _Scenario(
+            name="grep_ignore_case_miss",
+            tool=grep_tool,
+            arguments={"path": "tree", "pattern": "absent-token", "ignore_case": True},
+            input_bytes=fixture.input_bytes,
+            expected_count=0,
+            expected_truncated=False,
+            ripgrep=("--ignore-case", "absent-token", "tree"),
         ),
         _Scenario(
             name="grep_regex_capped",
@@ -300,14 +431,112 @@ def _scenarios(fixture: _Fixture, config: BenchmarkConfig) -> tuple[_Scenario, .
     )
 
 
+def _repository_workload(root: Path, config: BenchmarkConfig) -> _Workload:
+    """Search an existing tree, such as `src/`, with the default protected paths."""
+
+    cwd = root.resolve()
+    files = _regular_files(cwd)
+    # Read pages a text file; the largest Python source is a stable, decodable choice.
+    sources = [path for path in files if path.suffix == ".py"] or files
+    largest = max(sources, key=lambda path: path.stat().st_size)
+    grep_tool = GrepTool(_scanner_backend=config.grep_backend)
+    input_bytes = sum(path.stat().st_size for path in files)
+    scenarios = (
+        _Scenario(
+            name="read_first_page",
+            tool=ReadTool(),
+            arguments={"path": str(largest.relative_to(cwd)), "offset": 1, "limit": _PAGE_LINES},
+            input_bytes=largest.stat().st_size,
+            expected_count=None,
+            expected_truncated=None,
+        ),
+        _Scenario(
+            name="find_sorted_prefix",
+            tool=FindTool(),
+            arguments={"path": ".", "pattern": "*.py", "max_results": _MAX_RESULTS},
+            input_bytes=0,
+            expected_count=None,
+            expected_truncated=None,
+            ripgrep=("--files", "--glob", "*.py"),
+        ),
+        _Scenario(
+            name="grep_literal_miss",
+            tool=grep_tool,
+            arguments={"path": ".", "pattern": _ABSENT_TOKEN, "literal": True},
+            input_bytes=input_bytes,
+            expected_count=0,
+            expected_truncated=False,
+            ripgrep=("--fixed-strings", _ABSENT_TOKEN),
+        ),
+        _Scenario(
+            name="grep_regex_miss",
+            tool=grep_tool,
+            arguments={"path": ".", "pattern": _ABSENT_REGEX},
+            input_bytes=input_bytes,
+            expected_count=0,
+            expected_truncated=False,
+            ripgrep=(_ABSENT_REGEX,),
+        ),
+        _Scenario(
+            name="grep_ignore_case_miss",
+            tool=grep_tool,
+            arguments={"path": ".", "pattern": _ABSENT_TOKEN, "ignore_case": True},
+            input_bytes=input_bytes,
+            expected_count=0,
+            expected_truncated=False,
+            ripgrep=("--ignore-case", _ABSENT_TOKEN),
+        ),
+        _Scenario(
+            name="grep_regex_capped",
+            tool=grep_tool,
+            arguments={"path": ".", "pattern": r"def \w+", "max_results": _MAX_RESULTS},
+            input_bytes=input_bytes,
+            expected_count=None,
+            expected_truncated=None,
+        ),
+        _Scenario(
+            name="grep_literal_capped",
+            tool=grep_tool,
+            arguments={
+                "path": ".",
+                "pattern": "def ",
+                "literal": True,
+                "max_results": _MAX_RESULTS,
+            },
+            input_bytes=input_bytes,
+            expected_count=None,
+            expected_truncated=None,
+        ),
+    )
+    return _Workload(
+        cwd=cwd,
+        file_count=len(files),
+        context=ToolContext(
+            cwd=cwd,
+            max_output_bytes=config.max_output_bytes,
+            max_output_lines=config.max_output_lines,
+        ),
+        scenarios=scenarios,
+    )
+
+
+def _regular_files(root: Path) -> list[Path]:
+    """List regular files below root, skipping `.git`, before any ignore rules apply."""
+
+    files: list[Path] = []
+    for directory, directories, names in os.walk(root):
+        directories[:] = [name for name in directories if name != ".git"]
+        files.extend(path for name in names if (path := Path(directory, name)).is_file())
+    return files
+
+
 async def _measure_direct(
     scenario: _Scenario,
-    fixture: _Fixture,
-    context: ToolContext,
+    workload: _Workload,
     config: BenchmarkConfig,
 ) -> BenchmarkSample:
     async def invoke() -> ToolResult:
-        result = await scenario.tool.run(scenario.arguments, context)
+        result = await scenario.tool.run(scenario.arguments, workload.context)
         _validate_direct_result(scenario, result)
         return result
 
@@ -321,7 +550,7 @@ async def _measure_direct(
     return BenchmarkSample(
         scenario=scenario.name,
         layer="tool.run",
-        file_count=fixture.file_count,
+        file_count=workload.file_count,
         input_bytes=scenario.input_bytes,
         result_count=result_count,
         output_bytes=len(result.text.encode("utf-8")),
@@ -332,7 +561,7 @@ async def _measure_direct(
 
 async def _measure_executor(
     scenario: _Scenario,
-    fixture: _Fixture,
+    workload: _Workload,
     executor: ConfiguredToolExecutor,
     config: BenchmarkConfig,
 ) -> BenchmarkSample:
@@ -350,7 +579,9 @@ async def _measure_executor(
         result = next(event for event in events if isinstance(event, ToolExecutionEnded))
         if result.is_error:
             raise RuntimeError(f"executor benchmark failed for {scenario.name}: {result.output}")
-        if result.truncated != scenario.expected_truncated:
+        if scenario.expected_truncated is not None and (
+            result.truncated != scenario.expected_truncated
+        ):
             raise RuntimeError(f"unexpected executor truncation for {scenario.name}")
         return result
 
@@ -363,13 +594,171 @@ async def _measure_executor(
     return BenchmarkSample(
         scenario=scenario.name,
         layer="executor",
-        file_count=fixture.file_count,
+        file_count=workload.file_count,
         input_bytes=scenario.input_bytes,
         result_count=None,
         output_bytes=len(result.output.encode("utf-8")),
         truncated=result.truncated,
         measurement=measurement,
     )
+
+
+async def _measure_batch(
+    scenario: _Scenario,
+    workload: _Workload,
+    executor: ConfiguredToolExecutor,
+    config: BenchmarkConfig,
+    *,
+    layer: str,
+) -> BenchmarkSample:
+    """Time one model tool batch of `batch_size` identical calls per iteration.
+
+    The batch goes through the production `ToolBatch` and prepared scheduler. With the
+    parallel-safe executor (`batch`) calls overlap in worker threads, where CPU-bound
+    Python scanners still contend for the GIL; with the serial executor (`batch.serial`)
+    the same scheduler runs them one at a time.
+    """
+
+    batch_index = 0
+
+    async def invoke() -> tuple[ToolResultReady, ...]:
+        nonlocal batch_index
+        batch_index += 1
+        calls = tuple(
+            ToolCall(
+                call_id=f"benchmark-{scenario.name}-batch-{batch_index}-{index}",
+                name=scenario.tool.name,
+                arguments=scenario.arguments,
+            )
+            for index in range(config.batch_size)
+        )
+        results: list[ToolResultReady] = []
+        batch = ToolBatch(
+            tool_executor=executor,
+            tool_calls=calls,
+            truncated=False,
+            is_cancelled=lambda: False,
+            on_result=results.append,
+        )
+        async for _event in batch.events():
+            pass
+        errors = [result.output for result in results if result.is_error]
+        if len(results) != len(calls) or errors:
+            raise RuntimeError(f"batch benchmark failed for {scenario.name}: {errors}")
+        return tuple(results)
+
+    await invoke()
+    results, measurement = await measure_async(
+        invoke,
+        iterations=config.iterations,
+        track_memory=config.track_memory,
+    )
+    return BenchmarkSample(
+        scenario=scenario.name,
+        layer=layer,
+        file_count=workload.file_count,
+        input_bytes=scenario.input_bytes * config.batch_size,
+        result_count=len(results),
+        output_bytes=sum(len(result.output.encode("utf-8")) for result in results),
+        truncated=any(result.truncated for result in results),
+        measurement=measurement,
+    )
+
+
+async def _measure_ripgrep(
+    executable: str,
+    scenario: _Scenario,
+    workload: _Workload,
+    config: BenchmarkConfig,
+) -> BenchmarkSample:
+    """Time `rg` scanning the same tree, including its process start, as a native ceiling."""
+
+    assert scenario.ripgrep is not None
+    command = (executable, "--no-messages", *scenario.ripgrep)
+
+    async def invoke() -> bytes:
+        completed = await anyio.run_process(command, cwd=workload.cwd, check=False)
+        # rg exits 1 when nothing matches, which is the expected result for a miss.
+        if completed.returncode not in (0, 1):
+            raise RuntimeError(f"rg failed for {scenario.name}: {completed.returncode}")
+        return completed.stdout
+
+    await invoke()
+    stdout, measurement = await measure_async(invoke, iterations=config.iterations)
+    return BenchmarkSample(
+        scenario=scenario.name,
+        layer="ripgrep",
+        file_count=workload.file_count,
+        input_bytes=scenario.input_bytes,
+        result_count=stdout.count(b"\n"),
+        output_bytes=len(stdout),
+        truncated=False,
+        measurement=measurement,
+    )
+
+
+async def _measure_bash(cwd: Path, config: BenchmarkConfig) -> list[BenchmarkSample]:
+    """Time end-to-end `bash` tool calls next to a bare `/bin/sh -c` subprocess.
+
+    The tool path includes the job-recording wrapper, bounded output capture,
+    and process-tree cleanup that the runtime's shared supervisor performs.
+    """
+
+    context = ToolContext(
+        cwd=cwd,
+        max_output_bytes=config.max_output_bytes,
+        max_output_lines=config.max_output_lines,
+        protected_paths=(),
+    )
+    supervisor = ProcessSupervisor()
+    tool = BashTool(supervisor)
+    samples: list[BenchmarkSample] = []
+    try:
+        for name, command in _BASH_COMMANDS:
+
+            async def run_tool(command: str = command, name: str = name) -> ToolResult:
+                result = await tool.run({"command": command}, context)
+                if result.data.get("exit_code") != 0:
+                    raise RuntimeError(f"bash benchmark failed for {name}: {result.text}")
+                return result
+
+            async def run_shell(command: str = command, name: str = name) -> bytes:
+                completed = await anyio.run_process(["/bin/sh", "-c", command], cwd=cwd)
+                if completed.returncode != 0:
+                    raise RuntimeError(f"sh baseline failed for {name}")
+                return completed.stdout
+
+            await run_tool()
+            result, tool_measurement = await measure_async(run_tool, iterations=config.iterations)
+            samples.append(
+                BenchmarkSample(
+                    scenario=name,
+                    layer="tool.run",
+                    file_count=0,
+                    input_bytes=0,
+                    result_count=None,
+                    output_bytes=len(result.text.encode("utf-8")),
+                    truncated=result.truncated,
+                    measurement=tool_measurement,
+                )
+            )
+            await run_shell()
+            stdout, shell_measurement = await measure_async(run_shell, iterations=config.iterations)
+            samples.append(
+                BenchmarkSample(
+                    scenario=name,
+                    layer="sh",
+                    file_count=0,
+                    input_bytes=0,
+                    result_count=None,
+                    output_bytes=len(stdout),
+                    truncated=False,
+                    measurement=shell_measurement,
+                )
+            )
+    finally:
+        await tool.aclose()
+    return samples
 
 
 def _result_count(scenario: str, data: Mapping[str, object]) -> int:
@@ -387,11 +776,13 @@ def _result_count(scenario: str, data: Mapping[str, object]) -> int:
 
 def _validate_direct_result(scenario: _Scenario, result: ToolResult) -> None:
     count = _result_count(scenario.name, result.data)
-    if count != scenario.expected_count:
+    if scenario.expected_count is not None and count != scenario.expected_count:
         raise RuntimeError(
             f"unexpected result count for {scenario.name}: {count} != {scenario.expected_count}"
         )
-    if result.truncated != scenario.expected_truncated:
+    if scenario.expected_truncated is not None and (
+        result.truncated != scenario.expected_truncated
+    ):
         raise RuntimeError(f"unexpected truncation for {scenario.name}")
 
 
@@ -425,6 +816,27 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         default="auto",
         help="grep scanner used for controlled Python/native comparisons",
     )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        help="search this existing directory instead of synthetic fixtures",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="also run each scenario as one concurrent tool batch of this many calls",
+    )
+    parser.add_argument(
+        "--external-ceiling",
+        action="store_true",
+        help="also time rg on the same full-tree scans",
+    )
+    parser.add_argument(
+        "--bash",
+        action="store_true",
+        help="also time end-to-end bash tool calls against a bare sh subprocess",
+    )
     parser.add_argument("--output", type=Path)
     return parser.parse_args(arguments)
 
@@ -441,6 +853,10 @@ def main(arguments: Sequence[str] | None = None) -> None:
             include_executor=not parsed.tool_only,
             track_memory=parsed.track_memory,
             grep_backend=parsed.grep_backend,
+            root=parsed.root,
+            batch_size=parsed.batch_size,
+            external_ceiling=parsed.external_ceiling,
+            include_bash=parsed.bash,
         )
     )
     print(report.to_json())

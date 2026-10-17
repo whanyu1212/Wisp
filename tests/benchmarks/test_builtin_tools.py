@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
         )
     )
 
-    assert len(report.samples) == 14
+    assert len(report.samples) == 18
     assert {sample.layer for sample in report.samples} == {"tool.run", "executor"}
     assert {sample.scenario for sample in report.samples} == {
         "read_first_page",
@@ -26,6 +27,8 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
         "ls_sorted_prefix",
         "find_sorted_prefix",
         "grep_literal_miss",
+        "grep_regex_miss",
+        "grep_ignore_case_miss",
         "grep_literal_capped",
         "grep_regex_capped",
     }
@@ -40,6 +43,8 @@ def test_builtin_tools_benchmark_exercises_public_tool_and_executor_paths() -> N
     assert direct["ls_sorted_prefix"].result_count == 8
     assert direct["find_sorted_prefix"].result_count == 8
     assert direct["grep_literal_miss"].result_count == 0
+    assert direct["grep_regex_miss"].result_count == 0
+    assert direct["grep_ignore_case_miss"].result_count == 0
     assert direct["grep_literal_capped"].result_count == 8
     assert direct["grep_regex_capped"].result_count == 8
     assert not any(sample.truncated for sample in report.samples)
@@ -100,3 +105,81 @@ def test_builtin_tools_cli_creates_output_parent(tmp_path: Path) -> None:
 
     assert output.is_file()
     assert '"scenario": "grep_literal_miss"' in output.read_text(encoding="utf-8")
+
+
+def test_builtin_tools_benchmark_adds_batch_ceiling_and_bash_layers() -> None:
+    report = run_benchmark(
+        BenchmarkConfig(
+            file_counts=(8,),
+            file_bytes=512,
+            iterations=1,
+            include_executor=False,
+            batch_size=3,
+            external_ceiling=True,
+            include_bash=True,
+        )
+    )
+
+    batches = {sample.scenario: sample for sample in report.samples if sample.layer == "batch"}
+    assert len(batches) == 9
+    assert all(sample.result_count == 3 for sample in batches.values())
+    assert batches["grep_literal_miss"].input_bytes == 3 * 8 * 512
+    serial = {s.scenario: s for s in report.samples if s.layer == "batch.serial"}
+    assert set(serial) == set(batches)
+    assert all(sample.result_count == 3 for sample in serial.values())
+    ceilings = {sample.scenario for sample in report.samples if sample.layer == "ripgrep"}
+    if shutil.which("rg") is None:
+        assert ceilings == set()
+    else:
+        assert ceilings == {
+            "find_sorted_prefix",
+            "grep_literal_miss",
+            "grep_regex_miss",
+            "grep_ignore_case_miss",
+        }
+    bash = [sample for sample in report.samples if sample.scenario.startswith("bash_")]
+    assert [(sample.scenario, sample.layer) for sample in bash] == [
+        ("bash_true", "tool.run"),
+        ("bash_true", "sh"),
+        ("bash_short_lines_1mib", "tool.run"),
+        ("bash_short_lines_1mib", "sh"),
+        ("bash_long_line_1mib", "tool.run"),
+        ("bash_long_line_1mib", "sh"),
+    ]
+    assert bash[3].output_bytes > 1_000_000
+
+
+def test_builtin_tools_benchmark_searches_an_existing_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    package = tmp_path / "project" / "package"
+    package.mkdir(parents=True)
+    (package / "module.py").write_text("def first():\n    pass\n\ndef second():\n    pass\n")
+    (package / "notes.txt").write_text("plain text\n")
+
+    report = run_benchmark(
+        BenchmarkConfig(root=Path("project"), iterations=1, include_executor=False)
+    )
+
+    direct = {sample.scenario: sample for sample in report.samples}
+    assert set(direct) == {
+        "read_first_page",
+        "find_sorted_prefix",
+        "grep_literal_miss",
+        "grep_regex_miss",
+        "grep_ignore_case_miss",
+        "grep_regex_capped",
+        "grep_literal_capped",
+    }
+    assert all(sample.file_count == 2 for sample in report.samples)
+    assert direct["find_sorted_prefix"].result_count == 1
+    assert direct["grep_regex_capped"].result_count == 2
+    assert direct["grep_literal_miss"].result_count == 0
+
+
+def test_builtin_tools_benchmark_rejects_a_root_outside_the_working_directory(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="inside the current working directory"):
+        run_benchmark(BenchmarkConfig(root=tmp_path, iterations=1))
