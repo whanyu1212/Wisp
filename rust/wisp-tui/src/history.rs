@@ -188,7 +188,7 @@ fn project_assistant(
         .get("web_searches")
         .and_then(Value::as_array)
         .is_some_and(|searches| !searches.is_empty());
-    let cost = crate::web_search::cost(&message["cost"]);
+    let cost = crate::web_search::message_cost(message);
     if !content.is_empty() || has_searches || cost.is_some() {
         // Display-only evidence can be the entire reply before local tool calls.
         // Keep its authoritative empty text identical to the live projection.
@@ -654,13 +654,14 @@ mod tests {
         let cost = json!({"estimated_usd":"0.02", "web_searches":1});
         let mut reply = message("assistant", "answer");
         reply["web_searches"] = json!([search.clone()]);
-        reply["cost"] = cost.clone();
+        reply["cost"] = cost;
+        let cost_label = crate::web_search::message_cost(&reply);
         let restored = project_rpc_messages(&[reply]).unwrap();
         let mut live = SharedTranscript::default();
         live.begin_message(1);
         live.observe_search(1, crate::web_search::search(&search));
         live.append_message_delta(1, "ans");
-        live.complete_message_with_cost(1, "answer".into(), crate::web_search::cost(&cost));
+        live.complete_message_with_cost(1, "answer".into(), cost_label);
         assert_eq!(
             live.entries()[0].display_content(),
             restored.entries()[0].display_content()
@@ -670,25 +671,99 @@ mod tests {
     }
 
     #[test]
+    fn tool_reply_costs_match_live_and_hydrated_messages() {
+        use crate::reducer::BackendEvent;
+
+        for content in ["", "Checking the file."] {
+            for (cost, expected_label) in [
+                (Value::Null, None),
+                (json!({"estimated_usd":"0.02"}), Some("cost $0.020")),
+                (
+                    json!({"estimated_usd":"0.02", "web_searches":1}),
+                    Some("cost ≥$0.020"),
+                ),
+                (
+                    json!({"estimated_usd":null, "unavailable_reason":"pricing_unavailable"}),
+                    Some("cost unknown"),
+                ),
+                (
+                    json!({"estimated_usd":null, "unavailable_reason":"usage_incomplete"}),
+                    Some("cost unknown"),
+                ),
+                (
+                    json!({"estimated_usd":null, "unavailable_reason":"estimation_failed"}),
+                    Some("cost unknown"),
+                ),
+            ] {
+                let mut reply = message("assistant", content);
+                reply["cost"] = cost;
+                reply["tool_calls"] =
+                    json!([{"call_id":"read-1", "name":"read", "arguments":{"path":"README.md"}}]);
+                let restored = project_rpc_messages(&[reply.clone()]).unwrap();
+
+                reply["type"] = json!("message.completed");
+                reply["turn"] = json!(1);
+                let BackendEvent::MessageCompleted {
+                    turn,
+                    content,
+                    cost,
+                } = BackendEvent::from_projection_value(&reply).unwrap()
+                else {
+                    panic!("expected a completed message");
+                };
+                let expected_label = if content.is_empty() && expected_label == Some("cost unknown")
+                {
+                    None
+                } else {
+                    expected_label
+                };
+                assert_eq!(cost.as_deref(), expected_label);
+                let mut live = SharedTranscript::default();
+                live.begin_message(turn);
+                live.complete_message_with_cost(turn, content.clone(), cost);
+                let has_message = !content.is_empty() || expected_label.is_some();
+                assert_eq!(live.entries().len(), usize::from(has_message));
+                assert_eq!(restored.entries().len(), usize::from(has_message) + 1);
+                assert!(restored.entries().last().unwrap().tool_card().is_some());
+                if has_message {
+                    assert_eq!(
+                        live.entries()[0].display_content(),
+                        restored.entries()[0].display_content()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn empty_searched_replies_match_live_before_tool_calls() {
         for with_tool in [false, true] {
             let search = json!({"action":"search", "query":"docs", "sources":[]});
             let mut reply = message("assistant", "");
             reply["web_searches"] = json!([search.clone()]);
+            reply["cost"] = json!({"estimated_usd":null, "web_searches":1,
+                "unavailable_reason":"pricing_unavailable"});
             if with_tool {
                 reply["tool_calls"] =
                     json!([{"call_id":"read-1", "name":"read", "arguments":{"path":"README.md"}}]);
             }
+            let cost_label = crate::web_search::message_cost(&reply);
+            assert_eq!(cost_label.is_some(), !with_tool);
             let restored = project_rpc_messages(&[reply]).unwrap();
             let mut live = SharedTranscript::default();
             live.begin_message(1);
             live.observe_search(1, crate::web_search::search(&search));
-            live.complete_message_with_cost(1, String::new(), None);
+            live.complete_message_with_cost(1, String::new(), cost_label);
             assert_eq!(
                 live.entries()[0].display_content(),
                 restored.entries()[0].display_content()
             );
             assert!(restored.entries()[0].content.is_empty());
+            assert!(
+                restored.entries()[0]
+                    .display_content()
+                    .contains("Searched docs")
+            );
         }
     }
 

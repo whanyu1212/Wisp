@@ -56,7 +56,18 @@ pub(crate) fn search(value: &Value) -> String {
     result
 }
 
-pub(crate) fn cost(value: &Value) -> Option<String> {
+/// Do not create a cost-only placeholder before tools when no estimate is available.
+/// Live completions and restored messages use the same display policy; the underlying
+/// usage and unavailable reason remain untouched.
+pub(crate) fn message_cost(message: &Value) -> Option<String> {
+    let tool_only = message["content"].as_str() == Some("")
+        && message["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty());
+    cost(&message["cost"], !tool_only)
+}
+
+fn cost(value: &Value, show_unknown: bool) -> Option<String> {
     if value.is_null() {
         return None;
     }
@@ -65,7 +76,7 @@ pub(crate) fn cost(value: &Value) -> Option<String> {
         .and_then(|s| s.parse::<f64>().ok())
         .or_else(|| value["estimated_usd"].as_f64());
     let Some(amount) = amount.filter(|a| a.is_finite() && *a >= 0.0) else {
-        return Some("cost unknown".into());
+        return show_unknown.then(|| "cost unknown".into());
     };
     let amount = if amount == 0.0 {
         "$0.00".into()
@@ -110,17 +121,17 @@ mod tests {
     #[test]
     fn costs_distinguish_lower_bounds_and_unknown_estimates() {
         assert_eq!(
-            cost(&json!({"estimated_usd":"0.001", "web_searches":2})).as_deref(),
+            cost(&json!({"estimated_usd":"0.001", "web_searches":2}), true).as_deref(),
             Some("cost ≥$0.0010")
         );
         assert_eq!(
-            cost(&json!({"estimated_usd":"0.02"})).as_deref(),
+            cost(&json!({"estimated_usd":"0.02"}), true).as_deref(),
             Some("cost $0.020")
         );
         assert_eq!(
-            cost(&json!({"estimated_usd":null, "web_searches":2})).as_deref(),
+            cost(&json!({"estimated_usd":null, "web_searches":2}), true).as_deref(),
             Some("cost unknown")
         );
-        assert_eq!(cost(&Value::Null), None);
+        assert_eq!(cost(&Value::Null, true), None);
     }
 }

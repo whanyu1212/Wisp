@@ -380,7 +380,7 @@ impl BackendEvent {
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
-                cost: crate::web_search::cost(&value["cost"]),
+                cost: crate::web_search::message_cost(value),
             },
             "tool.call" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;
