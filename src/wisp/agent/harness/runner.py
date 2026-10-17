@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
-from uuid import uuid4
 
 import anyio
 
@@ -34,21 +32,9 @@ from wisp.providers.base import prepare_provider_history
 
 from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
 from .config import AgentHarnessConfig, _build_loop_config
+from .queues import QueuedMessages, _MessageQueues
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
-
-
-@dataclass(frozen=True, slots=True)
-class QueuedMessages:
-    """Detached snapshot of harness-owned queued user messages."""
-
-    steering: tuple[Message, ...] = ()
-    follow_up: tuple[Message, ...] = ()
-
-    @property
-    def count(self) -> int:
-        """Return the total number of queued messages."""
-        return len(self.steering) + len(self.follow_up)
 
 
 class SimpleCancellationToken:
@@ -115,9 +101,7 @@ class AgentHarness:
         self._current_token: SimpleCancellationToken | None = None
         self._current_scope: anyio.CancelScope | None = None
         self._running = False
-        self._steering_queue: deque[Message] = deque()
-        self._follow_up_queue: deque[Message] = deque()
-        self._queue_token = uuid4().hex
+        self._queues = _MessageQueues()
 
     @property
     def config(self) -> AgentHarnessConfig:
@@ -137,34 +121,28 @@ class AgentHarness:
     @property
     def queued_messages(self) -> QueuedMessages:
         """Return detached snapshots of both pending queues and their nested data."""
-        return QueuedMessages(
-            steering=tuple(message.model_copy(deep=True) for message in self._steering_queue),
-            follow_up=tuple(message.model_copy(deep=True) for message in self._follow_up_queue),
-        )
+        return self._queues.snapshot()
 
     @property
     def pending_message_count(self) -> int:
         """Return the total number of pending steering and follow-up messages."""
-        return len(self._steering_queue) + len(self._follow_up_queue)
+        return self._queues.count
 
     @property
     def pending_message_bytes(self) -> int:
         """Return serialized bytes retained across both pending queues."""
-
-        return sum(
-            self._queued_message_size(message)
-            for message in (*self._steering_queue, *self._follow_up_queue)
-        )
+        return self._queues.byte_size
 
     def has_queued_messages(self) -> bool:
         """Return whether either queue contains a pending message."""
-        return bool(self._steering_queue or self._follow_up_queue)
+        return self._queues.has_messages()
 
     def replace_config(self, config: AgentHarnessConfig) -> None:
         """Replace provider/tool configuration between runs."""
         self._ensure_idle()
         self._config = config
-        self._bump_queue_revision()
+        # The new configuration may carry different drain modes.
+        self._queues.mark_changed()
 
     def append_message(self, message: Message) -> None:
         """Append a detached copy of restored or application-provided state."""
@@ -199,10 +177,7 @@ class AgentHarness:
 
     def steer_message(self, message: Message) -> QueueUpdated:
         """Queue a detached user message for steering without changing the transcript."""
-        self._require_user_queue_message(message)
-        self._require_queue_capacity(message)
-        self._steering_queue.append(message.model_copy(deep=True))
-        self._bump_queue_revision()
+        self._enqueue("steering", message)
         return self.queue_updated_event()
 
     def follow_up(self, content: str) -> QueueUpdated:
@@ -211,53 +186,36 @@ class AgentHarness:
 
     def follow_up_message(self, message: Message) -> QueueUpdated:
         """Queue a detached user message for follow-up without changing the transcript."""
-        self._require_user_queue_message(message)
-        self._require_queue_capacity(message)
-        self._follow_up_queue.append(message.model_copy(deep=True))
-        self._bump_queue_revision()
+        self._enqueue("follow_up", message)
         return self.queue_updated_event()
 
     def set_steering_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many steering messages a future drain will inject."""
         self._config = replace(self._config, steering_mode=mode)
-        self._bump_queue_revision()
+        self._queues.mark_changed()
         return self.queue_updated_event()
 
     def set_follow_up_mode(self, mode: QueueMode) -> QueueUpdated:
         """Set how many follow-up messages a future drain will inject."""
         self._config = replace(self._config, follow_up_mode=mode)
-        self._bump_queue_revision()
+        self._queues.mark_changed()
         return self.queue_updated_event()
 
     def pop_latest_steering(self) -> Message | None:
         """Remove and return the latest steering message for editing."""
-        if not self._steering_queue:
-            return None
-        self._bump_queue_revision()
-        return self._steering_queue.pop()
+        return self._queues.pop_latest("steering")
 
     def pop_latest_follow_up(self) -> Message | None:
         """Remove and return the latest follow-up message for editing."""
-        if not self._follow_up_queue:
-            return None
-        self._bump_queue_revision()
-        return self._follow_up_queue.pop()
+        return self._queues.pop_latest("follow_up")
 
     def clear_queue(self, kind: QueueKind) -> tuple[Message, ...]:
         """Clear one queue and return its previous contents in FIFO order."""
-        queue = self._queue_for(kind)
-        cleared = tuple(queue)
-        queue.clear()
-        self._bump_queue_revision()
-        return cleared
+        return self._queues.clear(kind)
 
     def clear_queues(self) -> QueuedMessages:
         """Clear both queues and return their previous contents."""
-        cleared = self.queued_messages
-        self._steering_queue.clear()
-        self._follow_up_queue.clear()
-        self._bump_queue_revision()
-        return cleared
+        return self._queues.clear_all()
 
     def drain_steering(self) -> tuple[QueueMessageInjected | QueueUpdated, ...]:
         """Inject the next steering batch before a provider request starts."""
@@ -281,12 +239,9 @@ class AgentHarness:
         Returns:
             QueueUpdated: Detached contents, drain modes, and the current owner-state token.
         """
-        return QueueUpdated(
-            steering=tuple(message.user_visible_content for message in self._steering_queue),
-            follow_up=tuple(message.user_visible_content for message in self._follow_up_queue),
+        return self._queues.updated_event(
             steering_mode=self._config.steering_mode,
             follow_up_mode=self._config.follow_up_mode,
-            token=self._queue_token,
         )
 
     def prompt(
@@ -495,9 +450,9 @@ class AgentHarness:
                     continue
 
                 queue_kind: QueueKind | None = None
-                if self._steering_queue:
+                if self._queues.has_messages("steering"):
                     queue_kind = "steering"
-                elif not run.turns.had_tool_calls and self._follow_up_queue:
+                elif not run.turns.had_tool_calls and self._queues.has_messages("follow_up"):
                     queue_kind = "follow_up"
 
                 injected_messages: list[Message] = []
@@ -628,20 +583,24 @@ class AgentHarness:
             return _AdvanceMode.DELIVER_CANCELLATION
         return None
 
+    def _enqueue(self, kind: QueueKind, message: Message) -> None:
+        self._queues.enqueue(
+            kind,
+            message,
+            max_messages=self._config.max_pending_queue_messages,
+            max_bytes=self._config.max_pending_queue_bytes,
+        )
+
     def _queued_batch(self, kind: QueueKind) -> tuple[Message, ...]:
-        queue = self._queue_for(kind)
-        batch = tuple(queue)
         mode = self._config.steering_mode if kind == "steering" else self._config.follow_up_mode
-        return batch[:1] if mode == "one_at_a_time" else batch
+        return self._queues.next_batch(kind, mode)
 
     def _inject_queued_message(
         self, kind: QueueKind, expected: Message
     ) -> QueueMessageInjected | None:
-        queue = self._queue_for(kind)
-        if not queue or queue[0] is not expected:
+        message = self._queues.take_next(kind, expected)
+        if message is None:
             return None
-        message = queue.popleft()
-        self._bump_queue_revision()
         self._messages.append(message)
         return QueueMessageInjected(
             kind=kind,
@@ -650,41 +609,8 @@ class AgentHarness:
             timestamp=message.created_at,
         )
 
-    def _bump_queue_revision(self) -> None:
-        """Invalidate the queue token so stale queue edits can be detected."""
-        self._queue_token = uuid4().hex
-
     def _ensure_idle(self) -> None:
         if self._running:
             raise RuntimeError(
                 "AgentHarness is already running; use steer() or follow_up() to queue messages"
             )
-
-    def _queue_for(self, kind: QueueKind) -> deque[Message]:
-        if kind == "steering":
-            return self._steering_queue
-        if kind == "follow_up":
-            return self._follow_up_queue
-        raise ValueError(f"Unsupported queue kind: {kind!r}")
-
-    def _require_queue_capacity(self, message: Message) -> None:
-        pending = len(self._steering_queue) + len(self._follow_up_queue)
-        maximum = self._config.max_pending_queue_messages
-        if pending >= maximum:
-            raise RuntimeError(f"Agent queue is full (maximum {maximum} pending messages)")
-        pending_bytes = self.pending_message_bytes
-        message_bytes = self._queued_message_size(message)
-        maximum_bytes = self._config.max_pending_queue_bytes
-        if message_bytes > maximum_bytes - pending_bytes:
-            raise RuntimeError(
-                f"Agent queue byte limit exceeded (maximum {maximum_bytes} pending bytes)"
-            )
-
-    @staticmethod
-    def _queued_message_size(message: Message) -> int:
-        return len(message.model_dump_json().encode("utf-8"))
-
-    @staticmethod
-    def _require_user_queue_message(message: Message) -> None:
-        if message.role != "user":
-            raise ValueError("AgentHarness queues require a user message")

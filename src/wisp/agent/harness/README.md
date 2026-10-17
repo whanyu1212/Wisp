@@ -65,7 +65,8 @@ reuses the already-detached public transcript snapshot rather than copying it ag
 
 | Module | Read it when changing |
 | --- | --- |
-| [`runner.py`](./runner.py) | Prompt and continuation flow, transcript updates, queue behavior, cancellation, or loop-event projection |
+| [`runner.py`](./runner.py) | Prompt and continuation flow, transcript updates, when queues drain, cancellation, or loop-event projection |
+| [`queues.py`](./queues.py) | Queue contents, capacity checks, drain batch selection, or the revision token every queue change replaces |
 | [`boundaries.py`](./boundaries.py) | Session-owned compaction decisions, context-overflow recovery, or synchronization between loop context and the harness transcript |
 | [`config.py`](./config.py) | Provider/tool dependencies, runtime limits, queue modes, or queue capacity |
 | [`__init__.py`](./__init__.py) | Supported public imports |
