@@ -296,10 +296,12 @@ class ConfiguredToolExecutor:
         async def run() -> ToolExecutionEnded:
             return _execution_ended(tool_call, outcome)
 
+        # The runner only publishes an outcome decided during preparation and never
+        # reaches the tool, so a rejected call must not force its batch to run serially.
         return PreparedToolExecution(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            parallel_safe=False,
+            parallel_safe=True,
             runner=run,
         )
 

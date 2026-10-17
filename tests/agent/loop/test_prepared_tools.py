@@ -798,3 +798,206 @@ def test_one_sequential_call_makes_whole_batch_serial() -> None:
 
     assert started == ["call-1", "call-2", "call-3"]
     assert max_active == 1
+
+
+class _LabelTool:
+    """Hand each call's ``label`` argument to a shared test callback."""
+
+    description = "Run a labelled test callback."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def __init__(
+        self,
+        name: str,
+        safety: ToolSafety,
+        callback: Callable[[str], Awaitable[None]],
+    ) -> None:
+        self.name = name
+        self.safety = safety
+        self._callback = callback
+
+    async def run(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult:
+        del context
+        label = str(arguments["label"])
+        await self._callback(label)
+        return ToolResult(text=label)
+
+
+class _ArgumentRejectingTool:
+    name = "checked"
+    safety: ToolSafety = "read"
+    description = "Reject every call during preparation."
+    input_schema: dict[str, object] = {"type": "object", "properties": {}}
+
+    def check_arguments(self, arguments: Mapping[str, object]) -> str | None:
+        del arguments
+        return "label is not accepted"
+
+    async def run(
+        self,
+        arguments: Mapping[str, object],
+        context: ToolContext,
+    ) -> ToolResult:
+        raise AssertionError("a call rejected during preparation must not run")
+
+
+def _rejecting_executor(callback: Callable[[str], Awaitable[None]]) -> ConfiguredToolExecutor:
+    """Build an executor whose tools cover each way preparation rejects a call.
+
+    ``slow`` is parallel safe and ``side_effect`` is a valid sequential tool, like
+    bash or write. ``blocked`` is denied by policy, ``guarded`` is denied approval,
+    and ``checked`` rejects its arguments.
+    """
+
+    registry = ToolRegistry()
+    parallel = ToolExecutionMetadata(parallel_safe=True)
+    registry.register(_LabelTool("slow", "read", callback), execution=parallel)
+    registry.register(_LabelTool("side_effect", "mutating", callback))
+    registry.register(_LabelTool("guarded", "mutating", callback))
+    registry.register(_LabelTool("blocked", "read", callback), execution=parallel)
+    registry.register(_ArgumentRejectingTool(), execution=parallel)
+    return ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=Path.cwd(), protected_paths=()),
+        policy=ToolPolicy.allow_tool_names({"slow", "side_effect", "guarded", "checked"}),
+        approval_policy=ToolApprovalPolicy.approve_tool_names({"side_effect"}),
+    )
+
+
+async def _run_tool_batch(
+    calls: tuple[ToolCall, ...], executor: ConfiguredToolExecutor
+) -> list[object]:
+    with anyio.fail_after(2):
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(
+                    provider=_scripted_tool_batch_provider(calls),
+                    tool_executor=executor,
+                ),
+                messages=(Message(role="user", content="hi"),),
+            )
+        ]
+
+
+def _labelled_call(call_id: str, name: str) -> ToolCall:
+    return ToolCall(call_id=call_id, name=name, arguments={"label": call_id})
+
+
+@pytest.mark.parametrize(
+    ("rejected_call", "failure_code"),
+    [
+        pytest.param(_labelled_call("rejected", "missing"), "unknown_tool", id="unknown-tool"),
+        pytest.param(
+            ToolCall(call_id="rejected", name="slow", arguments={}, parse_error="bad JSON"),
+            "invalid_arguments",
+            id="parse-error",
+        ),
+        pytest.param(
+            _labelled_call("rejected", "checked"), "invalid_arguments", id="invalid-arguments"
+        ),
+        pytest.param(_labelled_call("rejected", "blocked"), "policy_denied", id="policy-denied"),
+        pytest.param(
+            _labelled_call("rejected", "guarded"), "approval_denied", id="approval-denied"
+        ),
+    ],
+)
+def test_rejected_call_keeps_parallel_safe_siblings_concurrent(
+    rejected_call: ToolCall,
+    failure_code: str,
+) -> None:
+    calls = (
+        _labelled_call("slow-1", "slow"),
+        rejected_call,
+        _labelled_call("slow-2", "slow"),
+        _labelled_call("slow-3", "slow"),
+    )
+
+    async def run() -> tuple[list[object], list[str]]:
+        started: list[str] = []
+        completed: list[str] = []
+        all_started = anyio.Event()
+        others_completed = anyio.Event()
+
+        async def callback(label: str) -> None:
+            # Every slow call must be running at once to pass the barrier, so a
+            # serial batch times out. slow-1 then finishes last.
+            started.append(label)
+            if len(started) == 3:
+                all_started.set()
+            await all_started.wait()
+            if label == "slow-1":
+                await others_completed.wait()
+            completed.append(label)
+            if len(completed) == 2:
+                others_completed.set()
+
+        events = await _run_tool_batch(calls, _rejecting_executor(callback))
+        return events, completed
+
+    events, completed = anyio.run(run)
+
+    assert completed[-1] == "slow-1"
+    published = [
+        (type(event).__name__, event.call_id)
+        for event in events
+        if isinstance(event, ToolExecutionEnded | ToolResultReady)
+    ]
+    assert published == [
+        (kind, call.call_id) for call in calls for kind in ("ToolExecutionEnded", "ToolResultReady")
+    ]
+    terminals = {event.call_id: event for event in events if isinstance(event, ToolExecutionEnded)}
+    assert terminals["rejected"].is_error
+    assert terminals["rejected"].failure_code == failure_code
+    assert [terminals[f"slow-{index}"].output for index in range(1, 4)] == [
+        "slow-1",
+        "slow-2",
+        "slow-3",
+    ]
+    assert_settled_tool_calls(events, tuple(call.call_id for call in calls))
+
+
+@pytest.mark.parametrize(
+    "first_call",
+    [
+        pytest.param(_labelled_call("first", "slow"), id="parallel-safe-sibling"),
+        pytest.param(_labelled_call("first", "guarded"), id="approval-denied-sibling"),
+    ],
+)
+def test_valid_side_effecting_call_keeps_batch_serial(first_call: ToolCall) -> None:
+    calls = (
+        first_call,
+        _labelled_call("side-1", "side_effect"),
+        _labelled_call("slow-2", "slow"),
+        _labelled_call("side-2", "side_effect"),
+    )
+
+    async def run() -> tuple[list[object], list[str], int]:
+        started: list[str] = []
+        active = 0
+        max_active = 0
+
+        async def callback(label: str) -> None:
+            nonlocal active, max_active
+            started.append(label)
+            active += 1
+            max_active = max(max_active, active)
+            await anyio.sleep(0)
+            await anyio.sleep(0)
+            active -= 1
+
+        events = await _run_tool_batch(calls, _rejecting_executor(callback))
+        return events, started, max_active
+
+    events, started, max_active = anyio.run(run)
+
+    ran = [call.call_id for call in calls if call.name != "guarded"]
+    assert started == ran
+    assert max_active == 1
+    assert [event.call_id for event in events if isinstance(event, ToolExecutionEnded)] == [
+        call.call_id for call in calls
+    ]
