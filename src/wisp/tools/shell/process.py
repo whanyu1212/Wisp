@@ -11,9 +11,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -25,6 +27,7 @@ from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
+_POSIX_EXIT_PIPE_ATTR = "_wisp_posix_exit_pipe"
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
 _WINDOWS_INVALID_HANDLE_VALUE = cast(int, ctypes.c_void_p(-1).value)
 _WINDOWS_RESUME_FAILED = 0xFFFFFFFF
@@ -141,6 +144,28 @@ class ProcessResult:
 
 
 @dataclass(frozen=True)
+class _PosixExitPipe:
+    """Read end of a pipe whose write end every process in a POSIX command tree inherits.
+
+    The write end is passed next to the jobs-file descriptor and nothing writes to it.
+    End-of-file on the non-blocking read end therefore proves that no process still
+    holds an inherited tracking descriptor, without scanning every process's open files.
+    """
+
+    read_fd: int
+    close: weakref.finalize[[int], asyncio.subprocess.Process]
+    """Closes ``read_fd`` exactly once, explicitly or when the process object is collected."""
+
+
+class _PosixGroupSignal(Enum):
+    """Outcome of signalling the process group a POSIX command started."""
+
+    SENT = "sent"
+    NO_MEMBERS = "no_members"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
 class _LimitedStreamResult:
     output: bytes
     truncated: bool = False
@@ -248,14 +273,19 @@ async def _run_shell(
 
 async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subprocess.Process:
     posix_jobs_file: Path | None = None
-    posix_jobs_fd: int | None = None
+    posix_inherited_fds: tuple[int, ...] = ()
+    posix_exit_pipe_read_fd: int | None = None
     if os.name == "posix":
         with tempfile.NamedTemporaryFile(prefix="wisp-jobs-", delete=False) as jobs_file:
             posix_jobs_file = Path(jobs_file.name)
         try:
-            posix_jobs_fd = _open_posix_jobs_fd(posix_jobs_file)
+            posix_inherited_fds = (_open_posix_jobs_fd(posix_jobs_file),)
+            posix_exit_pipe_read_fd, exit_pipe_write_fd = _open_posix_exit_pipe()
+            posix_inherited_fds = (*posix_inherited_fds, exit_pipe_write_fd)
         except OSError as exc:
-            _remove_posix_jobs_file(posix_jobs_file)
+            _release_unstarted_posix_tracking(
+                posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
+            )
             raise ToolError(f"Failed to start command: {exc}") from exc
         command = _wrap_posix_shell_command(command, posix_jobs_file)
     try:
@@ -274,9 +304,8 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
             )
         else:
             process_kwargs: dict[str, Any] = {}
-            if os.name == "posix":
-                if posix_jobs_fd is not None:
-                    process_kwargs["pass_fds"] = (posix_jobs_fd,)
+            if posix_inherited_fds:
+                process_kwargs["pass_fds"] = posix_inherited_fds
             if os.name == "posix" and sys.platform.startswith("linux"):
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
@@ -299,23 +328,29 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                     **process_kwargs,
                 )
     except OSError as exc:
-        if posix_jobs_fd is not None:
-            _close_posix_fd(posix_jobs_fd)
-        if posix_jobs_file is not None:
-            _remove_posix_jobs_file(posix_jobs_file)
+        _release_unstarted_posix_tracking(
+            posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
+        )
         raise ToolError(f"Failed to start command: {exc}") from exc
     except BaseException:
-        if posix_jobs_fd is not None:
-            _close_posix_fd(posix_jobs_fd)
-        if posix_jobs_file is not None:
-            _remove_posix_jobs_file(posix_jobs_file)
+        _release_unstarted_posix_tracking(
+            posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
+        )
         raise
 
-    if posix_jobs_fd is not None:
-        _close_posix_fd(posix_jobs_fd)
+    # Only the started process tree may hold the inherited descriptors; keeping a copy
+    # here would make the exit pipe never report end-of-file.
+    for fd in posix_inherited_fds:
+        _close_posix_fd(fd)
 
     if posix_jobs_file is not None:
         setattr(process, _POSIX_JOBS_FILE_ATTR, posix_jobs_file)
+    if posix_exit_pipe_read_fd is not None:
+        exit_pipe = _PosixExitPipe(
+            read_fd=posix_exit_pipe_read_fd,
+            close=weakref.finalize(process, _close_posix_fd, posix_exit_pipe_read_fd),
+        )
+        setattr(process, _POSIX_EXIT_PIPE_ATTR, exit_pipe)
 
     if os.name == "nt":
         try:
@@ -354,10 +389,26 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     signal_traps = _posix_signal_traps()
     child_command = f"{recorder_prelude}{signal_traps}eval {shlex.quote(command)}"
     quoted_child_command = shlex.quote(child_command)
+    # The recorder reaps its own interval sleep when stopped. A plain kill would orphan
+    # that sleep, which holds the command's output pipes and tracking descriptors for up
+    # to one interval and so delays both output EOF and the clean-exit cleanup fast path.
+    # A stop that lands between starting the sleep and saving its pid only costs latency.
+    # Sleeping before the first sample lets a short command stop the recorder while it
+    # waits; a stop during a sample waits for that sample's pgrep to finish. The child's
+    # EXIT trap and the final sample below still record jobs for short commands.
+    record_loop = (
+        "__wisp_record_loop() { "
+        "__wisp_sleep_pid=; "
+        'trap \'[ -z "$__wisp_sleep_pid" ] || '
+        '{ kill "$__wisp_sleep_pid"; wait "$__wisp_sleep_pid"; } 2>/dev/null; '
+        "exit 0' TERM; "
+        'while :; do sleep 0.25 & __wisp_sleep_pid=$!; wait "$__wisp_sleep_pid"; '
+        "__wisp_sleep_pid=; __wisp_record_jobs; done; }; "
+    )
     return "".join(
         (
             recorder_prelude,
-            "__wisp_record_loop() { while :; do __wisp_record_jobs; sleep 0.25; done; }; ",
+            record_loop,
             "__wisp_record_loop & __wisp_recorder_pid=$!; ",
             signal_traps,
             f"/bin/sh -c {quoted_child_command}; ",
@@ -423,25 +474,54 @@ def _posix_signal_traps() -> str:
 
 
 def _open_posix_jobs_fd(jobs_file: Path) -> int:
-    import fcntl
-
     fd = os.open(jobs_file, os.O_WRONLY | os.O_APPEND)
     try:
-        last_error: OSError | None = None
-        for minimum_fd in _posix_jobs_fd_minimums():
-            try:
-                jobs_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, minimum_fd)
-            except OSError as exc:
-                if exc.errno not in (errno.EINVAL, errno.EMFILE):
-                    raise
-                last_error = exc
-                continue
-            return int(jobs_fd)
-        if last_error is not None:
-            raise last_error
-        raise OSError(errno.EMFILE, "no file descriptor available for POSIX job tracking")
+        return _duplicate_posix_fd_high(fd)
     finally:
         _close_posix_fd(fd)
+
+
+def _open_posix_exit_pipe() -> tuple[int, int]:
+    """Create the exit pipe for one command.
+
+    Returns:
+        tuple[int, int]: The private non-blocking read end, and a high inheritable
+            duplicate of the write end to pass to the command.
+
+    Raises:
+        OSError: If the pipe or the high descriptor cannot be created.
+    """
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_blocking(read_fd, False)
+        inherited_write_fd = _duplicate_posix_fd_high(write_fd)
+    except BaseException:
+        _close_posix_fd(read_fd)
+        raise
+    finally:
+        _close_posix_fd(write_fd)
+    return read_fd, inherited_write_fd
+
+
+def _duplicate_posix_fd_high(fd: int) -> int:
+    """Duplicate ``fd`` as an inheritable descriptor above the range commands usually use."""
+
+    import fcntl
+
+    last_error: OSError | None = None
+    for minimum_fd in _posix_jobs_fd_minimums():
+        try:
+            high_fd = fcntl.fcntl(fd, fcntl.F_DUPFD, minimum_fd)
+        except OSError as exc:
+            if exc.errno not in (errno.EINVAL, errno.EMFILE):
+                raise
+            last_error = exc
+            continue
+        return int(high_fd)
+    if last_error is not None:
+        raise last_error
+    raise OSError(errno.EMFILE, "no file descriptor available for POSIX job tracking")
 
 
 def _posix_jobs_fd_minimums() -> range:
@@ -463,6 +543,19 @@ def _close_posix_fd(fd: int) -> None:
         os.close(fd)
     except OSError:
         return
+
+
+def _release_unstarted_posix_tracking(
+    jobs_file: Path | None,
+    inherited_fds: tuple[int, ...],
+    exit_pipe_read_fd: int | None,
+) -> None:
+    for fd in inherited_fds:
+        _close_posix_fd(fd)
+    if exit_pipe_read_fd is not None:
+        _close_posix_fd(exit_pipe_read_fd)
+    if jobs_file is not None:
+        _remove_posix_jobs_file(jobs_file)
 
 
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
@@ -497,14 +590,17 @@ async def _terminate_process_tree(
 
 
 async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
-    group_term_succeeded = await asyncio.to_thread(
+    group_term = await asyncio.to_thread(
         _signal_posix_process_group,
         process,
         signal.SIGTERM,
     )
-    if not group_term_succeeded:
+    if group_term is _PosixGroupSignal.FAILED:
         return False
-    await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
+    if group_term is _PosixGroupSignal.SENT:
+        # Only the process group receives SIGTERM, so the grace period is needed only when
+        # it had members to signal; detached survivors go straight to SIGKILL either way.
+        await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
     return await asyncio.to_thread(_finish_posix_process_tree_termination, process)
 
 
@@ -519,10 +615,10 @@ def _finish_posix_process_tree_termination(process: asyncio.subprocess.Process) 
     descendants_recorded = _record_posix_descendant_pids(process)
     if not descendants_recorded:
         return False
-    group_kill_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
+    group_kill = _signal_posix_process_group(process, signal.SIGKILL)
     recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
-    if group_kill_succeeded and recorded_kill_succeeded:
-        _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
+    if group_kill is not _PosixGroupSignal.FAILED and recorded_kill_succeeded:
+        _release_posix_tracking(process)
         return True
     return False
 
@@ -530,26 +626,35 @@ def _finish_posix_process_tree_termination(process: asyncio.subprocess.Process) 
 def _signal_posix_process_group(
     process: asyncio.subprocess.Process,
     selected_signal: signal.Signals,
-) -> bool:
+) -> _PosixGroupSignal:
     if process.returncode is not None and not _posix_group_has_members_without_live_leader(
         process.pid
     ):
-        return True
+        return _PosixGroupSignal.NO_MEMBERS
     try:
         os.killpg(process.pid, selected_signal)
     except ProcessLookupError:
-        return True
+        return _PosixGroupSignal.NO_MEMBERS
     except PermissionError:
         try:
             if process.returncode is None:
                 process.kill()
         except (ProcessLookupError, PermissionError):
             pass
-        return False
-    return True
+        return _PosixGroupSignal.FAILED
+    return _PosixGroupSignal.SENT
 
 
 def _posix_group_has_members_without_live_leader(pgid: int) -> bool:
+    # A group whose leader has exited cannot gain members once it is empty: joining
+    # needs an existing member to fork or a live group to setpgid into. A probe that
+    # finds no member at all therefore settles the answer without a process scan.
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
     try:
         completed = subprocess.run(
             ["ps", "-eo", "pid=,pgid="],
@@ -692,7 +797,7 @@ def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> set[int] |
             pids.extend(descendant_pids)
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if isinstance(jobs_file, Path):
-        holder_pids = _posix_jobs_file_holder_pids(jobs_file)
+        holder_pids = _posix_current_jobs_file_holder_pids(process, jobs_file)
         if holder_pids is None:
             return None
         pids.extend(holder_pids)
@@ -709,7 +814,7 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
             return False
     else:
         descendant_pids = ()
-    holder_pids = _posix_jobs_file_holder_pids(jobs_file)
+    holder_pids = _posix_current_jobs_file_holder_pids(process, jobs_file)
     if holder_pids is None:
         return False
     pids = tuple(dict.fromkeys((*descendant_pids, *holder_pids)))
@@ -722,6 +827,42 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
     except OSError:
         return False
     return True
+
+
+def _posix_current_jobs_file_holder_pids(
+    process: asyncio.subprocess.Process,
+    jobs_file: Path,
+) -> tuple[int, ...] | None:
+    """Return the processes holding the command's jobs file.
+
+    Scanning every process's open files takes 100 ms or more on macOS, so the scan is
+    skipped when the exit pipe proves that no inherited tracking descriptor remains
+    open. That is the usual state after a command exits cleanly.
+
+    Args:
+        process (asyncio.subprocess.Process): The command's shell leader.
+        jobs_file (Path): The jobs file whose descriptor the command tree inherited.
+
+    Returns:
+        tuple[int, ...] | None: Holder pids, empty when none remain, or None when the
+            holders cannot be determined.
+    """
+
+    if _posix_exit_pipe_reached_eof(process):
+        return ()
+    return _posix_jobs_file_holder_pids(jobs_file)
+
+
+def _posix_exit_pipe_reached_eof(process: asyncio.subprocess.Process) -> bool:
+    exit_pipe = getattr(process, _POSIX_EXIT_PIPE_ATTR, None)
+    if not isinstance(exit_pipe, _PosixExitPipe) or not exit_pipe.close.alive:
+        return False
+    try:
+        # Nothing writes to the pipe, so any outcome other than end-of-file (pending
+        # data, EAGAIN, or an error) keeps the full holder scan.
+        return os.read(exit_pipe.read_fd, 1) == b""
+    except OSError:
+        return False
 
 
 def _posix_jobs_file_holder_pids(jobs_file: Path) -> tuple[int, ...] | None:
@@ -888,6 +1029,13 @@ def _parse_posix_pid_tokens(tokens: Sequence[str]) -> tuple[int, ...]:
     return tuple(pids)
 
 
+def _release_posix_tracking(process: asyncio.subprocess.Process) -> None:
+    _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
+    exit_pipe = getattr(process, _POSIX_EXIT_PIPE_ATTR, None)
+    if isinstance(exit_pipe, _PosixExitPipe):
+        exit_pipe.close()
+
+
 def _remove_posix_jobs_file(jobs_file: object) -> None:
     if not isinstance(jobs_file, Path):
         return
@@ -914,10 +1062,10 @@ def _kill_process_tree(process: asyncio.subprocess.Process) -> bool:
         # process-group id is the leader pid. Descendants can outlive that leader
         # while still holding its stdout/stderr pipes open, so signal the group
         # even after asyncio has observed a return code for the leader.
-        group_succeeded = _signal_posix_process_group(process, signal.SIGKILL)
+        group_kill = _signal_posix_process_group(process, signal.SIGKILL)
         recorded_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
-        if group_succeeded and recorded_succeeded:
-            _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
+        if group_kill is not _PosixGroupSignal.FAILED and recorded_succeeded:
+            _release_posix_tracking(process)
             return True
         return False
     if os.name == "nt":
