@@ -16,7 +16,9 @@ from tests.support.agent_runtime import (
     assert_turn_terminals,
 )
 from wisp.agent.harness import AgentHarness
+from wisp.agent.harness.boundaries import HarnessBoundaryContext
 from wisp.agent.messages import Message
+from wisp.agent.request_boundary import ContextOverflowSnapshot, RequestBoundaryDecision
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     ToolExecutionEvent,
@@ -36,6 +38,7 @@ from wisp.providers.base import (
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
     ProviderToolCallCompleted,
@@ -638,3 +641,220 @@ def test_cancel_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None
     assert len([event for event in events if isinstance(event, TurnCompleted)]) == 1
     assert not harness.is_running
     assert not harness.cancel()
+
+
+def test_repeated_cancel_settles_once() -> None:
+    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
+        provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
+        harness = build_harness(provider)
+        events: list[object] = []
+
+        async def collect() -> None:
+            events.extend([event async for event in harness.prompt("stop now")])
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await provider.waiting.wait()
+                assert harness.cancel()
+                assert harness.cancel()
+        return harness, provider, events
+
+    harness, provider, events = anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "error",
+        "turn.completed",
+    ]
+    assert provider.closed
+    assert harness.is_running is False
+    assert harness.cancel() is False
+    assert_cancellation_settled(events)
+
+
+def test_cancel_during_tool_settlement() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+                ProviderResponseCompleted(
+                    content="checking",
+                    tool_calls=calls,
+                    finish_reason="tool_calls",
+                    response_id="response-1",
+                ),
+            ]
+        ]
+    )
+
+    async def run() -> tuple[AgentHarness, list[object], list[bool]]:
+        all_started = anyio.Event()
+        harness = build_harness(provider, executor=BlockingPreparedExecutor(all_started))
+        events: list[object] = []
+        repeated: list[bool] = []
+
+        async def collect() -> None:
+            async for event in harness.prompt("initial"):
+                events.append(event)
+                if isinstance(event, ToolResultReady) and event.call_id == "call-1":
+                    # Cancellation is already being delivered; asking again must not
+                    # interrupt the shielded settlement of the remaining call.
+                    repeated.append(harness.cancel())
+
+        with anyio.fail_after(2):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await all_started.wait()
+                assert harness.cancel()
+        return harness, events, repeated
+
+    harness, events, repeated = anyio.run(run)
+
+    assert repeated == [True]
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(event.call_id, event.process_state) for event in results] == [
+        ("call-1", "cancelled"),
+        ("call-2", "cancelled"),
+    ]
+    assert [event.message for event in events if isinstance(event, ErrorEvent)] == [
+        "Agent run cancelled"
+    ]
+    assert [
+        (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
+    ] == [("cancelled", "cancelled")]
+    assert [(message.role, message.tool_call_id) for message in harness.messages] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("tool", "call-2"),
+    ]
+    assert harness.is_running is False
+    assert_cancellation_settled(events)
+    assert_settled_tool_calls(events, ("call-1", "call-2"))
+
+
+class BlockingBoundaryPreparer:
+    def __init__(self) -> None:
+        self.entered = anyio.Event()
+        self.cancelled = False
+
+    async def prepare_boundary(
+        self, *, context: HarnessBoundaryContext
+    ) -> RequestBoundaryDecision | None:
+        del context
+        self.entered.set()
+        try:
+            await anyio.sleep_forever()
+        except anyio.get_cancelled_exc_class():
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+
+def test_cancel_interrupts_boundary_preparer() -> None:
+    provider = ScriptedProvider(
+        [
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="unused")],
+        ]
+    )
+    harness = build_harness(provider)
+    preparer = BlockingBoundaryPreparer()
+
+    async def run() -> list[object]:
+        events: list[object] = []
+
+        async def collect() -> None:
+            stream = harness.prompt("initial", boundary_preparer=preparer)
+            events.extend([event async for event in stream])
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await preparer.entered.wait()
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    assert preparer.cancelled
+    assert len(provider.calls) == 1
+    assert [event.type for event in events[-2:]] == ["turn.completed", "error"]
+    assert [event.outcome for event in events if isinstance(event, TurnCompleted)] == ["completed"]
+    assert [(message.role, message.content) for message in harness.messages] == [
+        ("user", "initial"),
+        ("assistant", "answer"),
+    ]
+    assert harness.is_running is False
+    assert harness.cancel() is False
+    assert_cancellation_settled(events)
+
+
+class BlockingOverflowHook:
+    def __init__(self) -> None:
+        self.entered = anyio.Event()
+        self.cancelled = False
+
+    async def recover_context_overflow(
+        self, *, snapshot: ContextOverflowSnapshot
+    ) -> RequestBoundaryDecision | None:
+        del snapshot
+        self.entered.set()
+        try:
+            await anyio.sleep_forever()
+        except anyio.get_cancelled_exc_class():
+            self.cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+
+def test_cancel_interrupts_overflow_recovery() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseFailed(
+                    message="context window exceeded", failure_kind="context_overflow"
+                ),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="unused")],
+        ]
+    )
+    harness = build_harness(provider)
+    hook = BlockingOverflowHook()
+
+    async def run() -> list[object]:
+        events: list[object] = []
+
+        async def collect() -> None:
+            stream = harness.prompt("initial", context_overflow_hook=hook)
+            events.extend([event async for event in stream])
+
+        with anyio.fail_after(1):
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(collect)
+                await hook.entered.wait()
+                assert harness.cancel()
+        return events
+
+    events = anyio.run(run)
+
+    assert hook.cancelled
+    assert len(provider.calls) == 1
+    assert "context.overflow" in [event.type for event in events]
+    # The loop never closed the rejected turn, so the harness publishes its terminals.
+    assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
+    assert [
+        (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
+    ] == [("cancelled", "cancelled")]
+    assert [message.role for message in harness.messages] == ["user"]
+    assert harness.is_running is False
+    assert_cancellation_settled(events)
