@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from json import JSONDecodeError
@@ -48,6 +48,12 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
 _CODEX_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+# How long a stream that ended at its terminal event is read on to its end. The
+# pooled connection is kept for the next request only if the response is read
+# to EOF; otherwise httpcore closes it and the next turn opens TCP and TLS again.
+# The bound stays below the cost of a new connection, so a server that holds the
+# stream open costs no more than reconnecting would.
+_STREAM_DRAIN_SECONDS = 0.25
 # Responses whose output items are kept in memory for replay on later prompts.
 # Sessions also save each response's items with its row (see native_output_for),
 # so this bound matters only for callers that keep transcripts without a session.
@@ -98,6 +104,7 @@ class OpenAICodexProvider:
         )
         self._base_url = base_url
         self._client = client
+        self._client_is_injected = client is not None
         self._retry_policy = retry_policy or RetryPolicy()
         self._continuations = ContinuationStore[tuple[dict[str, object], ...]]()
         self._native_outputs = ContinuationStore[NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
@@ -445,27 +452,76 @@ class OpenAICodexProvider:
         body: Mapping[str, object],
         headers: Mapping[str, str],
     ) -> AsyncIterator[AsyncIterator[dict[str, object]]]:
-        owns_client = self._client is None
-        client = self._client or httpx.AsyncClient(timeout=_CODEX_TIMEOUT)
+        """Open one Codex response stream on the shared HTTP client.
+
+        Each request closes its own response; the client and its connection pool
+        stay open for later requests until ``aclose``.
+
+        Args:
+            body (Mapping[str, object]): JSON request body.
+            headers (Mapping[str, str]): Request headers, including auth and session.
+
+        Yields:
+            AsyncIterator[dict[str, object]]: Parsed SSE events of the response.
+
+        Raises:
+            _CodexHTTPError: If the response status is not successful.
+            httpx.HTTPError: If the request or its response stream fails.
+        """
+
+        async with self._http_client().stream(
+            "POST",
+            _resolve_codex_url(self._base_url),
+            headers=headers,
+            json=body,
+        ) as response:
+            if not response.is_success:
+                text = await response.aread()
+                raise _CodexHTTPError(
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    body=text,
+                    reason=text.decode("utf-8", errors="replace") or response.reason_phrase,
+                )
+            lines = response.aiter_lines()
+            events = _sse_events(lines)
+            yield events
+            # Reached only when the caller left the stream normally, typically
+            # at its terminal event. Errors and cancellation skip this and let
+            # httpcore discard the connection as before.
+            await events.aclose()
+            await _drain_lines(lines)
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=_CODEX_TIMEOUT)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Close the Wisp-owned HTTP client and its pooled connections.
+
+        An injected client is left open for its owner. A later request creates a
+        new owned client.
+        """
+
+        if self._client_is_injected or self._client is None:
+            return
+        client = self._client
+        self._client = None
+        await client.aclose()
+
+
+async def _drain_lines(lines: AsyncIterator[str]) -> None:
+    """Read a finished response to EOF within a short bound so its connection is pooled."""
+
+    with anyio.move_on_after(_STREAM_DRAIN_SECONDS):
         try:
-            async with client.stream(
-                "POST",
-                _resolve_codex_url(self._base_url),
-                headers=headers,
-                json=body,
-            ) as response:
-                if not response.is_success:
-                    text = await response.aread()
-                    raise _CodexHTTPError(
-                        status_code=response.status_code,
-                        headers=response.headers,
-                        body=text,
-                        reason=text.decode("utf-8", errors="replace") or response.reason_phrase,
-                    )
-                yield _sse_events(response.aiter_lines())
-        finally:
-            if owns_client:
-                await client.aclose()
+            async for _line in lines:
+                pass
+        except httpx.HTTPError:
+            # The response already completed; a failed drain only loses the
+            # connection, which httpcore then closes.
+            pass
 
 
 def _codex_retry_decision(exc: ProviderError | httpx.HTTPError) -> RetryDecision | None:
@@ -746,7 +802,7 @@ def _resolve_codex_url(base_url: str) -> str:
     return f"{normalized}/codex/responses"
 
 
-async def _sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, object]]:
+async def _sse_events(lines: AsyncIterator[str]) -> AsyncGenerator[dict[str, object], None]:
     data_lines: list[str] = []
     async for raw_line in lines:
         line = raw_line.rstrip("\r")
