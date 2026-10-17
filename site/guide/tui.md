@@ -656,4 +656,7 @@ within-page searches, and failures appear with the reply, with bounded source
 titles and hosts. This metadata is restored when loading saved replies.
 
 Reply costs marked `cost ≥…` exclude provider search fees and are lower bounds,
-not complete prices. An unavailable token estimate is shown as `cost unknown`.
+not complete prices. An unavailable token estimate is shown as `cost unknown`,
+except on responses containing only tool calls and no text, where the label is
+omitted to avoid a standalone placeholder before the tools. Usage and cost
+metadata are still recorded.
