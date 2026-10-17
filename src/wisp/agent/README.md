@@ -115,11 +115,14 @@ assistant/tool tail produced so far.
 - **Native continuation**: continuing from the cursor instead of resending everything. Appending
   user messages to it needs an adapter that declares `supports_continuation_messages`.
 - **Continuation tail**: the assistant and tool rows, plus any injected user messages, produced
-  since the current base. Each request sends the base followed by this tail.
+  since the current base. The base followed by the tail is the logical transcript. What goes on the
+  wire is the adapter's choice: with a cursor, a stateful adapter such as OpenAI sends only the new
+  tool outputs and messages, while a stateless one such as Anthropic rebuilds the replay locally.
 - **Folding**: with no usable cursor, the loop moves a text-only tail into the base and sends a
-  fresh request. A tail containing tool calls is never flattened; that boundary is rejected
-  instead. `_apply_continuation` in [`loop/continuation.py`](./loop/continuation.py) tabulates
-  every case.
+  fresh request. A tail containing tool calls is never flattened. Right after a tool batch, the next
+  request can still carry the pending tool results; adding extra messages there, or continuing at
+  any later boundary, is rejected.
+  `_apply_continuation` in [`loop/continuation.py`](./loop/continuation.py) tabulates every case.
 
 ## Request boundaries and live input
 
