@@ -8,6 +8,7 @@ import heapq
 import os
 import stat
 import sys
+import time
 from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -58,6 +59,9 @@ IGNORED_DIRS = {
 RG_MATCH_SEPARATOR = "\x1f"
 RG_CONTEXT_SEPARATOR = "\x1e"
 _REGEX_TIMEOUT_SECONDS = 0.05
+# The regex timeout is wall-clock, so a CPU-starved thread can exceed it on a benign line.
+# Each search may spend this much wall time re-trying timed-out lines before failing.
+_REGEX_RETRY_BUDGET_SECONDS = 1.0
 _IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
 _MAX_IGNORE_FILE_BYTES = 1_000_000
 _MAX_IGNORE_FILE_PATTERNS = 10_000
@@ -1445,16 +1449,32 @@ def _build_matcher(
             recovery_hint="Retry with literal=true when searching for exact text.",
         ) from exc
 
+    retry_budget = _REGEX_RETRY_BUDGET_SECONDS
+
+    def time_limit_error() -> ToolError:
+        return ToolError(
+            "grep pattern exceeded the regex evaluation time limit",
+            failure_code="invalid_pattern",
+            retryable=True,
+            recovery_hint="Retry with literal=true or a simpler regex pattern.",
+        )
+
     def regex_matcher(line: str) -> bool:
+        nonlocal retry_budget
         try:
             return expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS) is not None
         except TimeoutError as exc:
-            raise ToolError(
-                "grep pattern exceeded the regex evaluation time limit",
-                failure_code="invalid_pattern",
-                retryable=True,
-                recovery_hint="Retry with literal=true or a simpler regex pattern.",
-            ) from exc
+            if retry_budget <= 0:
+                raise time_limit_error() from exc
+        # Catastrophic backtracking also times out on the longer attempt, while a line that
+        # only lost the CPU finishes; the shared budget bounds patterns that are slow per line.
+        started = time.monotonic()
+        try:
+            return expression.search(line, timeout=retry_budget) is not None
+        except TimeoutError as exc:
+            raise time_limit_error() from exc
+        finally:
+            retry_budget -= time.monotonic() - started
 
     return regex_matcher
 

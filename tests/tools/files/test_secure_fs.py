@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import os
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -1185,12 +1186,15 @@ def test_find_cancellation_reaches_ancestor_ignore_loading(
 def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text(("a" * 200_000) + "!\n", encoding="utf-8")
 
+    started = time.monotonic()
     with pytest.raises(ToolError, match="regex evaluation time limit"):
         run_tool(
             GrepTool(),
             {"path": ".", "pattern": "(a+)+$"},
             ToolContext(cwd=tmp_path),
         )
+    # The first attempt plus one retry from the per-search budget, with slack for slow hosts.
+    assert time.monotonic() - started < 5
 
 
 def test_grep_rejects_unbounded_newline_free_file(tmp_path: Path) -> None:
