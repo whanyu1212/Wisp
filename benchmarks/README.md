@@ -212,7 +212,8 @@ uv run python -m benchmarks.builtin_tools \
 
 Fixture construction and one warmup call per path happen outside the measured interval. The read
 cases compare a first page with a page near end-of-file; `ls` and `find` retain sorted prefixes;
-grep covers a full-tree literal miss plus result-capped literal and regular-expression searches.
+grep covers full-tree literal, regular-expression, and case-insensitive misses plus result-capped
+literal and regular-expression searches.
 Use `--grep-backend python|native` for a controlled scanner comparison when the native extension is
 installed. All files live in a temporary directory. Every direct result is checked against the
 fixture; executor samples also reject tool errors and unexpected truncation before they are
@@ -222,6 +223,25 @@ The executor layer includes registry lookup, policy, approval bypass for pre-app
 result copying, normalization, promotion, summary generation, and construction of the terminal
 event. It deliberately stops before session persistence, RPC serialization, or rendering, which
 already have separate benchmarks. To isolate tool work, use `--tool-only`.
+
+Optional layers answer "what would native code buy?":
+
+```bash
+uv run python -m benchmarks.builtin_tools --root src --iterations 5 \
+  --batch-size 8 --external-ceiling --bash --grep-backend python \
+  --output profiles/builtin-tools-src-python.json
+```
+
+- `--root DIR` searches an existing tree inside the working directory instead of synthetic
+  fixtures, with the default protected paths. Only misses have an oracle (zero matches).
+- `--batch-size N` runs each scenario as one model tool batch of N identical calls through the
+  production `ToolBatch` scheduler twice: `batch` with the runtime's parallel-safe metadata, and
+  `batch.serial` with it removed so the same scheduler runs the calls one at a time. Their ratio
+  is the measured gain or loss from overlapping calls.
+- `--external-ceiling` times `rg` on the same full-tree scans, including process start, as an
+  all-native upper bound. CPU time for this layer excludes the child process.
+- `--bash` times end-to-end `bash` tool calls through a `ProcessSupervisor` next to a bare
+  `/bin/sh -c` subprocess, for a trivial command, 1 MiB of short lines, and one 1 MiB line.
 
 Normal timing runs leave `tracemalloc` disabled. Run allocation evidence separately:
 
