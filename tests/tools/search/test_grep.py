@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import sys
 import threading
+import time
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
@@ -22,8 +23,11 @@ def test_grep_regex_timeout_is_actionable(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
+    timeouts: list[float] = []
+
     class _TimingOutExpression:
-        def search(self, *_args: object, **_kwargs: object) -> object:
+        def search(self, _line: str, *, timeout: float) -> object:
+            timeouts.append(timeout)
             raise TimeoutError
 
     (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
@@ -37,6 +41,77 @@ def test_grep_regex_timeout_is_actionable(
     assert caught.value.failure_code == "invalid_pattern"
     assert caught.value.retryable is True
     assert caught.value.recovery_hint == "Retry with literal=true or a simpler regex pattern."
+    assert timeouts == [
+        search_tools_module._REGEX_TIMEOUT_SECONDS,
+        search_tools_module._REGEX_RETRY_BUDGET_SECONDS,
+    ]
+
+
+def test_grep_retries_lines_that_time_out_while_starved(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Simulates a CPU-starved thread: every first attempt misses the wall-clock limit, but
+    # the line itself is cheap, so the longer retry succeeds and spends almost no budget.
+    timeouts: list[float] = []
+
+    class _StarvedExpression:
+        def search(self, line: str, *, timeout: float) -> object | None:
+            timeouts.append(timeout)
+            if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
+                raise TimeoutError
+            return object() if line.startswith("match") else None
+
+    lines = [f"match {index}" if index % 2 == 0 else f"other {index}" for index in range(50)]
+    (tmp_path / "notes.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _StarvedExpression()
+    )
+
+    result = run_tool(GrepTool(), {"pattern": "^match"}, ToolContext(cwd=tmp_path))
+
+    assert result.data is not None
+    assert result.data["count"] == 25
+    assert len(timeouts) == 100
+    retry_timeouts = timeouts[1::2]
+    assert retry_timeouts[0] == search_tools_module._REGEX_RETRY_BUDGET_SECONDS
+    assert all(
+        search_tools_module._REGEX_TIMEOUT_SECONDS < retry_timeout
+        for retry_timeout in retry_timeouts
+    )
+
+
+def test_grep_fails_without_retry_once_the_retry_budget_is_spent(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # A pattern that is slow on every line but never exceeds the retry window must not
+    # turn one search into an unbounded scan.
+    timeouts: list[float] = []
+
+    class _SlowExpression:
+        def search(self, _line: str, *, timeout: float) -> object | None:
+            timeouts.append(timeout)
+            if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
+                raise TimeoutError
+            time.sleep(0.03)
+            return None
+
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    monkeypatch.setattr(search_tools_module, "_REGEX_RETRY_BUDGET_SECONDS", 0.02)
+    monkeypatch.setattr(
+        search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _SlowExpression()
+    )
+
+    with pytest.raises(ToolError, match="regex evaluation time limit") as caught:
+        run_tool(GrepTool(), {"pattern": "slow"}, ToolContext(cwd=tmp_path))
+
+    assert caught.value.failure_code == "invalid_pattern"
+    assert timeouts == [
+        search_tools_module._REGEX_TIMEOUT_SECONDS,
+        0.02,
+        search_tools_module._REGEX_TIMEOUT_SECONDS,
+    ]
 
 
 def test_native_grep_loader_only_falls_back_for_absent_extension(
