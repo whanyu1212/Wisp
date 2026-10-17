@@ -530,7 +530,9 @@ impl LiveUi {
     ///
     /// A release copies from the last frame painted during the selection, which is what the
     /// user saw, even when the final drag step has not been painted yet. A plain click, or a
-    /// release before any frame was painted, copies nothing.
+    /// release before any frame was painted, copies nothing. While a response that could not be
+    /// sent awaits keyboard recovery, a release only ends the selection: its notice explains
+    /// what the next Ctrl+C does and must stay on screen.
     pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) {
         let Some((selection, _)) = &mut self.transcript_selection else {
             return;
@@ -542,6 +544,9 @@ impl LiveUi {
         }
         let (selection, screen) = self.transcript_selection.take().expect("selection above");
         self.render_pending = true;
+        if self.unsendable_current_response() {
+            return;
+        }
         let Some(text) = screen
             .map(|screen| selection.text(&screen))
             .filter(|text| !text.trim().is_empty())

@@ -1538,3 +1538,58 @@ async fn the_jump_label_is_inert_while_a_decision_is_docked() {
     assert!(!ui.transcript_viewport.follows_tail());
     assert!(ui.state.pending_approval.is_some());
 }
+
+#[tokio::test]
+async fn a_release_keeps_the_recovery_notice_of_an_unsendable_response() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    ui.state.view_status = ViewStatus::Running;
+    ui.state.current_command = Some(reducer::ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: reducer::ActiveCommandType::Prompt,
+    });
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+
+    // Mid-drag, after a cancellation was requested, an approval arrives whose answer exceeds
+    // the frame limit: the response needs keyboard recovery before any repaint.
+    ui.state.cancel_requested = true;
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "a".repeat(400),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        })),
+        &writer,
+        128,
+    )
+    .await
+    .unwrap();
+    assert!(ui.unsendable_current_response());
+    let notice = ui.notice.clone();
+    assert!(notice.is_some());
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.notice, notice);
+    assert!(copied.lock().unwrap().copied.is_empty());
+    assert!(ui.transcript_selection.is_none());
+    assert!(receiver.try_recv().is_err());
+}
