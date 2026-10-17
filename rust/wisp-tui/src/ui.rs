@@ -263,7 +263,7 @@ pub fn render_interactive(
                 Constraint::Length(1),
             ])
             .split(area);
-        render_transcript(
+        let jump_painted = render_transcript(
             frame,
             chunks[0],
             state,
@@ -286,7 +286,9 @@ pub fn render_interactive(
             notice,
             palette,
             bindings,
+            jump_painted.is_some(),
         );
+        // The jump label is drawn but not clickable: clicks never act while deciding.
         return mouse::Conversation::default();
     }
 
@@ -307,7 +309,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    render_transcript(
+    let jump_to_latest = render_transcript(
         frame,
         chunks[0],
         state,
@@ -342,12 +344,21 @@ pub fn render_interactive(
         notice,
         palette,
         bindings,
+        jump_to_latest.is_some(),
     );
     mouse::Conversation {
         transcript: Rect {
             width: frame.area().right().saturating_sub(chunks[0].x),
             ..chunks[0]
         },
+        // The jump label sits on the transcript's last row, which holds no transcript text.
+        selectable: Rect {
+            height: chunks[0]
+                .height
+                .saturating_sub(u16::from(jump_to_latest.is_some())),
+            ..content_area(chunks[0])
+        },
+        jump_to_latest,
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
@@ -392,18 +403,6 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-fn session_label(state: &UiState) -> Option<String> {
-    let session = state.selected_session.as_ref()?;
-    let label = session
-        .session_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&session.session_path);
-    let sanitized = sanitize_for_terminal(label);
-    (!sanitized.is_empty()).then_some(sanitized)
-}
-
 fn footer_leading_parts(state: &UiState) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
@@ -425,9 +424,6 @@ fn footer_leading_parts(state: &UiState) -> Vec<String> {
 
 fn footer_trailing_parts(state: &UiState) -> Vec<String> {
     let mut parts = Vec::new();
-    if let Some(session) = session_label(state) {
-        parts.push(session);
-    }
     if let Some(identity) = header_identity(state) {
         parts.push(identity);
     }
@@ -443,15 +439,28 @@ fn pinned_user_rows(
     row_cache: &mut TranscriptRowCache,
     width: usize,
 ) -> Option<(TranscriptEntryId, Vec<TranscriptRow>)> {
-    if !viewport.follows_tail() {
-        return None;
-    }
     let user = state
         .transcript
         .entries()
         .iter()
         .rev()
         .find(|entry| entry.role == TranscriptRole::User)?;
+    // The live view pins the prompt above its reply. Keep it pinned while reading back through
+    // that reply, or the first wheel tick up would drop it; once the top reaches the prompt's
+    // own content, the contiguous view shows it in place. While newer history is evicted, the
+    // last loaded prompt is not the latest one, so nothing pins.
+    let user_index = state.transcript.entry_index(user.id)?;
+    let reading_reply = !state.history.tail_evicted
+        && viewport.scrolled_top().is_some_and(|top| {
+            (top.entry_id == user.id && top.position == RowPosition::Spacer)
+                || state
+                    .transcript
+                    .entry_index(top.entry_id)
+                    .is_some_and(|index| index > user_index)
+        });
+    if !viewport.follows_tail() && !reading_reply {
+        return None;
+    }
     let mut rows = Vec::new();
     let mut anchor = RowAnchor {
         entry_id: user.id,
@@ -522,11 +531,12 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
-) {
+) -> Option<Rect> {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
     );
+    let outer = area;
     let mut area = area.inner(Margin {
         horizontal: 0,
         vertical: padding,
@@ -575,6 +585,8 @@ fn render_transcript(
     let content = content_area(rows_area);
     let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(rows_area.height).max(1);
+    // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
+    viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
     if let Some((user_id, rows)) = &mut pinned {
         let has_reply = state.transcript.entry_after(*user_id).is_some();
@@ -592,7 +604,6 @@ fn render_transcript(
             rows.push(spacer);
         }
     }
-    viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
     let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
     if let Some((user_id, mut user_rows)) = pinned {
@@ -711,6 +722,55 @@ fn render_transcript(
     if let Some((start, end)) = scroll {
         render_scrollbar(frame, rows_area, start, end, palette);
     }
+    // Scrolled back, the blank row above the composer offers the jump to the latest output.
+    (padding > 0 && !viewport.follows_tail())
+        .then(|| {
+            let row = Rect {
+                y: outer.bottom().saturating_sub(1),
+                height: 1,
+                ..outer
+            };
+            render_jump_to_latest(frame, content_area(row), viewport, palette, bindings)
+        })
+        .flatten()
+}
+
+/// Draw the centered jump-to-latest label in `row`, naming its key when it fits.
+///
+/// Returns:
+///     Option<Rect>: The painted label, which the caller makes clickable; `None` when even the
+///     short form does not fit.
+fn render_jump_to_latest(
+    frame: &mut Frame<'_>,
+    row: Rect,
+    viewport: &TranscriptViewport,
+    palette: Palette,
+    bindings: &Bindings,
+) -> Option<Rect> {
+    let what = if viewport.has_unseen_output() {
+        "↓ new output"
+    } else {
+        "↓ latest"
+    };
+    let key = primary_label(bindings, KeyAction::Tail);
+    let label = [
+        (key != "Unbound").then(|| format!(" {what} · {key} ")),
+        Some(format!(" {what} ")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|label| label.width() <= usize::from(row.width))?;
+    let width = label.width() as u16;
+    let area = Rect {
+        x: row.x + (row.width - width) / 2,
+        width,
+        ..row
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(Style::default().fg(palette.primary).bg(palette.panel)),
+        area,
+    );
+    Some(area)
 }
 
 fn active_reply(state: &UiState) -> Option<TranscriptEntryId> {
@@ -2120,6 +2180,7 @@ fn render_footer(
     notice: Option<&str>,
     palette: Palette,
     bindings: &Bindings,
+    jump_painted: bool,
 ) {
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow.
@@ -2154,9 +2215,9 @@ fn render_footer(
     status.extend(footer_trailing_parts(state));
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
-    } else if viewport.has_unseen_output() {
+    } else if !jump_painted && viewport.has_unseen_output() {
         status.push("new ↓".into());
-    } else if !viewport.follows_tail() {
+    } else if !jump_painted && !viewport.follows_tail() {
         status.push("scrolled".into());
     }
     let status_line = join_hints(status, status_budget);
@@ -3359,7 +3420,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_keeps_compact_context_and_session_on_an_80_column_run() {
+    fn footer_keeps_compact_context_and_leaves_out_the_session_on_an_80_column_run() {
         let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
         state.mode = AgentMode::Build;
         state.mode_confirmed = true;
@@ -3392,7 +3453,8 @@ mod tests {
         state.interaction_status = InteractionStatus::Idle;
         state.current_command = None;
         let idle = render_to_string(100, 18, &state, &PromptEditor::default());
-        assert!(idle.contains("demo-session"), "{idle}");
+        assert!(!idle.contains("demo-session"), "{idle}");
+        assert!(!idle.contains("demo.jsonl"), "{idle}");
         assert!(idle.contains("ctx"), "{idle}");
     }
 
@@ -4515,7 +4577,9 @@ mod tests {
             })
             .unwrap();
 
-        assert!(terminal.backend().to_string().contains("new ↓"));
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("↓ new output · Ctrl+End"), "{screen}");
+        assert!(!screen.contains("new ↓"), "{screen}");
     }
 
     #[test]

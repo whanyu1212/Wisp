@@ -4,8 +4,11 @@ use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus,
 use crate::{OverlayKind, prompt_editor::PromptEditor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
+use ratatui::style::Modifier;
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 pub(crate) fn enabled(value: Option<&str>) -> bool {
     value.is_none_or(|value| {
@@ -16,14 +19,140 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
     })
 }
 
-/// Motion/drag/release reports must not fill the input queue in this navigation-only slice.
+/// Left-button press, drag, and release, plus the wheel. Other buttons are dropped by the reader
+/// so they never fill the input queue.
+///
+/// A modified press or wheel report is dropped too. A drag or release keeps its modifiers: it
+/// only continues a selection an unmodified press started, and dropping a release because a key
+/// was held would leave that selection live.
 pub(crate) fn supported(event: MouseEvent) -> bool {
-    matches!(
-        event.kind,
+    match event.kind {
+        MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => true,
         MouseEventKind::Down(MouseButton::Left)
-            | MouseEventKind::ScrollUp
-            | MouseEventKind::ScrollDown
-    ) && event.modifiers.is_empty()
+        | MouseEventKind::ScrollUp
+        | MouseEventKind::ScrollDown => event.modifiers.is_empty(),
+        _ => false,
+    }
+}
+
+/// A left-button drag over painted transcript text, in screen cells.
+///
+/// The selection runs like a terminal's: from the earlier end to the later one in reading order,
+/// covering whole rows in between. It marks screen cells, not transcript rows: the caller drops it
+/// on wheel scrolling, resizes, and layout changes, and a release copies whatever those cells
+/// showed in the last painted frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Selection {
+    area: Rect,
+    anchor: Position,
+    head: Position,
+}
+
+impl Selection {
+    /// Start a selection at `event` when it lands inside `area`.
+    pub fn start(area: Rect, event: MouseEvent) -> Option<Self> {
+        let at = Position::new(event.column, event.row);
+        area.contains(at).then_some(Self {
+            area,
+            anchor: at,
+            head: at,
+        })
+    }
+
+    /// The transcript text area the selection was started in.
+    pub fn area(&self) -> Rect {
+        self.area
+    }
+
+    /// Move the free end to `event`, clamped to the selectable area.
+    ///
+    /// Returns:
+    ///     bool: Whether the selected cells changed.
+    pub fn extend(&mut self, event: MouseEvent) -> bool {
+        let head = Position::new(
+            event
+                .column
+                .clamp(self.area.x, self.area.right().saturating_sub(1)),
+            event
+                .row
+                .clamp(self.area.y, self.area.bottom().saturating_sub(1)),
+        );
+        let changed = head != self.head;
+        self.head = head;
+        changed
+    }
+
+    /// Whether the press and the current end are the same cell, as for a plain click.
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+
+    /// The selected column span of screen row `y`, inclusive at both ends.
+    fn columns(&self, y: u16) -> Option<(u16, u16)> {
+        let (start, end) = if (self.anchor.y, self.anchor.x) <= (self.head.y, self.head.x) {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        };
+        if self.is_empty() || y < start.y || y > end.y {
+            return None;
+        }
+        let first = if y == start.y { start.x } else { self.area.x };
+        let last = if y == end.y {
+            end.x
+        } else {
+            self.area.right().saturating_sub(1)
+        };
+        Some((first, last))
+    }
+
+    /// Show the selected cells in reverse video.
+    pub fn highlight(&self, buffer: &mut Buffer) {
+        for y in self.area.y..self.area.bottom() {
+            let Some((first, last)) = self.columns(y) else {
+                continue;
+            };
+            for x in first..=last {
+                if let Some(cell) = buffer.cell_mut((x, y)) {
+                    cell.modifier.insert(Modifier::REVERSED);
+                }
+            }
+        }
+    }
+
+    /// The selected text of a painted frame, one line per screen row.
+    ///
+    /// A wide character counts as selected when its first cell is. Trailing blanks on each row
+    /// are dropped, as terminals do, so padding and highlighted surfaces do not leak into the
+    /// copy.
+    ///
+    /// Args:
+    ///     buffer (&Buffer): The frame the selection was drawn over.
+    ///
+    /// Returns:
+    ///     String: The selected rows joined with `\n`; empty for a plain click.
+    pub fn text(&self, buffer: &Buffer) -> String {
+        let mut lines = Vec::new();
+        for y in self.area.y..self.area.bottom() {
+            let Some((first, last)) = self.columns(y) else {
+                continue;
+            };
+            let mut line = String::new();
+            let mut x = self.area.x;
+            while x < self.area.right() && x <= last {
+                let Some(cell) = buffer.cell((x, y)) else {
+                    break;
+                };
+                let symbol = cell.symbol();
+                if x >= first {
+                    line.push_str(symbol);
+                }
+                x = x.saturating_add(u16::try_from(symbol.width().max(1)).unwrap_or(1));
+            }
+            lines.push(line.trim_end().to_owned());
+        }
+        lines.join("\n")
+    }
 }
 
 pub(crate) fn contains(area: Rect, event: MouseEvent) -> bool {
@@ -150,6 +279,11 @@ impl Editor {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
+    /// Transcript text cells a drag can select: inside the side padding, so the scrollbar and
+    /// gutters are never copied.
+    pub selectable: Rect,
+    /// The footer's jump-to-latest label, painted only while the transcript is scrolled back.
+    pub jump_to_latest: Option<Rect>,
     pub editor: Option<Editor>,
     pub completion: Rows,
     pub completion_visible: bool,
@@ -211,11 +345,8 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         if !self.mouse_enabled
             || !supported(event)
+            || matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
             || self.unsendable_current_response()
-            || matches!(
-                self.state.view_status,
-                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-            )
         {
             return Ok(LoopControl::Continue);
         }
@@ -223,15 +354,28 @@ impl LiveUi {
             // Scrolling activates nothing and needs no hit regions, so it moves the
             // transcript wherever the pointer is (over the composer too) and also in
             // the window between a resize, which clears the painted frame, and the
-            // next paint. Before the first paint there is nothing to scroll.
+            // next paint. Before the first paint there is nothing to scroll. It also
+            // works while an approval or trust prompt is docked, so the reader can review
+            // what led to it; the prompt itself stays keyboard-only.
             if !self.transcript_viewport.is_sized() {
                 return Ok(LoopControl::Continue);
+            }
+            // A selection marks screen cells, which no longer hold the same text once scrolled.
+            if self.transcript_selection.take().is_some() {
+                self.render_pending = true;
             }
             let control = self
                 .navigate_transcript_action(TranscriptViewAction::ScrollLines(lines), writer, limit)
                 .await?;
             self.reconcile_browse_selection();
             return Ok(control);
+        }
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            // Clicks never answer, dismiss, or move focus away from a decision.
+            return Ok(LoopControl::Continue);
         }
         let Some(frame) = self
             .mouse_frame
@@ -331,7 +475,30 @@ impl LiveUi {
                 }
             }
             Layer::Conversation => {
-                // Wheel input was handled above, so this is a click.
+                if frame
+                    .conversation
+                    .jump_to_latest
+                    .is_some_and(|area| contains(area, event))
+                {
+                    // The same jump as the Tail key, including loading an evicted newer tail.
+                    let control = self
+                        .navigate_transcript_action(TranscriptViewAction::FollowTail, writer, limit)
+                        .await?;
+                    self.reconcile_browse_selection();
+                    return Ok(control);
+                }
+                // Wheel input was handled above, so this is a press. Over transcript text it
+                // starts a selection, which a drag extends and the release copies.
+                if self.transcript_selection.take().is_some() {
+                    self.render_pending = true;
+                }
+                if self.key_help.is_none() {
+                    self.transcript_selection =
+                        Selection::start(frame.conversation.selectable, event)
+                            .map(|selection| (selection, None));
+                    // Paint once so even a fast drag has a frame to copy from.
+                    self.render_pending |= self.transcript_selection.is_some();
+                }
                 if self.state.editor_editable() {
                     if let Some(index) = frame.conversation.completion.hit(event) {
                         let count = self
@@ -357,6 +524,39 @@ impl LiveUi {
             }
         }
         Ok(LoopControl::Continue)
+    }
+
+    /// Extend the transcript selection on a drag, or copy and clear it on release.
+    ///
+    /// A release copies from the last frame painted during the selection, which is what the
+    /// user saw, even when the final drag step has not been painted yet. A plain click, or a
+    /// release before any frame was painted, copies nothing. While a response that could not be
+    /// sent awaits keyboard recovery, a release only ends the selection: its notice explains
+    /// what the next Ctrl+C does and must stay on screen.
+    pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) {
+        let Some((selection, _)) = &mut self.transcript_selection else {
+            return;
+        };
+        let changed = selection.extend(event);
+        if !matches!(event.kind, MouseEventKind::Up(_)) {
+            self.render_pending |= changed;
+            return;
+        }
+        let (selection, screen) = self.transcript_selection.take().expect("selection above");
+        self.render_pending = true;
+        if self.unsendable_current_response() {
+            return;
+        }
+        let Some(text) = screen
+            .map(|screen| selection.text(&screen))
+            .filter(|text| !text.trim().is_empty())
+        else {
+            return;
+        };
+        self.notice = Some(match self.clipboard.copy(&text) {
+            Ok(()) => format!("Copied {} chars to clipboard.", text.chars().count()),
+            Err(error) => format!("Could not copy selection: {error}."),
+        });
     }
 
     fn select_mouse_row(&mut self, kind: OverlayKind, index: usize) -> bool {
@@ -404,6 +604,41 @@ impl LiveUi {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn selection_text_follows_reading_order_and_wide_characters() {
+        let area = Rect::new(1, 0, 8, 3);
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 3));
+        buffer.set_string(0, 0, "|ab界c  ", ratatui::style::Style::default());
+        buffer.set_string(0, 1, "|  pad   ", ratatui::style::Style::default());
+        buffer.set_string(0, 2, "|xyz     │", ratatui::style::Style::default());
+        let down = MouseEventKind::Down(MouseButton::Left);
+
+        // Upward drag ending on a wide character's second cell: the character starts before the
+        // selection, so it is left out.
+        let mut selection = Selection::start(area, at(down, 2, 2)).unwrap();
+        assert!(selection.extend(at(down, 4, 0)));
+        assert_eq!(selection.text(&buffer), "c\n  pad\nxy");
+
+        // Clamped to the area: the gutter and the scrollbar column are never copied.
+        let mut selection = Selection::start(area, at(down, 1, 0)).unwrap();
+        selection.extend(at(down, 40, 2));
+        assert_eq!(selection.text(&buffer), "ab界c\n  pad\nxyz");
+
+        let click = Selection::start(area, at(down, 3, 1)).unwrap();
+        assert!(click.is_empty());
+        assert_eq!(click.text(&buffer), "");
+        assert!(Selection::start(area, at(down, 0, 0)).is_none());
+    }
 
     fn click(column: u16, row: u16) -> MouseEvent {
         MouseEvent {

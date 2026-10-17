@@ -125,6 +125,7 @@ pub(super) struct PendingInput {
     editor_input: bool,
     catalog_input: bool,
     wheel_input: bool,
+    selection_input: bool,
     decision_highlight: bool,
 }
 
@@ -188,6 +189,12 @@ impl PendingInput {
             Input::Mouse(event) => mouse::Scroll::from_event(*event).is_some(),
             _ => false,
         };
+        // Dragging and releasing only extend or finish a transcript selection, and a release
+        // copies the frame the user saw, so a repaint must not swallow them either.
+        let selection_input = matches!(&input, Input::Mouse(event) if matches!(
+            event.kind,
+            crossterm::event::MouseEventKind::Drag(_) | crossterm::event::MouseEventKind::Up(_)
+        ));
         // Up/Down only move a decision's highlight; Enter is guarded separately by
         // the painted highlight, so tool output must not swallow the arrow keys.
         let decision_highlight = target.decision.is_some()
@@ -200,6 +207,7 @@ impl PendingInput {
             editor_input,
             catalog_input,
             wheel_input,
+            selection_input,
             decision_highlight,
         }
     }
@@ -238,6 +246,7 @@ impl PendingInput {
             || matches!(self.input, Input::Redraw | Input::Error(_))
             || same_editor
             || self.wheel_input
+            || self.selection_input
             || (self.decision_highlight && self.target.decision == current.decision)
             || self.target == current
         {

@@ -432,7 +432,7 @@ async fn wheel_scroll_survives_workflow_revision_changes_during_a_run() {
 }
 
 #[tokio::test]
-async fn wheel_captured_before_an_approval_does_not_reach_the_decision() {
+async fn wheel_captured_before_an_approval_scrolls_without_reaching_the_decision() {
     let (writer, mut commands) = mpsc::channel(16);
     let mut ui = active_ui();
     ui.mouse_enabled = true;
@@ -461,9 +461,99 @@ async fn wheel_captured_before_an_approval_does_not_reach_the_decision() {
     draw(&mut ui);
     assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
     pending.apply(&mut ui, &writer, 8192).await.unwrap();
-    assert!(ui.transcript_viewport.follows_tail());
+    assert!(!ui.transcript_viewport.follows_tail());
+    assert_eq!(ui.decision_choice, None);
     assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
     assert!(commands.try_recv().is_err());
+}
+
+fn long_running_turn() -> LiveUi {
+    let mut ui = active_ui();
+    ui.mouse_enabled = true;
+    ui.state.transcript.start_message(1);
+    ui.state
+        .transcript
+        .append_message_delta(1, &"earlier turn line\n".repeat(120));
+    ui
+}
+
+fn press(code: KeyCode, modifiers: KeyModifiers) -> Input {
+    Input::Key(KeyEvent::new(code, modifiers))
+}
+
+#[tokio::test]
+async fn a_docked_decision_leaves_the_transcript_scrollable_by_wheel_and_keys() {
+    let trust = UiAction::BackendEvent(BackendEvent::TrustRequested {
+        request_id: "trust-1".into(),
+        project_path: "/project".into(),
+    });
+    for (decision, status) in [
+        (approval("call-1"), ViewStatus::WaitingForApproval),
+        (trust, ViewStatus::WaitingForTrust),
+    ] {
+        let (writer, mut commands) = mpsc::channel(16);
+        let mut ui = long_running_turn();
+        ui.dispatch(decision, &writer, 8192).await.unwrap();
+        draw(&mut ui);
+        assert_eq!(ui.state.view_status, status);
+
+        let wheel = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        ui.handle_input(Input::Mouse(wheel), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(!ui.transcript_viewport.follows_tail(), "{status:?}: wheel");
+        let after_wheel = ui.transcript_viewport.clone();
+        ui.handle_input(press(KeyCode::PageUp, KeyModifiers::NONE), &writer, 8192)
+            .await
+            .unwrap();
+        assert_ne!(ui.transcript_viewport, after_wheel, "{status:?}: PgUp");
+        ui.handle_input(press(KeyCode::End, KeyModifiers::CONTROL), &writer, 8192)
+            .await
+            .unwrap();
+        assert!(
+            ui.transcript_viewport.follows_tail(),
+            "{status:?}: Ctrl+End"
+        );
+
+        assert_eq!(ui.state.view_status, status);
+        assert!(commands.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn transcript_bindings_never_take_a_key_the_decision_uses() {
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = long_running_turn();
+    // Validation keeps arrows and printable keys out of transcript bindings, but plain Enter
+    // can be bound, and it confirms a highlighted choice.
+    ui.bindings = crate::keybindings::Bindings::from_json(
+        r#"{"prompt.submit":["Ctrl+S"],"transcript.page_up":["Enter"]}"#,
+    )
+    .unwrap();
+    ui.dispatch(approval("call-1"), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    let before = ui.transcript_viewport.clone();
+
+    ui.handle_input(press(KeyCode::Up, KeyModifiers::NONE), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.decision_choice, Some(crate::ui::APPROVAL_CHOICES - 1));
+    draw(&mut ui);
+    ui.handle_input(press(KeyCode::Enter, KeyModifiers::NONE), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.transcript_viewport, before);
+    assert!(
+        matches!(commands.try_recv(), Ok(WriterMessage::Frame { .. })),
+        "Enter still confirms the highlighted choice"
+    );
 }
 
 #[tokio::test]

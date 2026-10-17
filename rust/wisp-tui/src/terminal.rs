@@ -71,14 +71,15 @@ impl MouseCapture {
 
     fn enable(&self, output: &mut impl Write) -> io::Result<()> {
         self.requested.store(true, Ordering::SeqCst);
-        // Button/wheel + SGR only: do not request unneeded motion/drag traffic.
-        output.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+        // Button/wheel, motion only while a button is held (drag selection), and SGR.
+        // Plain pointer motion (?1003) is never requested.
+        output.write_all(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h")?;
         output.flush()
     }
 
     fn restore(&self, output: &mut impl Write) -> io::Result<()> {
         if self.requested.load(Ordering::SeqCst) {
-            output.write_all(b"\x1b[?1000l\x1b[?1006l")?;
+            output.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1006l")?;
             output.flush()?;
             // Keep ownership after an I/O failure so another cleanup path can retry.
             self.requested.store(false, Ordering::SeqCst);
@@ -200,11 +201,11 @@ mod tests {
             "default mode must not change mouse protocols"
         );
         capture.enable(&mut output).unwrap();
-        assert_eq!(output, b"\x1b[?1000h\x1b[?1006h");
+        assert_eq!(output, b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
         assert!(capture.restore(&mut Broken).is_err());
         output.clear();
         capture.restore(&mut output).unwrap();
-        assert_eq!(output, b"\x1b[?1000l\x1b[?1006l");
+        assert_eq!(output, b"\x1b[?1000l\x1b[?1002l\x1b[?1006l");
         output.clear();
         capture.restore(&mut output).unwrap();
         assert!(output.is_empty());
@@ -216,6 +217,6 @@ mod tests {
         assert!(capture.enable(&mut Broken).is_err());
         let mut output = Vec::new();
         capture.restore(&mut output).unwrap();
-        assert_eq!(output, b"\x1b[?1000l\x1b[?1006l");
+        assert_eq!(output, b"\x1b[?1000l\x1b[?1002l\x1b[?1006l");
     }
 }

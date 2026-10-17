@@ -47,7 +47,7 @@ tokens, without adding newlines to the submitted prompt. The composer grows to i
 keeps the cursor's wrapped row visible. The frame
 collapses on short terminals to preserve editing space. The footer separates
 the keys for the current workflow on the left from status (`idle`, `working`, `approval`, `trust`),
-mode, model, context, and the selected session on the right, as space permits.
+mode, model, and context on the right, as space permits.
 The backend version stays in Ctrl+G help. An empty transcript shows a centered startup
 logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
@@ -148,9 +148,9 @@ starts again from the first page. Forking restores the selected prompt after the
 history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
-The 0.2 candidates ship native wheels for the two packaged targets. Transcript search and arbitrary drag
-selection remain follow-ups; composer selection and clipboard actions are keyboard-driven.
-See the mouse controls below; transcript copying still relies on terminal-native selection.
+The 0.2 candidates ship native wheels for the two packaged targets. Transcript search remains a
+follow-up; composer selection and clipboard actions are keyboard-driven. Drag over the transcript
+to copy it; see the mouse controls below.
 
 Rust also supports `/model` while idle. The picker groups models by provider, disables unavailable
 providers, and labels preview and legacy models. Use `Up`/`Down`, `PageUp`/`PageDown`, or `Home`/`End`
@@ -260,26 +260,40 @@ setting or persisted preference.
   loads when this reply finishes" and continues once the reply ends. Over an open popup, the wheel moves its selection or scrolls its report instead.
   It does not scroll the conversation behind the popup. The session tree requests its next page
   when wheeling past the last retained node.
+- While you are scrolled back, a `↓ latest · Ctrl+End` label (`↓ new output` once output arrived
+  meanwhile) sits on the blank row above the composer. Click it, or press the key, to return to the
+  latest output and follow it again. It is not clickable while an approval or trust prompt is
+  docked; the key still works. In terminals too short for that row, the footer shows `scrolled` or
+  `new ↓` instead.
 - Left-click a visible picker row to select it. **Clicks do not activate choices**: use `Enter` to
   apply a model/theme/logo, insert a file/skill reference, or navigate a session. Model selection remains
   locked while an application is pending. In the file tree, select a directory and use `Enter` or
   `Right` to expand it.
 - A left click outside a popup dismisses it like `Escape`, including cancelling an active device
   login or rolling back a theme preview. That click is consumed, never passed to the background.
+- With no popup open, drag over transcript text to select it; releasing the button copies the
+  selection to the clipboard (natively, and through OSC 52 so it also works over SSH) and shows
+  "Copied N chars to clipboard." A plain click copies nothing. The selection covers what is on
+  screen, row by row, so a wrapped line copies as separate lines and dragging past the edge does
+  not scroll. Wheel scrolling, resizing, or an approval or popup appearing clears it; text that
+  moves under it otherwise (streaming, keyboard scrolling) is copied as shown at release. Inside
+  tmux, OSC 52 needs `set-clipboard on`. Your
+  terminal's own selection still works with its bypass modifier, such as `Shift`-drag in Ghostty.
 - With no popup open, click in the main composer to position its cursor at a grapheme boundary.
   Tabs, wide/combining characters, and horizontal/vertical editor scrolling retain their source
   positions. At the minimum 30×8 size, a tall draft keeps one editable row; footer details may be
   omitted. Stale coordinates after resize, text replacement, or catalog refresh cannot select a
   new unseen target.
 
-Approvals and project-trust decisions remain **keyboard-only**; mouse input is ignored during those
-decisions and when a failed cancellation response requires keyboard recovery. Drag selection,
-transcript clipboard copy, horizontal wheel actions, and middle/right-click actions are not implemented.
-Capture can interfere with terminal-native text selection: set
-`WISP_TUI_MOUSE=0` for that workflow, or use your terminal's documented modifier override where
-supported. Only button and
-SGR mouse reports are requested, not all-motion tracking; native and launcher cleanup restore the
-terminal after exit or failure.
+Approvals and project-trust decisions are answered **from the keyboard only**: clicks are ignored
+while one is docked. The wheel and the transcript scroll keys (`PgUp`/`PgDn`, `Ctrl+Up`/`Ctrl+Down`,
+`Ctrl+Home`/`Ctrl+End`) still move the conversation so you can review what led to the request; a
+custom binding never takes a key the prompt uses. All mouse input is ignored when a failed
+cancellation response requires keyboard recovery. Horizontal wheel
+actions and middle/right-click actions are not implemented. For the terminal's own selection instead
+of Wisp's, set `WISP_TUI_MOUSE=0` or use your terminal's documented modifier override where
+supported. Wisp requests button, button-drag, and SGR mouse reports, never all-motion tracking;
+native and launcher cleanup restore the terminal after exit or failure.
 
 A missing or non-executable binary, unsupported platform, package-version mismatch,
 negotiation failure, or non-zero Rust exit is reported as an error. For source checkouts, see
