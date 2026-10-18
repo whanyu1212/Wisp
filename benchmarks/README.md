@@ -8,6 +8,32 @@ These scenarios answer two separate questions:
 Generate profile artifacts under the ignored `profiles/` directory. Compare absolute timings only
 on the same machine, with the same Python build and benchmark arguments.
 
+## Evidence reports
+
+`evidence/` keeps dated measurements and decision records behind choices that still shape the
+code. Their numbers come from one machine on one date; rerun the commands inside a report before
+relying on them.
+
+| Report | What it records |
+| --- | --- |
+| [tool_boundary_evidence.md](evidence/tool_boundary_evidence.md) | Which built-in tool work stays in Python and which moved to Rust |
+| [pending_text_rust_evidence.md](evidence/pending_text_rust_evidence.md) | The Rust pending-text kernel that native wheels use for managed process output |
+| [rpc_delta_coalescing_evidence.md](evidence/rpc_delta_coalescing_evidence.md) | JSONL-RPC `message.delta` coalescing limits and their effect |
+| [rust_tui_distribution_evidence.md](evidence/rust_tui_distribution_evidence.md) | Why the Rust TUI ships inside a platform `wisp-ai` wheel built with Hatchling |
+| [rust_tui_transport_pressure.md](evidence/rust_tui_transport_pressure.md) | Rust TUI transport bounds: 64-event inbound queue, 64 MiB frames, five-second deadlines |
+| [rust_tui_hydration_evidence.md](evidence/rust_tui_hydration_evidence.md) | Saved-history startup time before and after larger history pages |
+| [rust_tui_memory_evidence.md](evidence/rust_tui_memory_evidence.md) | Per-process memory with 0, 10,000 and 50,000 saved messages |
+| [rust_tui_e2e_evidence.md](evidence/rust_tui_e2e_evidence.md), [rust_tui_interaction_evidence.md](evidence/rust_tui_interaction_evidence.md) | The Rust/Textual comparisons made just before the Textual frontend was retired |
+| [rust_tui_transcript_evidence.md](evidence/rust_tui_transcript_evidence.md) | The last recorded transcript-benchmark results (2026-09-03) |
+
+Reports about the retired Python/Textual frontend, and the superseded Rust TUI rollout records for
+#467 and #470, were removed on 2026-10-18. Read them in the
+[last tree that had them](https://github.com/whanyu1212/Wisp/tree/1724ce5df7f4592e47fce67ec67f90920f076244/benchmarks).
+When you record new evidence, add it to `evidence/` and to this table, and delete reports whose
+decision or subject no longer exists.
+
+## JSONL-RPC delta egress
+
 Measure JSONL-RPC framing and client-side typed parsing with raw one-byte provider deltas and the
 production RPC coalescer:
 
@@ -21,13 +47,7 @@ The workload preconstructs identical typed events for both modes, then measures 
 encoder, byte sink, and normal event parser. It reports frame and wire-byte counts plus exact
 reconstructed-content validation. It does not include provider latency, operating-system pipe
 writes, or terminal rendering. The current decision evidence is recorded in
-`benchmarks/rpc_delta_coalescing_evidence.md`.
-
-## Rust TUI acceptance (#470)
-
-The renderer decision and the measurements that could not run are recorded in
-`benchmarks/rust_tui_acceptance_evidence.md`. Refresh the in-process transcript snapshot below when
-repeating that gate. Do not treat Textual-only input-latency numbers as a Rust comparison.
+[`evidence/rpc_delta_coalescing_evidence.md`](evidence/rpc_delta_coalescing_evidence.md).
 
 ## Rust TUI end-to-end and interaction benchmarks
 
@@ -48,7 +68,8 @@ uv run python -m benchmarks.rust_tui_interaction \
 These scripts measure PTY-output timing, terminal restoration, and process-tree resource samples.
 PTY output is a paint proxy rather than a display-photon measurement. Samples are comparable only
 with the same machine, build, and workload. The historical Rust/Textual comparisons remain in
-`benchmarks/rust_tui_e2e_evidence.md` and `benchmarks/rust_tui_interaction_evidence.md`; their
+[`evidence/rust_tui_e2e_evidence.md`](evidence/rust_tui_e2e_evidence.md) and
+[`evidence/rust_tui_interaction_evidence.md`](evidence/rust_tui_interaction_evidence.md); their
 Textual runners were retired with the frontend.
 
 ## Rust TUI saved-history startup
@@ -68,13 +89,14 @@ projection and clone, final transcript projection, and history installation alon
 launch-to-ready and observed process-tree CPU/RSS. Use `--no-profile` for the wall-clock comparison
 without per-page profile file writes. Stage totals omit RPC scheduling, process startup, transport,
 and drawing, so they do not sum to launch-to-ready. The before/after evidence and limitations are in
-`benchmarks/rust_tui_hydration_evidence.md`.
+[`evidence/rust_tui_hydration_evidence.md`](evidence/rust_tui_hydration_evidence.md).
 
 For per-process transcript memory, add `--no-profile --ready-hold-seconds 1`. The
 report records CLI launcher, Python RPC backend, and Rust TUI RSS when the
 history-ready frame appears and after one idle second. The process-tree peak
 still covers the whole run. Local 0/10k/50k results and a matched Rust/Textual
-interaction comparison are in `benchmarks/rust_tui_memory_evidence.md`.
+interaction comparison are in
+[`evidence/rust_tui_memory_evidence.md`](evidence/rust_tui_memory_evidence.md).
 
 ## Rust TUI Transcript
 
@@ -122,14 +144,8 @@ wait "$pid"
 A single-entry profiling run reports `scaling_work_independent: false` because no cross-length
 comparison is available. Use Linux
 `perf record -g -- target/release/examples/transcript_benchmark ...` for equivalent native sampling. Raw JSON and profiles stay under ignored `profiles/`; commit only compact numeric
-evidence and factual profiler conclusions. See `benchmarks/rust_tui_transcript_evidence.md`.
-
-## Historical Textual benchmark evidence
-
-The Textual-only benchmark runners were removed when that frontend was retired. Their recorded
-results remain as dated evidence in `tui_responsiveness_evidence.md`,
-`tui_terminal_frames_evidence.md`, and other historical reports; the commands inside those reports
-are not runnable against the current source tree.
+evidence and factual profiler conclusions. See
+[`evidence/rust_tui_transcript_evidence.md`](evidence/rust_tui_transcript_evidence.md).
 
 ## Managed Process Output
 
@@ -175,7 +191,7 @@ cargo run --release -p wisp-process-text \
 Python and Rust both execute `tests/fixtures/pending_text_conformance.json`. The fixture checks text,
 dropped and retained source bytes, and per-character source-byte provenance at every drain. Current
 comparison results and the integration boundary are recorded in
-`benchmarks/pending_text_rust_evidence.md`.
+[`evidence/pending_text_rust_evidence.md`](evidence/pending_text_rust_evidence.md).
 
 ## Built-in Tools
 
@@ -250,7 +266,7 @@ uv run python -m benchmarks.builtin_tools --file-counts 1000 --iterations 1 --tr
 ```
 
 The current cross-layer measurements and Python/Rust ownership decision are recorded in
-`benchmarks/tool_boundary_evidence.md`.
+[`evidence/tool_boundary_evidence.md`](evidence/tool_boundary_evidence.md).
 
 ## Context Estimation
 
@@ -279,7 +295,7 @@ uv run python -m benchmarks.rpc_streaming --response-bytes 65536 --chunk-sizes 1
 uv run python -m benchmarks.rpc_streaming --response-bytes 65536 --chunk-sizes 1,32,1024 --iterations 2
 ```
 
-This isolates codec overhead from subprocess pipes and Textual rendering, making event-count and
+This isolates codec overhead from subprocess pipes and terminal rendering, making event-count and
 batching costs visible before considering native JSON work.
 
 ## Session Loading

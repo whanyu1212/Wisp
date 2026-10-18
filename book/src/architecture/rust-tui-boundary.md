@@ -81,9 +81,9 @@ retirement removed the Python terminal renderers; neither change moved the agent
 The RC2 trial did not itself publish a stable release.
 
 The dated [RC2 checklist](../contributing/rc2-release.md) and
-[acceptance evidence](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_acceptance_evidence.md)
-record the original migration gates. Later [interaction](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_interaction_evidence.md)
-and [memory](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/rust_tui_memory_evidence.md)
+archived [acceptance evidence](https://github.com/whanyu1212/Wisp/blob/1724ce5df7f4592e47fce67ec67f90920f076244/benchmarks/rust_tui_acceptance_evidence.md)
+record the original migration gates. Later [interaction](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/rust_tui_interaction_evidence.md)
+and [memory](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/rust_tui_memory_evidence.md)
 measurements supersede its unmeasured performance questions. Those reports compare the former
 Textual frontend with Rust under specific workloads; they do not describe a currently selectable
 Textual renderer. Rust still retains full saved transcript history, with memory growing with session
