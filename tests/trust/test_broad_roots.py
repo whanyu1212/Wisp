@@ -16,7 +16,7 @@ import anyio
 import pytest
 from typer.testing import CliRunner
 
-import wisp.coding.prompt.project_context as project_context_module
+import wisp.coding.prompt.project_root as project_root_module
 from tests.support.cli import CliRunner as RpcCliRunner
 from tests.support.cli import DangerTool, ToolCallingProvider, app
 from wisp.coding import CodingSession
@@ -400,7 +400,7 @@ def test_a_git_repository_at_home_does_not_make_home_the_project(
     def dotfiles_repo(_cwd: Path, *args: str) -> str | None:
         return str(home) if args == ("rev-parse", "--show-toplevel") else None
 
-    monkeypatch.setattr(project_context_module, "_run_git", dotfiles_repo)
+    monkeypatch.setattr(project_root_module, "run_git", dotfiles_repo)
 
     assert resolve_project_context_root(notes) == notes.resolve()
 

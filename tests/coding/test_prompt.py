@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -15,12 +16,21 @@ from wisp.coding.prompt import (
     recover_repository_status,
     resolve_project_context_root,
 )
+from wisp.coding.prompt import git as git_module
 from wisp.coding.prompt import project_context as project_context_module
+from wisp.coding.prompt import project_root as project_root_module
+from wisp.coding.prompt import repository_status as repository_status_module
 from wisp.coding.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 
 _GIT_SNAPSHOT = "git (snapshot; run `git status` for the current state):"
+
+
+def _fake_git(monkeypatch: MonkeyPatch, run_git: Callable[..., str | None]) -> None:
+    """Answer every Git query made during project discovery and status reads."""
+    monkeypatch.setattr(project_root_module, "run_git", run_git)
+    monkeypatch.setattr(repository_status_module, "run_git", run_git)
 
 
 def test_prompt_includes_default_instructions_and_context(tmp_path: Path) -> None:
@@ -323,7 +333,7 @@ def test_project_context_uses_context_file_as_root_marker(
     subdir = project / "src"
     subdir.mkdir(parents=True)
     (project / "AGENTS.md").write_text("Root-only agent guidance.\n", encoding="utf-8")
-    monkeypatch.setattr(project_context_module, "_run_git", lambda _cwd, *args: None)
+    _fake_git(monkeypatch, lambda _cwd, *args: None)
 
     context = build_project_context(cwd=subdir)
 
@@ -476,7 +486,7 @@ def test_project_context_scans_git_root_from_subdirectory(
             return ""
         return None
 
-    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    _fake_git(monkeypatch, fake_run_git)
 
     context = build_project_context(cwd=subdir)
 
@@ -495,7 +505,7 @@ def test_project_context_walks_parents_without_git(
     subdir = project / "packages" / "app"
     subdir.mkdir(parents=True)
     (project / "package.json").write_text('{"name":"demo"}\n', encoding="utf-8")
-    monkeypatch.setattr(project_context_module, "_run_git", lambda _cwd, *args: None)
+    _fake_git(monkeypatch, lambda _cwd, *args: None)
 
     context = build_project_context(cwd=subdir)
 
@@ -516,7 +526,7 @@ def test_project_context_includes_bounded_git_status(
     def fake_run_git(_cwd: Path, *args: str) -> str | None:
         return responses.get(args)
 
-    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    _fake_git(monkeypatch, fake_run_git)
 
     context = build_project_context(cwd=tmp_path)
 
@@ -536,7 +546,7 @@ def test_project_context_is_bounded(tmp_path: Path, monkeypatch: MonkeyPatch) ->
             return "\n".join(f" M very-long-file-name-{index}.py" for index in range(50))
         return None
 
-    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    _fake_git(monkeypatch, fake_run_git)
 
     context = build_project_context(cwd=tmp_path, max_chars=120)
 
@@ -564,13 +574,27 @@ def test_project_context_applies_one_aggregate_git_deadline(
         output = "true" if command[-2:] == ("rev-parse", "--is-inside-work-tree") else ""
         return subprocess.CompletedProcess(command, 0, stdout=output)
 
-    monkeypatch.setattr(project_context_module.time, "monotonic", lambda: next(monotonic_values))
-    monkeypatch.setattr(project_context_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(git_module.subprocess, "run", fake_run)
 
     context = build_project_context(cwd=tmp_path)
 
     assert timeouts == [pytest.approx(1.0), pytest.approx(0.5)]
     assert f"{_GIT_SNAPSHOT} branch unknown; status unavailable" in context
+
+
+def test_nested_git_deadline_keeps_the_outer_one(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(git_module.time, "monotonic", lambda: 10.0)
+    deadline = git_module._GIT_CONTEXT_DEADLINE
+
+    with git_module.git_deadline():
+        outer = deadline.get()
+        with git_module.git_deadline():
+            assert deadline.get() == outer
+        assert deadline.get() == outer
+
+    assert outer == 10.0 + git_module.GIT_CONTEXT_TIMEOUT_SECONDS
+    assert deadline.get() is None
 
 
 def test_repository_status_is_read_once_and_reused_verbatim(
@@ -594,7 +618,7 @@ def test_repository_status_is_read_once_and_reused_verbatim(
             return " M src/app.py"
         return None
 
-    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    _fake_git(monkeypatch, fake_run_git)
 
     snapshot = read_repository_status(repo)
     context = build_project_context(cwd=repo, repository_status=snapshot)
@@ -628,7 +652,7 @@ def test_recover_status_round_trips_persisted_context(
             ("status", "--short"): status,
         }.get(args)
 
-    monkeypatch.setattr(project_context_module, "_run_git", fake_run_git)
+    _fake_git(monkeypatch, fake_run_git)
     snapshot = read_repository_status(repo)
     context = build_project_context(cwd=repo, repository_status=snapshot)
 
@@ -643,9 +667,8 @@ def test_recover_status_rejects_other_dirs_or_partial_context(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
-    monkeypatch.setattr(
-        project_context_module,
-        "_run_git",
+    _fake_git(
+        monkeypatch,
         lambda _cwd, *args: {
             ("rev-parse", "--is-inside-work-tree"): "true",
             ("branch", "--show-current"): "main",
