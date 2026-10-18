@@ -5,7 +5,7 @@ license: MIT
 compatibility: Wisp source checkouts and installed wisp-ai packages.
 metadata:
   author: Wisp
-  version: "1.4"
+  version: "1.5"
 ---
 
 # Wisp Development
@@ -17,7 +17,7 @@ proposing changes.
 ## Workflow
 
 1. Identify the narrowest owning layer: agent loop, harness, coding session, RPC host, or frontend.
-2. Preserve event-driven contracts and keep both terminal frontends as pure RPC clients.
+2. Preserve event-driven contracts and keep the Rust terminal UI a pure RPC client.
 3. Treat project trust, protected paths, tool safety, and approvals as independent boundaries.
 4. Use the existing runtime registration API instead of wiring capabilities into a frontend.
 5. Update authoritative sources before generated artifacts, preserving stable catalog and schema
@@ -26,16 +26,14 @@ proposing changes.
    events cross RPC.
 7. Run the repository's documented Python, Rust, handoff, and packaging gates that match the change.
 
-## GitHub delivery boundary
+## Local evidence and delivery
 
-When Wisp development continues into branch, commit, push, pull-request, CI, review, or
-merge-readiness work on GitHub, load the resolved `github-pr-delivery` entry and inspect its content
-before using it alongside this one. The name alone does not prove that Wisp's package entry was
-selected because a higher-precedence project or user entry may shadow it. Do not describe the resolved
-entry as bundled or assume guarantees that its content does not establish. This skill owns Wisp
-architecture, implementation, safety, and local verification; keep authorization-sensitive remote
-mechanics in the applicable delivery workflow rather than copying them here. Local verification is an
-input to PR delivery, not proof that remote CI or review is current and clean.
+This skill covers Wisp architecture, implementation, safety, and local verification. Create
+branches, commits, pushes, pull requests, merges, or releases only when the user asks for that step.
+In a Wisp source checkout, follow the delivery rules in `AGENTS.md`. Elsewhere, follow the project's
+own instructions. Local checks show the change works on this machine. They do not show that remote
+CI or review is clean for the commit being delivered, so report a pull request as ready only from the
+results for its current head commit.
 
 Load only the supporting resource needed for the task:
 

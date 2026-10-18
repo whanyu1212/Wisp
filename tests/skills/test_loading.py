@@ -55,15 +55,6 @@ def test_loads_instruction_body_without_frontmatter(tmp_path: Path) -> None:
                 "references/verification.md",
             ),
         ),
-        (
-            "github-pr-delivery",
-            (
-                "references/preflight-and-packaging.md",
-                "references/ci.md",
-                "references/review.md",
-                "references/readiness.md",
-            ),
-        ),
     ],
 )
 def test_loads_all_bundled_skill_resources(
@@ -108,17 +99,11 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
     verification = (root / "wisp-development" / "references" / "verification.md").read_text(
         encoding="utf-8"
     )
-    delivery = (
-        root / "github-pr-delivery" / "references" / "preflight-and-packaging.md"
-    ).read_text(encoding="utf-8")
     skills_guide = (BOOK_SRC_DIR / "guide" / "skills.md").read_text(encoding="utf-8")
 
     development_entry = catalog.get("wisp-development")
-    delivery_entry = catalog.get("github-pr-delivery")
     assert development_entry is not None
-    assert delivery_entry is not None
-    assert dict(development_entry.metadata)["version"] == "1.4"
-    assert dict(delivery_entry.metadata)["version"] == "1.3"
+    assert dict(development_entry.metadata)["version"] == "1.5"
     for method in (
         "register_provider",
         "register_provider_factory",
@@ -135,9 +120,8 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
     assert "scripts/generate_tui_themes.py" not in architecture
     assert "Textual" not in architecture
     assert "Python/Rust\nhandoff tests" in verification
-    assert "already-merged feature branch" in delivery
+    assert "`AGENTS.md`" in verification
     assert "`wisp-development`" in skills_guide
-    assert "`github-pr-delivery`" in skills_guide
 
 
 def test_bundled_architecture_guidance_tracks_protocol_and_cancellation_contracts() -> None:
@@ -181,22 +165,19 @@ def test_bundled_cancellation_guidance_qualifies_duplicate_ids(resource: str) ->
     assert "Reusing an ID across separate batches does not share settlement state" in guidance
 
 
-def test_bundled_review_guidance_rejects_timing_only_exact_head_evidence() -> None:
-    review = " ".join(
-        (bundled_skills_root() / "github-pr-delivery/references/review.md")
-        .read_text(encoding="utf-8")
-        .split()
+def test_package_ships_only_the_wisp_development_skill(tmp_path: Path) -> None:
+    root = bundled_skills_root()
+    catalog = discover_skills(
+        home_dir=tmp_path,
+        project_root=None,
+        protected_paths=(),
+        package_root=root,
     )
 
-    assert "accept clean only from the expected reviewer or automation" in review
-    assert (
-        "an explicit reviewed commit or a reliable association with the tracked trigger" in review
-    )
-    assert "whose review target is that SHA" in review
-    assert "Arrival after the trigger and an unchanged PR head are not sufficient" in review
-    assert "delayed verdict from an earlier review" in review
-    assert "report that verification gap instead of declaring exact-head review clean" in review
-    assert "or arrives after the trigger and the PR head has not changed" not in review
+    assert catalog.names() == ("wisp-development",)
+    # Wisp no longer ships a GitHub delivery skill, so its guidance must not point at one.
+    for resource in sorted(root.rglob("*.md")):
+        assert "github-pr-delivery" not in resource.read_text(encoding="utf-8"), resource
 
 
 def test_loads_nested_relative_resource(tmp_path: Path) -> None:

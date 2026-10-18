@@ -11,7 +11,7 @@ uv run pytest tests
 ```
 
 Use `uv run mypy` without a path so configured package discovery remains authoritative. Scope pytest
-to `tests`; `refs/` contains reference repositories, not Wisp's suite.
+to `tests`, which holds Wisp's whole suite.
 
 Provider-facing tests must use deterministic fake or scripted providers, not live credentials.
 When an event crosses RPC, verify the real JSON round trip. For Rust changes, also run the workspace
@@ -30,8 +30,6 @@ uvx twine check dist/*
 Report every completed check accurately. A nonzero exit or timeout is not a pass.
 
 These checks establish local technical evidence. When the work is delivered through a GitHub pull
-request, load the resolved `github-pr-delivery` entry and inspect its content before using it. Its name
-alone does not identify the package entry because a project or user skill may shadow it, so rely only
-on the authorization boundaries and current-head readiness guarantees its content actually provides.
-Do not substitute local results for current remote evidence or duplicate the applicable delivery
-procedure here.
+request, follow the delivery rules in `AGENTS.md` (or the project's own instructions outside a Wisp
+checkout). Wait until every CI check on the current head commit has finished, and inspect the
+unresolved review threads. Do not substitute local results for that remote evidence.
