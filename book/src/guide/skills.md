@@ -26,16 +26,16 @@ oversized metadata is rejected.
 Project locations are not scanned until project trust is granted; user locations remain available in
 untrusted projects.
 
-Wisp ships two read-only package skills:
+Wisp ships one read-only package skill:
 
 | Skill | Purpose |
 |---|---|
-| `wisp-development` | Wisp architecture, dual-frontend boundaries, generated catalogs, extension surfaces, safety, and verification |
-| `github-pr-delivery` | Focused GitHub PR packaging, current-head CI, review threads, re-review, merge readiness, and post-merge follow-up |
+| `wisp-development` | Wisp architecture, the Rust TUI's RPC boundary, generated catalogs, extension surfaces, safety, and verification |
 
-They are available from source checkouts and installed wheels, including in untrusted projects.
-Package skills have the lowest precedence; higher-precedence project or user skills may shadow them
-using the same deterministic conflict rules.
+It is available from source checkouts and installed wheels, including in untrusted projects.
+Package skills have the lowest precedence; a project or user skill with the same name shadows it
+using the same deterministic conflict rules. Wisp does not ship a GitHub delivery skill. Add your own
+as a user or project skill if you want one.
 
 ## The `skill` tool
 

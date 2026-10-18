@@ -221,11 +221,34 @@ uv run mypy
 
 ## Git hygiene
 
-- For GitHub delivery, use `github-pr-delivery` when available, or the installed GitHub delivery
-  instructions relevant to the task. If no such skill is available, follow the explicit Git and CI
-  rules in this file and report any verification gap; do not assume a missing skill was followed.
 - Review `git status` before and after edits.
 - Stage only files belonging to the requested task.
 - Never discard or overwrite user changes to make the worktree clean.
 - Update local `main` only with a verified fast-forward workflow; use ancestry checks rather than
   comparing object IDs alone.
+
+## GitHub delivery
+
+These rules apply only when the user asks for a commit, push, pull request, or merge.
+
+- Start each change on its own branch from an up-to-date `main`, and confirm with
+  `git merge-base --is-ancestor origin/main HEAD` before pushing.
+- Stage explicit paths, never `git add .` when unrelated work exists. Check
+  `git diff --cached --check`, and scan the staged diff for secrets, `.env` files, and local-only
+  files before committing.
+- Write commit subjects as `type(scope): summary`, matching the history. Use the body to explain why
+  the change is needed, and add `Refs HY-123` when a Linear issue exists.
+- Fill in `.github/PULL_REQUEST_TEMPLATE.md`. Describe the net diff against `main` rather than the
+  branch's history, list the exact commands run and their results, and mark checks that were not
+  run.
+- After every push, wait until all checks reach a terminal state. Pending, queued, cancelled, or
+  unexplained skipped checks are not passes; `CI passed` is the required status.
+- Codex reviews each pull request automatically. Verify each finding against the code. Fix a valid
+  one narrowly, with a regression test where it applies, then reply with the fixing commit and
+  resolve the thread only after the fix is pushed. Answer an invalid one with evidence instead of
+  changing code to silence it. After addressing findings, comment `@codex review` and wait for a
+  result tied to the current head commit: a 👀 reaction means queued, and silence is not approval.
+- A pull request is ready to merge when it is not a draft, GitHub reports it mergeable, every check
+  on the current head passed, no actionable review thread is unresolved, and the latest review of
+  that head is clean.
+- Never amend, rebase, force-push, merge, release, or delete branches unless the user asks.
