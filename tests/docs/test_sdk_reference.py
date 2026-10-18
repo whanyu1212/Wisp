@@ -6,12 +6,11 @@ import inspect
 import re
 from dataclasses import fields
 
-from tests.support.paths import REPO_ROOT
+from tests.support.paths import BOOK_SRC_DIR
 from wisp.rpc import RpcController
 from wisp.sdk import InProcessOptions
 
-_REPOSITORY_ROOT = REPO_ROOT
-_REFERENCE = (_REPOSITORY_ROOT / "site" / "reference" / "sdk.md").read_text(encoding="utf-8")
+_REFERENCE = (BOOK_SRC_DIR / "reference" / "sdk.md").read_text(encoding="utf-8")
 
 
 def test_sdk_reference_covers_every_controller_method() -> None:

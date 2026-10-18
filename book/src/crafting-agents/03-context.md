@@ -49,7 +49,7 @@ The builder lives in
 [`examples/crafting_agents/context.py`](https://github.com/whanyu1212/Wisp/blob/main/examples/crafting_agents/context.py):
 
 ```python
-{{#include ../../examples/crafting_agents/context.py:assembly}}
+{{#include ../../../examples/crafting_agents/context.py:assembly}}
 ```
 
 In `checkpoint_03.py`, `run_checkpoint` passes the resulting blocks into the
@@ -57,7 +57,7 @@ existing loop. Request inspection wraps the provider; permissions go separately
 to the executor:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_03.py:request}}
+{{#include ../../../examples/crafting_agents/checkpoint_03.py:request}}
 ```
 
 The output has five blocks:
@@ -100,7 +100,7 @@ Instead, metadata, project guidance, and tool guidance receive separate limits.
 The fixed core and boundary blocks do not share those allowances.
 
 ```python
-{{#include ../../examples/crafting_agents/context.py:budget}}
+{{#include ../../../examples/crafting_agents/context.py:budget}}
 ```
 
 The marker fits **inside** the body limit; section headers are additional fixed
@@ -127,7 +127,7 @@ sequence. The new executor adds discovery and document reads while delegating
 edits and tests to the existing executor:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_03.py:discovery}}
+{{#include ../../../examples/crafting_agents/checkpoint_03.py:discovery}}
 ```
 
 Discovery returns sorted names from a fixed candidate set. It does not read

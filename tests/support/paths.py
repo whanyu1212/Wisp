@@ -9,5 +9,7 @@ from pathlib import Path
 TESTS_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = TESTS_DIR.parent
 FIXTURES_DIR = TESTS_DIR / "fixtures"
+BOOK_SRC_DIR = REPO_ROOT / "book" / "src"
+"""Markdown source of the published mdBook (``book/book.toml`` sets ``src = "src"``)."""
 
-__all__ = ["FIXTURES_DIR", "REPO_ROOT", "TESTS_DIR"]
+__all__ = ["BOOK_SRC_DIR", "FIXTURES_DIR", "REPO_ROOT", "TESTS_DIR"]

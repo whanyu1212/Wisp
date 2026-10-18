@@ -87,16 +87,18 @@ cargo install mdbook-mermaid --version 0.17.1 --locked
 Build or serve the book from the repository root:
 
 ```bash
-mdbook build
-mdbook serve --open
+mdbook build book
+mdbook serve book --open
 ```
 
-The source lives in `site/`, and `site/SUMMARY.md` controls chapter order. CI also checks links in the
-rendered `book/` directory.
+Everything for the book lives in `book/`: `book/book.toml`, the Markdown source in `book/src/`
+(`book/src/SUMMARY.md` controls chapter order), and the theme in `book/theme/`. Output goes to the
+ignored `book/build/`. CI fails the build if mdBook logs an error, such as an include whose file
+cannot be read, and checks links in the rendered output.
 
 Mermaid's browser assets are generated vendor files. After upgrading the pinned plugin, refresh them
 instead of editing them:
 
 ```bash
-mdbook-mermaid install .
+mdbook-mermaid install book
 ```
