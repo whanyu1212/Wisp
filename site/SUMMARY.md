@@ -53,6 +53,7 @@
 - [Testing](contributing/testing.md)
 - [RC5 release](contributing/rc5-release.md)
 - [RC6 release](contributing/rc6-release.md)
+- [RC13 release](contributing/rc13-release.md)
 - [RC12 release](contributing/rc12-release.md)
 - [RC11 release](contributing/rc11-release.md)
 - [RC10 release](contributing/rc10-release.md)
