@@ -3,6 +3,7 @@
 from .builder import (
     DEFAULT_TOOL_GUIDANCE_MAX_CHARS,
     build_prompt_messages,
+    extend_custom_prompt_messages,
 )
 from .git import GIT_CONTEXT_TIMEOUT_SECONDS
 from .instructions import (
@@ -32,6 +33,7 @@ from .repository_status import (
 __all__ = [
     "DEFAULT_TOOL_GUIDANCE_MAX_CHARS",
     "build_prompt_messages",
+    "extend_custom_prompt_messages",
     "DEFAULT_SYSTEM_PROMPT",
     "INSTRUCTION_BOUNDARY_SYSTEM_PROMPT",
     "WEB_SEARCH_GUIDANCE",
