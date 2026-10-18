@@ -582,7 +582,7 @@ def test_project_context_applies_one_aggregate_git_deadline(
     assert f"{_GIT_SNAPSHOT} branch unknown; status unavailable" in context
 
 
-def test_nested_git_deadline_keeps_the_outer_one(monkeypatch: MonkeyPatch) -> None:
+def test_nested_deadline_keeps_outer(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(git_module.time, "monotonic", lambda: 10.0)
     deadline = git_module._GIT_CONTEXT_DEADLINE
 

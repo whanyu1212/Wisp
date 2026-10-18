@@ -246,12 +246,14 @@ The builder assembles:
 1. Core instructions, with the reusable prompt-cache boundary on that first message.
 2. Bounded project context, or an untrusted-project notice with tool descriptions.
 3. Optional, deduplicated tool guidance.
-4. Additional host guidance, including the skill index when its tool is exposed.
+4. Additional host guidance: the skill index when its tool is exposed, then web-search guidance
+   when search is on.
 5. An instruction-boundary notice.
 6. Plan-mode restrictions when applicable.
 
-This describes the default builder; an SDK-supplied `prompt_messages` override
-takes a separate path in the session. The builder itself does not decide project
+A `prompt_messages` override passed to `CodingSession` replaces steps 1–3 and 5.
+`extend_custom_prompt_messages` still appends steps 4 and 6 after it, because they
+describe what the session currently allows. The builder itself does not decide project
 trust or validate tool permissions. It uses decisions supplied by the owning
 session and executor.
 

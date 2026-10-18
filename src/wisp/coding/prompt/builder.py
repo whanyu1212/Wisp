@@ -90,15 +90,64 @@ def build_prompt_messages(
     ]
     if tool_guidance := _tool_guidance(tool_prompt_metadata):
         messages.append(Message(role="system", content=tool_guidance))
-    messages.extend(
+    messages.extend(_guidance_messages(additional_guidance))
+    messages.append(Message(role="system", content=INSTRUCTION_BOUNDARY_SYSTEM_PROMPT))
+    messages.extend(_mode_messages(mode))
+    return tuple(messages)
+
+
+def extend_custom_prompt_messages(
+    prompt_messages: Sequence[Message],
+    *,
+    additional_guidance: Sequence[str] = (),
+    mode: AgentMode = DEFAULT_AGENT_MODE,
+) -> tuple[Message, ...]:
+    """Add the session's operational guidance to a caller-supplied prompt.
+
+    A custom prompt replaces Wisp's instructions, project context, tool guidance,
+    and instruction-boundary notice. The host guidance and plan-mode restrictions
+    still apply, because they describe what the session currently allows; they
+    follow the custom messages in the same order `build_prompt_messages` uses.
+
+    Args:
+        prompt_messages (Sequence[Message]): The caller's replacement prompt.
+        additional_guidance (Sequence[str]): Host-provided guidance, in order.
+        mode (AgentMode): Whether to append the plan-mode restrictions.
+
+    Returns:
+        tuple[Message, ...]: The custom messages, then non-blank host guidance,
+        then the plan-mode restrictions in plan mode.
+
+    Examples:
+        >>> custom = (Message(role="system", content="Custom policy."),)
+        >>> messages = extend_custom_prompt_messages(
+        ...     custom, additional_guidance=("Skill index.", " "), mode="plan"
+        ... )
+        >>> [message.content for message in messages[:2]]
+        ['Custom policy.', 'Skill index.']
+        >>> messages[2].content == PLAN_MODE_SYSTEM_PROMPT
+        True
+    """
+
+    return (
+        *prompt_messages,
+        *_guidance_messages(additional_guidance),
+        *_mode_messages(mode),
+    )
+
+
+def _guidance_messages(additional_guidance: Sequence[str]) -> tuple[Message, ...]:
+    return tuple(
         Message(role="system", content=guidance)
         for guidance in additional_guidance
         if guidance.strip()
     )
-    messages.append(Message(role="system", content=INSTRUCTION_BOUNDARY_SYSTEM_PROMPT))
+
+
+def _mode_messages(mode: AgentMode) -> tuple[Message, ...]:
     if mode == "plan":
-        messages.append(Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
-    return tuple(messages)
+        return (Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT),)
+    return ()
 
 
 def _tool_guidance(metadata: Sequence[ToolPromptMetadata]) -> str:

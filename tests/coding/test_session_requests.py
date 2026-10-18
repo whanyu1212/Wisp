@@ -10,6 +10,8 @@ from tests.coding.session_support import (
     CapturingProvider,
 )
 from wisp.agent.messages import Message
+from wisp.agent.mode import PLAN_MODE_SYSTEM_PROMPT
+from wisp.coding.prompt import WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding.session import CodingSession, _prompt_cache_key
 from wisp.events import (
     MessageCompleted,
@@ -133,7 +135,8 @@ def test_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
 
 
-def test_custom_prompt_messages_remain_full_replacement(tmp_path: Path) -> None:
+def test_custom_prompt_replaces_defaults(tmp_path: Path) -> None:
+    # With no skills, web search, or plan mode, nothing is added to a custom prompt.
     provider = CapturingProvider()
     custom_prompt = Message(role="system", content="Custom application policy.")
 
@@ -151,6 +154,31 @@ def test_custom_prompt_messages_remain_full_replacement(tmp_path: Path) -> None:
     assert [(message.role, message.content) for message in provider.seen_messages] == [
         ("system", "Custom application policy."),
         ("user", "hello"),
+    ]
+
+
+def test_custom_prompt_keeps_guidance(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    custom_prompt = Message(role="system", content="Custom application policy.")
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            prompt_messages=(custom_prompt,),
+            web_search=True,
+            mode="plan",
+        )
+        _ = [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    # The same additions, in the same order, as on the default prompt path.
+    assert [message.content for message in provider.seen_messages if message.role == "system"] == [
+        "Custom application policy.",
+        WEB_SEARCH_UNAVAILABLE_GUIDANCE,
+        PLAN_MODE_SYSTEM_PROMPT,
     ]
 
 

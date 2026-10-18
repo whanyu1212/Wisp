@@ -679,7 +679,7 @@ def test_entry_requires_exactly_its_matching_payload(
         )
 
 
-def test_round_trips_repository_status_snapshot(tmp_path: Path) -> None:
+def test_round_trips_status_snapshot(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     entry = MessageSessionEntry(
         session_id=session.session_id,
@@ -692,7 +692,7 @@ def test_round_trips_repository_status_snapshot(tmp_path: Path) -> None:
     assert session.read_entries()[0] == entry
 
 
-def test_rejects_repository_status_on_non_system_message() -> None:
+def test_rejects_status_on_non_system() -> None:
     with pytest.raises(ValidationError, match="valid only on system messages"):
         MessageSessionEntry(
             session_id="session-1",

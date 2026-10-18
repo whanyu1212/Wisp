@@ -177,7 +177,7 @@ def _resume_in_new_process(
     return before, after
 
 
-def test_project_context_entry_saves_its_git_status(tmp_path: Path) -> None:
+def test_saves_git_status(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     store = JsonlSessionStore(tmp_path / "sessions")
@@ -208,7 +208,7 @@ def test_project_context_entry_saves_its_git_status(tmp_path: Path) -> None:
     assert snapshot.status in saved[0].message.content
 
 
-def test_session_saved_without_a_snapshot_reads_git_again(tmp_path: Path) -> None:
+def test_old_session_reads_git(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     _init_git_repo(repo)
 
@@ -224,7 +224,7 @@ def test_session_saved_without_a_snapshot_reads_git_again(tmp_path: Path) -> Non
     assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
 
 
-def test_resumed_session_reuses_an_unavailable_git_status(tmp_path: Path) -> None:
+def test_reuses_unavailable_status(tmp_path: Path) -> None:
     # The saved snapshot is reused as sent, even when Git was unavailable then.
     project = tmp_path / "project"
     project.mkdir()

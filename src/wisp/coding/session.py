@@ -28,7 +28,7 @@ from wisp.agent.messages import (
     completion_event_has_history,
     message_from_completion_event,
 )
-from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
+from wisp.agent.mode import DEFAULT_AGENT_MODE, AgentMode
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -64,6 +64,7 @@ from wisp.coding.prompt import (
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
     build_prompt_messages,
+    extend_custom_prompt_messages,
     read_repository_status,
 )
 from wisp.coding.stats import build_session_stats
@@ -1631,15 +1632,16 @@ class CodingSession:
             )
             else ""
         )
+        # Both prompt paths add the same host guidance, in this order.
+        additional_guidance = (skill_index, self._web_search_guidance())
         if self.prompt_messages is not None:
-            messages = (
-                (*self.prompt_messages, Message(role="system", content=skill_index))
-                if skill_index
-                else self.prompt_messages
+            return _SessionPrompt(
+                messages=extend_custom_prompt_messages(
+                    self.prompt_messages,
+                    additional_guidance=additional_guidance,
+                    mode=self.mode,
+                )
             )
-            if self.mode == "plan":
-                messages = (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
-            return _SessionPrompt(messages=messages)
         repository_status = (
             self._repository_status_snapshot(session_id, operation_context.cwd, session=session)
             if self.trusted and session_id is not None
@@ -1653,9 +1655,7 @@ class CodingSession:
             )
             if effective_registry is not None
             else (),
-            additional_guidance=tuple(
-                guidance for guidance in (skill_index, self._web_search_guidance()) if guidance
-            ),
+            additional_guidance=additional_guidance,
             mode=self.mode,
             max_context_chars=self.project_context_max_chars,
             include_project_context=self.trusted,
