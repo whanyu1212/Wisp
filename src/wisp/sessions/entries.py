@@ -242,7 +242,7 @@ def session_entry_from_json(line: str, *, source: str | None = None) -> SessionE
         raw = JsonObjectAdapter.validate_json(line)
     except ValidationError as exc:
         raise MalformedSessionEntryError(f"Malformed session entry JSON{location}") from exc
-    return session_entry_from_dict(raw, source=source)
+    return _decode_entry(raw, source=source, line=line)
 
 
 def session_entry_from_dict(raw: JsonObject, *, source: str | None = None) -> SessionEntry:
@@ -265,6 +265,10 @@ def session_entry_from_dict(raw: JsonObject, *, source: str | None = None) -> Se
         UnsupportedPersistedEventVersionError: An event envelope uses another schema.
     """
 
+    return _decode_entry(raw, source=source, line=None)
+
+
+def _decode_entry(raw: JsonObject, *, source: str | None, line: str | None) -> SessionEntry:
     location = f" at {source}" if source is not None else ""
     _require_current_entry_version(raw, location=location)
     normalized = _restore_omitted_null_references(raw)
@@ -275,7 +279,11 @@ def session_entry_from_dict(raw: JsonObject, *, source: str | None = None) -> Se
     try:
         # Validate through Pydantic's JSON path so strict models still accept
         # JSON-native datetime strings while rejecting Python-side coercions.
-        return SessionEntryAdapter.validate_json(json.dumps(normalized))
+        # Restoring a reference only adds keys; when none were added, the source
+        # line is already that JSON, so it is not serialized again.
+        if line is None or len(normalized) != len(raw):
+            line = json.dumps(normalized)
+        return SessionEntryAdapter.validate_json(line)
     except (TypeError, ValidationError) as exc:
         raise MalformedSessionEntryError(f"Malformed session entry{location}") from exc
 

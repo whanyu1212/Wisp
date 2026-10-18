@@ -23,6 +23,8 @@ from wisp.sessions.entries import (
     PersistedEventEnvelope,
     RepositoryStatusSnapshot,
     SessionEntryAdapter,
+    session_entry_from_dict,
+    session_entry_from_json,
     session_entry_to_json,
 )
 from wisp.sessions.errors import (
@@ -699,3 +701,34 @@ def test_rejects_status_on_non_system() -> None:
             message=Message(role="user", content="hello"),
             repository_status=RepositoryStatusSnapshot(cwd="/repo", status="git: unavailable"),
         )
+
+
+_BASE = '"schema_version":6,"id":"e1","session_id":"s","created_at":"2026-01-01T00:00:00Z"'
+_USER = '"message":{"role":"user","content":"caf\\u00e9","created_at":"2026-01-01T00:00:00Z"}'
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        f'{{{_BASE},"kind":"message",{_USER}}}',  # parent_id omitted
+        f'{{{_BASE},"kind":"message","parent_id":null,{_USER}}}',
+        f'{{{_BASE},"kind":"message","parent_id":"p","parent_id":"q",{_USER}}}',
+        f'{{{_BASE},"kind":"event","parent_id":null,"event":{{"schema_version":1,"payload":{{}}}}}}',
+        f'{{{_BASE},"kind":"event","parent_id":null,"event":{{"schema_version":2,"payload":{{}}}}}}',
+        f'{{{_BASE},"kind":"active_leaf","active_leaf_id":null,"reason":"system"}}',
+        f'{{{_BASE},"kind":"active_leaf","active_leaf_id":null}}',
+        f'{{{_BASE},"kind":"session_info","name":"one"}}',
+        '{"schema_version":6,"kind":"session_info","session_id":"s","name":"no id"}',
+        f'{{{_BASE},"kind":"message","parent_id":null,{_USER},"extra":1}}',
+    ],
+)
+def test_line_and_dict_decoding_agree(line: str) -> None:
+    # Decoding a line skips re-serializing it when nothing is restored; the
+    # dictionary path always re-serializes, so it is the reference.
+    try:
+        expected = session_entry_from_dict(json.loads(line))
+    except Exception as exc:
+        with pytest.raises(type(exc)):
+            session_entry_from_json(line)
+    else:
+        assert session_entry_from_json(line) == expected
