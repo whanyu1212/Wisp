@@ -14,7 +14,10 @@ saves YOLO or trust for your home folder or a folder above it, and lets the trac
 conversation wherever the pointer is. RC11 shows and toggles the providers' own web search in the
 TUI with `/search`, and cuts local overhead from bash, `grep`, `find`, and Codex requests. RC12
 keeps prompts visible when scrolling back, copies transcript text you drag over, scrolls the
-conversation while an approval waits, and adds a jump-to-latest label above the composer.
+conversation while an approval waits, and adds a jump-to-latest label above the composer. RC13
+stops a reply from flickering when it finishes streaming, loads long sessions a little faster, and
+moves several internal Python modules; sessions a trusted RC13 run writes cannot be resumed by
+RC12 or earlier.
 Check the
 [release page](https://github.com/whanyu1212/Wisp/releases) for the latest
 published candidate before installing one.
@@ -87,11 +90,11 @@ checkout; native wheels are built and published in lockstep with the Python rele
 
 ## Trying a published candidate
 
-After RC12's artifacts are published and verified, use its exact version in an explicit pin:
+After RC13's artifacts are published and verified, use its exact version in an explicit pin:
 
 ```bash
-uvx --python 3.12 --from "wisp-ai==0.2.0rc12" wisp --version
-uvx --python 3.12 --from "wisp-ai==0.2.0rc12" wisp
+uvx --python 3.12 --from "wisp-ai==0.2.0rc13" wisp --version
+uvx --python 3.12 --from "wisp-ai==0.2.0rc13" wisp
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
@@ -103,16 +106,21 @@ still uses normal Wisp configuration and session locations. Use a disposable pro
 important state when testing. Continue using [0.1.0 installation instructions](./installation)
 if you do not want to opt into prerelease testing.
 
-To return a persistent `uv tool` installation to the published RC11 after an RC12 regression, exit
+To return a persistent `uv tool` installation to the published RC12 after an RC13 regression, exit
 Wisp, back up important sessions, then install the exact earlier version:
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.2.0rc11"
+uv tool install --force --python 3.12 "wisp-ai==0.2.0rc12"
 wisp --version
 ```
 
-RC11 reads RC12 sessions, settings, and trust records unchanged, since RC12 changes only the Rust
-TUI. RC11 has no drag-to-copy, so use your terminal's own selection (such as Shift-drag) or
+RC12 reads RC13 settings and trust records unchanged, but **not every RC13 session**. A trusted
+RC13 run saves its Git status snapshot in a field RC12 does not know, so RC12 still lists that
+session but reports it as malformed when you resume it; no earlier release can resume it either.
+Sessions RC13 wrote for an untrusted project, and sessions written by RC12 or earlier, still load.
+Keep a backup of any session you want to continue after going back, or start a new one there.
+Going back further to RC11: RC11 reads RC12 sessions, settings, and trust records unchanged, since
+RC12 changes only the Rust TUI. RC11 has no drag-to-copy, so use your terminal's own selection (such as Shift-drag) or
 `WISP_TUI_MOUSE=0`. Going back further to RC10: RC10 resumes, lists, and reads RC11 and RC12
 sessions, including with `read_typed_events()`; it does not show the web search evidence that RC11
 and RC12 display with saved replies. `/search` does not exist in
@@ -138,7 +146,7 @@ sessions before going back to RC3, and test session resume before relying on a d
 
 ## Before promoting to 0.2.0
 
-Use the [RC12 release checklist](../contributing/rc12-release) for candidate publication, platform
+Use the [RC13 release checklist](../contributing/rc13-release) for candidate publication, platform
 installation, long-session measurements, and rollback gates.
 
 - Require green CI and release-workflow verification/build checks on the exact candidate commit.

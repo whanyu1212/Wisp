@@ -1617,7 +1617,7 @@ wheels = [
 
 [[package]]
 name = "wisp-ai"
-version = "0.2.0rc12"
+version = "0.2.0rc13"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },

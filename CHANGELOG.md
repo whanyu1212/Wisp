@@ -10,14 +10,68 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc12 — release preparation
+## 0.2.0rc13 — release preparation
+
+RC13 finishes a cleanup of the agent runtime's Python packages, stops a reply from flickering when
+it finishes streaming, and loads long sessions a little faster. It changes no command, event, or
+handshake model. Sessions a trusted RC13 run writes save their Git status snapshot in a new field,
+which **RC12 and earlier reject**: they list such a session but report it as malformed when
+resuming it. Several internal Python modules moved with no compatibility re-export. As always, the
+backend and frontend must come from the same release, which the handshake enforces. This section
+describes the candidate under preparation; publication requires a separate tagged release.
+
+### Rust TUI
+
+- A reply no longer flickers when it finishes streaming: the transcript keeps its layout until the
+  command finishes, instead of briefly bringing back the working row. (#726)
+
+### Sessions
+
+- A trusted run saves the Git status snapshot its project context used with that system message
+  (`repository_status` on the message entry), and a resumed session reuses it from there instead
+  of re-reading it from the prompt text. A resume now also keeps the cached prompt when Git was
+  unavailable or the project context was cut short. Sessions saved before RC13 read Git once on
+  their next resume. The entry `schema_version` stays 6, since earlier files still load. (#732)
+- Loading a session parses each saved entry once instead of twice. On a 10,000-message session,
+  parsing every entry took about 30% less time, and resuming it in the TUI reached a ready screen
+  about 50 ms sooner (local macOS measurement). (#736)
+
+### Prompts
+
+- A custom `prompt_messages` passed to `CodingSession` now also gets the web-search guidance when
+  search is on, after the skill index and before the plan-mode instructions, as the default prompt
+  does. Only code that builds `CodingSession` directly can set it; the CLI, RPC, and SDK never do.
+  (#733)
+
+### Python API
+
+These modules moved with no compatibility re-export. None is in the documented SDK surface.
+
+- `wisp.agent.prompt` is now `wisp.coding.prompt`. (#730) Its `recover_repository_status` is
+  removed. (#732)
+- `wisp.agent.mode` is removed: import `AgentMode` and `DEFAULT_AGENT_MODE` from `wisp.events`
+  and `PLAN_MODE_SYSTEM_PROMPT` from `wisp.coding.prompt`. `is_agent_mode` is removed. (#734)
+- `wisp.agent.messages` is now `wisp.messages` (`from wisp.messages import Message`), and
+  `wisp.agent.history` is now `wisp.messages.history`. (#737)
+- New: `wisp.sessions.RepositoryStatusSnapshot` (#732), and `PROJECT_CONTEXT_HEADER` (#732) and
+  `extend_custom_prompt_messages` (#733) in `wisp.coding.prompt`.
+
+### Development
+
+- The agent harness names its cancellation phases (#727) and keeps its message queues in
+  `harness/queues.py` (#728). `prompt/project_context.py` is split into `git.py`,
+  `project_root.py`, and `repository_status.py` (#731). Behavior is unchanged.
+- The agent README defines the continuation terms and the request-boundary rules (#729).
+- The Rust TUI benchmarks run again: they passed the removed `--renderer` flag. CI now runs their
+  PTY tests, which skip without a built `wisp-tui`. (#735)
+
+## 0.2.0rc12 — 2026-10-17
 
 RC12 is a Rust TUI candidate. Scrolling back no longer loses prompts, dragging over the transcript
 copies it, the conversation scrolls while an approval or trust prompt waits, and a label above the
 composer jumps back to the latest output. It changes no command, event, or session format; as
 always, the backend and frontend must come from the same release, which the handshake enforces.
-RC11 resumes, lists, and reads RC12 sessions. This section describes the candidate under
-preparation; publication requires a separate tagged release.
+RC11 resumes, lists, and reads RC12 sessions.
 
 ### Rust TUI
 
