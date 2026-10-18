@@ -21,9 +21,11 @@ Please include:
 
 Remove API keys, tokens and private file contents from any logs you attach.
 
-Wisp has one maintainer. Expect an acknowledgement within 7 days. Once a report is confirmed, the
-fix lands on `main` and ships in the next release, followed by a published GitHub security
-advisory. The advisory credits you unless you ask not to be named.
+Wisp has one maintainer. Expect an acknowledgement within 7 days. Once a report is confirmed, the fix
+is developed in the advisory's temporary private fork, not on the public `main` branch. The fix is
+then merged, released and announced together, so the patched release and the published GitHub
+security advisory are available as soon as the change is public. The advisory credits you unless
+you ask not to be named.
 
 ## Supported versions
 
