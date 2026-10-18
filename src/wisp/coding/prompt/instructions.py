@@ -83,3 +83,10 @@ other; an MCP server is still added only through a proposal the user confirms.""
 WEB_SEARCH_UNAVAILABLE_GUIDANCE = """Web search is turned on in Wisp's settings, but the current
 provider has no built-in web search, so you cannot search the web. If a task needs information you
 do not have, say so rather than guessing."""
+
+PLAN_MODE_SYSTEM_PROMPT = """You are in plan mode. Inspect the project using available read-only
+tools.
+Do not modify files or execute shell commands. Identify the files inspected, distinguish confirmed
+facts from assumptions, and produce a concrete implementation plan covering relevant files,
+implementation steps, tests, risks, and unresolved decisions. Do not claim that changes were
+made."""

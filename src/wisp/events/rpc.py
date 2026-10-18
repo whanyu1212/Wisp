@@ -7,7 +7,6 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from wisp.agent.mode import AgentMode
 from wisp.events._base import QueueMode, WispEvent
 from wisp.project_files import (
     MAX_PROJECT_FILES,
@@ -20,6 +19,12 @@ from wisp.skills.models import SkillDiagnosticCode, SkillDiagnosticSeverity, Ski
 # The tool-approval posture a frontend selects; persisted per project by ``wisp.trust``.
 # A ``type`` alias so the schema bundle keeps its named ``PermissionMode`` definition.
 type PermissionMode = Literal["ask", "yolo"]
+
+# Whether the agent may change the project ("build") or only inspect it and plan ("plan").
+# A ``type`` alias for the same reason as ``PermissionMode``.
+type AgentMode = Literal["build", "plan"]
+
+DEFAULT_AGENT_MODE: AgentMode = "build"
 
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32
@@ -45,7 +50,7 @@ class CodingSessionState(BaseModel):
 
     provider: str
     model: str | None = None
-    mode: AgentMode = "build"
+    mode: AgentMode = DEFAULT_AGENT_MODE
     effort: str | None = None
     auto_compaction_enabled: bool
     web_search: bool = False

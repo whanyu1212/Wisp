@@ -10,8 +10,7 @@ from tests.coding.session_support import (
     CapturingProvider,
 )
 from wisp.agent.messages import Message
-from wisp.agent.mode import PLAN_MODE_SYSTEM_PROMPT
-from wisp.coding.prompt import WEB_SEARCH_UNAVAILABLE_GUIDANCE
+from wisp.coding.prompt import PLAN_MODE_SYSTEM_PROMPT, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding.session import CodingSession, _prompt_cache_key
 from wisp.events import (
     MessageCompleted,

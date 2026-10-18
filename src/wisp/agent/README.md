@@ -162,7 +162,6 @@ history synchronized.
 | [`context_budget.py`](./context_budget.py) | Estimates request context, records provider observations, and builds context-pressure budgets. |
 | [`history.py`](./history.py) | Normalizes historical tool exchanges into provider-safe portable history. |
 | [`transcript_repair.py`](./transcript_repair.py) | Orders tool results and synthesizes missing results after interrupted tool calls. |
-| [`mode.py`](./mode.py) | Defines build and plan modes and plan-mode instructions. |
 | [`validation.py`](./validation.py) | Validates limits shared by harness and loop configuration. |
 
 ## Where a change belongs

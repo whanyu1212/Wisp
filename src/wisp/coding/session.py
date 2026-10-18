@@ -28,7 +28,6 @@ from wisp.agent.messages import (
     completion_event_has_history,
     message_from_completion_event,
 )
-from wisp.agent.mode import DEFAULT_AGENT_MODE, AgentMode
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -70,7 +69,9 @@ from wisp.coding.prompt import (
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
+    DEFAULT_AGENT_MODE,
     AgentCompleted,
+    AgentMode,
     AgentStarted,
     CodingSessionState,
     CompactionCompleted,

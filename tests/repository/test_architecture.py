@@ -259,6 +259,23 @@ def test_prompt_package_lives_in_the_coding_layer() -> None:
     assert importers == []
 
 
+def test_events_do_not_import_agent() -> None:
+    """The event vocabulary sits below the agent runtime, so its imports point one way."""
+    events_dir = REPO_ROOT / "src" / "wisp" / "events"
+
+    importers = sorted(
+        str(path.relative_to(REPO_ROOT))
+        for path in events_dir.rglob("*.py")
+        if any(
+            imported == "wisp.agent" or imported.startswith("wisp.agent.")
+            for imported in _module_imports(path)
+        )
+    )
+
+    assert importers == []
+    assert not (REPO_ROOT / "src" / "wisp" / "agent" / "mode.py").exists()
+
+
 def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> None:
     wisp_dir = REPO_ROOT / "src" / "wisp"
 

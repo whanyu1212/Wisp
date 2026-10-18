@@ -41,6 +41,7 @@ from wisp.events._base import (
 )
 from wisp.events.errors import ErrorEvent
 from wisp.events.rpc import (
+    DEFAULT_AGENT_MODE,
     MAX_RPC_CONNECTION_LABEL_CHARS,
     MAX_RPC_CONNECTION_METHODS,
     MAX_RPC_CONNECTION_PROVIDERS,
@@ -56,6 +57,7 @@ from wisp.events.rpc import (
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_OAUTH_EXPIRY_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
+    AgentMode,
     CodingSessionState,
     PermissionMode,
     PermissionState,
@@ -168,6 +170,7 @@ from wisp.events.usage import (
 )
 
 __all__ = [
+    "DEFAULT_AGENT_MODE",
     "MAX_RPC_CONNECTION_LABEL_CHARS",
     "MAX_RPC_CONNECTION_METHODS",
     "MAX_RPC_CONNECTION_PROVIDERS",
@@ -184,6 +187,7 @@ __all__ = [
     "MAX_RPC_OAUTH_EXPIRY_CHARS",
     "MAX_RPC_PROVIDER_ID_CHARS",
     "AgentCompleted",
+    "AgentMode",
     "AgentStarted",
     "BillableTokenUsage",
     "CodingSessionState",

@@ -6,12 +6,16 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from wisp.agent.messages import Message
-from wisp.agent.mode import DEFAULT_AGENT_MODE, PLAN_MODE_SYSTEM_PROMPT, AgentMode
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS
+from wisp.events import DEFAULT_AGENT_MODE, AgentMode
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 
-from .instructions import DEFAULT_SYSTEM_PROMPT, INSTRUCTION_BOUNDARY_SYSTEM_PROMPT
+from .instructions import (
+    DEFAULT_SYSTEM_PROMPT,
+    INSTRUCTION_BOUNDARY_SYSTEM_PROMPT,
+    PLAN_MODE_SYSTEM_PROMPT,
+)
 from .project_context import (
     DEFAULT_CONTEXT_FILE_MAX_CHARS,
     DEFAULT_CONTEXT_MAX_CHARS,
