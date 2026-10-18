@@ -111,8 +111,17 @@ SKILL_EXPANSION_MARKER
                 os.write(terminal_fd, b"inspect this change\r")
                 phase = "submitted"
                 output.clear()
-            elif phase == "submitted" and run_settled(output, 0, b"SKILL_EXPANSION_MARKER"):
-                # FakeProvider echoes its expanded input as assistant output.
+            elif phase == "submitted" and b"SKILL_EXPANSION_MARKER" in output:
+                # FakeProvider echoes its expanded input as assistant output. The reply can
+                # finish before "working" is painted, leaving the idle footer unchanged and
+                # never redrawn. A resize repaints the whole frame.
+                browser_width += 1
+                fcntl.ioctl(
+                    terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, browser_width, 0, 0)
+                )
+                phase = "settling"
+                output.clear()
+            elif phase == "settling" and run_settled(output):
                 os.write(terminal_fd, b"\x03")
                 phase = "quit"
             if phase == "browser ready" and time.monotonic() >= next_browser_frame:

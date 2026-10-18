@@ -35,6 +35,7 @@ def _sample(renderer: Renderer, run: int, value: float) -> BenchmarkSample:
         submit_to_settled_ms=value + 4,
         total_ms=value + 5,
         terminal_output_bytes=int(value * 100),
+        idle_repainted=False,
         child_user_cpu_ms=value + 6,
         child_system_cpu_ms=value + 7,
         child_max_rss_bytes=int(value * 1_000),
@@ -57,9 +58,24 @@ def test_summarize_samples_retains_raw_distribution_extremes() -> None:
     assert rust.launch_to_ready_ms.median == 20
     assert rust.launch_to_ready_ms.p95 == 29
     assert rust.launch_to_ready_ms.max == 30
+    assert rust.terminal_output_bytes is not None
     assert rust.terminal_output_bytes.median == 2_000
     assert rust.child_max_rss_bytes is not None
     assert rust.child_max_rss_bytes.max == 30_000
+
+
+def test_summary_leaves_repainted_samples_out_of_distorted_times() -> None:
+    repainted = replace(_sample("rust", 2, 30), submit_to_settled_ms=None, idle_repainted=True)
+
+    (rust,) = summarize_samples((_sample("rust", 1, 10), repainted))
+
+    assert rust.samples == 2
+    assert rust.idle_repainted_samples == 1
+    assert rust.launch_to_ready_ms.max == 30
+    assert rust.submit_to_settled_ms is not None and rust.submit_to_settled_ms.max == 14
+    assert rust.total_ms is not None and rust.total_ms.max == 15
+    assert rust.terminal_output_bytes is not None
+    assert rust.terminal_output_bytes.max == 1_000
 
 
 def test_report_json_includes_samples_and_summaries() -> None:
@@ -201,7 +217,9 @@ def test_source_cli_benchmark_completes_rust_renderer() -> None:
         assert sample.submit_to_prompt_echo_ms >= 0
         assert sample.submit_to_first_response_ms >= sample.submit_to_prompt_echo_ms
         assert sample.submit_to_final_response_ms >= sample.submit_to_first_response_ms
-        assert sample.submit_to_settled_ms >= sample.submit_to_final_response_ms
+        if sample.submit_to_settled_ms is not None:
+            assert sample.submit_to_settled_ms >= sample.submit_to_final_response_ms
+        assert (sample.submit_to_settled_ms is None) == sample.idle_repainted
         assert sample.total_ms >= sample.launch_to_ready_ms
         assert sample.terminal_output_bytes > 0
         assert sample.exact_markers_visible

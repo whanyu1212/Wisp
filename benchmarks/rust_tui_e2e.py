@@ -42,6 +42,11 @@ _SOURCE_ROOT = _REPOSITORY_ROOT / "src"
 _CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _DCS = re.compile(rb"\x1bP.*?\x1b\\", re.DOTALL)
+# A fake reply can finish before "working" is painted. The idle footer then never changes, so a
+# repaint of only changed cells never writes "idle" again; one resize repaints the whole frame.
+# That only confirms the run settled. The wait and the redraw distort the sample's settle time,
+# total time, and output bytes, so summaries leave such samples out of those three.
+_IDLE_REPAINT_AFTER_NS = 250_000_000
 _READY_MARKERS = (
     "AskWispanything",
     "Typeapromptor/forcommands.",
@@ -64,7 +69,12 @@ class BenchmarkConfig:
 
 @dataclass(frozen=True)
 class BenchmarkSample:
-    """Measurements and correctness observations from one CLI process."""
+    """Measurements and correctness observations from one CLI process.
+
+    ``submit_to_settled_ms`` is None when ``idle_repainted`` is set: the idle footer was never
+    redrawn after the reply, so a forced repaint confirmed the settle but not when it happened.
+    Such a sample's ``total_ms`` and ``terminal_output_bytes`` include the wait and the redraw.
+    """
 
     renderer: Renderer
     run: int
@@ -73,9 +83,10 @@ class BenchmarkSample:
     submit_to_prompt_echo_ms: float
     submit_to_first_response_ms: float
     submit_to_final_response_ms: float
-    submit_to_settled_ms: float
+    submit_to_settled_ms: float | None
     total_ms: float
     terminal_output_bytes: int
+    idle_repainted: bool
     child_user_cpu_ms: float | None
     child_system_cpu_ms: float | None
     child_max_rss_bytes: int | None
@@ -99,13 +110,14 @@ class RendererSummary:
 
     renderer: Renderer
     samples: int
+    idle_repainted_samples: int
     launch_to_ready_ms: Distribution
     submit_to_prompt_echo_ms: Distribution
     submit_to_first_response_ms: Distribution
     submit_to_final_response_ms: Distribution
-    submit_to_settled_ms: Distribution
-    total_ms: Distribution
-    terminal_output_bytes: Distribution
+    submit_to_settled_ms: Distribution | None
+    total_ms: Distribution | None
+    terminal_output_bytes: Distribution | None
     child_user_cpu_ms: Distribution | None
     child_system_cpu_ms: Distribution | None
     child_max_rss_bytes: Distribution | None
@@ -198,10 +210,13 @@ def summarize_samples(samples: Sequence[BenchmarkSample]) -> tuple[RendererSumma
     summaries = []
     for renderer in renderer_order:
         selected = tuple(sample for sample in samples if sample.renderer == renderer)
+        # A forced idle repaint distorts these three measurements; see BenchmarkSample.
+        measured = tuple(sample for sample in selected if not sample.idle_repainted)
         summaries.append(
             RendererSummary(
                 renderer=renderer,
                 samples=len(selected),
+                idle_repainted_samples=len(selected) - len(measured),
                 launch_to_ready_ms=_distribution(
                     tuple(sample.launch_to_ready_ms for sample in selected)
                 ),
@@ -214,12 +229,12 @@ def summarize_samples(samples: Sequence[BenchmarkSample]) -> tuple[RendererSumma
                 submit_to_final_response_ms=_distribution(
                     tuple(sample.submit_to_final_response_ms for sample in selected)
                 ),
-                submit_to_settled_ms=_distribution(
-                    tuple(sample.submit_to_settled_ms for sample in selected)
+                submit_to_settled_ms=_optional_distribution(
+                    tuple(sample.submit_to_settled_ms for sample in measured)
                 ),
-                total_ms=_distribution(tuple(sample.total_ms for sample in selected)),
-                terminal_output_bytes=_distribution(
-                    tuple(float(sample.terminal_output_bytes) for sample in selected)
+                total_ms=_optional_distribution(tuple(sample.total_ms for sample in measured)),
+                terminal_output_bytes=_optional_distribution(
+                    tuple(float(sample.terminal_output_bytes) for sample in measured)
                 ),
                 child_user_cpu_ms=_optional_distribution(
                     tuple(sample.child_user_cpu_ms for sample in selected)
@@ -349,6 +364,7 @@ def _run_sample(
         first_response_ns: int | None = None
         final_response_ns: int | None = None
         settled_ns: int | None = None
+        idle_repaint_requested = False
         quit_sent = False
         wait_result: _WaitResult | None = None
         initial_terminal: list[int | list[bytes]] | None = None
@@ -409,6 +425,16 @@ def _run_sample(
                             plain[final_index + len(FINAL_TOKEN) :], renderer
                         ):
                             settled_ns = now_ns
+                        elif (
+                            not idle_repaint_requested
+                            and now_ns - final_response_ns > _IDLE_REPAINT_AFTER_NS
+                        ):
+                            fcntl.ioctl(
+                                terminal_fd,
+                                termios.TIOCSWINSZ,
+                                struct.pack("HHHH", config.height, config.width - 1, 0, 0),
+                            )
+                            idle_repaint_requested = True
                     if settled_ns is not None and not quit_sent:
                         os.write(terminal_fd, b"/quit\r")
                         quit_sent = True
@@ -487,9 +513,12 @@ def _run_sample(
             submit_to_prompt_echo_ms=_elapsed_ms(submitted, prompt_echo),
             submit_to_first_response_ms=_elapsed_ms(submitted, first_response),
             submit_to_final_response_ms=_elapsed_ms(submitted, final_response),
-            submit_to_settled_ms=_elapsed_ms(submitted, settled),
+            submit_to_settled_ms=None
+            if idle_repaint_requested
+            else _elapsed_ms(submitted, settled),
             total_ms=_elapsed_ms(launched_ns, completed_ns),
             terminal_output_bytes=terminal_output_bytes,
+            idle_repainted=idle_repaint_requested,
             child_user_cpu_ms=wait_result.user_cpu_ms,
             child_system_cpu_ms=wait_result.system_cpu_ms,
             child_max_rss_bytes=wait_result.max_rss_bytes,
