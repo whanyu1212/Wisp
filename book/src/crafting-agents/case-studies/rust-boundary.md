@@ -36,9 +36,9 @@ sequences:
   one Python hotspot that offered an obvious local fix.
 
 The retained reports are
-[`benchmarks/tool_boundary_evidence.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/tool_boundary_evidence.md)
+[`benchmarks/evidence/tool_boundary_evidence.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/tool_boundary_evidence.md)
 and
-[`benchmarks/pending_text_rust_evidence.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/pending_text_rust_evidence.md).
+[`benchmarks/evidence/pending_text_rust_evidence.md`](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/pending_text_rust_evidence.md).
 The figures below are historical observations from those workloads, not
 predictions for every machine or repository.
 

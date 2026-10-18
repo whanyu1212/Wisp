@@ -4,7 +4,8 @@ Refreshed 2026-09-03 for issue #470. The previous snapshot was 2026-08-29 for #4
 sampling output remain ignored under `profiles/`.
 
 This is not a comparative Textual measurement and does not authorize a default-renderer change.
-See `benchmarks/rust_tui_acceptance_evidence.md`.
+See the archived
+[#470 acceptance evidence](https://github.com/whanyu1212/Wisp/blob/1724ce5df7f4592e47fce67ec67f90920f076244/benchmarks/rust_tui_acceptance_evidence.md).
 
 ## Reproducibility
 
