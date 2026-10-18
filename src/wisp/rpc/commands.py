@@ -19,11 +19,11 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.agent.mode import AgentMode
 from wisp.events import (
     MAX_RPC_MODEL_EFFORT_CHARS,
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
+    AgentMode,
     PermissionMode,
     QueueKind,
     QueueMode,

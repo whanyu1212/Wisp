@@ -14,8 +14,8 @@ from anyio.abc import Process
 from pydantic import ValidationError
 
 from wisp import __version__
-from wisp.agent.mode import AgentMode
 from wisp.events import (
+    AgentMode,
     KnownWispEvent,
     PermissionMode,
     QueueKind,
