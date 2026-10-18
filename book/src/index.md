@@ -18,18 +18,18 @@ Its TUI, print mode, JSONL RPC process, and Python SDK share one typed runtime. 
 ## Install Wisp
 
 ```bash
-uv tool install "wisp-ai==0.1.0"
+uv tool install --python 3.12 wisp-ai
 cd path/to/project
 wisp
 ```
 
 > [!TIP]
-> **Wisp 0.1.0 is available**
+> **Wisp 0.2.0 is available**
 >
-> The first stable release includes live TUI steering, lazy provider startup, persistent sessions,
-> explicit safety approvals, and typed CLI, RPC, and SDK interfaces. Read the
-> [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md#010--2026-08-23) or
-> [install from PyPI](https://pypi.org/project/wisp-ai/0.1.0/).
+> 0.2 makes the Rust terminal UI the interactive interface, adds MCP server management and the
+> providers' own web search, and never saves trust or YOLO for your home folder. Read the
+> [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and, if you are coming
+> from 0.1, the [upgrade guide](./guide/upgrading.md).
 
 ## Start reading
 

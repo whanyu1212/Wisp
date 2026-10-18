@@ -38,21 +38,17 @@ Wisp needs Python 3.12 or newer and runs on macOS and Linux. Windows is best-eff
 dedicated CI coverage.
 
 ```bash
-uv tool install "wisp-ai==0.1.0"
+uv tool install --python 3.12 wisp-ai
 ```
 
-This README describes the 0.2 line, which is in release candidates. Its native wheels bundle the
-Rust terminal UI for macOS arm64 and Linux x86_64 (glibc 2.28+):
+On macOS arm64 and Linux x86_64 (glibc 2.28+), the native wheel includes the Rust terminal UI. Other
+platforms get a pure wheel, which keeps print, JSON, RPC and SDK use but has no terminal UI. Keep
+`--python 3.12` (or newer): without it, uv may resolve for an older default Python and pick the pure
+wheel. Run `uv tool update-shell` once if `wisp` is not on your `PATH`.
 
-```bash
-uv tool install --python 3.12 "wisp-ai==0.2.0rc13"
-```
-
-Run `uv tool update-shell` once if `wisp` is not on your `PATH`. On other platforms the install
-falls back to a pure wheel, which keeps print, JSON, RPC and SDK use but has no terminal UI. The
-[installation guide](https://whanyu1212.github.io/Wisp/guide/installation.html) and the
-[0.2 upgrade guide](https://whanyu1212.github.io/Wisp/guide/upgrading.html) cover updates, rollback
-and troubleshooting.
+The [installation guide](https://whanyu1212.github.io/Wisp/guide/installation.html) covers updates
+and troubleshooting. Coming from 0.1? Read the
+[upgrade guide](https://whanyu1212.github.io/Wisp/guide/upgrading.html) first.
 
 ## Quickstart
 

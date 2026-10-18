@@ -25,8 +25,6 @@ undo/redo, composer clipboard actions, and compact paste presentation. The
 [architecture guide](../architecture/rust-tui-boundary#subsystem-ownership) describes which process
 owns each part of the interface.
 Rust uses external update instructions, as described below.
-Published-artifact validation and terminal/accessibility feedback remain release acceptance work;
-the RC trial does not establish stable promotion.
 
 During a backend output burst, Rust waits up to five seconds for inbound queue capacity while
 continuing to give input and redraws turns. Sustained transport stalls and failed command writes
@@ -148,7 +146,7 @@ starts again from the first page. Forking restores the selected prompt after the
 history loads. Navigating to a user-message node likewise restores its editable prompt after loading;
 prompts that exceed the editor limit are rejected explicitly rather than truncated.
 
-The 0.2 candidates ship native wheels for the two packaged targets. Transcript search remains a
+Native wheels ship for the two packaged targets. Transcript search remains a
 follow-up; composer selection and clipboard actions are keyboard-driven. Drag over the transcript
 to copy it; see the mouse controls below.
 

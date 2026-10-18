@@ -11,7 +11,8 @@ release.
 future packages are not defined here.
 
 Package releases use semantic versioning expressed with Python's PEP 440 spelling. For example,
-`0.1.0` is the first stable release in the `0.1` minor line.
+`0.2.0` is the first stable release in the `0.2` minor line, and `0.2.0rc13` was one of its release
+candidates.
 
 - Patch releases preserve the documented public API. They may correct behavior that contradicts a
   documented contract; consumers that relied on the defect may observe the correction.
@@ -100,7 +101,7 @@ migration or containment advice.
 > The agent module reorganization removes the deprecated `wisp.agent.messages.SessionEntry(...)`
 > factory before the normal deprecation window, at the 0.2 minor-release boundary. This is a specific
 > early-removal exception for the agent API cleanup; the normal policy continues to apply to other
-> public APIs. The [0.2 upgrade guide](../guide/upgrading) tracks candidate availability and migration.
+> public APIs. The [0.2 upgrade guide](../guide/upgrading) lists the migration steps.
 >
 > Construct `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions`
 > instead. For event entries, wrap raw event dictionaries in `PersistedEventEnvelope(payload=...)`.

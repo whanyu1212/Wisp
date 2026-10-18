@@ -1,51 +1,59 @@
-# Upgrading to Wisp 0.2
+# Upgrading from Wisp 0.1 to 0.2
 
-This guide describes the 0.2 candidate series and the checks required before stable promotion.
-RC2 introduced the Rust-default trial on native wheels; RC3 removes the Python terminal renderers.
-RC4 adds prompt-cache improvements, removes the remaining compatibility shims, and requires the
-backend and frontend to be the same Wisp release. RC5 fixes stdio MCP servers and `wisp update` in
-public installs. RC6 refreshes the Rust TUI's approval prompts, diff cards, tool-card markers, and
-working row, and fixes dropped trackpad scrolling. RC7 lets the TUI recover from a failed prompt, such
-as one sent without credentials, instead of requiring an exit. RC8 manages MCP servers from `/mcp`,
-`wisp mcp`, or by asking Wisp, adds header and OAuth authentication for hosted MCP servers, and
-offers the providers' own web search. RC9 fixes hosted MCP servers with many tools (such as Linear's)
-and has Wisp propose a hosted server's URL and OAuth sign-in instead of a local bridge. RC10 never
-saves YOLO or trust for your home folder or a folder above it, and lets the trackpad scroll the
-conversation wherever the pointer is. RC11 shows and toggles the providers' own web search in the
-TUI with `/search`, and cuts local overhead from bash, `grep`, `find`, and Codex requests. RC12
-keeps prompts visible when scrolling back, copies transcript text you drag over, scrolls the
-conversation while an approval waits, and adds a jump-to-latest label above the composer. RC13
-stops a reply from flickering when it finishes streaming, loads long sessions a little faster, and
-moves several internal Python modules; sessions a trusted RC13 run writes cannot be resumed by
-RC12 or earlier.
-Check the
-[release page](https://github.com/whanyu1212/Wisp/releases) for the latest
-published candidate before installing one.
+Wisp 0.2 is a minor release with announced breaking changes. What you need to do depends on how you
+use Wisp:
+
+- **At the terminal**, the interactive interface is now a Rust TUI that ships in the native wheels.
+- **From Python**, a few deprecated names are gone and some internal modules moved.
+- **Over JSONL-RPC**, clients must handshake first and connect only to a backend from the same
+  release.
+
+The [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) lists every change,
+release candidate by release candidate.
+
+## Upgrade
+
+Back up `~/.wisp/sessions` (or your configured session directory), then install 0.2:
+
+```bash
+uv tool install --force --python 3.12 wisp-ai
+wisp --version       # wisp 0.2.0
+wisp-tui --version   # wisp-tui 0.2.0, on platforms with a native wheel
+```
+
+Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter
+first; if that is older than 3.12, uv selects the pure wheel and the install has no Rust TUI. Use
+this command rather than `wisp update` from 0.1.0, which predates the native wheels. See
+[Installation](./installation#the-tui-does-not-start-after-installing) if the TUI still doesn't
+start.
 
 ## What changes for terminal users
 
-`wisp`, `wisp tui`, and `wisp --mode tui` launch Rust. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary and Python
-backend. Pure-wheel installs retain print, JSON, RPC, and SDK but interactive commands fail with
-actionable missing-binary guidance. Build a matching Rust binary for a source checkout and set its
-absolute path in `WISP_RUST_TUI_BINARY`; see
+`wisp`, `wisp tui`, and `wisp --mode tui` launch the Rust TUI. Native wheels for macOS arm64 and
+Linux glibc 2.28+ x86_64 include it. Every other platform, including Intel macOS, gets a pure wheel:
+print, JSON, RPC, and SDK use work as before, but interactive commands stop with instructions for
+getting a native wheel or building a matching binary. For a source checkout, build the binary and
+set its absolute path in `WISP_RUST_TUI_BINARY`; see
 [Development setup](../contributing/development#rust-tui-scaffold).
 
-RC2 includes the native-wheel release pipeline, composer selection/undo/clipboard, semantic colors,
-and complete saved-history loading. It is a trial of Rust as the default on the packaged platforms,
-not a claim of universal terminal performance.
+The Python terminal renderers are gone, along with the options that chose between them: the
+`textual`, `fullscreen`, and `line` renderers, `--line`, `--tui-renderer`, and
+`wisp tui --renderer`. Python still runs the agent, providers, tools, permissions, and saved
+sessions; the [TUI guide](./tui) covers the new interface.
 
-RC3 removes the `textual`, `fullscreen`, and `line` renderers and the `--line` flag; later 0.2
-candidates also remove the `auto`/`rust` renderer selector. It also adds selectable startup logos, improves full-history
-hydration, and reduces RPC streaming and literal-search overhead. Python still controls providers,
-tools, permissions, and saved sessions.
+Your 0.1 settings, credentials, and trust decisions carry over. Two things need attention:
 
-RC2 published an Intel macOS native wheel; RC3 does not. Intel macOS installs receive the pure wheel,
-so print, JSON, RPC, and SDK continue to work, but interactive TUI startup fails with missing-binary
-guidance. RC3 has no Python TUI fallback on that platform.
+- A `~/.wisp/catalog.toml` overlay must declare `schema_version = 2`.
+- 0.2 never saves trust or YOLO for your home folder or a folder above it. A decision 0.1 saved for
+  such a folder is ignored but kept; see [Tools & safety](./tools-and-safety#home-folder-and-broad-folders).
 
-Only session files written in the current entry schema (v6) load. Older files are rejected rather
-than migrated. Python continues to own persistence. Back up important sessions before testing a
-candidate; older releases are not promised to understand newly written records.
+0.2 opens sessions saved by 0.1.0, since both write the same session format (entry schema v6).
+Session files from releases before 0.1.0 that use an older format no longer load; 0.2 rejects them
+rather than converting them.
+
+0.2 also adds MCP server management from `/mcp`, `wisp mcp`, or by asking Wisp (see
+[Tools & safety](./tools-and-safety#mcp-tools)), and the providers' own web search, which `/search`
+toggles in the TUI.
 
 ## Python integrations
 
@@ -65,6 +73,7 @@ This is a minor release with an announced breaking API cleanup, not a patch rele
   Message records moved from `wisp.agent.messages` to `wisp.messages` (for example
   `from wisp.messages import Message`), and history helpers from `wisp.agent.history` to
   `wisp.messages.history`, again with no re-export.
+- The SDK rejects a backend from a different Wisp release when it connects.
 - Prefer the documented [Python SDK import surface](../reference/sdk) when embedding Wisp.
   See [Compatibility & versioning](../reference/compatibility) for the public API boundary and
   the early-removal exception.
@@ -88,77 +97,24 @@ The in-process Python SDK has no serialization boundary and does not perform a w
 The Rust TUI requires the exact Python package release. Source builds use the matching
 checkout; native wheels are built and published in lockstep with the Python release.
 
-## Trying a published candidate
+## Going back to 0.1.0
 
-After RC13's artifacts are published and verified, use its exact version in an explicit pin:
+Exit Wisp, back up your sessions, and prepare your settings first:
 
-```bash
-uvx --python 3.12 --from "wisp-ai==0.2.0rc13" wisp --version
-uvx --python 3.12 --from "wisp-ai==0.2.0rc13" wisp
-```
+- **Hosted MCP servers.** 0.1.0 ignores the whole `~/.wisp/settings.json`, with a warning, if it
+  lists an MCP server that uses `url`. Copy those entries somewhere safe and remove them.
+- **Home-folder trust.** 0.1.0 applies trust or YOLO that it saved for your home folder again.
+  While still on 0.2, run `wisp trust forget ~`, and choose Ask in `/permissions` from your home
+  folder, to remove those records.
 
-Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter first;
-if that is older than 3.12, uv selects the pure wheel and the install has no Rust TUI. See
-[Installation](./installation#the-tui-does-not-start-after-installing-a-02-candidate).
-
-This avoids replacing an existing persistent `uv tool` installation, but the running application
-still uses normal Wisp configuration and session locations. Use a disposable project and back up
-important state when testing. Continue using [0.1.0 installation instructions](./installation)
-if you do not want to opt into prerelease testing.
-
-To return a persistent `uv tool` installation to the published RC12 after an RC13 regression, exit
-Wisp, back up important sessions, then install the exact earlier version:
+Then install the exact earlier version:
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.2.0rc12"
+uv tool install --force --python 3.12 "wisp-ai==0.1.0"
 wisp --version
 ```
 
-RC12 reads RC13 settings and trust records unchanged, but **not every RC13 session**. A trusted
-RC13 run saves its Git status snapshot in a field RC12 does not know, so RC12 still lists that
-session but reports it as malformed when you resume it; no earlier release can resume it either.
-Sessions RC13 wrote for an untrusted project, and sessions written by RC12 or earlier, still load.
-Keep a backup of any session you want to continue after going back, or start a new one there.
-Going back further to RC11: RC11 reads RC12 sessions, settings, and trust records unchanged, since
-RC12 changes only the Rust TUI. RC11 has no drag-to-copy, so use your terminal's own selection (such as Shift-drag) or
-`WISP_TUI_MOUSE=0`. Going back further to RC10: RC10 resumes, lists, and reads RC11 and RC12
-sessions, including with `read_typed_events()`; it does not show the web search evidence that RC11
-and RC12 display with saved replies. `/search` does not exist in
-RC10, and a toggle made with it in RC11 was never saved; set the default with the `web_search`
-setting or `WISP_WEB_SEARCH`, which RC10 reads as before. Going back further to RC9: RC9 resumes
-and lists RC10 through RC12 sessions, but `read_typed_events()` in RC9's SDK rejects one in which a tool
-approval was requested. RC9 also applies YOLO or trust that a release before RC10
-saved for your home folder again; RC10 ignores those records but does not delete them, so remove
-them first with `wisp trust forget ~` and Ask in `/permissions` (from your home folder) if you have
-any. RC8 and RC9 read each other's sessions and settings, but RC8 rejects an MCP server with more
-than 64 tools. Going back further to RC7: RC7 reads RC8 through RC12 sessions in which no web search
-ran, and
-reports a session where one did as malformed. RC7 also ignores the whole `~/.wisp/settings.json` if
-any MCP server in it uses `headers` or `headers_from`, so remove those entries (or note them and
-re-add them later) before going back. RC4 through RC7 read each other's sessions. Going back to RC4 additionally needs `--with "mcp==2.0.0"`
-to keep stdio MCP servers working there.
-
-This replaces the installed package and its paired native binary on supported platforms. Do not
-delete session files. Older versions may not understand records written by newer versions. In
-particular, RC3 cannot open a session in which a later candidate saved a response from a provider that
-sends a prompt-cache key (such as Codex or OpenAI); it reports a malformed session entry. Back up
-sessions before going back to RC3, and test session resume before relying on a downgraded install.
-
-## Before promoting to 0.2.0
-
-Use the [RC13 release checklist](../contributing/rc13-release) for candidate publication, platform
-installation, long-session measurements, and rollback gates.
-
-- Require green CI and release-workflow verification/build checks on the exact candidate commit.
-- Verify wheel and source-distribution metadata, installed SDK imports, `wisp --version`, and a
-  fake-provider prompt outside the source checkout.
-- Exercise Rust in real terminals: long streaming output while typing and scrolling,
-  file-picker navigation, cancellation, approvals, and session resume.
-- Verify pure-wheel print/JSON/RPC/SDK and the actionable Rust-unavailable error for interactive
-  commands.
-- Dogfood the published candidate and resolve release blockers before updating stable version
-  pins or creating the final tag. Passing headless tests is not evidence of native-terminal
-  visual correctness.
-
-The [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) records the release
-scope. Publishing the candidate and publishing the final release are separate approval steps.
+0.1.0 can open a session 0.2 wrote only if it holds no record type added during 0.2. It reports a
+session as malformed if it contains a response from a provider that sends a prompt-cache key (such
+as Codex or OpenAI), a web search result, or the Git status snapshot a trusted project saves. Start
+new sessions after going back, and never delete or hand-edit session files as a rollback step.

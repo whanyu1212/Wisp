@@ -10,15 +10,68 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0rc13 — release preparation
+## 0.2.0 — release preparation
+
+0.2.0 is the second stable release. It promotes the 0.2 release candidates below (RC1 through RC13)
+and adds two small changes since RC13. It changes no command, event, handshake, or session format
+since RC13, so RC13 and 0.2.0 read each other's sessions; the backend and frontend must still come
+from the same release, which the handshake enforces. Read the
+[upgrade guide](book/src/guide/upgrading.md) before upgrading Python integrations or external
+JSONL-RPC clients from 0.1. This section describes the release under preparation; publication
+requires a separate tagged release.
+
+### Since 0.1.0
+
+The RC sections below have the details and pull-request numbers.
+
+- **Rust terminal UI.** `wisp` opens a Rust TUI, now the only interactive interface; the Textual
+  renderers are gone (RC3). Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 include it.
+  Other platforms, including Intel macOS, get a pure wheel that keeps print, JSON, RPC, and SDK use.
+- **MCP servers.** Manage them from `/mcp`, with `wisp mcp`, or by asking Wisp, without editing
+  `settings.json`. Hosted servers can authenticate with headers or OAuth (RC8, RC9).
+- **Web search.** Wisp can use the providers' own web search, which the TUI shows and `/search`
+  toggles (RC8, RC11).
+- **Trust and YOLO** are never saved for your home folder or a folder above it (RC10).
+- **Prompt caching** for Codex, xAI, and Anthropic keeps more of each conversation cached between
+  prompts (RC4).
+- **Faster tools.** Native wheels use Rust for literal grep and for retaining managed-process output,
+  and bash, `grep`, and `find` have less local overhead (RC3, RC11).
+
+### Breaking changes since 0.1.0
+
+- Interactive use needs a native wheel or a source-built `wisp-tui`. The `textual`, `fullscreen`,
+  and `line` renderers, `--line`, `--tui-renderer`, and `wisp tui --renderer` are removed (RC3,
+  RC4).
+- External JSONL-RPC clients must send `rpc.handshake.request` first and connect only to a backend
+  from the same Wisp release. Events no longer carry a per-event `schema_version`, and the Python
+  SDK rejects a backend from a different release (RC4).
+- The deprecated `wisp.agent.messages.SessionEntry(...)` factory and the remaining compatibility
+  shims are removed (RC1, RC4), and several internal modules moved with no re-export, including
+  `wisp.agent.prompt` to `wisp.coding.prompt` and `wisp.agent.messages` to `wisp.messages` (RC13).
+- Session files load only in the current format (entry schema v6, compaction record v4), which is
+  what 0.1.0 writes; files from earlier prereleases no longer load (RC4).
+- `~/.wisp/catalog.toml` overlays must declare `schema_version = 2` (RC4).
+
+### Since RC13
+
+- Wisp no longer bundles the `github-pr-delivery` skill; `wisp skills`, `/skills`, and the RPC skill
+  catalog list only `wisp-development`, now version 1.5. A user or project skill with that name is
+  unaffected. (#748)
+- The TUI's startup logo and the brand images use the refreshed glass mascot. (#740)
+- Development: the book moved to `book/` and its CI fails on mdBook errors such as a missing include
+  (#742); benchmark evidence moved to `benchmarks/evidence/` (#743); the native-wheel build hook moved
+  to `packaging/hatch_build.py`, with a new "How Wisp is built" page (#744); duplicate images were
+  removed and a test now rejects them (#745); and the repository gained `CONTRIBUTING.md` and
+  `SECURITY.md` (#746) and a rewritten README (#747).
+
+## 0.2.0rc13 — 2026-10-18
 
 RC13 finishes a cleanup of the agent runtime's Python packages, stops a reply from flickering when
 it finishes streaming, and loads long sessions a little faster. It changes no command, event, or
 handshake model. Sessions a trusted RC13 run writes save their Git status snapshot in a new field,
 which **RC12 and earlier reject**: they list such a session but report it as malformed when
 resuming it. Several internal Python modules moved with no compatibility re-export. As always, the
-backend and frontend must come from the same release, which the handshake enforces. This section
-describes the candidate under preparation; publication requires a separate tagged release.
+backend and frontend must come from the same release, which the handshake enforces.
 
 ### Rust TUI
 
