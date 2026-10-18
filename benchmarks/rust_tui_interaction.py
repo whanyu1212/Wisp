@@ -390,8 +390,6 @@ def _run_sample(
             "-m",
             "wisp",
             "tui",
-            "--renderer",
-            renderer,
             "--session-dir",
             str(session_dir),
             *(["--continue"] if history_messages else []),

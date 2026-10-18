@@ -109,12 +109,14 @@ jobs:
         continue-on-error: ${{ runner.os == 'macOS' }}
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
+        # tests/benchmarks is included so the benchmark harnesses' PTY runs
+        # (skipped without the binary) keep working against the current CLI.
         # The per-test timeout turns a silent hang into a named failure with a
         # traceback instead of letting it consume the whole job timeout. The
         # signal method fails only that test, so later tests and the JUnit
         # report still run.
         run: >-
-          uv run pytest tests/tui_e2e --durations=20
+          uv run pytest tests/tui_e2e tests/benchmarks --durations=20
           --timeout=90 --timeout-method=signal
           --junitxml=test-results/rust-smoke/junit.xml
 

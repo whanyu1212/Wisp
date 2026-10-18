@@ -309,8 +309,6 @@ def _run_sample(
             "-m",
             "wisp",
             "tui",
-            "--renderer",
-            renderer,
             "--session-dir",
             str(session_dir),
         )
@@ -604,7 +602,9 @@ def _plain_text(output: bytes | bytearray) -> str:
 def _ready(plain: str, renderer: Renderer) -> bool:
     compact = "".join(plain.split())
     provider_ready = "fake/fake" in plain
-    context_hydrated = re.search(r"ctx\s+~?[0-9]", plain) is not None
+    # Incremental repaints can reach the PTY with cursor moves instead of spaces,
+    # so "ctx ~3.5k" may arrive as "ctx~3.5k" once escapes are stripped.
+    context_hydrated = re.search(r"ctx\s*~?[0-9]", plain) is not None
     return (
         provider_ready and context_hydrated and any(marker in compact for marker in _READY_MARKERS)
     )
