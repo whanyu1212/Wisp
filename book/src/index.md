@@ -1,6 +1,6 @@
 # Wisp
 
-![Wisp, a coding agent that stays in sync with you](./hero.png)
+![Wisp, a coding agent that stays in sync with you](https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png)
 
 Wisp is a coding agent that stays in sync with you. You can redirect it while it works, approve changes before they happen, and inspect the transcript afterward.
 
