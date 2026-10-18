@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import anyio
 import pytest
 
 import wisp.coding.session as session_module
+from wisp.coding.prompt import PROJECT_CONTEXT_HEADER
 from wisp.coding.session import CodingSession, _prompt_cache_key
 from wisp.providers.events import (
     ProviderEvent,
@@ -19,7 +22,7 @@ from wisp.providers.fake import FakeProvider, ScriptedProvider
 from wisp.sessions.entries import (
     MessageSessionEntry,
 )
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.context import ToolContext
 
 
@@ -146,6 +149,98 @@ def test_resumed_session_reuses_saved_git_status(
     # before the restart, so the provider's cached prefix still applies.
     assert _system_prompt(after, 0) == _system_prompt(before, 0)
     assert any("branch main; status clean" in content for content in _system_prompt(after, 0))
+
+
+def _resume_in_new_process(
+    tmp_path: Path, cwd: Path, *, between_runs: Callable[[JsonlSession], None]
+) -> tuple[ScriptedProvider, ScriptedProvider]:
+    """Run once, call ``between_runs``, then resume with no in-memory snapshot."""
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    before, after = ScriptedProvider([_reply()]), ScriptedProvider([_reply()])
+
+    def process(provider: ScriptedProvider) -> CodingSession:
+        return CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path / "sessions"),
+            tool_context=ToolContext(cwd=cwd),
+            trusted=True,
+        )
+
+    async def run() -> None:
+        _ = [event async for event in process(before).run("first", session=session)]
+        between_runs(session)
+        resumed = JsonlSessionStore(tmp_path / "sessions").load(session.session_id)
+        _ = [event async for event in process(after).run("second", session=resumed)]
+
+    anyio.run(run)
+    return before, after
+
+
+def test_project_context_entry_saves_its_git_status(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    agent = CodingSession(
+        provider=ScriptedProvider([_reply()]),
+        sessions=store,
+        tool_context=ToolContext(cwd=repo),
+        trusted=True,
+    )
+
+    async def run() -> None:
+        _ = [event async for event in agent.run("first", session=session)]
+
+    anyio.run(run)
+
+    saved = [
+        entry
+        for entry in session.read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.repository_status is not None
+    ]
+    assert len(saved) == 1
+    snapshot = saved[0].repository_status
+    assert snapshot is not None
+    assert saved[0].message.content.startswith(f"{PROJECT_CONTEXT_HEADER}\n")
+    assert snapshot.cwd == str(repo.resolve())
+    assert snapshot.status.endswith("branch main; status clean")
+    assert snapshot.status in saved[0].message.content
+
+
+def test_session_saved_without_a_snapshot_reads_git_again(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+
+    def save_like_an_older_release(session: JsonlSession) -> None:
+        records = [json.loads(line) for line in session.path.read_text().splitlines()]
+        for record in records:
+            record.pop("repository_status", None)
+        session.path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        (repo / "edit.txt").write_text("changed\n")
+
+    _before, after = _resume_in_new_process(tmp_path, repo, between_runs=save_like_an_older_release)
+
+    assert any("branch main; 1 changed file(s)" in content for content in _system_prompt(after, 0))
+
+
+def test_resumed_session_reuses_an_unavailable_git_status(tmp_path: Path) -> None:
+    # The saved snapshot is reused as sent, even when Git was unavailable then.
+    project = tmp_path / "project"
+    project.mkdir()
+
+    def start_tracking_with_git(_session: JsonlSession) -> None:
+        for args in (("init", "-q", "-b", "main"), ("commit", "-q", "--allow-empty", "-m", "x")):
+            subprocess.run(
+                ["git", "-C", str(project), "-c", "user.name=W", "-c", "user.email=w@x", *args],
+                check=True,
+                capture_output=True,
+            )
+
+    before, after = _resume_in_new_process(tmp_path, project, between_runs=start_tracking_with_git)
+
+    assert any("\ngit: unavailable\n" in content for content in _system_prompt(before, 0))
+    assert _system_prompt(after, 0) == _system_prompt(before, 0)
 
 
 def test_resumed_session_rereads_git_after_cache_expiry(

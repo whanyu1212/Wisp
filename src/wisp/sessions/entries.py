@@ -72,17 +72,37 @@ class ToolResultPresentationSnapshot(BaseModel):
     truncated: bool = False
 
 
+class RepositoryStatusSnapshot(BaseModel):
+    """The Git status a project-context message was built with.
+
+    A resumed session reuses it so its prompt, and so the provider's cached
+    prefix, stays the same as in its earlier runs.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    cwd: str = Field(min_length=1)
+    status: str = Field(min_length=1)
+
+
 class MessageSessionEntry(SessionTreeEntryBase):
     """One provider/frontend-visible message record."""
 
     kind: Literal["message"] = "message"
     message: Message
     tool_result: ToolResultPresentationSnapshot | None = None
+    repository_status: RepositoryStatusSnapshot | None = None
 
     @model_validator(mode="after")
     def _validate_tool_result(self) -> Self:
         if self.tool_result is not None and self.message.role != "tool":
             raise ValueError("tool-result presentation metadata is valid only on tool messages")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_repository_status(self) -> Self:
+        if self.repository_status is not None and self.message.role != "system":
+            raise ValueError("a repository status snapshot is valid only on system messages")
         return self
 
 

@@ -21,6 +21,7 @@ from wisp.sessions.entries import (
     EventSessionEntry,
     MessageSessionEntry,
     PersistedEventEnvelope,
+    RepositoryStatusSnapshot,
     SessionEntryAdapter,
     session_entry_to_json,
 )
@@ -675,4 +676,26 @@ def test_entry_requires_exactly_its_matching_payload(
             }
             if payloads
             else {"session_id": "session-id", "kind": kind}
+        )
+
+
+def test_round_trips_repository_status_snapshot(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    entry = MessageSessionEntry(
+        session_id=session.session_id,
+        message=Message(role="system", content="[WISP PROJECT CONTEXT]\ncwd: /repo"),
+        repository_status=RepositoryStatusSnapshot(cwd="/repo", status="git: unavailable"),
+    )
+
+    anyio.run(session.append_entry, entry)
+
+    assert session.read_entries()[0] == entry
+
+
+def test_rejects_repository_status_on_non_system_message() -> None:
+    with pytest.raises(ValidationError, match="valid only on system messages"):
+        MessageSessionEntry(
+            session_id="session-1",
+            message=Message(role="user", content="hello"),
+            repository_status=RepositoryStatusSnapshot(cwd="/repo", status="git: unavailable"),
         )

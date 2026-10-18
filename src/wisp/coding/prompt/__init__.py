@@ -15,6 +15,7 @@ from .project_context import (
     DEFAULT_CONTEXT_FILE_MAX_CHARS,
     DEFAULT_CONTEXT_MAX_CHARS,
     MAX_PROJECT_FILES,
+    PROJECT_CONTEXT_HEADER,
     build_project_context,
     build_untrusted_project_context,
 )
@@ -26,7 +27,6 @@ from .project_root import (
 from .repository_status import (
     MAX_GIT_STATUS_LINES,
     read_repository_status,
-    recover_repository_status,
 )
 
 __all__ = [
@@ -41,11 +41,11 @@ __all__ = [
     "GIT_CONTEXT_TIMEOUT_SECONDS",
     "MAX_GIT_STATUS_LINES",
     "MAX_PROJECT_FILES",
+    "PROJECT_CONTEXT_HEADER",
     "PROJECT_CONTEXT_FILE_CANDIDATES",
     "PROJECT_FILE_CANDIDATES",
     "build_project_context",
     "build_untrusted_project_context",
     "read_repository_status",
-    "recover_repository_status",
     "resolve_project_context_root",
 ]
