@@ -17,7 +17,7 @@ on:
       - ".github/workflows/rust-tui-wheels.yml"
       - "Cargo.lock"
       - "Cargo.toml"
-      - "hatch_build.py"
+      - "packaging/**"
       - "pyproject.toml"
       - "rust/wisp-process-text/**"
       - "rust/wisp-protocol/**"

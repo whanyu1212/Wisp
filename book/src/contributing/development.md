@@ -54,16 +54,9 @@ generates its private Rust projections from those schemas at compile time. Packa
 generated-schema drift must fail a check or the startup handshake rather than degrade to another
 contract.
 
-Candidate native wheels use pinned Hatchling with `hatch_build.py`; ordinary PEP 517 and release
-builds remain on `uv_build`. Set `WISP_RUST_TUI_WHEEL_TAG` only when reproducing a candidate wheel:
-
-```bash
-WISP_RUST_TUI_WHEEL_TAG=cp312-abi3-macosx_11_0_arm64 \
-  uvx --from hatchling==1.27.0 hatchling build -t wheel -d candidate-dist
-```
-
-The tag is CI-owned packaging metadata, not runtime configuration. Use the exact target tag from
-`rust-tui-wheels.yml`; never relabel an artifact built for another platform.
+Native wheels are built with pinned Hatchling and `packaging/hatch_build.py`; the source
+distribution and pure wheel stay on `uv_build`. [How Wisp is built](building.md) explains the two
+backends, what each release file contains, and how to reproduce a candidate wheel.
 
 Run the Rust quality gates with the pinned toolchain:
 
