@@ -12,3 +12,7 @@ coverage.
 
 See [Development setup](./development) to prepare a checkout and [Testing](./testing) for local and
 CI test partitions.
+
+Report security vulnerabilities privately, not in public issues; the repository's
+[security policy](https://github.com/whanyu1212/Wisp/blob/main/SECURITY.md) explains how and what is
+in scope.
