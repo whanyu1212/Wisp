@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png" alt="Wisp — A coding agent that stays in sync, illustrated by a glowing spectral companion linked to a terminal." width="100%">
+  <img src="assets/wisp-banner-v3.png" alt="Wisp: redirect it while it works, approve what it changes. A glass spectral companion beside real Python SDK code." width="100%">
 </p>
 
 # Wisp
