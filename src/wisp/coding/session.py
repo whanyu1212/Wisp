@@ -60,11 +60,11 @@ from wisp.coding.costs import CostEstimator
 from wisp.coding.persistence import PendingSessionEntry, RunPersistence
 from wisp.coding.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
+    PROJECT_CONTEXT_HEADER,
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
     build_prompt_messages,
     read_repository_status,
-    recover_repository_status,
 )
 from wisp.coding.stats import build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
@@ -111,6 +111,7 @@ from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     MessageSessionEntry,
+    RepositoryStatusSnapshot,
     SessionEntry,
     ToolResultPresentationSnapshot,
 )
@@ -130,7 +131,6 @@ from wisp.tools.policy import ToolPolicy
 # still hold the cached prefix built from it. After a longer pause the cache has
 # expired anyway, so a fresh read costs nothing and avoids a long-stale status.
 RESUMED_REPOSITORY_STATUS_MAX_AGE = timedelta(hours=1)
-_PROJECT_CONTEXT_HEADER = "[WISP PROJECT CONTEXT]\n"
 
 PERSISTED_SESSION_EVENT_TYPES = frozenset(
     {
@@ -145,6 +145,22 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "error",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionPrompt:
+    """System messages for one run, and the Git snapshot their project context used.
+
+    The snapshot is saved with the project-context message so a resumed session
+    can send the same prompt again (see `_persisted_repository_status`).
+    """
+
+    messages: tuple[Message, ...]
+    repository_status: RepositoryStatusSnapshot | None = None
+
+
+def _is_project_context(message: Message) -> bool:
+    return message.role == "system" and message.content.startswith(f"{PROJECT_CONTEXT_HEADER}\n")
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,13 +656,14 @@ class CodingSession:
             # Publish it before prompt preparation so the first queue mutation
             # need not fail against the previous run's displayed snapshot.
             yield await emit(harness.queue_updated_event())
-        prompt_messages = await self._prompt_messages_async(
+        session_prompt = await self._prompt_messages_async(
             effective_tools,
             registry=operation_registry,
             context=operation_context,
             session_id=session.session_id,
             session=session,
         )
+        prompt_messages = session_prompt.messages
         if operation_instructions:
             prompt_messages = (
                 *prompt_messages,
@@ -671,7 +688,19 @@ class CodingSession:
         )
 
         for prompt_message in prompt_messages:
-            await persistence.append_message(prompt_message)
+            # The project-context entry also carries its Git snapshot, which
+            # `append_message` has no way to attach, so it is built here.
+            if session_prompt.repository_status is not None and _is_project_context(prompt_message):
+                await persistence.append_entry(
+                    MessageSessionEntry(
+                        session_id=session.session_id,
+                        message=prompt_message,
+                        operation_id=operation_id,
+                        repository_status=session_prompt.repository_status,
+                    )
+                )
+            else:
+                await persistence.append_message(prompt_message)
 
         await persistence.append_entry(user_entry)
         # Add the persisted prompt before checking the threshold so provider limits
@@ -1510,10 +1539,12 @@ class CodingSession:
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
             provider_messages = (
-                *await self._prompt_messages_async(
-                    session_id=session.session_id if session is not None else None,
-                    session=session,
-                ),
+                *(
+                    await self._prompt_messages_async(
+                        session_id=session.session_id if session is not None else None,
+                        session=session,
+                    )
+                ).messages,
                 *self._normalize_provider_messages(history),
             )
             observation = self._context_observations.get(
@@ -1586,7 +1617,7 @@ class CodingSession:
         context: ToolContext | None = None,
         session_id: str | None = None,
         session: JsonlSession | None = None,
-    ) -> tuple[Message, ...]:
+    ) -> _SessionPrompt:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
         operation_context = context or self.tool_context
         effective_registry = registry if registry is not None else self.tool_registry
@@ -1607,9 +1638,14 @@ class CodingSession:
                 else self.prompt_messages
             )
             if self.mode == "plan":
-                return (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
-            return messages
-        return build_prompt_messages(
+                messages = (*messages, Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT))
+            return _SessionPrompt(messages=messages)
+        repository_status = (
+            self._repository_status_snapshot(session_id, operation_context.cwd, session=session)
+            if self.trusted and session_id is not None
+            else None
+        )
+        messages = build_prompt_messages(
             cwd=operation_context.cwd,
             tools=effective_tools,
             tool_prompt_metadata=effective_registry.prompt_metadata(
@@ -1625,9 +1661,16 @@ class CodingSession:
             include_project_context=self.trusted,
             protected_paths=operation_context.protected_paths,
             trusted_context_root=self.project_context_root,
+            repository_status=repository_status,
+        )
+        return _SessionPrompt(
+            messages=messages,
             repository_status=(
-                self._repository_status_snapshot(session_id, operation_context.cwd, session=session)
-                if self.trusted and session_id is not None
+                RepositoryStatusSnapshot(
+                    cwd=str(operation_context.cwd.resolve(strict=False)),
+                    status=repository_status,
+                )
+                if repository_status
                 else None
             ),
         )
@@ -1691,7 +1734,7 @@ class CodingSession:
         context: ToolContext | None = None,
         session_id: str | None = None,
         session: JsonlSession | None = None,
-    ) -> tuple[Message, ...]:
+    ) -> _SessionPrompt:
         """Build the operation prompt without blocking the event-loop thread."""
 
         return await anyio.to_thread.run_sync(
@@ -2319,9 +2362,9 @@ def _persisted_repository_status(
       session, whose new key cannot match anything cached for the source;
     * a recent response, within `RESUMED_REPOSITORY_STATUS_MAX_AGE`.
 
-    Only the newest project context on the active path is considered. In every
-    other case the caller reads Git, so a stale status is never shown without a
-    caching benefit.
+    Only the newest project context on the active path is considered, through
+    the snapshot saved with it. In every other case the caller reads Git, so a
+    stale status is never shown without a caching benefit.
 
     Args:
         session (JsonlSession): The persisted session a new run continues.
@@ -2343,7 +2386,7 @@ def _persisted_repository_status(
         message = entry.message
         if latest_response is None and message.role == "assistant":
             latest_response = entry
-        if message.role == "system" and message.content.startswith(_PROJECT_CONTEXT_HEADER):
+        if _is_project_context(message):
             if latest_response is None or not _continues_prompt_cache(
                 latest_response,
                 session=session,
@@ -2352,7 +2395,12 @@ def _persisted_repository_status(
                 prompt_cache_key=prompt_cache_key,
             ):
                 return None
-            return recover_repository_status(message.content, cwd)
+            # Absent for an untrusted context and for sessions saved before the
+            # snapshot was stored; either way the caller reads Git.
+            snapshot = entry.repository_status
+            if snapshot is None or snapshot.cwd != str(cwd.resolve(strict=False)):
+                return None
+            return snapshot.status
     return None
 
 

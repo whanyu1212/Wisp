@@ -28,6 +28,10 @@ DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
 MAX_PROJECT_FILES = 16
 
 
+# First line of the project-context system message.
+PROJECT_CONTEXT_HEADER = "[WISP PROJECT CONTEXT]"
+
+
 def build_project_context(
     *,
     cwd: Path,
@@ -68,7 +72,7 @@ def build_project_context(
         )
         root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
         sections = [
-            "[WISP PROJECT CONTEXT]",
+            PROJECT_CONTEXT_HEADER,
             f"cwd: {resolved_cwd}",
             root_section,
             (
@@ -111,7 +115,7 @@ def build_untrusted_project_context(
     """
 
     sections = [
-        "[WISP PROJECT CONTEXT]",
+        PROJECT_CONTEXT_HEADER,
         "project context: skipped because this project is not trusted",
         _tool_summary(tools),
     ]
