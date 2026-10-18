@@ -177,12 +177,14 @@ const ADAL_MARK_BRAILLE_FULL: [&str; 16] = [
     "⣼⣿⣿⣿⣿⣿⣿⣿⣿⠿⠋⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠙⠿⣿⣿⣿⣿⣿⣿⣿⣿⣧",
 ];
 
+// Keep the face hollow and the eyes distinct at every size. Glass reflections
+// and background glow are omitted so the mark also reads in monochrome.
 #[rustfmt::skip]
 const WISP_BRAILLE_MINI: [&str; 5] = [
     "⠀⠀⠀⠀⢸⣭⡀",
     "⠀⢀⠤⠶⠶⣿⣿⡄",
     "⢀⡖⠋⠉⠛⢮⠛",
-    "⢸⢰⠀⢠⡄⢸⠆",
+    "⢸⢸⡇⢸⡇⢸⠆",
     "⠈⠳⢤⣬⠵⠋",
 ];
 
@@ -335,6 +337,33 @@ mod tests {
                 assert!(!lines.is_empty(), "{} at {width}x{height}", choice.name());
                 assert!(lines.len() <= usize::from(height));
                 assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+            }
+        }
+    }
+
+    #[test]
+    fn wisp_sizes_fit_exact_bounds_and_fall_back() {
+        let palette = Palette::default();
+        for (width, height, expected_rows) in [
+            (34, 16, 16),
+            (33, 16, 10),
+            (34, 15, 10),
+            (20, 10, 10),
+            (19, 10, 5),
+            (20, 9, 5),
+            (8, 5, 5),
+            (7, 5, 0),
+            (8, 4, 0),
+        ] {
+            for no_color in [false, true] {
+                let lines =
+                    preview_lines(LogoChoice::WispBraille, width, height, palette, no_color);
+                assert_eq!(lines.len(), expected_rows, "{width}x{height}");
+                for line in lines {
+                    assert!(line.width() <= usize::from(width));
+                    assert_eq!(line.spans[1].style.fg, Some(palette.primary));
+                    assert_eq!(line.spans[1].style.bg, None);
+                }
             }
         }
     }

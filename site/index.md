@@ -1,5 +1,7 @@
 # Wisp
 
+![Wisp, a coding agent that stays in sync with you](./hero.png)
+
 Wisp is a coding agent that stays in sync with you. You can redirect it while it works, approve changes before they happen, and inspect the transcript afterward.
 
 Its TUI, print mode, JSONL RPC process, and Python SDK share one typed runtime. Sessions, approvals, cancellation, and event ordering behave consistently across those interfaces, within the controls each input model can support.
