@@ -6,7 +6,6 @@ from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 
 from wisp.agent.context_budget import estimate_context_budget
-from wisp.agent.messages import Message
 from wisp.agent.turn_lifecycle import TurnLifecycle
 from wisp.events import (
     ContextBudget,
@@ -29,6 +28,7 @@ from wisp.events import (
     TurnStarted,
     WebSearchPerformed,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     is_context_overflow_message,

@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from wisp.agent.messages import Message
 from wisp.events import WispEvent
+from wisp.messages import Message
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     EventSessionEntry,

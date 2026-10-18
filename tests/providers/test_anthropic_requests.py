@@ -13,7 +13,7 @@ from tests.providers.anthropic_support import (
     message_delta_event,
     text_delta_event,
 )
-from wisp.agent.messages import Message as WispMessage
+from wisp.messages import Message as WispMessage
 from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
 from wisp.providers.base import (
     ToolCallResult,

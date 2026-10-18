@@ -8,8 +8,8 @@ from typing import get_args
 
 from tests.support.paths import REPO_ROOT
 from wisp import __version__
-from wisp.agent.messages import CompactionRecord
 from wisp.events import WispEvent
+from wisp.messages import CompactionRecord
 from wisp.sessions import (
     PERSISTED_EVENT_ENVELOPE_SCHEMA_VERSION,
     SESSION_ENTRY_SCHEMA_VERSION,

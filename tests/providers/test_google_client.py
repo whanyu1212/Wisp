@@ -17,8 +17,8 @@ from tests.providers.google_support import (
     StubModels,
     text_chunk,
 )
-from wisp.agent.messages import Message as WispMessage
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.messages import Message as WispMessage
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

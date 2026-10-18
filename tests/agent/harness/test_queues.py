@@ -13,7 +13,6 @@ from tests.agent.harness.support import (
     message_with_nested_arguments,
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
-from wisp.agent.messages import Message
 from wisp.events import (
     QueueMessageInjected,
     QueueMode,
@@ -22,6 +21,7 @@ from wisp.events import (
     TurnCompleted,
     wisp_event_from_json,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolSpec,
 )

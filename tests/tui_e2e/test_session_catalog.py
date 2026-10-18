@@ -17,7 +17,7 @@ import pytest
 from tests.tui_e2e.support import rendered_without_spacing
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.sessions.jsonl import JsonlSessionStore
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.rpc.coordinator import _RpcSessionState
 from wisp.sessions.entries import SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.jsonl import JsonlSession

@@ -9,11 +9,11 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
     ToolCallRequested,
 )
+from wisp.messages import Message
 from wisp.sessions import (
     SessionNameChange,
     SessionTreeNavigation,

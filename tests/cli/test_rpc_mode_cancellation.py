@@ -9,9 +9,9 @@ from tests.cli.rpc_mode_support import (
 )
 from tests.support.cli import *
 from tests.support.rpc import guard_rpc_command_serialization
-from wisp.agent.messages import CompactionRecord
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import ContextBudget, ContextEstimate, ToolCallSnapshot
+from wisp.messages import CompactionRecord
 from wisp.rpc.coordinator import _RpcPromptReady
 from wisp.rpc.session import run as rpc_session_run_module
 from wisp.rpc.session.run import (

@@ -22,7 +22,7 @@ from anthropic.types import (
 from anthropic.types.raw_content_block_start_event import ContentBlock
 from anthropic.types.raw_message_delta_event import Delta
 
-from wisp.agent.messages import Message as WispMessage
+from wisp.messages import Message as WispMessage
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.base import (
     ToolCallResult,

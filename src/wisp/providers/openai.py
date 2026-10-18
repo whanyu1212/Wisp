@@ -34,7 +34,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response_input_param import ResponseInputItemParam, ResponseInputParam
 
-from wisp.agent.messages import Message, NativeOutput, Role
+from wisp.messages import Message, NativeOutput, Role
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

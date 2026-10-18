@@ -11,7 +11,6 @@ from tests.coding.compaction_support import (
     _append_turn,
     build_model_registry,
 )
-from wisp.agent.messages import Message
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentStarted,
@@ -24,6 +23,7 @@ from wisp.events import (
     TurnCompleted,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError
 from wisp.providers.events import (
     ProviderEvent,

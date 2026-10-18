@@ -20,7 +20,6 @@ from tests.support.agent_runtime import (
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, AgentHarnessEvent, QueuedMessages
 from wisp.agent.harness.boundaries import HarnessBoundaryContext, HarnessBoundaryPreparer
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
     RequestBoundaryUnsupportedError,
@@ -41,6 +40,7 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolSpec
 from wisp.providers.events import (
     ProviderEvent,

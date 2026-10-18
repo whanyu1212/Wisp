@@ -11,13 +11,13 @@ from tests.support.rpc import (
     build_rpc_executor_fixture,
     guard_rpc_command_serialization,
 )
-from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
     RpcCommandFinished,
     RpcCommandStarted,
     RpcMessagesReported,
 )
+from wisp.messages import Message
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession
 

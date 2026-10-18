@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.deepseek import DEFAULT_DEEPSEEK_MODEL, DeepSeekProvider
 from wisp.providers.events import (

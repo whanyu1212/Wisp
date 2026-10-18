@@ -7,7 +7,6 @@ from typing import cast
 import anyio
 import pytest
 
-from wisp.agent.messages import Message
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentStarted,
@@ -16,6 +15,7 @@ from wisp.events import (
     QueueMode,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,

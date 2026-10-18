@@ -7,7 +7,6 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
@@ -15,6 +14,7 @@ from wisp.events import (
     TokenUsage,
     ToolCallSnapshot,
 )
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,

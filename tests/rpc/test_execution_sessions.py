@@ -17,7 +17,6 @@ from tests.support.rpc import (
     reject_unexpected_command,
 )
 from wisp.agent.harness import QueuedMessages
-from wisp.agent.messages import Message
 from wisp.coding.session import _RetainedQueueState
 from wisp.events import (
     RpcCommandFinished,
@@ -29,6 +28,7 @@ from wisp.events import (
     RpcSessionsReported,
     RpcStateReported,
 )
+from wisp.messages import Message
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.coordinator import _RpcCommandCompleted
 from wisp.rpc.session.state import rpc_selected_session_state

@@ -13,9 +13,9 @@ from wisp.agent.loop.model_response import CompletedModelResponse, ModelResponse
 from wisp.agent.loop.provider_lifecycle import CompletedProviderResponse
 from wisp.agent.loop.provider_request import open_provider_stream
 from wisp.agent.loop.response_projection import project_usage_and_cost
-from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import WebSearchPerformed, WebSearchSource
+from wisp.messages import Message
 from wisp.providers.base import ProviderProtocolError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,

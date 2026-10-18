@@ -37,8 +37,8 @@ def _seed_history(session_dir: Path, count: int) -> int:
     Returns:
         Fixture file size in bytes, excluding later smoke-test messages.
     """
-    from wisp.agent.messages import Message
     from wisp.events import ToolCallSnapshot
+    from wisp.messages import Message
     from wisp.sessions import JsonlSessionStore, MessageSessionEntry
     from wisp.sessions.entries import session_entry_to_json
 

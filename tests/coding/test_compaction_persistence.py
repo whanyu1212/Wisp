@@ -13,7 +13,6 @@ from tests.coding.compaction_support import (
     _append_turn,
     build_model_registry,
 )
-from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     CompactionSummaryError,
 )
@@ -28,6 +27,7 @@ from wisp.events import (
     ToolCallSnapshot,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,

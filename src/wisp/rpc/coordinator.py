@@ -9,8 +9,8 @@ from typing import Literal, Protocol, cast
 
 import anyio
 
-from wisp.agent.messages import Message
 from wisp.events import WispEvent
+from wisp.messages import Message
 from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ParsedRpcCommand
 from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.sessions.jsonl import JsonlSession

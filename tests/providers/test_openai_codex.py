@@ -12,7 +12,7 @@ from tests.providers.openai_codex_support import (
     fake_codex_token,
     store_with_oauth,
 )
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ToolCall
 from wisp.providers.events import (

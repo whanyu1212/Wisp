@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers import fake as fake_module
 from wisp.providers.events import ProviderResponseCompleted, ProviderTextDelta
 

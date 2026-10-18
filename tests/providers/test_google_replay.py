@@ -13,8 +13,8 @@ from tests.providers.google_support import (
     part_chunk,
     text_chunk,
 )
-from wisp.agent.messages import Message as WispMessage
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message as WispMessage
 from wisp.providers.base import (
     ProviderProtocolError,
     ToolCallResult,

@@ -12,7 +12,6 @@ from tests.agent.loop.support import (
     completed_stream,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
 )
@@ -21,6 +20,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ProviderProtocolError,
     ToolCallResult,

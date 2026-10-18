@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message
 
 INTERRUPTED_TOOL_RESULT_TEXT = (
     "Tool call interrupted before completion; execution outcome is unknown."

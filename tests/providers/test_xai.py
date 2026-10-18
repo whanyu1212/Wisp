@@ -19,7 +19,7 @@ from openai.types.responses import (
 )
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message, NativeOutput
+from wisp.messages import Message, NativeOutput
 from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderResponseCompleted,

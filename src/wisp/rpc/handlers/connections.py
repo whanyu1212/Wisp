@@ -8,7 +8,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.messages import Message
 from wisp.auth.connections import (
     DEVICE_CODE_PROVIDER,
     supports_api_key,
@@ -22,6 +21,7 @@ from wisp.events import (
     RpcDeviceCodeProgressReported,
     RpcDeviceCodeReported,
 )
+from wisp.messages import Message
 from wisp.rpc.commands import (
     BeginDeviceCodeCommand,
     DisconnectProviderCommand,

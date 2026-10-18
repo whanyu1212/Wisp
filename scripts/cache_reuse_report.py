@@ -41,8 +41,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from wisp.agent.messages import Message
 from wisp.config.runtime import default_session_dir
+from wisp.messages import Message
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     EventSessionEntry,

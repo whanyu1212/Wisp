@@ -21,13 +21,6 @@ from wisp.agent.harness import (
     HarnessBoundaryContext,
     QueuedMessages,
 )
-from wisp.agent.history import active_turn_start
-from wisp.agent.messages import (
-    CompactionRecord,
-    Message,
-    completion_event_has_history,
-    message_from_completion_event,
-)
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -99,6 +92,13 @@ from wisp.events import (
     WispEvent,
     utc_now,
 )
+from wisp.messages import (
+    CompactionRecord,
+    Message,
+    completion_event_has_history,
+    message_from_completion_event,
+)
+from wisp.messages.history import active_turn_start
 from wisp.providers.base import (
     ContextOverflowError,
     Provider,

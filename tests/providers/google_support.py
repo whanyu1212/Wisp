@@ -7,7 +7,7 @@ from typing import Any
 
 from google.genai import types as genai_types
 
-from wisp.agent.messages import Message as WispMessage
+from wisp.messages import Message as WispMessage
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

@@ -20,7 +20,6 @@ from tests.support.agent_runtime import (
 )
 from wisp.agent.context_budget import observe_context
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -39,6 +38,7 @@ from wisp.events import (
     UsageCostRates,
     wisp_event_from_json,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     ToolCallResult,

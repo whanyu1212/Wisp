@@ -15,7 +15,6 @@ from tests.support.rpc import (
     preserve_running_command,
     reject_unexpected_command,
 )
-from wisp.agent.messages import Message
 from wisp.events import (
     RpcCommandFinished,
     RpcCommandStarted,
@@ -23,6 +22,7 @@ from wisp.events import (
     RpcSessionTreeReported,
     RpcSessionTreeUnreverted,
 )
+from wisp.messages import Message
 from wisp.rpc.session import mutation as rpc_session_mutation_module
 from wisp.sessions.jsonl import JsonlSession, SessionTreeNavigation
 

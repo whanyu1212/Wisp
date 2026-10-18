@@ -15,9 +15,9 @@ from tests.providers.openai_codex_support import (
     store_with_oauth,
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
-from wisp.agent.messages import Message, NativeOutput
 from wisp.coding import CodingSession
 from wisp.events import ToolCallSnapshot, ToolExecutionEnded
+from wisp.messages import Message, NativeOutput
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderProtocolError,

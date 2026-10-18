@@ -9,7 +9,6 @@ from tests.agent.harness.support import (
     build_harness,
     message_with_nested_arguments,
 )
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -21,6 +20,7 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     ToolSpec,

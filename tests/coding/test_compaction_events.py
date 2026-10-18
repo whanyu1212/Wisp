@@ -6,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from wisp.agent.context_budget import build_context_budget, estimate_context
-from wisp.agent.messages import Message
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
@@ -16,6 +15,7 @@ from wisp.events import (
     wisp_event_from_dict,
     wisp_event_from_json,
 )
+from wisp.messages import Message
 
 
 def test_compaction_events_round_trip_without_summary() -> None:

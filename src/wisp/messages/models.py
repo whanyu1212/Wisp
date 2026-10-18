@@ -1,4 +1,4 @@
-"""Message and session record contracts."""
+"""Provider-facing message and compaction records, and their projection from events."""
 
 from __future__ import annotations
 

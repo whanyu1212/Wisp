@@ -6,7 +6,6 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import ContextOverflowFailure, ContextOverflowSnapshot
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.coding.session import PERSISTED_SESSION_EVENT_TYPES
@@ -19,6 +18,7 @@ from wisp.events import (
     WispEvent,
     wisp_event_from_json,
 )
+from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError, is_context_overflow_message
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (

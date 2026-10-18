@@ -7,7 +7,6 @@ import pytest
 from pydantic import ValidationError
 
 from tests.support.session_entries import linked_entries
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.coding.costs import (
     CostEstimator,
     aggregate_session_cost,
@@ -17,6 +16,7 @@ from wisp.coding.costs import (
 )
 from wisp.coding.stats import build_session_stats
 from wisp.events import MessageCompleted, TokenUsage, UsageCost, wisp_event_from_json
+from wisp.messages import CompactionRecord, Message
 from wisp.providers.catalog import (
     ModelCatalog,
     ModelCatalogProviderEntry,

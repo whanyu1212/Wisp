@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Sequence
 
 import anyio
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (

@@ -6,10 +6,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from wisp.agent.messages import Message
 from wisp.events import (
     ContextBudget,
 )
+from wisp.messages import Message
 
 
 class RequestBoundaryUnsupportedError(RuntimeError):

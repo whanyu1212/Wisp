@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 
 from wisp.agent.context_budget import context_fingerprint
-from wisp.agent.history import normalize_provider_history
-from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message
+from wisp.messages.history import normalize_provider_history
 
 
 def _call(

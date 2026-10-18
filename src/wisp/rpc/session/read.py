@@ -13,7 +13,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.messages import Message
 from wisp.events import (
     RpcCommandFinished,
     RpcMessagesReported,
@@ -22,6 +21,7 @@ from wisp.events import (
     RpcSessionTreeNode,
     RpcSessionTreeReported,
 )
+from wisp.messages import Message
 from wisp.rpc.commands import GetMessagesCommand, GetSessionsCommand, GetSessionTreeCommand
 from wisp.rpc.coordinator import (
     _RpcCommandCompleted,

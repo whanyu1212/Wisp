@@ -10,9 +10,9 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient, OpenAIError
 from openai.types.chat import ChatCompletionChunk
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -426,7 +426,7 @@ def test_normalized_historical_tool_call_never_reaches_wire_dangling() -> None:
     reach the wire, rather than only asserting on the normalizer's return value.
     """
 
-    from wisp.agent.history import normalize_provider_history
+    from wisp.messages.history import normalize_provider_history
 
     transcript = [
         Message(role="user", content="search"),

@@ -17,7 +17,6 @@ from tests.support.agent_runtime import (
     assert_turn_terminals,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
@@ -28,6 +27,7 @@ from wisp.events import (
     MessageCompleted,
     ToolCallSnapshot,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

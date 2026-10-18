@@ -13,7 +13,6 @@ from wisp.agent.context_budget import (
     estimate_context_budget,
     observe_context,
 )
-from wisp.agent.messages import CompactionRecord, Message, NativeOutput
 from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import build_session_stats
 from wisp.events import (
@@ -24,6 +23,7 @@ from wisp.events import (
     TokenUsage,
     wisp_event_from_json,
 )
+from wisp.messages import CompactionRecord, Message, NativeOutput
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,

@@ -9,13 +9,13 @@ import anyio
 from tests.coding.session_support import (
     CapturingProvider,
 )
-from wisp.agent.messages import Message
 from wisp.coding.prompt import PLAN_MODE_SYSTEM_PROMPT, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding.session import CodingSession, _prompt_cache_key
 from wisp.events import (
     MessageCompleted,
     ToolCallSnapshot,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolSpec,
 )

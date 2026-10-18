@@ -9,9 +9,9 @@ import anyio
 import pytest
 
 from tests.support.session_entries import linked_entries
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
 from wisp.events import ToolCallSnapshot
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,

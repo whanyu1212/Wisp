@@ -13,7 +13,6 @@ from tests.coding.compaction_support import (
     context_row,
     two_turn_replay,
 )
-from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     MAX_COMPACTION_TOOL_RESULT_CHARS,
     REQUIRED_COMPACTION_HEADINGS,
@@ -31,6 +30,7 @@ from wisp.events import (
     UsageCost,
     UsageCostRates,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,

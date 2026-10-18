@@ -15,8 +15,8 @@ from tests.providers.openai_support import (
     completed_event,
     text_delta,
 )
-from wisp.agent.messages import Message
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

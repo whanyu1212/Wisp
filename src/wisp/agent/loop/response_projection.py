@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from wisp.agent.context_budget import observe_context
-from wisp.agent.messages import Message
 from wisp.events import MessageCompleted, TokenUsage, ToolCallSnapshot, UsageCost
+from wisp.messages import Message
 
 from .provider_lifecycle import CompletedProviderResponse
 from .provider_request import provider_supports_prompt_cache_key

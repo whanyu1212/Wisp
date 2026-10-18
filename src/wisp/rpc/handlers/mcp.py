@@ -21,7 +21,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.messages import Message
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import (
     McpServerExistsError,
@@ -47,6 +46,7 @@ from wisp.events import (
 )
 from wisp.mcp.config import McpServerConfig, header_template_variable
 from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
+from wisp.messages import Message
 from wisp.rpc.commands import (
     AddMcpServerCommand,
     LoginMcpServerCommand,

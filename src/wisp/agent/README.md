@@ -6,7 +6,9 @@ this code through the same `CodingSession` path. The model's instructions are bu
 layer, in [`wisp.coding.prompt`](../coding/prompt/).
 
 The package root intentionally re-exports nothing. Import the public `harness` and `loop` APIs from
-their package roots, and shared contracts from the module that defines them.
+their package roots, and shared contracts from the module that defines them. The `Message` and
+compaction records it exchanges with providers live one layer below, in
+[`wisp.messages`](../messages/).
 
 ## Big picture
 
@@ -19,7 +21,7 @@ flowchart LR
   subgraph Agent["wisp.agent"]
     Harness["AgentHarness<br/>transcript and live controls"]
     Loop["run_agent_loop<br/>one invocation"]
-    Contracts["shared contracts<br/>messages, boundaries, tools, budgets"]
+    Contracts["shared contracts<br/>boundaries, tools, budgets"]
 
     Harness --> Loop
     Contracts -.-> Harness
@@ -30,6 +32,9 @@ flowchart LR
   Session --> Harness
   Session -.->|boundary and overflow policy| Harness
   Loop --> Provider["Provider adapter"]
+  Messages["wisp.messages<br/>Message, history"]
+  Agent -.-> Messages
+  Provider -.-> Messages
   Loop --> Tools["Tool executor"]
   Loop -->|typed events| Harness
   Harness -->|typed events| Session
@@ -155,12 +160,10 @@ history synchronized.
 | --- | --- |
 | [`harness/`](./harness/) | Owns the transcript across invocations, live queues, cancellation, and boundary coordination. Start with `runner.AgentHarness._run`. |
 | [`loop/`](./loop/) | Implements the provider/tool cycle and emits ordered events for one invocation. Start with `runner.run_agent_loop`. |
-| [`messages.py`](./messages.py) | Defines provider-facing `Message` and compaction records, and projects completion events into detached transcript rows. |
 | [`request_boundary.py`](./request_boundary.py) | Defines snapshots, replace/rebase decisions, and boundary and overflow hook protocols. |
 | [`turn_lifecycle.py`](./turn_lifecycle.py) | Tracks the open turn so each started turn ends exactly once. The loop publishes turns through it; the harness and session use it to build the terminal events they publish themselves. |
 | [`tool_contracts.py`](./tool_contracts.py) | Defines ordinary and prepared tool-executor protocols and their lifecycle errors. |
 | [`context_budget.py`](./context_budget.py) | Estimates request context, records provider observations, and builds context-pressure budgets. |
-| [`history.py`](./history.py) | Normalizes historical tool exchanges into provider-safe portable history. |
 | [`transcript_repair.py`](./transcript_repair.py) | Orders tool results and synthesizes missing results after interrupted tool calls. |
 | [`validation.py`](./validation.py) | Validates limits shared by harness and loop configuration. |
 
@@ -171,6 +174,7 @@ history synchronized.
 | System instructions or project-file discovery | [`wisp/coding/prompt/`](../coding/prompt/) |
 | Transcript retention, queues, or cancellation across calls | [`harness/`](./harness/) |
 | Turn sequencing, provider stream validation, or tool scheduling | [`loop/`](./loop/) |
+| `Message` records or provider-history normalization | [`wisp/messages/`](../messages/) |
 | Provider-specific request or continuation behavior | [`wisp/providers/`](../providers/) |
 | Persistence, compaction policy, permissions, or approvals | [`wisp/coding/`](../coding/) |
 | Observable event schemas | [`wisp/events/`](../events/) |
@@ -185,8 +189,8 @@ shared loop.
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import RequestBoundaryDecision
+from wisp.messages import Message
 ```
 
 Within these subpackages, import private collaborators from their defining modules rather than from

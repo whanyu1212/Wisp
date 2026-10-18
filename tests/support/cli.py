@@ -15,7 +15,6 @@ from pytest import MonkeyPatch
 from typer.testing import CliRunner as RawCliRunner
 
 from wisp import __version__
-from wisp.agent.messages import Message
 from wisp.cli import app
 from wisp.cli import application as cli_module
 from wisp.cli import rpc as cli_rpc_module
@@ -25,6 +24,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolResultReady,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolCall, ToolCallResult, ToolSpec
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import (

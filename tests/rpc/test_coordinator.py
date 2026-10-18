@@ -14,8 +14,8 @@ from tests.rpc.coordinator_support import (
     input_command,
     parsed_command,
 )
-from wisp.agent.messages import Message
 from wisp.events import RpcSessionSelected, WispEvent
+from wisp.messages import Message
 from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,

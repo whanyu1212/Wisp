@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError
 import anyio
 import pytest
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderResponseCompleted,

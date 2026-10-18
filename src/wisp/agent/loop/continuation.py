@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowSnapshot,
@@ -16,6 +15,7 @@ from wisp.agent.request_boundary import (
     RequestContextRebase,
 )
 from wisp.events import ContextBudget, ToolResultReady
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     structured_tool_replacement_support,

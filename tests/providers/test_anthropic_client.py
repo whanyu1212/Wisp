@@ -17,8 +17,8 @@ from tests.providers.anthropic_support import (
     message_delta_event,
     text_delta_event,
 )
-from wisp.agent.messages import Message as WispMessage
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.messages import Message as WispMessage
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (

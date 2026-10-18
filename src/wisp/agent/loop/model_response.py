@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import wisp.providers.events as provider_events
-from wisp.agent.messages import Message
 from wisp.events import (
     MessageDelta,
     MessageStarted,
@@ -15,6 +14,7 @@ from wisp.events import (
     WebSearchPerformed,
     WebSearchSource,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     ProviderProtocolError,

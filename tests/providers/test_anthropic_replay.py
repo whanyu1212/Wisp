@@ -25,8 +25,8 @@ from tests.providers.anthropic_support import (
     thinking_delta_event,
     tool_use_start_event,
 )
-from wisp.agent.messages import Message as WispMessage
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message as WispMessage
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.base import (
     ProviderProtocolError,
