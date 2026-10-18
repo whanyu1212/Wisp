@@ -126,7 +126,10 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `persistence.py` holds the branch-pinned writer a run uses to append entries;
   `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
   In `prompt/`, `builder.py` assembles instructions in order; `instructions.py` holds core
-  instruction text; `project_context.py` discovers trusted files and bounded Git/project context;
+  instruction text; `project_context.py` assembles the bounded project context and trusted
+  instruction files; `project_root.py` finds the project root that also scopes trust;
+  `repository_status.py` reads and recovers the session's Git status snapshot; `git.py` runs
+  Git under one shared deadline;
   `text_budget.py` applies shared character limits to context and tool guidance.
 - For session persistence, start with `src/wisp/sessions/jsonl.py`: `JsonlSessionStore` and
   `JsonlSession` own the append/read lifecycle and the public result models. `file_io.py` holds the

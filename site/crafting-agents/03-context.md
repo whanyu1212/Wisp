@@ -305,12 +305,16 @@ current behavior.
 - [`prompt/builder.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/builder.py):
   instruction ordering and bounded, deduplicated tool guidance.
 - [`prompt/project_context.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/project_context.py):
-  project-root discovery, Git summary, directory-chain instructions, and shared budgets.
+  the project-context block, directory-chain instructions, and shared budgets.
+- [`prompt/project_root.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/project_root.py):
+  project-root discovery, which also scopes trust.
+- [`prompt/repository_status.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/repository_status.py):
+  the Git status snapshot a session reuses so its prompt stays cacheable.
 - [`prompt/text_budget.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/prompt/text_budget.py):
   character limits and truncation markers.
 - [`coding/session.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/session.py):
   `_prompt_messages` supplies trust and effective tool policy to the builder.
-- [`tests/agent/test_prompt.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/agent/test_prompt.py):
+- [`tests/coding/test_prompt.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/coding/test_prompt.py):
   ordering, untrusted loading, file precedence, and budget contracts.
 
 Wisp's RPC `get_project_files` capability serves frontend browsing and completion;

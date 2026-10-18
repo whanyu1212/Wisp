@@ -1,19 +1,22 @@
-"""Discover trusted project instructions and collect bounded project context."""
+"""Assemble the bounded project-context block, including trusted instruction files."""
 
 from __future__ import annotations
 
-import subprocess
-import time
 from collections.abc import Sequence
-from contextvars import ContextVar
 from pathlib import Path
 
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.providers.base import ToolSpec
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
-from wisp.trust.scope import is_broad_root
 
+from .git import git_deadline
+from .project_root import (
+    PROJECT_CONTEXT_FILE_CANDIDATES,
+    PROJECT_FILE_CANDIDATES,
+    resolve_project_context_root,
+)
+from .repository_status import read_repository_status
 from .text_budget import truncate_text
 
 DEFAULT_CONTEXT_MAX_CHARS = 32_768
@@ -22,44 +25,7 @@ DEFAULT_CONTEXT_MAX_CHARS = 32_768
 DEFAULT_CONTEXT_FILE_MAX_CHARS = 28_000
 
 
-MAX_GIT_STATUS_LINES = 12
-
-
 MAX_PROJECT_FILES = 16
-
-
-GIT_CONTEXT_TIMEOUT_SECONDS = 2.0
-
-
-_GIT_CONTEXT_DEADLINE: ContextVar[float | None] = ContextVar(
-    "wisp_git_context_deadline",
-    default=None,
-)
-
-
-PROJECT_FILE_CANDIDATES = (
-    "pyproject.toml",
-    "uv.lock",
-    "requirements.txt",
-    "setup.py",
-    "setup.cfg",
-    "tox.ini",
-    "pytest.ini",
-    "package.json",
-    "package-lock.json",
-    "pnpm-lock.yaml",
-    "yarn.lock",
-    "Cargo.toml",
-    "Cargo.lock",
-    "go.mod",
-    "go.sum",
-    "Makefile",
-    "README.md",
-    ".gitignore",
-)
-
-
-PROJECT_CONTEXT_FILE_CANDIDATES = ("AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD")
 
 
 def build_project_context(
@@ -92,10 +58,9 @@ def build_project_context(
         unavailable status; the shared deadline is restored on exit.
     """
 
-    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
-    try:
+    with git_deadline():
         resolved_cwd = cwd.resolve(strict=False)
-        project_root = _project_root(resolved_cwd)
+        project_root = resolve_project_context_root(resolved_cwd)
         resolved_trusted_context_root = (
             trusted_context_root.resolve(strict=False)
             if trusted_context_root is not None
@@ -106,7 +71,11 @@ def build_project_context(
             "[WISP PROJECT CONTEXT]",
             f"cwd: {resolved_cwd}",
             root_section,
-            repository_status if repository_status is not None else _git_summary(resolved_cwd),
+            (
+                repository_status
+                if repository_status is not None
+                else read_repository_status(resolved_cwd)
+            ),
             _project_files_summary(project_root),
             _tool_summary(tools),
         ]
@@ -124,80 +93,6 @@ def build_project_context(
         if context_file_section:
             sections.append(context_file_section)
         return _truncate_context("\n".join(section for section in sections if section), max_chars)
-    finally:
-        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
-
-
-def read_repository_status(cwd: Path) -> str:
-    """Read the Git status section of the project context once.
-
-    A session takes this once and passes it to `build_project_context` on later runs.
-    The working tree changes as the agent edits files; putting the fresh status in
-    every run's prompt would change the prompt prefix and miss the provider's
-    prompt cache for the whole conversation after it.
-
-    Args:
-        cwd (Path): Working directory whose repository is summarized.
-
-    Returns:
-        str: The status section, labeled as a snapshot, or an unavailable status when
-            the directory is not a work tree or Git does not answer in time.
-    """
-    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
-    try:
-        return _git_summary(cwd.resolve(strict=False))
-    finally:
-        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
-
-
-def recover_repository_status(project_context: str, cwd: Path) -> str | None:
-    """Recover the Git status snapshot a persisted project context was built with.
-
-    A resumed session can reuse the snapshot its earlier runs sent instead of
-    reading Git again, so its first request keeps the prompt prefix the provider
-    already cached. This parses the section `build_project_context` writes.
-
-    Args:
-        project_context (str): A persisted ``[WISP PROJECT CONTEXT]`` system message.
-        cwd (Path): Working directory the new run describes.
-
-    Returns:
-        str | None: The status section exactly as `read_repository_status` returned
-            it, or None when the context is for another directory or holds no
-            complete snapshot (for example an unavailable status or truncation).
-
-    Examples:
-        >>> context = "\\n".join([
-        ...     "[WISP PROJECT CONTEXT]",
-        ...     "cwd: /repo",
-        ...     f"{_GIT_SNAPSHOT_LABEL} branch main; status clean",
-        ...     "project files: none detected",
-        ... ])
-        >>> recover_repository_status(context, Path("/repo"))
-        'git (snapshot; run `git status` for the current state): branch main; status clean'
-        >>> recover_repository_status(context, Path("/elsewhere")) is None
-        True
-    """
-    lines = project_context.split("\n")
-    if len(lines) < 3 or lines[0] != "[WISP PROJECT CONTEXT]":
-        return None
-    if lines[1] != f"cwd: {cwd.resolve(strict=False)}":
-        return None
-    start = next(
-        (index for index, line in enumerate(lines) if line.startswith(_GIT_SNAPSHOT_LABEL)),
-        None,
-    )
-    if start is None:
-        return None
-    end = start + 1
-    # Changed-file lines (and the "... N more" line) are indented under the header.
-    while end < len(lines) and lines[end].startswith("  "):
-        end += 1
-    # A complete context always continues with the project-files section; anything
-    # else (end of text or a truncation marker) means the status may be cut short.
-    if end == len(lines) or not lines[end].startswith("project files:"):
-        return None
-    return "\n".join(lines[start:end])
 
 
 def build_untrusted_project_context(
@@ -221,99 +116,6 @@ def build_untrusted_project_context(
         _tool_summary(tools),
     ]
     return _truncate_context("\n".join(sections), max_chars)
-
-
-def _project_root(cwd: Path) -> Path:
-    git_root = _run_git(cwd, "rev-parse", "--show-toplevel")
-    if git_root:
-        resolved_git_root = Path(git_root).expanduser().resolve(strict=False)
-        # A repository at the home folder (such as tracked dotfiles) would make
-        # every folder below it one project, sharing its trust and permissions.
-        if not is_broad_root(resolved_git_root):
-            return resolved_git_root
-
-    candidates = _folders_below_broad_root(cwd)
-    for candidate in candidates:
-        if any((candidate / name).exists() for name in PROJECT_FILE_CANDIDATES):
-            return candidate
-
-    for candidate in candidates:
-        if any((candidate / name).exists() for name in PROJECT_CONTEXT_FILE_CANDIDATES):
-            return candidate
-    return cwd
-
-
-def _folders_below_broad_root(cwd: Path) -> tuple[Path, ...]:
-    """Return ``cwd`` and its parents, stopping before the home folder or above.
-
-    A marker file in the home folder, such as a stray ``package.json``, must not
-    turn the home folder into the project for every folder below it.
-
-    Args:
-        cwd (Path): Resolved working directory.
-
-    Returns:
-        tuple[Path, ...]: Folders to search for project markers, nearest first;
-        empty when ``cwd`` is itself a broad folder.
-    """
-
-    folders: list[Path] = []
-    for candidate in (cwd, *cwd.parents):
-        if is_broad_root(candidate):
-            break
-        folders.append(candidate)
-    return tuple(folders)
-
-
-def resolve_project_context_root(cwd: Path) -> Path:
-    """Resolve the project root used for trust and instruction discovery.
-
-    The search never settles on the home folder or a folder above it: a Git
-    repository or marker file there is ignored, so the result is a folder below
-    it, or ``cwd`` itself.
-
-    Args:
-        cwd (Path): Directory from which to search for a Git or project root.
-
-    Returns:
-        Path: The discovered root, falling back to the resolved working directory.
-    """
-
-    deadline_token = _GIT_CONTEXT_DEADLINE.set(time.monotonic() + GIT_CONTEXT_TIMEOUT_SECONDS)
-    try:
-        return _project_root(cwd.resolve(strict=False))
-    finally:
-        _GIT_CONTEXT_DEADLINE.reset(deadline_token)
-
-
-# Sessions reuse one status across runs to keep the prompt cacheable, so tell the model
-# it may be out of date.
-_GIT_SNAPSHOT_LABEL = "git (snapshot; run `git status` for the current state):"
-
-
-def _git_summary(cwd: Path) -> str:
-    inside_work_tree = _run_git(cwd, "rev-parse", "--is-inside-work-tree")
-    if inside_work_tree != "true":
-        return "git: unavailable"
-
-    branch = _run_git(cwd, "branch", "--show-current")
-    if not branch:
-        branch = _run_git(cwd, "rev-parse", "--short", "HEAD") or "unknown"
-
-    status = _run_git(cwd, "status", "--short")
-    if status is None:
-        return f"{_GIT_SNAPSHOT_LABEL} branch {branch}; status unavailable"
-    if not status:
-        return f"{_GIT_SNAPSHOT_LABEL} branch {branch}; status clean"
-
-    status_lines = status.splitlines()
-    shown = status_lines[:MAX_GIT_STATUS_LINES]
-    hidden_count = max(0, len(status_lines) - len(shown))
-    suffix = f"\n  ... {hidden_count} more" if hidden_count else ""
-    return (
-        f"{_GIT_SNAPSHOT_LABEL} branch {branch}; {len(status_lines)} changed file(s)"
-        f"\n  " + "\n  ".join(shown) + suffix
-    )
 
 
 def _project_files_summary(cwd: Path) -> str:
@@ -451,27 +253,6 @@ def _tool_summary(tools: Sequence[ToolSpec]) -> str:
             description = f"{description[:117].rstrip()}..."
         lines.append(f"  - {tool.name}: {description}")
     return "\n".join(lines)
-
-
-def _run_git(cwd: Path, *args: str) -> str | None:
-    deadline = _GIT_CONTEXT_DEADLINE.get()
-    remaining = deadline - time.monotonic() if deadline is not None else 1.0
-    if remaining <= 0:
-        return None
-    try:
-        result = subprocess.run(
-            ("git", "-C", str(cwd), *args),
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=min(1.0, remaining),
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip()
 
 
 def _truncate_context(text: str, max_chars: int) -> str:
