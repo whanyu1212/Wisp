@@ -50,6 +50,7 @@
 
 - [Overview](contributing/index.md)
 - [Development setup](contributing/development.md)
+- [How Wisp is built](contributing/building.md)
 - [Testing](contributing/testing.md)
 - [RC5 release](contributing/rc5-release.md)
 - [RC6 release](contributing/rc6-release.md)
