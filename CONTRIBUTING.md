@@ -20,7 +20,7 @@ automatically.
 
 ## Before you open a pull request
 
-Run the Python gates for every change:
+Run the checks that match what you changed. For Python code or tests:
 
 ```bash
 uv run ruff format --check .
@@ -38,7 +38,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
-For changes to the book, run `mdbook build book`. See
+Documentation-only changes don't need the application test suite. For changes to the book, run
+`mdbook build book` and `uv run pytest tests/docs`, which keeps the book's examples and references in
+sync with the code. See
 [Development setup](https://whanyu1212.github.io/Wisp/contributing/development.html#working-on-these-docs)
 for installing the pinned mdBook tools.
 
