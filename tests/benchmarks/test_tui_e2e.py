@@ -104,6 +104,16 @@ def test_response_markers_survive_blank_cells_skipped_by_incremental_repaint() -
     )
 
 
+def test_ready_ignores_cursor_gaps() -> None:
+    # The status line as Linux CI painted it: cursor moves, no spaces.
+    status = b"\x1b[24;9Hidle\x1b[24;14H\xc2\xb7build\x1b[24;21H\xc2\xb7ctx~3.5k/1.0k349%"
+    composer = b"\x1b[20;3HAsk Wisp anything\x1b[24;40Hfake/fake"
+    plain = rust_tui_e2e._plain_text(composer + status)
+
+    assert rust_tui_e2e._ready(plain, "rust")
+    assert not rust_tui_e2e._ready(plain.replace("ctx~3.5k", "ctx~?"), "rust")
+
+
 @pytest.mark.parametrize("foreground", [0, os.getpgrp()])
 def test_timeout_cleanup_never_signals_the_benchmark_process_group(
     monkeypatch: pytest.MonkeyPatch,
