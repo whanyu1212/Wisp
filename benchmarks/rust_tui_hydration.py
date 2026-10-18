@@ -461,8 +461,6 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             "-m",
             "wisp",
             "tui",
-            "--renderer",
-            "rust",
             "--session-dir",
             str(session_dir),
             *(["--continue"] if history_messages else []),
