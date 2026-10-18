@@ -3,10 +3,10 @@ title = "Wisp"
 description = "Learn to build coding agents, explore Wisp's engineering choices, and use its shared runtime."
 authors = ["Wisp contributors"]
 language = "en"
-src = "site"
+src = "src"
 
 [build]
-build-dir = "book"
+build-dir = "build"
 create-missing = false
 
 [preprocessor.mermaid]
@@ -19,7 +19,7 @@ preferred-dark-theme = "navy"
 no-section-label = true
 git-repository-url = "https://github.com/whanyu1212/Wisp"
 git-repository-icon = "fab-github"
-edit-url-template = "https://github.com/whanyu1212/Wisp/edit/main/{path}"
+edit-url-template = "https://github.com/whanyu1212/Wisp/edit/main/book/{path}"
 site-url = "/Wisp/"
 additional-js = ["mermaid.min.js", "mermaid-init.js"]
 additional-css = ["theme/custom.css"]

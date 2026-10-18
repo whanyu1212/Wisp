@@ -33,7 +33,7 @@ source. Likewise, approving an edit does not approve test execution.
 We describe the proposed operation with immutable strings and tuples:
 
 ```python
-{{#include ../../examples/crafting_agents/side_effects.py:request}}
+{{#include ../../../examples/crafting_agents/side_effects.py:request}}
 ```
 
 The request includes the call ID, name, exact arguments, and relevant file
@@ -55,7 +55,7 @@ not something supplied by the model.
 The wrapper retains chapter 2's executor and makes authorization explicit:
 
 ```python
-{{#include ../../examples/crafting_agents/side_effects.py:execute}}
+{{#include ../../../examples/crafting_agents/side_effects.py:execute}}
 ```
 
 The ordering has observable consequences:

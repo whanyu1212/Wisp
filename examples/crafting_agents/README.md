@@ -1,6 +1,6 @@
 # Crafting Coding Agents checkpoints
 
-Runnable sources for the first five chapters of the [mdBook](../../site/crafting-agents/index.md).
+Runnable sources for the first five chapters of the [mdBook](../../book/src/crafting-agents/index.md).
 Use Python 3.12+ from the checkout root; no package installation, API key, network,
 or third-party dependency is needed:
 
@@ -69,7 +69,7 @@ privileges: the temporary directory is not an OS sandbox.
 
 The adapter intentionally supports text and function calls without reasoning-item
 replay. GPT-4.1 mini is the documented non-reasoning example; this is not a generic
-adapter for every model exposed by Responses. See the [provider chapter](../../site/crafting-agents/04-providers.md)
+adapter for every model exposed by Responses. See the [provider chapter](../../book/src/crafting-agents/04-providers.md)
 for terminal validation, retry limits, and the live-verification boundary.
 
 The book includes code through mdBook `ANCHOR` regions. Edit these files rather

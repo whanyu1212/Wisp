@@ -6,7 +6,7 @@ import re
 import tomllib
 from typing import get_args
 
-from tests.support.paths import REPO_ROOT
+from tests.support.paths import BOOK_SRC_DIR, REPO_ROOT
 from wisp import __version__
 from wisp.events import WispEvent
 from wisp.messages import CompactionRecord
@@ -17,7 +17,7 @@ from wisp.sessions import (
 
 _REPOSITORY_ROOT = REPO_ROOT
 _CHANGELOG = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-_POLICY = (_REPOSITORY_ROOT / "site" / "reference" / "compatibility.md").read_text(encoding="utf-8")
+_POLICY = (BOOK_SRC_DIR / "reference" / "compatibility.md").read_text(encoding="utf-8")
 
 
 def test_runtime_and_project_package_versions_match() -> None:
@@ -111,12 +111,10 @@ def test_policy_documents_current_persistence_versions() -> None:
 
 
 def test_compatibility_reference_is_linked_from_sdk_and_navigation() -> None:
-    sdk = (_REPOSITORY_ROOT / "site" / "reference" / "sdk.md").read_text(encoding="utf-8")
-    reference_index = (_REPOSITORY_ROOT / "site" / "reference" / "index.md").read_text(
-        encoding="utf-8"
-    )
-    sessions = (_REPOSITORY_ROOT / "site" / "guide" / "sessions.md").read_text(encoding="utf-8")
-    summary = (_REPOSITORY_ROOT / "site" / "SUMMARY.md").read_text(encoding="utf-8")
+    sdk = (BOOK_SRC_DIR / "reference" / "sdk.md").read_text(encoding="utf-8")
+    reference_index = (BOOK_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
+    sessions = (BOOK_SRC_DIR / "guide" / "sessions.md").read_text(encoding="utf-8")
+    summary = (BOOK_SRC_DIR / "SUMMARY.md").read_text(encoding="utf-8")
 
     assert "[Compatibility & versioning](./compatibility)" in sdk
     assert "being documented separately as part of" not in sdk

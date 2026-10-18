@@ -55,7 +55,7 @@ teaching contract; a live adapter will need to translate it to the provider's to
 schema. The executor is a separate callable that accepts a decoded `ToolCall`.
 
 ```python
-{{#include ../../examples/crafting_agents/core.py:loop}}
+{{#include ../../../examples/crafting_agents/core.py:loop}}
 ```
 
 Follow the normal path from top to bottom:
@@ -97,7 +97,7 @@ The read executor exposes only `calculator.py`. Our scripted provider first asks
 for the wrong path, then the right one, then returns a diagnosis:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_01.py:script}}
+{{#include ../../../examples/crafting_agents/checkpoint_01.py:script}}
 ```
 
 Each `after` condition checks the preceding observation before yielding the next

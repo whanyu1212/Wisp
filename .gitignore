@@ -18,8 +18,8 @@ dist/
 # Rust
 /target/
 
-# Docs: mdBook output (source lives in site/ and IS tracked)
-/book/
+# Docs: mdBook output (the source in book/ IS tracked)
+/book/build/
 
 # Private local notes and design docs (never published; the book lives elsewhere)
 /docs/

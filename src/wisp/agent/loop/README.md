@@ -9,7 +9,7 @@ invocations, persistence, compaction policy, queues, or frontend behavior. Those
 `AgentHarness`, `CodingSession`, and the shared RPC interfaces.
 
 For the system-level design and lifecycle diagrams, see the
-[agent runtime architecture](../../../../site/architecture/agent-runtime.md).
+[agent runtime architecture](../../../../book/src/architecture/agent-runtime.md).
 
 ## Execution flow
 

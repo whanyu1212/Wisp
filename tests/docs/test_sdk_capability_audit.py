@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import re
 
-from tests.support.paths import REPO_ROOT
+from tests.support.paths import BOOK_SRC_DIR, REPO_ROOT
 
 _REPOSITORY_ROOT = REPO_ROOT
-_AUDIT_PATH = _REPOSITORY_ROOT / "site" / "reference" / "sdk-capability-audit.md"
+_AUDIT_PATH = BOOK_SRC_DIR / "reference" / "sdk-capability-audit.md"
 _AUDIT = _AUDIT_PATH.read_text(encoding="utf-8")
 _PI_RELEASE = "v0.84.2"
 _PI_COMMIT = "914cf1472e715297caa30db4b9535d534a9eb718"
@@ -69,11 +69,9 @@ def test_every_local_audit_link_has_a_markdown_target() -> None:
 
 
 def test_audit_is_linked_from_sdk_reference_navigation() -> None:
-    guide = (_REPOSITORY_ROOT / "site" / "guide" / "sdk.md").read_text(encoding="utf-8")
-    reference_index = (_REPOSITORY_ROOT / "site" / "reference" / "index.md").read_text(
-        encoding="utf-8"
-    )
-    summary = (_REPOSITORY_ROOT / "site" / "SUMMARY.md").read_text(encoding="utf-8")
+    guide = (BOOK_SRC_DIR / "guide" / "sdk.md").read_text(encoding="utf-8")
+    reference_index = (BOOK_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
+    summary = (BOOK_SRC_DIR / "SUMMARY.md").read_text(encoding="utf-8")
     changelog = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert "[SDK capability audit](../reference/sdk-capability-audit)" in guide

@@ -125,7 +125,7 @@ would turn ordinary streaming into a series of parse failures. Instead, collect
 the fragments under the item's identity:
 
 ```python
-{{#include ../../examples/crafting_agents/responses.py:events}}
+{{#include ../../../examples/crafting_agents/responses.py:events}}
 ```
 
 The accumulator displays text immediately and reports argument-buffer progress
@@ -163,7 +163,7 @@ our existing executor.
 Here is the boundary the loop actually awaits:
 
 ```python
-{{#include ../../examples/crafting_agents/responses.py:boundary}}
+{{#include ../../../examples/crafting_agents/responses.py:boundary}}
 ```
 
 Only acquiring a stream sits inside the retry loop. After a stream is acquired,
@@ -254,7 +254,7 @@ uv run python -m examples.crafting_agents.checkpoint_04 --live --model gpt-4.1-m
 The flag both exposes the extra tools and enables a separate host-side gate:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_04.py:permission}}
+{{#include ../../../examples/crafting_agents/checkpoint_04.py:permission}}
 ```
 
 The test tool executes edited Python with the host process's privileges. A

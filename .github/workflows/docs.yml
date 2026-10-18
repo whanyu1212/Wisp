@@ -5,23 +5,15 @@ on:
     branches:
       - main
     paths:
-      - "site/**"
+      - "book/**"
       - "examples/crafting_agents/**"
-      - "book.toml"
-      - "mermaid-init.js"
-      - "mermaid.min.js"
-      - "theme/**"
       - ".github/workflows/docs.yml"
   pull_request:
     branches:
       - main
     paths:
-      - "site/**"
+      - "book/**"
       - "examples/crafting_agents/**"
-      - "book.toml"
-      - "mermaid-init.js"
-      - "mermaid.min.js"
-      - "theme/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
@@ -86,17 +78,26 @@ jobs:
           python -m examples.crafting_agents.checkpoint_05 --scenario approval-denied
           python -m examples.crafting_agents.checkpoint_05 --scenario stale-input
 
+      # mdBook exits 0 even when a preprocessor fails (a missing {{#include}} file is
+      # logged as ERROR and the raw directive is published), so fail on logged errors.
       - name: Build book
-        run: mdbook build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mdbook build book 2>&1 | tee "$RUNNER_TEMP/mdbook.log"
+          if grep -qE '^\s*ERROR' "$RUNNER_TEMP/mdbook.log"; then
+            echo "::error::mdbook build logged errors; see the output above."
+            exit 1
+          fi
 
       - name: Check rendered links
-        run: lychee --offline --no-progress --fallback-extensions html --exclude-path 'book/404.html' book
+        run: lychee --offline --no-progress --fallback-extensions html --exclude-path 'book/build/404.html' book/build
 
       - name: Upload artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book
+          path: book/build
 
   deploy:
     name: Deploy to GitHub Pages

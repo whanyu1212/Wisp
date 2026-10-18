@@ -46,7 +46,7 @@ The dispatcher looks up the tool, checks the exact argument names and string
 values, and bounds both successful output and expected errors:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_02.py:dispatch}}
+{{#include ../../../examples/crafting_agents/checkpoint_02.py:dispatch}}
 ```
 
 An extra argument is rejected rather than silently ignored. That makes failures
@@ -57,7 +57,7 @@ still propagates.
 After validation, the three operations are straightforward:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_02.py:operations}}
+{{#include ../../../examples/crafting_agents/checkpoint_02.py:operations}}
 ```
 
 ### Why require exactly one match?
@@ -87,7 +87,7 @@ Line and byte budgets protect different cases: many short lines versus a single
 very long line. Apply both, even after the first limit has truncated the output:
 
 ```python
-{{#include ../../examples/crafting_agents/checkpoint_02.py:budget}}
+{{#include ../../../examples/crafting_agents/checkpoint_02.py:budget}}
 ```
 
 The result stores truncation separately from the bounded text. Our dispatcher
