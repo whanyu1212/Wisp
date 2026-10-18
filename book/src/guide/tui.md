@@ -624,10 +624,34 @@ cards, pickers, context reports, and safety decisions; its key reference is deri
 bindings. The panel moves below the conversation on narrow terminals and never runs a tool, changes
 the session, or resolves an approval.
 
-The searchable prompt-history index holds up to 100 unique prompts and is memory-only; `/history`
-does not create a separate on-disk cache. Submitted user messages still become part of the active
-session's persistent JSONL transcript under the configured session directory. Do not put secrets in
-prompts, and delete or protect session files according to their contents.
+### Prompt history
+
+Press `Ctrl+R` or run `/history` to search the prompts submitted in the current TUI run, including
+accepted steering and follow-ups. Search ignores case and repeated whitespace and covers the first
+16,384 normalized characters of each prompt; restoring a prompt keeps its complete original text.
+`Enter` replaces your draft with the selected prompt without submitting it, and `Esc`, `Ctrl+C` or
+`Ctrl+R` closes history and keeps your draft. History survives session switches and is cleared when
+the TUI exits. It holds up to 100 unique prompts within a 4 MiB text budget and evicts the oldest
+first.
+
+The index is memory-only; `/history` does not create a separate on-disk cache. Submitted user
+messages still become part of the active session's persistent JSONL transcript under the configured
+session directory. Do not put secrets in prompts, and delete or protect session files according to
+their contents.
+
+### Context, skills and MCP browsers
+
+The header shows context usage. `/context` reports the budget, usage, cost and compaction details;
+during a run, session totals show the last refreshed snapshot. When idle, `/context auto on|off`
+changes automatic compaction for the current process, and `/compact [instructions]` compacts the
+selected session. `Ctrl+C` cancels a manual compaction.
+
+`/skills` lists skill descriptions and sources, and `d` shows discovery diagnostics. `Enter` inserts
+the selected `/skill:name ` before your draft, ready to edit and submit. Slash completion lists
+commands first, then skills, and typing `/skill:` narrows it to skills; `Tab` or `Enter` accepts a
+suggestion, then `Enter` submits. `/mcp` shows server status, registered tools and connection
+errors. In both browsers `r` refreshes and `Esc` or `Ctrl+C` closes; both stay available while a
+prompt is running.
 
 ## Modes
 
