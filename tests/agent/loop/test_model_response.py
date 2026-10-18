@@ -18,9 +18,9 @@ from wisp.agent.loop.provider_lifecycle import (
 )
 from wisp.agent.loop.provider_request import iter_provider_events, open_provider_stream
 from wisp.agent.loop.response_projection import project_usage_and_cost
-from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import UsageCost
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     ProviderProtocolError,

@@ -17,8 +17,8 @@ from tests.providers.openai_support import (
     completed_event,
     text_delta,
 )
-from wisp.agent.messages import Message
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.messages import Message
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

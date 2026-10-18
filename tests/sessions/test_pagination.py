@@ -9,12 +9,12 @@ import pytest
 from pydantic import ValidationError
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
 from wisp.events import (
     ErrorEvent,
     RpcMessageToolResultSnapshot,
     ToolCallSnapshot,
 )
+from wisp.messages import Message
 from wisp.sessions import (
     jsonl as jsonl_module,
 )

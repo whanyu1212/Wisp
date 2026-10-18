@@ -18,7 +18,6 @@ from tests.support.agent_runtime import (
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent
-from wisp.agent.messages import Message
 from wisp.events import (
     MessageCompleted,
     QueueMessageInjected,
@@ -27,6 +26,7 @@ from wisp.events import (
     TurnCompleted,
     TurnStarted,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolSpec,
 )

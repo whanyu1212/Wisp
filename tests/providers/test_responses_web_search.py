@@ -32,7 +32,7 @@ from tests.providers.openai_support import (
     StubResponsesResource,
     completed_event,
 )
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.events import (
     ProviderEvent,

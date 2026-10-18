@@ -21,7 +21,7 @@ from openai import (
 )
 from openai.types.chat import ChatCompletionChunk
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.openai_compatible import (
     openai_compatible_api_key_environment,
     validate_openai_compatible_provider_name,

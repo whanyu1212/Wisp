@@ -6,7 +6,6 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Literal
 
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
-from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolExecutor,
@@ -15,6 +14,7 @@ from wisp.events import (
     ToolCallSnapshot,
     ToolExecutionEnded,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     Provider,
     ToolSpec,

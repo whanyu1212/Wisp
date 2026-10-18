@@ -8,9 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import cast
 
-from wisp.agent.history import surrogate_safe_text
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import (
     BillableTokenUsage,
@@ -20,6 +18,8 @@ from wisp.events import (
     TurnCompleted,
     UsageCost,
 )
+from wisp.messages import Message
+from wisp.messages.history import surrogate_safe_text
 from wisp.providers.base import Provider
 from wisp.providers.events import ToolCall
 from wisp.sessions.replay import SessionContextRow, SessionReplay

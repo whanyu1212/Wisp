@@ -15,7 +15,6 @@ from tests.agent.loop.support import (
     RecordingToolExecutor,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
@@ -31,6 +30,7 @@ from wisp.events import (
     ToolResultReady,
     wisp_event_from_json,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
 )

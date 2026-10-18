@@ -10,8 +10,8 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import ErrorEvent
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.branching import SessionBranchProjection
 from wisp.sessions.entries import (

@@ -113,8 +113,11 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `wisp.events` (the package root re-exports everything); the lifecycle submodules `run.py`,
   `usage.py`, `tools.py`, `sessions.py`, `rpc.py`, and `errors.py` only group the models, and
   `__init__.py` owns the `KnownWispEvent` union whose member order the schema bundle depends on.
-- `messages.py` defines message and compaction records and projects completion events. `history.py`
-  normalizes provider history; `transcript_repair.py` orders tool results and repairs interruptions.
+- `src/wisp/messages/` is the provider-neutral message vocabulary, below `wisp.providers` and
+  `wisp.agent`: providers know messages, the agent knows providers. `models.py` defines message and
+  compaction records and projects completion events (import them from `wisp.messages`);
+  `history.py` normalizes provider history. In `wisp.agent`, `transcript_repair.py` orders tool
+  results and repairs interruptions.
 - `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
   and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
   `turn_lifecycle.py` tracks the open turn: the loop publishes turns through it, and the harness and
@@ -163,8 +166,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   surfaces; prompt building is coding-layer code, so do not restore `wisp.agent.prompt`.
   Within each package, import from defining modules. Use the current shared module names above;
   do not restore the removed `configuration.py`, `context.py`, `execution.py`, or `transcript.py`
-  import shims. Import history helpers directly from `wisp.agent.history` and concrete session-entry
-  models from `wisp.sessions`; do not restore the removed `wisp.agent.messages.SessionEntry` factory.
+  import shims. Import message records from `wisp.messages`, history helpers directly from
+  `wisp.messages.history`, and concrete session-entry models from `wisp.sessions`; do not restore
+  `wisp.agent.messages`, `wisp.agent.history`, or the removed `SessionEntry` factory.
   The same rule applies outside `wisp.agent`: import tool implementations from their defining
   modules under `wisp.tools.files`, `wisp.tools.shell`, and `wisp.tools.search` (for example
   `wisp.tools.files.paths` or `wisp.tools.shell.supervisor`), and retry helpers from `wisp.retry`;

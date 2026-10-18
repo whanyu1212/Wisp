@@ -12,8 +12,8 @@ from pytest import MonkeyPatch
 
 import wisp.sdk as sdk_module
 from tests.support.rpc import guard_rpc_command_serialization
-from wisp.agent.messages import Message
 from wisp.config.runtime import WispConfig
+from wisp.messages import Message
 from wisp.rpc import host as rpc_host_module
 from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore

@@ -6,8 +6,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from wisp.agent.messages import Message
 from wisp.agent.transcript_repair import MissingToolResult, order_tool_result_items
+from wisp.messages import Message
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,

@@ -12,7 +12,6 @@ from wisp.agent.context_budget import (
     estimate_context,
     estimate_context_budget,
 )
-from wisp.agent.messages import Message
 from wisp.coding.compaction import NothingToCompactError, plan_manual_compaction
 from wisp.coding.costs import aggregate_session_cost
 from wisp.events import (
@@ -23,6 +22,7 @@ from wisp.events import (
     TokenUsage,
     UsageCost,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolSpec
 from wisp.sessions.entries import (
     CompactionSessionEntry,

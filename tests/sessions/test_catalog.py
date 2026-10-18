@@ -7,7 +7,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.rpc.commands import GetSessionsCommand
 from wisp.rpc.framing import RpcFrameError, encode_rpc_frame
 from wisp.rpc.session.read import _session_catalog_report

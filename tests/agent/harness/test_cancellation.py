@@ -17,7 +17,6 @@ from tests.support.agent_runtime import (
 )
 from wisp.agent.harness import AgentHarness
 from wisp.agent.harness.boundaries import HarnessBoundaryContext
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import ContextOverflowSnapshot, RequestBoundaryDecision
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
@@ -31,6 +30,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

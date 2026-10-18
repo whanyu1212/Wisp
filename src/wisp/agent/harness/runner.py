@@ -9,11 +9,6 @@ from enum import Enum, auto
 import anyio
 
 from wisp.agent.loop import AgentLoopEvent, run_agent_loop
-from wisp.agent.messages import (
-    Message,
-    completion_event_has_history,
-    message_from_completion_event,
-)
 from wisp.agent.request_boundary import ContextOverflowHook
 from wisp.agent.transcript_repair import plan_interrupted_tool_repairs
 from wisp.agent.turn_lifecycle import TurnLifecycle
@@ -27,6 +22,11 @@ from wisp.events import (
     ToolExecutionEnded,
     TurnCompleted,
     TurnStarted,
+)
+from wisp.messages import (
+    Message,
+    completion_event_has_history,
+    message_from_completion_event,
 )
 from wisp.providers.base import prepare_provider_history
 

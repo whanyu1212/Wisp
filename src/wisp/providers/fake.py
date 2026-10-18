@@ -10,7 +10,7 @@ from typing import Literal
 
 import anyio
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,

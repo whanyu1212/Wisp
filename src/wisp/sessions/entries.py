@@ -18,7 +18,6 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
     JsonObject,
     JsonObjectAdapter,
@@ -27,6 +26,7 @@ from wisp.events import (
     utc_now,
     wisp_event_from_dict,
 )
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions.errors import (
     MalformedPersistedEventError,
     MalformedSessionEntryError,

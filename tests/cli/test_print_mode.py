@@ -8,7 +8,6 @@ import pytest
 
 from tests.support.cli import *
 from wisp import __version__
-from wisp.agent.messages import CompactionRecord
 from wisp.cli.output import _print_event_line
 from wisp.events import (
     BillableTokenUsage,
@@ -24,6 +23,7 @@ from wisp.events import (
     UsageCostRates,
     WispEvent,
 )
+from wisp.messages import CompactionRecord
 from wisp.providers.base import ContextOverflowError
 from wisp.sessions.entries import CompactionSessionEntry
 from wisp.sessions.replay import HISTORICAL_CONTEXT_SUMMARY_LABEL

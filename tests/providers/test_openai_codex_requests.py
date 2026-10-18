@@ -13,7 +13,7 @@ from tests.providers.openai_codex_support import (
     completed_event,
     store_with_oauth,
 )
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import (

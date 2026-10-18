@@ -18,8 +18,8 @@ from scripts.cache_reuse_report import (
     read_session_entries,
     split_prompts,
 )
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import ContextObservation, JsonObject, TokenUsage, ToolCallSnapshot
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,

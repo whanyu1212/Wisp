@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from benchmarks.support import Measurement, environment, measure, measure_async
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.sessions.jsonl import JsonlSessionStore
 
 

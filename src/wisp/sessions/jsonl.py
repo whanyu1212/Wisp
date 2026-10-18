@@ -14,12 +14,12 @@ from uuid import uuid4
 
 import anyio
 
-from wisp.agent.messages import Message
 from wisp.events import (
     JsonObject,
     KnownWispEvent,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.sessions.branching import (
     SessionBranchProjection,
     project_fork_from_user_message,

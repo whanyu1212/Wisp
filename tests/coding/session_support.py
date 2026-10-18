@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCall,
     ToolCallResult,

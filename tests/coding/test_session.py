@@ -13,7 +13,6 @@ import wisp.coding.session as session_module
 from tests.coding.session_support import (
     CapturingProvider,
 )
-from wisp.agent.messages import Message
 from wisp.coding.prompt import build_prompt_messages
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -28,6 +27,7 @@ from wisp.events import (
     TurnCompleted,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

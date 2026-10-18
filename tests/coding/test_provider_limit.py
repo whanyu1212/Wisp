@@ -12,7 +12,6 @@ from tests.coding.compaction_support import (
     build_model_registry,
 )
 from wisp.agent.context_budget import build_context_budget, estimate_context
-from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     exceeds_provider_auto_compaction_limit,
     matches_provider_suffix,
@@ -32,6 +31,7 @@ from wisp.events import (
     TurnStarted,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError
 from wisp.providers.events import (
     ProviderResponseCompleted,

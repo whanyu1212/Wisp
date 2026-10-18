@@ -13,7 +13,7 @@ from tests.cli.rpc_mode_support import (
 )
 from tests.support.cli import *
 from tests.support.rpc import guard_rpc_command_serialization
-from wisp.agent.messages import CompactionRecord
+from wisp.messages import CompactionRecord
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseFailed,

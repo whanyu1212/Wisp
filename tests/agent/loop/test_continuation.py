@@ -14,7 +14,6 @@ from wisp.agent.loop.continuation import (
     has_valid_replacement_tool_order,
     is_tool_shaped,
 )
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -30,6 +29,7 @@ from wisp.events import (
     ToolExecutionEnded,
     ToolResultReady,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import ProviderEvent, ToolCall
 

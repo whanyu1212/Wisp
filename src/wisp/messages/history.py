@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 
-from .messages import Message
+from .models import Message
 
 
 def active_turn_start(messages: Sequence[Message]) -> int | None:
@@ -220,7 +220,7 @@ def normalize_provider_history(
     Examples:
         An orphaned tool result becomes data in an assistant message:
 
-        >>> from wisp.agent.messages import Message
+        >>> from wisp.messages import Message
         >>> orphan = Message(role="tool", content="done", tool_call_id="call-1")
         >>> history = normalize_provider_history([orphan])
         >>> history[0].role

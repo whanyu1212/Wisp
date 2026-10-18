@@ -6,11 +6,11 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-from wisp.agent.messages import CompactionRecord, Message
 from wisp.events import (
     ErrorEvent,
     ToolCallSnapshot,
 )
+from wisp.messages import CompactionRecord, Message
 from wisp.sessions import (
     SessionTreePage,
     pagination,

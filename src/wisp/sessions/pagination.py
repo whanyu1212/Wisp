@@ -14,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from wisp.agent.messages import Role
 from wisp.events import (
     JsonObject,
     RpcMessageSnapshot,
@@ -25,6 +24,7 @@ from wisp.events import (
     WebSearchPerformed,
     WebSearchSource,
 )
+from wisp.messages import Role
 from wisp.sessions.entries import (
     CompactionSessionEntry,
     EventSessionEntry,

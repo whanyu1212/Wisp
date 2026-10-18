@@ -54,12 +54,14 @@ This is a minor release with an announced breaking API cleanup, not a patch rele
 - For event entries, pass `PersistedEventEnvelope(payload=raw_event)` rather than a raw dictionary
   as the `event` value. This changes Python construction, not existing JSONL files.
 - Code importing agent internals must update removed module paths. Use `wisp.agent.harness` and
-  `wisp.agent.loop` as package entry points; history helpers now live in `wisp.agent.history`.
+  `wisp.agent.loop` as package entry points.
   Prompt building moved from `wisp.agent.prompt` to `wisp.coding.prompt` with no compatibility
   re-export, so update imports such as `build_prompt_messages` and `resolve_project_context_root`.
   `wisp.agent.mode` is also gone: import `AgentMode` and `DEFAULT_AGENT_MODE` from `wisp.events`,
-  and `PLAN_MODE_SYSTEM_PROMPT` from `wisp.coding.prompt`; `is_agent_mode` is removed. Do not
-  rely on removed history-helper re-exports from `wisp.agent.messages`.
+  and `PLAN_MODE_SYSTEM_PROMPT` from `wisp.coding.prompt`; `is_agent_mode` is removed.
+  Message records moved from `wisp.agent.messages` to `wisp.messages` (for example
+  `from wisp.messages import Message`), and history helpers from `wisp.agent.history` to
+  `wisp.messages.history`, again with no re-export.
 - Prefer the documented [Python SDK import surface](../reference/sdk) when embedding Wisp.
   See [Compatibility & versioning](../reference/compatibility) for the public API boundary and
   the early-removal exception.

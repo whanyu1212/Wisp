@@ -32,7 +32,7 @@ from tests.providers.anthropic_support import (
     text_delta_event,
     tool_use_start_event,
 )
-from wisp.agent.messages import Message as WispMessage
+from wisp.messages import Message as WispMessage
 from wisp.providers.anthropic import AnthropicProvider
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (

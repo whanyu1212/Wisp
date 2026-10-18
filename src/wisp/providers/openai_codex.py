@@ -15,10 +15,10 @@ from typing import Literal, cast
 import anyio
 import httpx
 
-from wisp.agent.messages import Message, NativeOutput, Role
 from wisp.auth.openai_codex import account_id_from_access_token, refresh_openai_codex_token
 from wisp.auth.storage import JsonAuthStore
 from wisp.config.runtime import default_auth_path
+from wisp.messages import Message, NativeOutput, Role
 from wisp.providers.auth import ProviderAuthResolver, StoredProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

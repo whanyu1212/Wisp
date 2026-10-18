@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from wisp.agent.messages import Message
 from wisp.agent.transcript_repair import (
     INTERRUPTED_TOOL_RESULT_TEXT,
     MissingToolResult,
@@ -8,6 +7,7 @@ from wisp.agent.transcript_repair import (
     plan_interrupted_tool_repairs,
 )
 from wisp.events import ToolCallSnapshot
+from wisp.messages import Message
 
 
 def _assistant_with_calls(*call_ids: str) -> Message:

@@ -9,9 +9,9 @@ import pytest
 
 from examples.extensions.static_extension import ExampleState, activate, activate_async
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.messages import Message
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import AgentStarted, ToolExecutionEnded
+from wisp.messages import Message
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,

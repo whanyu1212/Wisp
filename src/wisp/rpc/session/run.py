@@ -13,7 +13,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.messages import Message
 from wisp.coding.prompt import resolve_project_context_root
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -25,6 +24,7 @@ from wisp.events import (
     ToolExecutionEnded,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.rpc.commands import (
     CompactCommand,
     GetSessionStatsCommand,

@@ -10,9 +10,9 @@ import pytest
 from pytest import MonkeyPatch
 
 from tests.providers.openai_codex_support import store_with_oauth
-from wisp.agent.messages import Message
 from wisp.auth import openai_codex as openai_codex_auth_module
 from wisp.auth.storage import JsonAuthStore
+from wisp.messages import Message
 from wisp.providers import openai_codex as openai_codex_module
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ProviderConfigurationError

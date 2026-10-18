@@ -14,7 +14,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response import IncompleteDetails
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,

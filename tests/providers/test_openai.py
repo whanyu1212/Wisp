@@ -29,7 +29,7 @@ from tests.providers.openai_support import (
     stub_response,
     text_delta,
 )
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import (
     ToolCall,
     ToolCallResult,

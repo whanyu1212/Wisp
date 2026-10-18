@@ -9,7 +9,6 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.agent.messages import Message
 from wisp.events import (
     RpcCommandFinished,
     RpcSessionCloned,
@@ -20,6 +19,7 @@ from wisp.events import (
     RpcSessionTreeUnreverted,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.rpc.commands import (
     CloneSessionCommand,
     ForkSessionCommand,

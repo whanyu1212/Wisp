@@ -37,7 +37,7 @@ from anthropic.types import (
     WebSearchToolResultBlockParam,
 )
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

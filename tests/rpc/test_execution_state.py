@@ -17,7 +17,6 @@ from tests.support.rpc import (
     guard_rpc_command_serialization,
 )
 from wisp.agent.harness import QueuedMessages
-from wisp.agent.messages import Message
 from wisp.coding.session import _RetainedQueueState
 from wisp.events import (
     ErrorEvent,
@@ -26,6 +25,7 @@ from wisp.events import (
     RpcStateReported,
     RpcStateSnapshot,
 )
+from wisp.messages import Message
 from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.coordinator import _RpcRunningCommand
 

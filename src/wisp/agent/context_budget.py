@@ -7,13 +7,13 @@ import math
 from collections.abc import Sequence
 from hashlib import sha256
 
-from wisp.agent.messages import Message
 from wisp.events import (
     ContextAccountingMethod,
     ContextBudget,
     ContextEstimate,
     ContextObservation,
 )
+from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 
 

@@ -6,8 +6,8 @@ import anyio
 import pytest
 
 from tests.rpc.coordinator_support import ignore_reject
-from wisp.agent.messages import Message
 from wisp.events import RpcSessionSelected, WispEvent
+from wisp.messages import Message
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,

@@ -6,8 +6,8 @@ from collections import deque
 from dataclasses import dataclass
 from uuid import uuid4
 
-from wisp.agent.messages import Message
 from wisp.events import QueueKind, QueueMode, QueueUpdated
+from wisp.messages import Message
 
 
 @dataclass(frozen=True, slots=True)

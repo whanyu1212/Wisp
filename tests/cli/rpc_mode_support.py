@@ -8,7 +8,7 @@ from pathlib import Path
 import anyio
 
 from tests.support.cli import _last_user_prompt
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 from wisp.providers.catalog import (
     ModelCatalog,

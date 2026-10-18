@@ -11,9 +11,9 @@ from pytest import MonkeyPatch
 
 import wisp.sdk as sdk_module
 from tests.support.rpc import guard_rpc_command_serialization
-from wisp.agent.messages import Message
 from wisp.config.runtime import WispConfig
 from wisp.events import RpcCommandFinished
+from wisp.messages import Message
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,

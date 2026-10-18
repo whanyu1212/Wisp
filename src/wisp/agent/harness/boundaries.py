@@ -7,7 +7,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Protocol
 
-from wisp.agent.messages import Message
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
     ContextOverflowHook,
@@ -15,6 +14,7 @@ from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
 )
+from wisp.messages import Message
 from wisp.providers.base import Provider, prepare_provider_history
 
 

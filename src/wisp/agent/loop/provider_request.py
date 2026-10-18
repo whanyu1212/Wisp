@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from typing import TYPE_CHECKING, cast
 
 import wisp.providers.events as provider_events
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     Provider,

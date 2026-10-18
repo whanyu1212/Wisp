@@ -17,7 +17,6 @@ from tests.support.paths import REPO_ROOT
 _PURE_AGENT_MODULES = (
     "validation.py",
     "context_budget.py",
-    "history.py",
     "transcript_repair.py",
     "request_boundary.py",
     "tool_contracts.py",
@@ -62,8 +61,6 @@ _CODING_FORBIDDEN_IMPORTS = (
 _FRONTEND_MODULES = (Path("cli/application.py"),)
 _FRESH_IMPORT_MODULES = (
     "wisp.agent.harness",
-    "wisp.agent.history",
-    "wisp.agent.messages",
     "wisp.agent.request_boundary",
     "wisp.agent.tool_contracts",
     "wisp.coding.compaction",
@@ -77,6 +74,8 @@ _FRESH_IMPORT_MODULES = (
     "wisp.config.settings",
     "wisp.mcp.config",
     "wisp.mcp.transport",
+    "wisp.messages",
+    "wisp.messages.history",
     "wisp.providers.base",
     "wisp.runtime.api",
     # wisp.trust.permissions is a leaf below wisp.config; it must not import
@@ -259,13 +258,14 @@ def test_prompt_package_lives_in_the_coding_layer() -> None:
     assert importers == []
 
 
-def test_events_do_not_import_agent() -> None:
-    """The event vocabulary sits below the agent runtime, so its imports point one way."""
-    events_dir = REPO_ROOT / "src" / "wisp" / "events"
+def test_lower_layers_do_not_import_agent() -> None:
+    """Providers know messages and the agent knows providers, so imports point one way."""
+    wisp_dir = REPO_ROOT / "src" / "wisp"
 
     importers = sorted(
         str(path.relative_to(REPO_ROOT))
-        for path in events_dir.rglob("*.py")
+        for package in ("events", "messages", "providers")
+        for path in (wisp_dir / package).rglob("*.py")
         if any(
             imported == "wisp.agent" or imported.startswith("wisp.agent.")
             for imported in _module_imports(path)
@@ -273,7 +273,8 @@ def test_events_do_not_import_agent() -> None:
     )
 
     assert importers == []
-    assert not (REPO_ROOT / "src" / "wisp" / "agent" / "mode.py").exists()
+    for removed in ("mode.py", "messages.py", "history.py"):
+        assert not (wisp_dir / "agent" / removed).exists()
 
 
 def test_obsolete_tools_and_providers_compatibility_modules_are_removed() -> None:

@@ -7,7 +7,6 @@ from tests.coding.compaction_support import (
     context_row,
     two_turn_replay,
 )
-from wisp.agent.messages import Message
 from wisp.coding.compaction import (
     AlreadyCompactedError,
     NothingToCompactError,
@@ -18,6 +17,7 @@ from wisp.coding.compaction import (
 from wisp.events import (
     ToolCallSnapshot,
 )
+from wisp.messages import Message
 from wisp.sessions.replay import (
     HISTORICAL_CONTEXT_SUMMARY_LABEL,
     SessionContextRow,

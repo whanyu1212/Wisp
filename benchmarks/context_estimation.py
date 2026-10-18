@@ -11,7 +11,7 @@ from pathlib import Path
 
 from benchmarks.support import Measurement, environment, measure
 from wisp.agent.context_budget import context_fingerprint, estimate_context
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.base import ToolSpec
 
 

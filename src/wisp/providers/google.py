@@ -15,7 +15,7 @@ from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,

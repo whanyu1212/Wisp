@@ -12,7 +12,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.agent.messages import Message
+from wisp.messages import Message
 from wisp.sessions import (
     file_io,
 )

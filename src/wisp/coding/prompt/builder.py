@@ -5,9 +5,9 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
-from wisp.agent.messages import Message
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.events import DEFAULT_AGENT_MODE, AgentMode
+from wisp.messages import Message
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 

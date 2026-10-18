@@ -16,7 +16,6 @@ from tests.coding.session_support import (
 )
 from wisp.agent.harness import AgentHarness
 from wisp.agent.loop import AgentLoopConfig, AgentLoopEvent
-from wisp.agent.messages import Message
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -35,6 +34,7 @@ from wisp.events import (
     TurnStarted,
     WispEvent,
 )
+from wisp.messages import Message
 from wisp.providers.base import (
     Provider,
     ProviderProtocolError,
