@@ -42,6 +42,10 @@ _SOURCE_ROOT = _REPOSITORY_ROOT / "src"
 _CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _DCS = re.compile(rb"\x1bP.*?\x1b\\", re.DOTALL)
+# A fake reply can finish before "working" is painted. The idle footer then never changes, so a
+# repaint of only changed cells never writes "idle" again; one resize repaints the whole frame.
+# Waiting first keeps the resize out of the measurement whenever "idle" does appear on its own.
+_IDLE_REPAINT_AFTER_NS = 250_000_000
 _READY_MARKERS = (
     "AskWispanything",
     "Typeapromptor/forcommands.",
@@ -349,6 +353,7 @@ def _run_sample(
         first_response_ns: int | None = None
         final_response_ns: int | None = None
         settled_ns: int | None = None
+        idle_repaint_requested = False
         quit_sent = False
         wait_result: _WaitResult | None = None
         initial_terminal: list[int | list[bytes]] | None = None
@@ -409,6 +414,16 @@ def _run_sample(
                             plain[final_index + len(FINAL_TOKEN) :], renderer
                         ):
                             settled_ns = now_ns
+                        elif (
+                            not idle_repaint_requested
+                            and now_ns - final_response_ns > _IDLE_REPAINT_AFTER_NS
+                        ):
+                            fcntl.ioctl(
+                                terminal_fd,
+                                termios.TIOCSWINSZ,
+                                struct.pack("HHHH", config.height, config.width - 1, 0, 0),
+                            )
+                            idle_repaint_requested = True
                     if settled_ns is not None and not quit_sent:
                         os.write(terminal_fd, b"/quit\r")
                         quit_sent = True
