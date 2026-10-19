@@ -194,6 +194,15 @@ impl Palette {
         Style::default().fg(self.muted)
     }
 
+    /// The thin rule between back-to-back tool cards: the muted colour, halfway faded into
+    /// the background so the rule separates rows without competing with their text.
+    pub fn rule(self) -> Style {
+        if self.monochrome {
+            return Style::default().fg(self.muted);
+        }
+        Style::default().fg(mix(self.muted, self.background, 0.5))
+    }
+
     pub fn selection(self) -> Style {
         if self.monochrome {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)

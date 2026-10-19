@@ -453,7 +453,8 @@ fn pinned_user_rows(
     let user_index = state.transcript.entry_index(user.id)?;
     let reading_reply = !state.history.tail_evicted
         && viewport.scrolled_top().is_some_and(|top| {
-            (top.entry_id == user.id && top.position == RowPosition::Spacer)
+            (top.entry_id == user.id
+                && matches!(top.position, RowPosition::Spacer | RowPosition::UserLeadOut))
                 || state
                     .transcript
                     .entry_index(top.entry_id)
@@ -602,7 +603,14 @@ fn render_transcript(
             spacer.kind = TranscriptRowKind::Spacer;
             spacer.anchor.position = RowPosition::Spacer;
             spacer.spans.clear();
-            rows.push(spacer);
+            rows.push(spacer.clone());
+            // The plain gap that separates the pinned prompt from its reply, as in place.
+            if has_reply && visible_lines >= rows.len().saturating_add(reply_rows).saturating_add(1)
+            {
+                spacer.role = TranscriptRole::Assistant;
+                spacer.anchor.position = RowPosition::UserLeadOut;
+                rows.push(spacer);
+            }
         }
     }
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
@@ -1024,6 +1032,19 @@ fn render_transcript_row(
         content.x += columns;
         content.width -= columns;
     }
+    if row.kind == TranscriptRowKind::Rule {
+        // The rule starts under the chip, after the status marker's column.
+        let start = content.width.min(1);
+        let columns = usize::from(content.width - start);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "─".repeat(columns),
+                base.patch(palette.rule()),
+            )),
+            Rect::new(content.x + start, content.y, content.width - start, 1),
+        );
+        return;
+    }
     if code {
         frame.render_widget(Block::default().style(palette.composer()), content);
     } else if matches!(
@@ -1101,11 +1122,17 @@ fn render_transcript_row(
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
 
-/// Fill a card's label as a chip. The padding borrows the space that ends the status
-/// marker and the first space after the label, so the row's text, width and copied
-/// selection stay the same.
-fn fill_label_chip(spans: &mut [Span<'static>], label: usize, chip: Style) {
-    let mut text = spans[label].content.to_string();
+/// Fill a card's label as a chip one space wider than the name on each side. The padding
+/// borrows the space that ends the status marker and the first space after the name, which
+/// is either the label's own alignment padding or the gap after it, so the row's text, width
+/// and copied selection stay the same. The rest of the alignment padding stays plain, so
+/// stacked chips differ in width instead of forming one block.
+fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style) {
+    let content = spans[label].content.to_string();
+    let name = content.trim_end_matches(' ');
+    let mut text = name.to_owned();
+    let mut padding = content[name.len()..].to_owned();
+    let plain = spans[label].style;
     if let Some(before) = label
         .checked_sub(1)
         .map(|index| &mut spans[index])
@@ -1114,7 +1141,10 @@ fn fill_label_chip(spans: &mut [Span<'static>], label: usize, chip: Style) {
         before.content.to_mut().pop();
         text.insert(0, ' ');
     }
-    if let Some(after) = spans
+    if !padding.is_empty() {
+        padding.remove(0);
+        text.push(' ');
+    } else if let Some(after) = spans
         .get_mut(label + 1)
         .filter(|after| after.content.starts_with(' '))
     {
@@ -1122,6 +1152,9 @@ fn fill_label_chip(spans: &mut [Span<'static>], label: usize, chip: Style) {
         text.push(' ');
     }
     spans[label] = Span::styled(text, chip);
+    if !padding.is_empty() {
+        spans.insert(label + 1, Span::styled(padding, plain));
+    }
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
@@ -4661,6 +4694,62 @@ mod tests {
     }
 
     #[test]
+    fn stacked_cards_draw_rules() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("check".into());
+        for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo test")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": command}),
+                });
+            let mut result = tool_result(call_id, "ok");
+            result.name = "bash".into();
+            state.transcript.observe_tool_result(result);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        let lines = screen.lines().collect::<Vec<_>>();
+        let first = lines
+            .iter()
+            .position(|line| line.contains("cargo fmt"))
+            .unwrap();
+        // A plain row separates the prompt's surface from the first card.
+        assert!(
+            lines[first - 1].trim_matches(['"', ' ']).is_empty(),
+            "{screen}"
+        );
+        assert!(lines[first + 1].contains("──────"), "{screen}");
+        assert!(lines[first + 2].contains("cargo test"), "{screen}");
+        let (fg, _, _) = style_at_text(terminal.backend(), "──────").unwrap();
+        assert_eq!(Some(fg), Palette::default().rule().fg);
+        let palette = Palette::default();
+        let user_bg = palette.user_text().bg;
+        let gap_row = u16::try_from(first - 1).unwrap();
+        assert_ne!(
+            Some(terminal.backend().buffer()[(5, gap_row)].bg),
+            user_bg,
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn tool_card_status_tones_reach_terminal_cells() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("read".into());
@@ -4735,9 +4824,18 @@ mod tests {
         let (success_fg, success_bg, success_modifiers) =
             style_at_text(complete.backend(), "Read     README.md").unwrap();
         assert_eq!((Some(success_fg), Some(success_bg)), (chip.fg, chip.bg));
-        // The chip spans the marker's space, the padded label and the gap's first space.
+        // The chip spans the marker's space, the name and one space; the alignment padding
+        // after it stays plain, so stacked chips of different names differ in width.
         assert_eq!(
-            Some(style_at_text(complete.backend(), " Read    ").unwrap().1),
+            Some(style_at_text(complete.backend(), " Read ").unwrap().1),
+            chip.bg
+        );
+        assert_ne!(
+            Some(
+                style_at_text(complete.backend(), "    README.md")
+                    .unwrap()
+                    .1
+            ),
             chip.bg
         );
         // Only the card selected in browse shows how to expand it.
