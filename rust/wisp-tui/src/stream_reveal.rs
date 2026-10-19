@@ -109,7 +109,7 @@ impl StreamPacer {
                 .last_growth
                 .is_some_and(|growth| now.saturating_duration_since(growth) >= IDLE_RELEASE);
         let allowance = self.budget.max(0.0).floor() as usize;
-        self.fences = self.fences.advance(&shown[self.fences.scanned..]);
+        self.fences = self.fences.advance_shown(shown);
         let end = reveal_end(shown, waiting, allowance, release, self.fences);
         if end == 0 {
             return false;
@@ -196,18 +196,15 @@ fn word_end(waiting: &str, allowance: usize, release: bool) -> usize {
 /// a table row or code fence line without its line break, or an inline span without its
 /// closer. A row or closer that has already arrived just past `end` is shown whole.
 fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) -> usize {
+    // The pacer has read every complete line of `shown`, so the current line starts at
+    // `fences.scanned` unless a line break has arrived in `waiting`.
     let line_start = waiting[..end].rfind('\n').map(|newline| newline + 1);
-    let shown_line = match line_start {
-        Some(_) => "",
-        None => &shown[shown.rfind('\n').map_or(0, |newline| newline + 1)..],
-    };
-    let waiting_line_start = line_start.unwrap_or(0);
-    let line = format!("{shown_line}{}", &waiting[waiting_line_start..end]);
+    let line_starts_unshown = line_start.or((fences.scanned == shown.len()).then_some(0));
 
     // A table row or fence line shown before its line break flashes as plain text, so
     // it is shown whole once its line break arrives, within a cap on the row's length.
-    if let Some(start) = line_start.or((shown_line.is_empty()).then_some(0)) {
-        let trimmed = line.trim_start();
+    if let Some(start) = line_starts_unshown {
+        let trimmed = waiting[start..end].trim_start();
         let block_line =
             trimmed.starts_with('|') || trimmed.starts_with("```") || trimmed.starts_with("~~~");
         if block_line {
@@ -221,9 +218,21 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) 
         }
     }
 
-    // Read the text after the shown fence scan, in offsets from the start of `shown`.
-    let tail = format!("{}{}", &shown[fences.scanned..], &waiting[..end]);
-    let fences = fences.advance_from(&tail, fences.scanned);
+    // Read the text after the shown fence scan, in offsets from the start of `shown`. A
+    // shown line longer than the lookback is read only from the lookback on; a line that
+    // long is not a fence line.
+    let unfinished = shown.len() - fences.scanned;
+    let (tail_start, mid_line) = if unfinished > PARAGRAPH_LOOKBACK_BYTES {
+        let mut start = shown.len() - PARAGRAPH_LOOKBACK_BYTES;
+        while !shown.is_char_boundary(start) {
+            start += 1;
+        }
+        (start, true)
+    } else {
+        (fences.scanned, false)
+    };
+    let tail = format!("{}{}", &shown[tail_start..], &waiting[..end]);
+    let fences = fences.advance_from(&tail, tail_start, mid_line);
     // Markers inside a fenced code block are literal.
     if fences.open.is_some() {
         return end;
@@ -281,8 +290,11 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) 
 /// as the opener, as the renderer reads it.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct FenceState {
-    /// How far the complete lines read reach, in bytes from the start of the reply.
+    /// Where the first line not yet read starts, in bytes from the start of the reply.
     scanned: usize,
+    /// How far the shown text has been searched for a line break, so a long unfinished
+    /// line is not searched again each frame.
+    searched: usize,
     /// Where the text passed to the last `advance_from` started.
     scanned_from: usize,
     /// The open fence's delimiter and length.
@@ -292,37 +304,54 @@ pub(crate) struct FenceState {
 }
 
 impl FenceState {
-    /// Read the complete lines of `text`, which starts where the last read stopped.
-    fn advance(self, text: &str) -> Self {
-        self.advance_from(text, self.scanned)
+    /// Read the lines of `shown` completed since the last call. Each byte is searched
+    /// for a line break once, however many frames its line takes to finish.
+    fn advance_shown(mut self, shown: &str) -> Self {
+        let mut from = self.searched.max(self.scanned);
+        while let Some(newline) = shown[from..].find('\n') {
+            let line_end = from + newline + 1;
+            self.read_line(&shown[self.scanned..line_end - 1], line_end);
+            self.scanned = line_end;
+            from = line_end;
+        }
+        self.searched = shown.len();
+        self
     }
 
-    /// Read the complete lines of `text`, which starts `base` bytes into the reply.
-    fn advance_from(mut self, text: &str, base: usize) -> Self {
+    /// Read the complete lines of `text`, which starts `base` bytes into the reply. When
+    /// `mid_line`, `text` starts partway into a line, which is not read as a fence line.
+    fn advance_from(mut self, text: &str, base: usize, mid_line: bool) -> Self {
         self.scanned_from = base;
         let mut offset = base;
-        for line in text.split_inclusive('\n') {
+        for (index, line) in text.split_inclusive('\n').enumerate() {
             let Some(content) = line.strip_suffix('\n') else {
                 break;
             };
-            match self.open {
-                Some((delimiter, length)) => {
-                    if crate::markdown::is_closing_fence_line(content, delimiter, length) {
-                        self.open = None;
-                        self.boundary_end = offset + line.len();
-                    }
-                }
-                None => {
-                    if let Some(opened) = opening_fence(content) {
-                        self.open = Some(opened);
-                        self.boundary_end = offset + line.len();
-                    }
-                }
+            if index > 0 || !mid_line {
+                self.read_line(content, offset + line.len());
             }
             offset += line.len();
         }
         self.scanned = offset;
         self
+    }
+
+    /// Open or close a fence on one complete line, which ends at `line_end`.
+    fn read_line(&mut self, content: &str, line_end: usize) {
+        match self.open {
+            Some((delimiter, length)) => {
+                if crate::markdown::is_closing_fence_line(content, delimiter, length) {
+                    self.open = None;
+                    self.boundary_end = line_end;
+                }
+            }
+            None => {
+                if let Some(opened) = opening_fence(content) {
+                    self.open = Some(opened);
+                    self.boundary_end = line_end;
+                }
+            }
+        }
     }
 }
 
@@ -469,7 +498,7 @@ mod tests {
 
     /// `reveal_end` with the fence state of `shown`, as the pacer keeps it.
     fn reveal(shown: &str, waiting: &str, allowance: usize, release: bool) -> usize {
-        let fences = FenceState::default().advance(shown);
+        let fences = FenceState::default().advance_shown(shown);
         reveal_end(shown, waiting, allowance, release, fences)
     }
 
@@ -743,6 +772,23 @@ mod tests {
         assert_eq!(reveal("", &waiting, 3, false), "| a | b |\n".len());
         // A row still arriving waits for its line break.
         assert_eq!(reveal("Intro\n", "| a | b ", 40, false), 0);
+    }
+
+    #[test]
+    fn long_line_scan_is_bounded() {
+        let mut fences = FenceState::default();
+        let mut shown = String::new();
+        for _ in 0..200 {
+            shown.push_str("word ");
+            fences = fences.advance_shown(&shown);
+        }
+        // An unfinished line is searched once, not again on every frame.
+        assert_eq!((fences.scanned, fences.searched), (0, shown.len()));
+        shown.push_str(&"word ".repeat(2_000));
+        let fences = fences.advance_shown(&shown);
+        let waiting = "and **bold te";
+        let end = reveal_end(&shown, waiting, 20, false, fences);
+        assert_eq!(end, "and ".len());
     }
 
     #[test]
