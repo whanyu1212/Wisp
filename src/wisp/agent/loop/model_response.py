@@ -224,24 +224,19 @@ class ModelResponseStream:
                     consumer_closed = True
                     raise
         except Exception as exc:
+            if consumer_closed or isinstance(self.outcome, CancelledModelResponse):
+                raise
             # A recorded terminal means the provider already finished; aclose
             # failures must not be rewritten into overflow recovery.
-            if (
-                consumer_closed
-                or isinstance(self.outcome, CancelledModelResponse)
-                or lifecycle.terminal is not None
-            ):
+            if lifecycle.terminal is not None:
+                self._record_unfinished(lifecycle)
                 raise
             if isinstance(exc, ContextOverflowError):
                 overflow_error = exc
             elif is_context_overflow_message(str(exc)):
                 overflow_error = ContextOverflowError(str(exc))
             else:
-                if lifecycle.started:
-                    self.unfinished = UnfinishedModelResponse(
-                        content="".join(lifecycle.text),
-                        started_response_id=lifecycle.started_response_id,
-                    )
+                self._record_unfinished(lifecycle)
                 raise
             self.outcome = OverflowModelResponse(
                 error=overflow_error,
@@ -257,7 +252,12 @@ class ModelResponseStream:
             yield cancelled
             self.outcome = cancelled
             return
-        finished = lifecycle.finish()
+        try:
+            finished = lifecycle.finish()
+        except Exception:
+            # A stream that ends without a valid terminal leaves its message open too.
+            self._record_unfinished(lifecycle)
+            raise
         if isinstance(finished, FailedProviderResponse):
             self.outcome = FailedModelResponse(
                 failed=finished,
@@ -269,6 +269,14 @@ class ModelResponseStream:
             completed=finished,
             had_streamed_delta=attempt_had_streamed_delta,
         )
+
+    def _record_unfinished(self, lifecycle: ProviderResponseLifecycle) -> None:
+        """Keep an opened message's partial text for the runner to close."""
+        if lifecycle.started:
+            self.unfinished = UnfinishedModelResponse(
+                content="".join(lifecycle.text),
+                started_response_id=lifecycle.started_response_id,
+            )
 
 
 # Search text comes from the web. Bound it before it enters events, the

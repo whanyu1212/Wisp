@@ -41,6 +41,7 @@ from wisp.events import (
 from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
 )
@@ -847,6 +848,41 @@ def test_provider_failure_after_a_delta_closes_the_message_with_partial_text(
     terminal = events[-1]
     assert isinstance(terminal, TurnCompleted)
     assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
+
+
+def test_stream_ending_without_a_terminal_closes_the_message_with_partial_text() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="unterminated"),
+                ProviderTextDelta(delta="partial"),
+            ]
+        ]
+    )
+    events: list[agent_loop_module.AgentLoopEvent] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ProviderProtocolError, match="ended without a terminal response"):
+        anyio.run(run)
+
+    assert [event.type for event in events][-4:] == [
+        "message.delta",
+        "message.completed",
+        "error",
+        "turn.completed",
+    ]
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.content, completion.response_id, completion.finish_reason) == (
+        "partial",
+        "unterminated",
+        "error",
+    )
 
 
 def test_provider_error_before_the_response_starts_opens_no_message() -> None:

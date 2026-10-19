@@ -179,7 +179,12 @@ def test_rejects_conflicting_response_ids(
 
     events = anyio.run(run)
 
-    assert not any(isinstance(event, MessageCompleted) for event in events)
+    # The rejected response is never accepted; its opened message closes as an error.
+    assert [
+        (event.finish_reason, event.tool_calls)
+        for event in events
+        if isinstance(event, MessageCompleted)
+    ] == [("error", ())]
     assert not any(event.type == "tool.call" for event in events)
 
 
@@ -271,7 +276,12 @@ def test_rejects_finish_reason_that_contradicts_tool_calls(
 
     assert executor.calls == []
     assert hook.snapshots == []
-    assert not any(isinstance(event, MessageCompleted) for event in events)
+    # The rejected response is never accepted; its opened message closes as an error.
+    assert [
+        (event.finish_reason, event.tool_calls)
+        for event in events
+        if isinstance(event, MessageCompleted)
+    ] == [("error", ())]
     assert not any(event.type.startswith("tool.") for event in events)
 
 
