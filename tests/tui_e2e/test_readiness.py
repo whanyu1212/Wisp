@@ -267,7 +267,12 @@ def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: P
         tui.wait_ready()
         offset = len(tui.output)
         tui.send(b"typed")
-        tui.wait_for(b"typed", since=offset, failure="typed undo group did not render")
+        # Keys read in separate wake-ups paint in separate frames ("t", then "yped"),
+        # so match the painted text rather than contiguous bytes.
+        tui.wait_until(
+            lambda output: b"typed" in rendered_without_spacing(output[offset:]),
+            failure="typed undo group did not render",
+        )
 
         offset = len(tui.output)
         tui.send(b"\x1a")  # Ctrl+Z
@@ -287,7 +292,10 @@ def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: P
 
         offset = len(tui.output)
         tui.send(b"\x19")  # Ctrl+Y
-        tui.wait_for(b"typed", since=offset, failure="redo did not restore the edit group")
+        tui.wait_until(
+            lambda output: b"typed" in rendered_without_spacing(output[offset:]),
+            failure="redo did not restore the edit group",
+        )
 
         tui.send(b"\x1afinal\x19\r")
         tui.wait_until(

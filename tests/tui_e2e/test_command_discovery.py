@@ -416,7 +416,12 @@ for line in sys.stdin:
                 status = waited_status
                 break
         if status is None:
-            pytest.fail(f"Rust TUI timed out in {phase!r}; output={bytes(output)!r}")
+            # The backend log tells a dropped key (no command sent) from a slow reply.
+            recent_commands = [command["type"] for command in complete_logged_commands(command_log)]
+            pytest.fail(
+                f"Rust TUI timed out in {phase!r}; recent commands={recent_commands[-8:]!r}; "
+                f"output={bytes(output)!r}"
+            )
         assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
         assert phase == "quit", (phase, bytes(output))
         assert termios.tcgetattr(terminal_fd) == initial_terminal
