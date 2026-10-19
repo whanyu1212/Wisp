@@ -247,17 +247,17 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) 
     // An inline span can continue across a soft line break but not a blank line, and
     // only prose after the last fence line counts.
     let combined_len = shown.len() + end;
-    let paragraph_start = match tail.rfind("\n\n") {
-        Some(blank) => fences.scanned_from + blank + 2,
+    let paragraph_start = match after_last_blank_line(&tail, !mid_line) {
+        Some(after) => fences.scanned_from + after,
         None => {
             let window = shown.len().saturating_sub(PARAGRAPH_LOOKBACK_BYTES);
             let mut window = window.min(fences.scanned_from);
             while !shown.is_char_boundary(window) {
                 window += 1;
             }
-            shown[window..fences.scanned_from]
-                .rfind("\n\n")
-                .map_or(window, |blank| window + blank + 2)
+            let starts_at_line = window == 0 || shown[..window].ends_with('\n');
+            after_last_blank_line(&shown[window..fences.scanned_from], starts_at_line)
+                .map_or(window, |after| window + after)
         }
     };
     let mut prose_start = paragraph_start
@@ -278,7 +278,12 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) 
     let Some(opener) = (prose_start + opened_at).checked_sub(shown.len()) else {
         return end;
     };
-    let rest_of_paragraph = waiting[end..].split("\n\n").next().unwrap_or_default();
+    let rest_starts_at_line = if end == 0 {
+        shown.is_empty() || shown.ends_with('\n')
+    } else {
+        waiting[..end].ends_with('\n')
+    };
+    let rest_of_paragraph = before_first_blank_line(&waiting[end..], rest_starts_at_line);
     if let Some(close) = find_closer(rest_of_paragraph, marker) {
         let closed = end + close + marker.len();
         if closed - opener <= MARKER_HOLD_BYTES {
@@ -362,8 +367,42 @@ impl FenceState {
     }
 }
 
+/// Whether `line`, with its line break, is a blank line: only spaces, tabs or a carriage
+/// return, as Markdown reads a paragraph break.
+fn is_blank_line(line: &str) -> bool {
+    line.ends_with('\n') && line.trim_matches([' ', '\t', '\r', '\n']).is_empty()
+}
+
+/// Where the text after the last blank line in `text` starts. The first line counts
+/// only when `text` starts at the beginning of a line.
+fn after_last_blank_line(text: &str, starts_at_line: bool) -> Option<usize> {
+    let mut after = None;
+    let mut offset = 0;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        offset += line.len();
+        if (index > 0 || starts_at_line) && is_blank_line(line) {
+            after = Some(offset);
+        }
+    }
+    after
+}
+
+/// `text` up to its first blank line. The first line counts only when `text` starts at
+/// the beginning of a line.
+fn before_first_blank_line(text: &str, starts_at_line: bool) -> &str {
+    let mut offset = 0;
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        if (index > 0 || starts_at_line) && is_blank_line(line) {
+            return &text[..offset];
+        }
+        offset += line.len();
+    }
+    text
+}
+
 /// The delimiter and length of the code fence that `line` opens, if it opens one. As in
-/// CommonMark, a fence is indented at most three spaces (inside any block quote markers),
+/// CommonMark, a fence is indented at most three spaces (inside any block quote or list
+/// item markers),
 /// since more makes the line indented code, and a backtick fence's info string has no
 /// backtick.
 fn opening_fence(line: &str) -> Option<(u8, usize)> {
@@ -374,9 +413,12 @@ fn opening_fence(line: &str) -> Option<(u8, usize)> {
             return None;
         }
         rest = &rest[indent..];
-        match rest.strip_prefix('>') {
-            Some(quoted) => rest = quoted,
-            None => break,
+        if let Some(quoted) = rest.strip_prefix('>') {
+            rest = quoted;
+        } else if let Some(item) = list_item_content(rest) {
+            rest = item;
+        } else {
+            break;
         }
     }
     let delimiter = *rest.as_bytes().first()?;
@@ -388,6 +430,30 @@ fn opening_fence(line: &str) -> Option<(u8, usize)> {
         return None;
     }
     Some((delimiter, length))
+}
+
+/// The content of a list item line after its marker (`-`, `*`, `+`, or up to nine digits
+/// and `.` or `)`) and the spaces that follow it, if `line` starts a list item.
+fn list_item_content(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let marker = match bytes.first()? {
+        b'-' | b'*' | b'+' => 1,
+        b'0'..=b'9' => {
+            let digits = bytes
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits > 9 || !matches!(bytes.get(digits), Some(b'.' | b')')) {
+                return None;
+            }
+            digits + 1
+        }
+        _ => return None,
+    };
+    let after = &line[marker..];
+    after
+        .starts_with([' ', '\t'])
+        .then(|| after.trim_start_matches([' ', '\t']))
 }
 
 /// Where `marker` next closes a span in `text`, skipping escaped markers and, for `**`
@@ -644,6 +710,24 @@ mod tests {
             "Use ".len()
         );
         assert_eq!(reveal("> ```\n", inner, 20, false), inner.len());
+        // A fence can open on a list item's line.
+        assert_eq!(
+            reveal("- ```rust\n", "let x = a ** b; ", 40, false),
+            "let x = a ** b; ".len()
+        );
+        assert_eq!(
+            reveal("1. ```\n", "let x = a ** b; ", 40, false),
+            "let x = a ** b; ".len()
+        );
+        // A blank line may hold spaces or a carriage return.
+        assert_eq!(
+            reveal("", "a **b\n \nc d ", 20, false),
+            "a **b\n \nc d ".len()
+        );
+        assert_eq!(
+            reveal("", "a **b\r\n\r\nc d ", 20, false),
+            "a **b\r\n\r\nc d ".len()
+        );
         // Markers in a fenced code block are literal.
         assert_eq!(
             reveal("```rust\n", "let x = a ** b; ", 40, false),
