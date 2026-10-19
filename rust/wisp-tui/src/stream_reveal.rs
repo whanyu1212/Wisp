@@ -57,6 +57,9 @@ pub(crate) struct StreamPacer {
     /// Shown plus waiting bytes at the last tick, to notice when more text arrives.
     arrived: usize,
     last_growth: Option<Instant>,
+    /// Code fences in the complete lines shown so far, kept as the reply grows so a
+    /// frame reads only the lines added since the last one.
+    fences: FenceState,
 }
 
 impl StreamPacer {
@@ -106,7 +109,8 @@ impl StreamPacer {
                 .last_growth
                 .is_some_and(|growth| now.saturating_duration_since(growth) >= IDLE_RELEASE);
         let allowance = self.budget.max(0.0).floor() as usize;
-        let end = reveal_end(shown, waiting, allowance, release);
+        self.fences = self.fences.advance(&shown[self.fences.scanned..]);
+        let end = reveal_end(shown, waiting, allowance, release, self.fences);
         if end == 0 {
             return false;
         }
@@ -131,14 +135,22 @@ impl StreamPacer {
 ///     waiting (&str): The reply text that has arrived but is not shown.
 ///     allowance (usize): Graphemes the pace allows; a word in progress may run past it.
 ///     release (bool): Whether the stream paused or completed, which lets holds go.
+///     fences (FenceState): The code fences in the complete lines of `shown`.
 ///
 /// Returns:
 ///     usize: A byte length of `waiting` on a grapheme boundary; zero shows nothing.
 ///
 /// Examples:
-///     `reveal_end("", "Hello wor", 3, false)` is 6: `Hello ` finishes the word that
+///     With nothing shown, `reveal_end("", "Hello wor", 3, false, FenceState::default())`
+///     is 6: `Hello ` finishes the word that
 ///     the allowance started, and `wor` waits for the rest of its word.
-fn reveal_end(shown: &str, waiting: &str, allowance: usize, release: bool) -> usize {
+fn reveal_end(
+    shown: &str,
+    waiting: &str,
+    allowance: usize,
+    release: bool,
+    fences: FenceState,
+) -> usize {
     if allowance == 0 {
         return 0;
     }
@@ -146,7 +158,7 @@ fn reveal_end(shown: &str, waiting: &str, allowance: usize, release: bool) -> us
     if release {
         end
     } else {
-        hold_open_markup(shown, waiting, end)
+        hold_open_markup(shown, waiting, end, fences)
     }
 }
 
@@ -182,8 +194,8 @@ fn word_end(waiting: &str, allowance: usize, release: bool) -> usize {
 
 /// Pull `end` back so the shown text does not stop inside markup that is not finished:
 /// a table row or code fence line without its line break, or an inline span without its
-/// closer. A closer that has already arrived just past `end` is shown with its span.
-fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
+/// closer. A row or closer that has already arrived just past `end` is shown whole.
+fn hold_open_markup(shown: &str, waiting: &str, end: usize, fences: FenceState) -> usize {
     let line_start = waiting[..end].rfind('\n').map(|newline| newline + 1);
     let shown_line = match line_start {
         Some(_) => "",
@@ -192,74 +204,64 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     let waiting_line_start = line_start.unwrap_or(0);
     let line = format!("{shown_line}{}", &waiting[waiting_line_start..end]);
 
-    // A table row or fence line shown before its line break flashes as plain text.
+    // A table row or fence line shown before its line break flashes as plain text, so
+    // it is shown whole once its line break arrives, within a cap on the row's length.
     if let Some(start) = line_start.or((shown_line.is_empty()).then_some(0)) {
         let trimmed = line.trim_start();
         let block_line =
             trimmed.starts_with('|') || trimmed.starts_with("```") || trimmed.starts_with("~~~");
-        if block_line && waiting.len() - start <= LINE_HOLD_BYTES {
-            return start;
+        if block_line {
+            match waiting[end..].find('\n') {
+                Some(newline) if end + newline + 1 - start <= LINE_HOLD_BYTES => {
+                    return end + newline + 1;
+                }
+                None if waiting.len() - start <= LINE_HOLD_BYTES => return start,
+                _ => {}
+            }
         }
     }
 
-    // An inline span can continue across a soft line break, so look back to the start of
-    // the paragraph rather than the line.
-    let paragraph_start = waiting[..end].rfind("\n\n").map(|blank| blank + 2);
-    let shown_paragraph = match paragraph_start {
-        Some(_) => "",
+    // Read the text after the shown fence scan, in offsets from the start of `shown`.
+    let tail = format!("{}{}", &shown[fences.scanned..], &waiting[..end]);
+    let fences = fences.advance_from(&tail, fences.scanned);
+    // Markers inside a fenced code block are literal.
+    if fences.open.is_some() {
+        return end;
+    }
+    // An inline span can continue across a soft line break but not a blank line, and
+    // only prose after the last fence line counts.
+    let combined_len = shown.len() + end;
+    let paragraph_start = match tail.rfind("\n\n") {
+        Some(blank) => fences.scanned_from + blank + 2,
         None => {
-            let mut start = shown
+            let window = shown.len().saturating_sub(PARAGRAPH_LOOKBACK_BYTES);
+            let mut window = window.min(fences.scanned_from);
+            while !shown.is_char_boundary(window) {
+                window += 1;
+            }
+            shown[window..fences.scanned_from]
                 .rfind("\n\n")
-                .map_or(0, |blank| blank + 2)
-                .max(shown.len().saturating_sub(PARAGRAPH_LOOKBACK_BYTES));
-            while !shown.is_char_boundary(start) {
-                start += 1;
-            }
-            &shown[start..]
+                .map_or(window, |blank| window + blank + 2)
         }
     };
-    let waiting_paragraph_start = paragraph_start.unwrap_or(0);
-    let paragraph = format!(
-        "{shown_paragraph}{}",
-        &waiting[waiting_paragraph_start..end]
-    );
-    // Markers inside a fenced code block are literal, so read only the prose after the
-    // last fence line, and none at all while a fence is still open.
-    // A fence closes only on its own delimiter, at least as long as the opener, as the
-    // renderer reads it.
-    let mut prose_start = 0;
-    let mut fence: Option<(u8, usize)> = None;
-    let mut offset = 0;
-    for line in paragraph.split_inclusive('\n') {
-        let text = line.trim_end_matches('\n');
-        match fence {
-            Some((delimiter, length)) => {
-                if crate::markdown::is_closing_fence_line(text, delimiter, length) {
-                    fence = None;
-                    prose_start = offset + line.len();
-                }
-            }
-            None => {
-                if let Some(opened) = opening_fence(text) {
-                    fence = Some(opened);
-                    prose_start = offset + line.len();
-                }
-            }
+    let mut prose_start = paragraph_start
+        .max(fences.boundary_end)
+        .max(combined_len.saturating_sub(PARAGRAPH_LOOKBACK_BYTES));
+    let prose = if prose_start < shown.len() {
+        while !shown.is_char_boundary(prose_start) {
+            prose_start += 1;
         }
-        offset += line.len();
-    }
-    if fence.is_some() {
-        return end;
-    }
-    let Some((marker, opened_at)) = open_inline_marker(&paragraph[prose_start..]) else {
+        format!("{}{}", &shown[prose_start..], &waiting[..end])
+    } else {
+        waiting[prose_start - shown.len()..end].to_owned()
+    };
+    let Some((marker, opened_at)) = open_inline_marker(&prose) else {
         return end;
     };
-    let opened_at = prose_start + opened_at;
     // The opener is already on screen, so holding the rest of the span gains nothing.
-    let Some(opener) = opened_at.checked_sub(shown_paragraph.len()) else {
+    let Some(opener) = (prose_start + opened_at).checked_sub(shown.len()) else {
         return end;
     };
-    let opener = waiting_paragraph_start + opener;
     let rest_of_paragraph = waiting[end..].split("\n\n").next().unwrap_or_default();
     if let Some(close) = find_closer(rest_of_paragraph, marker) {
         let closed = end + close + marker.len();
@@ -271,6 +273,56 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
         end
     } else {
         opener
+    }
+}
+
+/// The code fences in a reply's complete lines: which fence is open, if any, and where
+/// the last fence line ends. A fence closes only on its own delimiter, at least as long
+/// as the opener, as the renderer reads it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FenceState {
+    /// How far the complete lines read reach, in bytes from the start of the reply.
+    scanned: usize,
+    /// Where the text passed to the last `advance_from` started.
+    scanned_from: usize,
+    /// The open fence's delimiter and length.
+    open: Option<(u8, usize)>,
+    /// Where the line after the last opening or closing fence starts.
+    boundary_end: usize,
+}
+
+impl FenceState {
+    /// Read the complete lines of `text`, which starts where the last read stopped.
+    fn advance(self, text: &str) -> Self {
+        self.advance_from(text, self.scanned)
+    }
+
+    /// Read the complete lines of `text`, which starts `base` bytes into the reply.
+    fn advance_from(mut self, text: &str, base: usize) -> Self {
+        self.scanned_from = base;
+        let mut offset = base;
+        for line in text.split_inclusive('\n') {
+            let Some(content) = line.strip_suffix('\n') else {
+                break;
+            };
+            match self.open {
+                Some((delimiter, length)) => {
+                    if crate::markdown::is_closing_fence_line(content, delimiter, length) {
+                        self.open = None;
+                        self.boundary_end = offset + line.len();
+                    }
+                }
+                None => {
+                    if let Some(opened) = opening_fence(content) {
+                        self.open = Some(opened);
+                        self.boundary_end = offset + line.len();
+                    }
+                }
+            }
+            offset += line.len();
+        }
+        self.scanned = offset;
+        self
     }
 }
 
@@ -415,6 +467,12 @@ mod tests {
 
     const FRAME: Duration = Duration::from_millis(16);
 
+    /// `reveal_end` with the fence state of `shown`, as the pacer keeps it.
+    fn reveal(shown: &str, waiting: &str, allowance: usize, release: bool) -> usize {
+        let fences = FenceState::default().advance(shown);
+        reveal_end(shown, waiting, allowance, release, fences)
+    }
+
     fn shown(transcript: &Transcript) -> String {
         transcript.entries().last().unwrap().content.clone()
     }
@@ -454,9 +512,9 @@ mod tests {
 
     #[test]
     fn partial_word_waits() {
-        assert_eq!(reveal_end("", "Hello wor", 3, false), 6);
-        assert_eq!(reveal_end("", "Hello wor", 30, false), 6);
-        assert_eq!(reveal_end("", "Hello wor", 30, true), 9);
+        assert_eq!(reveal("", "Hello wor", 3, false), 6);
+        assert_eq!(reveal("", "Hello wor", 30, false), 6);
+        assert_eq!(reveal("", "Hello wor", 30, true), 9);
     }
 
     #[test]
@@ -473,55 +531,61 @@ mod tests {
 
     #[test]
     fn cjk_reveals_without_spaces() {
-        assert_eq!(reveal_end("", "你好世界", 2, false), "你好".len());
+        assert_eq!(reveal("", "你好世界", 2, false), "你好".len());
     }
 
     #[test]
     fn long_token_reveals_gradually() {
         let url = "https://example.com/a/very/long/path/that/keeps/going";
-        let end = reveal_end("", url, 30, false);
+        let end = reveal("", url, 30, false);
         assert!(end > WORD_HOLD_GRAPHEMES && end < url.len(), "{end}");
     }
 
     #[test]
     fn unclosed_bold_waits() {
         let waiting = "Use **bold te";
-        assert_eq!(reveal_end("", waiting, 20, false), "Use ".len());
+        assert_eq!(reveal("", waiting, 20, false), "Use ".len());
         // A closed span is shown whole once the allowance reaches into it.
         assert_eq!(
-            reveal_end("", "Use **bold** now", 6, false),
+            reveal("", "Use **bold** now", 6, false),
             "Use **bold** ".len()
         );
         // An opener already on screen is not held again.
-        assert_eq!(reveal_end("Use **bo", "ld te", 20, false), "ld ".len());
+        assert_eq!(reveal("Use **bo", "ld te", 20, false), "ld ".len());
     }
 
     #[test]
     fn span_continues_across_soft_break() {
         // A span opened on an earlier line is closed here, not opened.
         assert_eq!(
-            reveal_end("Some **bold\n", "text** here ", 20, false),
+            reveal("Some **bold\n", "text** here ", 20, false),
             "text** here ".len()
         );
         // An opener before a soft break still waits for its closer.
-        assert_eq!(reveal_end("", "Use **bold\ntext ", 20, false), "Use ".len());
+        assert_eq!(reveal("", "Use **bold\ntext ", 20, false), "Use ".len());
         // A blank line ends the paragraph, and the span with it.
         assert_eq!(
-            reveal_end("", "a **b\n\nc d ", 20, false),
+            reveal("", "a **b\n\nc d ", 20, false),
             "a **b\n\nc d ".len()
         );
         // Prose after a closed fence still holds its spans.
         assert_eq!(
-            reveal_end("```\ncode\n```\n", "Use **bold ", 20, false),
+            reveal("```\ncode\n```\n", "Use **bold ", 20, false),
             "Use ".len()
         );
         // A shorter or different fence line inside a block does not close it.
         let inner = "a **b c ";
-        assert_eq!(reveal_end("````md\n```\n", inner, 20, false), inner.len());
-        assert_eq!(reveal_end("```\n~~~\n", inner, 20, false), inner.len());
+        assert_eq!(reveal("````md\n```\n", inner, 20, false), inner.len());
+        assert_eq!(reveal("```\n~~~\n", inner, 20, false), inner.len());
+        // A blank line inside an open code block keeps it open.
+        assert_eq!(reveal("```\ncode\n\n", inner, 20, false), inner.len());
+        assert_eq!(
+            reveal("```\n\n", "x\n\na **b c ", 20, false),
+            "x\n\na **b c ".len()
+        );
         // Markers in a fenced code block are literal.
         assert_eq!(
-            reveal_end("```rust\n", "let x = a ** b; ", 40, false),
+            reveal("```rust\n", "let x = a ** b; ", 40, false),
             "let x = a ** b; ".len()
         );
     }
@@ -530,11 +594,11 @@ mod tests {
     fn closer_skips_escapes_and_code() {
         let escaped = "Use **bold \\** still** end ";
         assert_eq!(
-            reveal_end("", escaped, 6, false),
+            reveal("", escaped, 6, false),
             "Use **bold \\** still**".len()
         );
         let coded = "Use **a `**` b** c ";
-        assert_eq!(reveal_end("", coded, 6, false), "Use **a `**` b**".len());
+        assert_eq!(reveal("", coded, 6, false), "Use **a `**` b**".len());
     }
 
     #[test]
@@ -549,24 +613,21 @@ mod tests {
 
     #[test]
     fn unclosed_code_waits() {
-        assert_eq!(reveal_end("", "Run `cargo te", 20, false), "Run ".len());
-        assert_eq!(reveal_end("", "a `**` b ", 20, false), "a `**` b ".len());
+        assert_eq!(reveal("", "Run `cargo te", 20, false), "Run ".len());
+        assert_eq!(reveal("", "a `**` b ", 20, false), "a `**` b ".len());
     }
 
     #[test]
     fn hold_cap_releases_span() {
         let waiting = format!("**{} ", "word ".repeat(40));
-        assert_eq!(reveal_end("", &waiting, 10, false), "**word word ".len());
+        assert_eq!(reveal("", &waiting, 10, false), "**word word ".len());
     }
 
     #[test]
     fn table_row_waits_for_newline() {
         let waiting = "Intro\n| a | b ";
-        assert_eq!(reveal_end("", waiting, 40, false), "Intro\n".len());
-        assert_eq!(
-            reveal_end("", "| a | b |\n| c", 40, false),
-            "| a | b |\n".len()
-        );
+        assert_eq!(reveal("", waiting, 40, false), "Intro\n".len());
+        assert_eq!(reveal("", "| a | b |\n| c", 40, false), "| a | b |\n".len());
     }
 
     #[test]
@@ -672,13 +733,22 @@ mod tests {
     #[test]
     fn code_span_backslash_is_literal() {
         let line = "Use `C:\\` as the root and then more ";
-        assert_eq!(reveal_end("", line, 200, false), line.len());
+        assert_eq!(reveal("", line, 200, false), line.len());
+    }
+
+    #[test]
+    fn arrived_row_shows_whole() {
+        // A short row whose line break has arrived is shown whole, however much follows.
+        let waiting = format!("| a | b |\n{}", "more words ".repeat(80));
+        assert_eq!(reveal("", &waiting, 3, false), "| a | b |\n".len());
+        // A row still arriving waits for its line break.
+        assert_eq!(reveal("Intro\n", "| a | b ", 40, false), 0);
     }
 
     #[test]
     fn long_table_row_is_shown() {
         let row = format!("| {} ", "cell ".repeat(120));
-        assert_eq!(reveal_end("", &row, 1_000, false), row.len());
+        assert_eq!(reveal("", &row, 1_000, false), row.len());
     }
 
     #[test]
