@@ -471,7 +471,10 @@ async def run_agent_loop(
                 finish_reason="error",
                 response_id=unfinished.started_response_id,
             )
-        if isinstance(exc, ContextOverflowError):
+        # ContextOverflow reports a provider rejecting an open turn's request. An
+        # overflow raised at the request boundary, after the turn completed, sent no
+        # request; it publishes only the error below.
+        if isinstance(exc, ContextOverflowError) and lifecycle.open_turn is not None:
             yield _context_overflow_event(config, turn=turn, message=str(exc))
         for event in lifecycle.terminal_events(str(exc), outcome="failed"):
             yield event
