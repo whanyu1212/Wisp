@@ -627,6 +627,11 @@ fn render_transcript(
         if rows.len() > tail_budget {
             rows.drain(..rows.len() - tail_budget);
         }
+        // A rule only separates two cards; with the card above it cut off, it would hang
+        // under the pinned prompt's gap.
+        if rows.len() > 1 && rows[0].kind == TranscriptRowKind::Rule {
+            rows.remove(0);
+        }
         let assistant_header = (tail_budget >= 2)
             .then(|| {
                 clipped_tail_assistant_header(state, &rows, row_cache, content_width, active_reply)
@@ -4710,7 +4715,21 @@ mod tests {
             result.name = "bash".into();
             state.transcript.observe_tool_result(result);
         }
-        let mut terminal = Terminal::new(TestBackend::new(40, 14)).unwrap();
+        // `Process` fills the label width, so its chip borrows the gap's first space instead.
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "p1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"operation": "poll", "process_id": "process-1"}),
+            });
+        let mut poll = tool_result("p1", "");
+        poll.name = "bash".into();
+        poll.process_id = Some("process-1".into());
+        poll.process_state = Some("running".into());
+        state.transcript.observe_tool_result(poll);
+        let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
         terminal
             .draw(|frame| {
                 render(
@@ -4747,6 +4766,24 @@ mod tests {
             user_bg,
             "{screen}"
         );
+        let chip_bg = palette.chip().bg;
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..buffer.area.height)
+            .find_map(|y| {
+                let row = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.find("Process")
+                    .map(|byte| (u16::try_from(row[..byte].chars().count()).unwrap(), y))
+            })
+            .expect("process card");
+        let bg_at = |x: u16| Some(buffer[(x, y)].bg);
+        assert_eq!(
+            (bg_at(x - 1), bg_at(x), bg_at(x + 7)),
+            (chip_bg, chip_bg, chip_bg),
+            "{screen}"
+        );
+        assert_ne!(bg_at(x + 8), chip_bg, "{screen}");
     }
 
     #[test]

@@ -195,9 +195,11 @@ impl Palette {
     }
 
     /// The thin rule between back-to-back tool cards: the muted colour, halfway faded into
-    /// the background so the rule separates rows without competing with their text.
+    /// the background so the rule separates rows without competing with their text. A glass
+    /// theme shows the terminal's own background instead of `background`, so its rule keeps
+    /// the plain muted colour rather than fading toward a colour that isn't on screen.
     pub fn rule(self) -> Style {
-        if self.monochrome {
+        if self.monochrome || self.terminal_background {
             return Style::default().fg(self.muted);
         }
         Style::default().fg(mix(self.muted, self.background, 0.5))
