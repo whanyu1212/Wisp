@@ -185,7 +185,6 @@ for line in sys.stdin:
     startup_redraw_offset: int | None = None
     cards_redraw_offset: int | None = None
     process_expand_offset: int | None = None
-    edit_select_offset: int | None = None
     detail_requested = False
     detail_seen = False
     detail_resize_output_offset: int | None = None
@@ -212,11 +211,11 @@ for line in sys.stdin:
             ):
                 os.write(terminal_fd, b"tools\r")
                 prompt_sent = True
-            # A slow backend can paint "Running process" before the completed card;
-            # the shared blank cell then never reaches the PTY stream.
+            # The backend emits the edit card after the process completes, so once
+            # demo.txt is painted every card holds its final state. A running process card
+            # already shows the same `Process` chip, so the chip alone proves nothing.
             if cards_redraw_offset is None and all(
-                marker in rendered_without_spacing(output)
-                for marker in (b"README.md", b"Processcompleted", b"demo.txt")
+                marker in rendered_without_spacing(output) for marker in (b"README.md", b"demo.txt")
             ):
                 cards_redraw_offset = len(output)
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
@@ -236,17 +235,13 @@ for line in sys.stdin:
                 browse_sent = True
             if (
                 process_expand_offset is not None
-                and edit_select_offset is None
+                and not detail_requested
                 and b"safe\xef\xbf\xbd[2J" in output[process_expand_offset:]
             ):
-                edit_select_offset = len(output)
-                os.write(terminal_fd, b"\t")
-            if (
-                edit_select_offset is not None
-                and not detail_requested
-                and b"demo.txt" in output[edit_select_offset:]
-            ):
-                os.write(terminal_fd, b"\r")
+                # A selected card looks like any other, and the diff card has nothing to
+                # fold, so selecting it paints nothing to wait for. Keys apply in order, so
+                # Tab and Enter go together, like the browse keys above.
+                os.write(terminal_fd, b"\t\r")
                 detail_requested = True
             if (
                 browse_sent
@@ -291,7 +286,8 @@ for line in sys.stdin:
     assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
-    assert b"Process completed" in output
+    # The resize repaints whole frames, where the completed marker sits beside the chip.
+    assert "✓Processprocess-1".encode() in rendered_without_spacing(output[cards_redraw_offset:])
     assert b"safe" in output
     assert b"safe\xef\xbf\xbd[2J" in output
     assert b"safe\x1b[2J" not in output

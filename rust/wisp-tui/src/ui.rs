@@ -12,8 +12,8 @@ use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    RowAnchor, RowPosition, TranscriptRow, TranscriptRowCache, TranscriptRowKind,
-    TranscriptRowTone, TranscriptViewport,
+    RESULT_CONNECTOR, RESULT_INDENT, RowAnchor, RowGutter, RowPosition, TranscriptRow,
+    TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -263,7 +263,7 @@ pub fn render_interactive(
                 Constraint::Length(1),
             ])
             .split(area);
-        let jump_painted = render_transcript(
+        let (jump_painted, _) = render_transcript(
             frame,
             chunks[0],
             state,
@@ -309,7 +309,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    let jump_to_latest = render_transcript(
+    let (jump_to_latest, fold_rows) = render_transcript(
         frame,
         chunks[0],
         state,
@@ -362,6 +362,7 @@ pub fn render_interactive(
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
+        fold_rows,
     }
 }
 
@@ -531,7 +532,7 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
-) -> Option<Rect> {
+) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
@@ -661,6 +662,7 @@ fn render_transcript(
             })
             .map(|row| row.anchor)
     });
+    let mut fold_rows = Vec::new();
     if rows.is_empty() && status_lines.is_empty() {
         let lines = empty_transcript_lines(
             state,
@@ -680,6 +682,18 @@ fn render_transcript(
                 conversation.width,
                 1,
             );
+            if matches!(
+                row.kind,
+                TranscriptRowKind::CardAction
+                    | TranscriptRowKind::CardGroup
+                    | TranscriptRowKind::Thought
+            ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_))
+            {
+                fold_rows.push(mouse::FoldRow {
+                    y: area.y,
+                    entry: row.anchor.entry_id,
+                });
+            }
             if offset == 0
                 && user_top_padding
                 && row.role == TranscriptRole::User
@@ -723,7 +737,7 @@ fn render_transcript(
         render_scrollbar(frame, rows_area, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
-    (padding > 0 && !viewport.follows_tail())
+    let jump_to_latest = (padding > 0 && !viewport.follows_tail())
         .then(|| {
             let row = Rect {
                 y: outer.bottom().saturating_sub(1),
@@ -732,7 +746,8 @@ fn render_transcript(
             };
             render_jump_to_latest(frame, content_area(row), viewport, palette, bindings)
         })
-        .flatten()
+        .flatten();
+    (jump_to_latest, fold_rows)
 }
 
 /// Draw the centered jump-to-latest label in `row`, naming its key when it fits.
@@ -978,29 +993,43 @@ fn render_transcript_row(
     palette: Palette,
     pulse: Option<u8>,
 ) {
+    // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
     let user = user_surface;
     let code = row
         .spans
         .iter()
         .any(|span| span.style.block == BlockStyle::Code);
-    let mut base = if user {
+    let base = if user {
         palette.user_text()
     } else {
         palette.base()
     };
-    if selected {
-        base = base.patch(palette.selection());
-    }
     frame.render_widget(Block::default().style(base), area);
-    let content = content_area(area);
-    if code && !selected {
+    let mut content = content_area(area);
+    let gutter = match row.gutter {
+        RowGutter::None => None,
+        RowGutter::Connector => Some(RESULT_CONNECTOR),
+        RowGutter::Indent => Some(RESULT_INDENT),
+    };
+    // The gutter sits beside a code or diff row's fill rather than inside it.
+    if let Some(gutter) = gutter {
+        let columns = u16::try_from(gutter.width())
+            .unwrap_or(u16::MAX)
+            .min(content.width);
+        frame.render_widget(
+            Paragraph::new(Span::styled(gutter, base.fg(palette.muted))),
+            Rect::new(content.x, content.y, columns, 1),
+        );
+        content.x += columns;
+        content.width -= columns;
+    }
+    if code {
         frame.render_widget(Block::default().style(palette.composer()), content);
     } else if matches!(
         row.tone,
         TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion
-    ) && !selected
-    {
+    ) {
         frame.render_widget(
             Block::default().style(base.patch(tone_style(row.tone, palette))),
             content,
@@ -1034,6 +1063,13 @@ fn render_transcript_row(
     // While the run is active, an in-progress marker animates as a spinner. The
     // shape changes rather than the brightness, so it reads the same in monochrome.
     let spinner = pulse.map(|frame| format!("{} ", spinner_frame(frame)));
+    let label = (row.kind == TranscriptRowKind::CardAction)
+        .then(|| {
+            row.spans
+                .iter()
+                .position(|span| span.style.inline == InlineStyle::ToolName)
+        })
+        .flatten();
     let mut spans = row
         .spans
         .into_iter()
@@ -1041,10 +1077,6 @@ fn render_transcript_row(
             let mut semantic = markdown_span_style(style, span.style, palette);
             if span.style.inline == InlineStyle::ToolStatus {
                 semantic = semantic.patch(tone_style(row.tone, palette));
-            }
-            // Selection is the last style layer, including syntax and inline-code backgrounds.
-            if selected {
-                semantic = semantic.patch(palette.selection());
             }
             match &spinner {
                 Some(spinner) if span.style.inline == InlineStyle::ToolStatus => {
@@ -1054,15 +1086,42 @@ fn render_transcript_row(
             }
         })
         .collect::<Vec<_>>();
+    if let Some(label) = label {
+        let chip = spans[label].style.patch(palette.chip());
+        fill_label_chip(&mut spans, label, chip);
+    }
+    if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
+        spans.push(Span::styled(hint, base.fg(palette.muted)));
+    }
     if row.kind == TranscriptRowKind::CardGroup {
-        let mut marker = base.patch(tone_style(row.tone, palette));
-        if selected {
-            marker = marker.patch(palette.selection());
-        }
+        let marker = base.patch(tone_style(row.tone, palette));
         let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
         spans.insert(0, Span::styled(glyph, marker));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
+}
+
+/// Fill a card's label as a chip. The padding borrows the space that ends the status
+/// marker and the first space after the label, so the row's text, width and copied
+/// selection stay the same.
+fn fill_label_chip(spans: &mut [Span<'static>], label: usize, chip: Style) {
+    let mut text = spans[label].content.to_string();
+    if let Some(before) = label
+        .checked_sub(1)
+        .map(|index| &mut spans[index])
+        .filter(|before| before.content.ends_with(' '))
+    {
+        before.content.to_mut().pop();
+        text.insert(0, ' ');
+    }
+    if let Some(after) = spans
+        .get_mut(label + 1)
+        .filter(|after| after.content.starts_with(' '))
+    {
+        after.content.to_mut().remove(0);
+        text.push(' ');
+    }
+    spans[label] = Span::styled(text, chip);
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
@@ -4638,17 +4697,26 @@ mod tests {
             pending
                 .backend()
                 .to_string()
-                .contains("Awaiting approval to read")
+                .contains("Read     README.md · awaiting approval")
         );
-        let (pending_fg, _, pending_modifiers) =
-            style_at_text(pending.backend(), "Awaiting approval to read").unwrap();
-        assert_eq!(pending_fg, Palette::default().accent);
+        let palette = Palette::default();
+        let (pending_fg, pending_bg, pending_modifiers) =
+            style_at_text(pending.backend(), "Read     README.md").unwrap();
+        let chip = palette.chip();
+        assert_eq!((Some(pending_fg), Some(pending_bg)), (chip.fg, chip.bg));
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
-            style_at_text(pending.backend(), "? Awaiting").unwrap().0,
+            style_at_text(pending.backend(), "? Read").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
+        // The note names the state outside the chip, in the row's muted text.
+        assert_eq!(
+            style_at_text(pending.backend(), "awaiting approval")
+                .unwrap()
+                .0,
+            palette.muted
+        );
 
         state
             .transcript
@@ -4657,11 +4725,23 @@ mod tests {
             .transcript
             .observe_tool_result(tool_result("call-1", "contents"));
         let complete = draw(&state);
-        assert!(complete.backend().to_string().contains("Read  README.md"));
+        assert!(
+            complete
+                .backend()
+                .to_string()
+                .contains("Read     README.md")
+        );
         assert!(!complete.backend().to_string().contains("contents"));
-        let (success_fg, _, success_modifiers) =
-            style_at_text(complete.backend(), "Read  README.md").unwrap();
-        assert_eq!(success_fg, Palette::default().accent);
+        let (success_fg, success_bg, success_modifiers) =
+            style_at_text(complete.backend(), "Read     README.md").unwrap();
+        assert_eq!((Some(success_fg), Some(success_bg)), (chip.fg, chip.bg));
+        // The chip spans the marker's space, the padded label and the gap's first space.
+        assert_eq!(
+            Some(style_at_text(complete.backend(), " Read    ").unwrap().1),
+            chip.bg
+        );
+        // Only the card selected in browse shows how to expand it.
+        assert!(!complete.backend().to_string().contains("to expand"));
         assert_eq!(
             style_at_text(complete.backend(), "✓ Read").unwrap().0,
             Palette::default().success
@@ -4769,7 +4849,7 @@ mod tests {
             110,
         );
         assert!(
-            rendered.contains("Edited  src/wisp/providers/google.py  +3 -3"),
+            rendered.contains("Edit     src/wisp/providers/google.py  +3 -3"),
             "{rendered}"
         );
         assert!(rendered.contains("- retain portable"), "{rendered}");
@@ -4878,7 +4958,10 @@ mod tests {
 
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
         // Counts sit on the action line; the card has no `M path` heading or `@@` rows.
-        assert!(collapsed.contains("Edited  file.txt  +1 -1"), "{collapsed}");
+        assert!(
+            collapsed.contains("Edit     file.txt  +1 -1"),
+            "{collapsed}"
+        );
         assert!(!collapsed.contains("M file.txt"));
         assert!(!collapsed.contains("@@"));
         assert!(!collapsed.contains("No newline"));
@@ -4926,7 +5009,7 @@ mod tests {
         let visible_text = selected.plain_text();
         let (_, selected_background, _) =
             style_at_text(browse_terminal.backend(), &visible_text).unwrap();
-        assert_eq!(selected_background, Palette::default().primary);
+        assert_eq!(selected_background, Palette::default().background);
         let (added_fg, added_background, _) =
             style_at_text(browse_terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, deleted_background, _) =
@@ -4989,7 +5072,91 @@ mod tests {
     }
 
     #[test]
-    fn selection_overrides_syntax_and_inline_backgrounds_without_losing_modifiers() {
+    fn card_decorations_keep_text() {
+        let span = |text: &str, inline| crate::markdown::TranscriptSpan {
+            text: text.into(),
+            affinity: crate::markdown::SourceAffinity::default(),
+            style: TranscriptSpanStyle {
+                inline,
+                ..TranscriptSpanStyle::default()
+            },
+        };
+        let row = |kind, spans, gutter, fold_hint| TranscriptRow {
+            anchor: RowAnchor {
+                entry_id: TranscriptEntryId::from_raw(1),
+                position: RowPosition::Content(0),
+            },
+            role: TranscriptRole::Tool,
+            kind,
+            tone: TranscriptRowTone::Success,
+            spans,
+            gutter,
+            fold_hint,
+        };
+        let action = row(
+            TranscriptRowKind::CardAction,
+            vec![
+                span("✓ ", InlineStyle::ToolStatus),
+                span("Read", InlineStyle::ToolName),
+                span("  a.rs", InlineStyle::Normal),
+            ],
+            RowGutter::None,
+            crate::transcript_view::FoldHint::Expand,
+        );
+        let detail = row(
+            TranscriptRowKind::CardDetail,
+            vec![span("out", InlineStyle::Normal)],
+            RowGutter::Connector,
+            crate::transcript_view::FoldHint::None,
+        );
+        for no_color in [false, true] {
+            let palette = crate::theme::default_theme().palette(no_color);
+            let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+            terminal
+                .draw(|frame| {
+                    for (y, row) in [&action, &detail].into_iter().enumerate() {
+                        let area = Rect::new(0, y as u16, 40, 1);
+                        render_transcript_row(frame, area, row.clone(), None, false, palette, None);
+                    }
+                    let selected = Some(action.anchor);
+                    let area = Rect::new(0, 2, 40, 1);
+                    render_transcript_row(
+                        frame,
+                        area,
+                        action.clone(),
+                        selected,
+                        false,
+                        palette,
+                        None,
+                    );
+                })
+                .unwrap();
+            let screen = terminal.backend().to_string();
+            // The hint appears only on the selected copy of the action row.
+            assert_eq!(screen.matches("✓ Read  a.rs").count(), 2, "{screen}");
+            assert_eq!(screen.matches("(→ to expand)").count(), 1, "{screen}");
+            assert!(screen.contains("└ out"), "{screen}");
+
+            let (fg, bg, modifiers) = style_at_text(terminal.backend(), " Read ").unwrap();
+            let chip = palette.chip();
+            if no_color {
+                assert!(modifiers.contains(Modifier::REVERSED));
+            } else {
+                assert_eq!((Some(fg), Some(bg)), (chip.fg, chip.bg));
+            }
+            // The chip ends with the gap's first space; the second stays plain.
+            let (_, gap_bg, gap_modifiers) = style_at_text(terminal.backend(), " a.rs").unwrap();
+            assert!(!gap_modifiers.contains(Modifier::REVERSED));
+            assert_ne!(Some(gap_bg), chip.bg);
+            assert_eq!(
+                style_at_text(terminal.backend(), "└").unwrap().0,
+                palette.muted
+            );
+        }
+    }
+
+    #[test]
+    fn selected_row_keeps_styles() {
         for no_color in [false, true] {
             let palette = crate::theme::default_theme().palette(no_color);
             let mut terminal = Terminal::new(TestBackend::new(30, 2)).unwrap();
@@ -5013,29 +5180,36 @@ mod tests {
                         ..TranscriptSpanStyle::default()
                     },
                 }],
+                gutter: RowGutter::None,
+                fold_hint: crate::transcript_view::FoldHint::None,
             };
+            // Browse marks a selection only with a fold hint; this row has none, so the
+            // selected and unselected renders match cell for cell.
             terminal
                 .draw(|frame| {
-                    render_transcript_row(
-                        frame,
-                        Rect::new(0, 0, 30, 1),
-                        row.clone(),
-                        Some(anchor),
-                        false,
-                        palette,
-                        None,
-                    )
+                    for (y, selected) in [None, Some(anchor)].into_iter().enumerate() {
+                        let area = Rect::new(0, y as u16, 30, 1);
+                        render_transcript_row(
+                            frame,
+                            area,
+                            row.clone(),
+                            selected,
+                            false,
+                            palette,
+                            None,
+                        );
+                    }
                 })
                 .unwrap();
-            let cell = &terminal.backend().buffer()[(1, 0)];
-            assert!(cell.modifier.contains(Modifier::BOLD | Modifier::ITALIC));
-            if no_color {
-                assert!(cell.modifier.contains(Modifier::REVERSED));
-            } else {
-                assert_eq!(cell.fg, palette.background);
-                assert_eq!(cell.bg, palette.primary);
-                assert_eq!(terminal.backend().buffer()[(29, 0)].bg, palette.primary);
+            let buffer = terminal.backend().buffer();
+            for x in 0..30 {
+                assert_eq!(buffer[(x, 0)], buffer[(x, 1)], "column {x}");
             }
+            assert!(
+                buffer[(1, 0)]
+                    .modifier
+                    .contains(Modifier::BOLD | Modifier::ITALIC)
+            );
         }
     }
 
@@ -5458,7 +5632,7 @@ mod tests {
         let collapsed = render_bash_card(command, Some((false, None)), 40, false);
         let action = collapsed
             .lines()
-            .find(|line| line.contains("✓ Ran"))
+            .find(|line| line.contains("✓ Bash"))
             .expect("action row");
         assert!(action.contains('…'), "{collapsed}");
         assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
@@ -5466,7 +5640,7 @@ mod tests {
         let expanded = render_bash_card(command, Some((false, None)), 40, true);
         let action = expanded
             .lines()
-            .find(|line| line.contains("✓ Ran"))
+            .find(|line| line.contains("✓ Bash"))
             .expect("action row");
         assert!(!action.contains('…'), "{expanded}");
         assert!(expanded.contains("y_long_test_name"), "{expanded}");
@@ -5484,7 +5658,7 @@ mod tests {
         );
         let diff_action = diff
             .lines()
-            .find(|line| line.contains("Edited"))
+            .find(|line| line.contains("Edit  "))
             .expect("diff action row");
         assert!(diff_action.contains('…'), "{diff}");
         assert!(diff_action.contains("+1 -1"), "{diff}");
@@ -5504,6 +5678,10 @@ mod tests {
                 .find(|line| line.contains(marker))
                 .unwrap_or_else(|| panic!("{marker}: {rendered}"));
             assert!(action.contains('…'), "{rendered}");
+            if marker == "⊘" {
+                // The status note is kept whole; the command is cut instead.
+                assert!(action.contains("… · cancelled"), "{rendered}");
+            }
         }
     }
 
@@ -5748,7 +5926,7 @@ mod tests {
         state.transcript.observe_tool_result(process_result);
         let process_between_steps = render_to_string_with_activity(80, 18, &state, 3);
         assert!(
-            process_between_steps.contains("Running process"),
+            process_between_steps.contains("Process  process-1"),
             "{process_between_steps}"
         );
         assert!(
