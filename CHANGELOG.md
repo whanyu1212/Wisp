@@ -10,15 +10,55 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.2.0 — release preparation
+## 0.2.1 — 2026-10-19
+
+0.2.1 is a patch release on 0.2.0. It changes no command, event, or handshake model and no session
+format, so 0.2.0 and 0.2.1 read each other's sessions; the backend and frontend must still come
+from the same release, which the handshake enforces. Two fixes change which events a consumer sees
+in failure paths; they are listed under the event contract below.
+
+### Terminal UI
+
+- Tool cards are easier to scan. Each card leads with a short tool name in a tinted chip (`Bash`,
+  `Read`, `Search`, `List`, `Edit`, `Write`, `Process`, or `MCP` with `server/tool`) in place of
+  verb phrases such as `Ran` or `Awaiting approval to read`. States the status marker can't show,
+  such as `awaiting approval` or `denied`, end the row as a muted note. The first result row starts
+  with a `└ ` connector, a selected card shows a muted `(→ to expand)` hint instead of a solid bar,
+  a click on a card's action line, an `explored N files` row, or a thought header expands or
+  collapses it, and back-to-back cards stack without blank rows. (#759)
+
+### Event contract
+
+- When a provider raises an ordinary exception after its response started (for example a
+  connection reset), the open message now closes with `message.completed` (`finish_reason="error"`)
+  carrying the partial text, before `error` and the turn's terminal events. This matches what a typed
+  provider failure already produced; the harness keeps the partial reply in the transcript. (#753,
+  HY-190)
+- `context.overflow` is published only while a turn is open. When Wisp's own boundary check refuses
+  to build the next request after a completed tool turn, only `error` is published; it no longer
+  names the completed turn. Provider rejections inside a turn are unchanged. (#758, HY-201)
+
+### Fixes
+
+- A response that repeats a tool-call id now fails the turn with a provider protocol error, so a
+  mutating tool can't run twice and the next request can't carry two results with one id. (#756,
+  HY-191)
+- Over JSONL-RPC, the 101st `steer` or `follow_up` sent before a prompt run is ready gets the same
+  `Agent queue is full (maximum 100 pending messages)` error as one sent after, instead of an RPC
+  command-queue error that depended on timing. `wisp.agent.harness` now also exports
+  `DEFAULT_MAX_PENDING_QUEUE_MESSAGES` and `queue_full_error`. (#751)
+- Development: TUI end-to-end tests reap failed PTY children with a deadline and no longer wait for
+  footer redraws that never come, with narrower macOS timeouts (#750, #752, #754, #757); a loop test
+  checks that every opened message closes once (#755, HY-195).
+
+## 0.2.0 — 2026-10-19
 
 0.2.0 is the second stable release. It promotes the 0.2 release candidates below (RC1 through RC13)
 and adds two small changes since RC13. It changes no command, event, handshake, or session format
 since RC13, so RC13 and 0.2.0 read each other's sessions; the backend and frontend must still come
 from the same release, which the handshake enforces. Read the
 [upgrade guide](book/src/guide/upgrading.md) before upgrading Python integrations or external
-JSONL-RPC clients from 0.1. This section describes the release under preparation; publication
-requires a separate tagged release.
+JSONL-RPC clients from 0.1.
 
 ### Since 0.1.0
 
