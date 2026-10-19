@@ -108,8 +108,10 @@ type RpcDispatch = Callable[
 type RpcReject = Callable[[ParsedRpcCommand, str], Awaitable[None]]
 type RpcCompletionEventWriter = Callable[[WispEvent], None]
 type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
+type RpcQueuedMessageRejection = Callable[[int], str | None]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
+_QUEUED_MESSAGE_COMMAND_TYPES = frozenset({"steer", "follow_up"})
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
@@ -155,6 +157,7 @@ class RpcCoordinator:
         prompt_ready_type: type[object] = _RpcPromptReady,
         completion_event_writer: RpcCompletionEventWriter | None = None,
         completion_event_renderer: RpcCompletionEventRenderer | None = None,
+        queued_message_rejection: RpcQueuedMessageRejection | None = None,
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
@@ -178,6 +181,7 @@ class RpcCoordinator:
         self._prompt_queue_ready = False
         self._completion_event_writer = completion_event_writer
         self._completion_event_renderer = completion_event_renderer
+        self._queued_message_rejection = queued_message_rejection
 
     def _ordered_auxiliary_pending(self) -> bool:
         return any(
@@ -425,6 +429,12 @@ class RpcCoordinator:
             and not self._prompt_queue_ready
         )
         if prompt_queue_not_ready:
+            # Held messages count against the run's message limit before the shared
+            # command bound, so the same overflow gets the run's error either way.
+            message_rejection = self._held_message_rejection(selected_type)
+            if message_rejection is not None:
+                await reject(command, message_rejection)
+                return False
             await self._enqueue_command(
                 command,
                 queue=self.pending_prompt_queue_commands,
@@ -497,6 +507,19 @@ class RpcCoordinator:
         elif result.selected_session is not None:
             self.session_state.session = result.selected_session
         return result.should_shutdown
+
+    def _held_message_rejection(self, command_type: str) -> str | None:
+        if (
+            self._queued_message_rejection is None
+            or command_type not in _QUEUED_MESSAGE_COMMAND_TYPES
+        ):
+            return None
+        held_messages = sum(
+            1
+            for held in self.pending_prompt_queue_commands
+            if held.command_type in _QUEUED_MESSAGE_COMMAND_TYPES
+        )
+        return self._queued_message_rejection(held_messages)
 
     def _duplicate_outstanding_id(self, command: ParsedRpcCommand) -> str | None:
         command_id = command.command_id

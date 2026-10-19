@@ -9,12 +9,14 @@ from tests.rpc.coordinator_support import (
     input_command,
     parsed_command,
 )
+from wisp.coding.session import CodingSession
 from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
     _RpcDispatchResult,
     _RpcInputClosed,
+    _RpcPromptReady,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -227,5 +229,48 @@ def test_coordinator_bounds_aggregate_queued_command_bytes() -> None:
             reject=reject,
         )
         assert list(coordinator.queued_commands) == expected_commands([second])
+
+    anyio.run(scenario)
+
+
+def test_coordinator_rejects_held_messages_with_the_run_queue_error() -> None:
+    """A steer beyond the run's limit gets the run's error even before the run is ready."""
+
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(
+            _RpcSessionState(None, (), 0),
+            queued_message_rejection=CodingSession.queued_message_rejection,
+        )
+        prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+        dispatched: list[str] = []
+        rejected: list[tuple[str, str]] = []
+
+        async def dispatch(
+            command: ParsedRpcCommand,
+            running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            dispatched.append(str(command.command_id))
+            return _RpcDispatchResult(running)
+
+        async def reject(command: ParsedRpcCommand, message: str) -> None:
+            rejected.append((str(command.command_id), message))
+
+        # Every steer arrives before the run accepts queued messages, so all are held.
+        for index in range(101):
+            await coordinator.handle_event(
+                input_command({"id": f"steer-{index}", "type": "steer", "content": str(index)}),
+                dispatch=dispatch,
+                reject=reject,
+            )
+        await coordinator.handle_event(
+            _RpcPromptReady("prompt"),
+            dispatch=dispatch,
+            reject=reject,
+        )
+
+        assert rejected == [("steer-100", "Agent queue is full (maximum 100 pending messages)")]
+        assert dispatched == [f"steer-{index}" for index in range(100)]
+        assert coordinator.running_command is prompt
 
     anyio.run(scenario)

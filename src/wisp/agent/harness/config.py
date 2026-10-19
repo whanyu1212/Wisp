@@ -11,7 +11,7 @@ from wisp.agent.validation import validate_agent_runtime_limits
 from wisp.events import QueueMode
 from wisp.providers.base import Provider, ToolSpec
 
-_MAX_PENDING_QUEUE_MESSAGES = 100
+DEFAULT_MAX_PENDING_QUEUE_MESSAGES = 100
 _MAX_PENDING_QUEUE_BYTES = 8 * 1024 * 1024
 
 
@@ -31,7 +31,7 @@ class AgentHarnessConfig:
     cost_estimator: UsageCostEstimator | None = None
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
-    max_pending_queue_messages: int = _MAX_PENDING_QUEUE_MESSAGES
+    max_pending_queue_messages: int = DEFAULT_MAX_PENDING_QUEUE_MESSAGES
     max_pending_queue_bytes: int = _MAX_PENDING_QUEUE_BYTES
     prompt_cache_key: str | None = None
     web_search: bool = False

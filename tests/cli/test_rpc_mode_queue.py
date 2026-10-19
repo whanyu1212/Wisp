@@ -200,14 +200,19 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    finished = {
-        record["command_id"]: record
-        for record in records
-        if record["type"] == "rpc.command.finished"
-    }
-    assert finished["steer-99"]["ok"] is True
-    assert finished["steer-100"]["ok"] is False
-    assert finished["steer-100"]["error"] == ("Agent queue is full (maximum 100 pending messages)")
+    terminals = [record for record in records if record["type"] == "rpc.command.finished"]
+    terminal_ids = [record["command_id"] for record in terminals]
+    assert len(terminal_ids) == len(set(terminal_ids)), terminal_ids
+    finished = {record["command_id"]: record for record in terminals}
+    # Report every rejected steer with its error, so a failure names its cause.
+    rejected_steers = [
+        (record["command_id"], record["error"])
+        for record in terminals
+        if record["command_id"].startswith("steer-") and not record["ok"]
+    ]
+    assert rejected_steers == [
+        ("steer-100", "Agent queue is full (maximum 100 pending messages)")
+    ], rejected_steers
     assert finished["state"]["ok"] is True
     assert finished["cancel"]["ok"] is True
     state_start = next(

@@ -10,6 +10,18 @@ from wisp.events import QueueKind, QueueMode, QueueUpdated
 from wisp.messages import Message
 
 
+def queue_full_error(max_messages: int) -> str:
+    """Return the error for a message that would exceed the queued-message limit.
+
+    Args:
+        max_messages (int): Maximum messages allowed across both queues.
+
+    Returns:
+        str: The rejection reported to whoever submitted the message.
+    """
+    return f"Agent queue is full (maximum {max_messages} pending messages)"
+
+
 @dataclass(frozen=True, slots=True)
 class QueuedMessages:
     """Detached snapshot of harness-owned queued user messages."""
@@ -94,7 +106,7 @@ class _MessageQueues:
         if message.role != "user":
             raise ValueError("AgentHarness queues require a user message")
         if self.count >= max_messages:
-            raise RuntimeError(f"Agent queue is full (maximum {max_messages} pending messages)")
+            raise RuntimeError(queue_full_error(max_messages))
         if _message_size(message) > max_bytes - self.byte_size:
             raise RuntimeError(
                 f"Agent queue byte limit exceeded (maximum {max_bytes} pending bytes)"

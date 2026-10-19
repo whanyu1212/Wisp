@@ -743,6 +743,7 @@ class RpcHost:
             command_completed_type=_RpcCommandCompleted,
             completion_event_writer=publish_event,
             completion_event_renderer=render_completion_events,
+            queued_message_rejection=CodingSession.queued_message_rejection,
         )
         host = cls(
             runtime=runtime,
