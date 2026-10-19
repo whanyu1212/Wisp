@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import run_settled
+from tests.tui_e2e.support import complete_frames, rendered_without_spacing, run_settled
 from wisp import __version__
 
 _PRESSURE_BACKEND = r"""
@@ -409,7 +409,17 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
         tui.wait_ready()
         assert backend_pid_path.exists()
 
-        tui.send(b"/connect\r")
+        # Enter acts on what was painted, like the other slash-command tests: wait
+        # for a complete frame showing the command before submitting it.
+        offset = len(tui.output)
+        tui.send(b"/connect")
+        tui.wait_until(
+            lambda output: (
+                b"/connect" in rendered_without_spacing(complete_frames(output[offset:]))
+            ),
+            failure="typed /connect did not render",
+        )
+        tui.send(b"\r")
         tui.wait_for(
             b"CONNECTION-SAFE-TAIL",
             failure="hostile connection metadata did not render through its trailing sentinel",
