@@ -483,7 +483,12 @@ def test_execution_failure_keeps_accepted_state_and_recovers(
             if fault == "tool":
                 assert workflow.executor.finished == ["call-1"]
             if fault == "provider":
-                assert not any(message.role == "assistant" for message in harness.messages)
+                # A raised provider error keeps the partial reply, like a typed failure.
+                assert [
+                    (message.content, message.finish_reason)
+                    for message in harness.messages
+                    if message.role == "assistant"
+                ] == [("unfinished", "error")]
             await _assert_reusable(workflow)
 
     anyio.run(run)

@@ -72,6 +72,14 @@ class OverflowModelResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class UnfinishedModelResponse:
+    """Record an opened message whose provider raised before finishing it."""
+
+    content: str
+    started_response_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class CancelledModelResponse:
     """Ask the loop runner to publish cancellation terminals for this response."""
 
@@ -98,6 +106,9 @@ class ModelResponseStream:
         previous_response_id (str | None): Native provider cursor, if available.
         outcome (ModelResponseOutcome | None, optional): Terminal result, initially None.
             Normally left unset and populated by consuming events to completion.
+        unfinished (UnfinishedModelResponse | None, optional): The opened message's
+            partial text when an unexpected error escapes after the response started,
+            so the runner can close it. Normally left unset.
     """
 
     config: AgentLoopConfig
@@ -106,6 +117,7 @@ class ModelResponseStream:
     extra_messages: Sequence[Message]
     previous_response_id: str | None
     outcome: ModelResponseOutcome | None = None
+    unfinished: UnfinishedModelResponse | None = None
 
     async def events(self, *, turn: int) -> AsyncIterator[ModelResponseEvent]:
         """Translate provider progress and record a terminal outcome when exhausted.
@@ -131,7 +143,8 @@ class ModelResponseStream:
                 during consumption becomes OverflowModelResponse; typed provider failure
                 becomes FailedModelResponse. Cleanup errors after a recorded terminal,
                 consumer closure, and cancellation keep their original exception.
-                An interrupted consumer may leave outcome unset.
+                An interrupted consumer may leave outcome unset. Any other error after
+                the response started records ``unfinished`` before propagating.
         """
         lifecycle = ProviderResponseLifecycle()
         attempt_had_streamed_delta = False
@@ -224,6 +237,11 @@ class ModelResponseStream:
             elif is_context_overflow_message(str(exc)):
                 overflow_error = ContextOverflowError(str(exc))
             else:
+                if lifecycle.started:
+                    self.unfinished = UnfinishedModelResponse(
+                        content="".join(lifecycle.text),
+                        started_response_id=lifecycle.started_response_id,
+                    )
                 raise
             self.outcome = OverflowModelResponse(
                 error=overflow_error,

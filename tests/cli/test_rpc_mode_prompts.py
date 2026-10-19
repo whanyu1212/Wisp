@@ -327,10 +327,13 @@ def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
 
     assert result.exit_code == 0, result.output
     records = _jsonl_records(result.stdout)
-    assistant_messages = [
-        record["content"] for record in records if record["type"] == "message.completed"
+    completions = [
+        (record["content"], record["finish_reason"])
+        for record in records
+        if record["type"] == "message.completed"
     ]
-    assert assistant_messages == ["saw failed history"]
+    # The failed prompt's opened message closes as an empty error completion.
+    assert completions == [("", "error"), ("saw failed history", "stop")]
     finished = [record for record in records if record["type"] == "rpc.command.finished"]
     assert [(record["command_id"], record["ok"]) for record in finished] == [
         ("cmd-1", False),
