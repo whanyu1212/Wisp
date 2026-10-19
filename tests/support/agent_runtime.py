@@ -152,6 +152,14 @@ def assert_message_pairing(events: Sequence[object]) -> None:
     its start all close the message with ``finish_reason="error"``, so frontends,
     persistence, and SDK clients never hold an open reply. Only a cancelled turn may
     end with its message still open, because cancellation publishes nothing further.
+
+    Args:
+        events (Sequence[object]): Events one loop stream published, in order.
+
+    Raises:
+        AssertionError: A completion has no open start, a message starts while
+            another is open, a completed or failed turn ends with its message open,
+            or the stream ends with a message open.
     """
 
     open_turn: int | None = None
