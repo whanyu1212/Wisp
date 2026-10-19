@@ -44,6 +44,7 @@ mod session_catalog_tests;
 mod session_picker;
 mod session_tree_picker;
 mod startup_logo;
+mod stream_reveal;
 mod syntax;
 mod terminal;
 mod theme;
@@ -582,6 +583,8 @@ struct LiveUi {
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
     file_picker: FilePicker,
+    stream_pacer: stream_reveal::StreamPacer,
+    stream_trace: Option<stream_reveal::StreamTrace>,
 }
 
 impl Default for LiveUi {
@@ -634,6 +637,8 @@ impl Default for LiveUi {
             discovery_view: None,
             completion: Completion::default(),
             file_picker: FilePicker::default(),
+            stream_pacer: stream_reveal::StreamPacer::default(),
+            stream_trace: None,
         }
     }
 }
@@ -1166,6 +1171,19 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if let (
+            Some(trace),
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                delta,
+                content_kind: reducer::MessageContentKind::Text,
+                ..
+            }),
+        ) = (&mut self.stream_trace, &action)
+        {
+            if !trace.record(delta.len(), std::time::Instant::now()) {
+                self.stream_trace = None;
+            }
+        }
         // Preserve the identity of input captured before buffered workflow updates.
         // Streaming text and telemetry cannot replace a selected workflow target.
         if event_loop::changes_activation_target(&action) {
@@ -1848,6 +1866,17 @@ impl LiveUi {
         self.activity_clock
             .as_ref()
             .map(|(_, started)| started.elapsed())
+    }
+
+    /// Show the next part of a paced reply, if one is waiting, and repaint if it changed.
+    fn advance_stream_reveal(&mut self, now: std::time::Instant) {
+        if self.stream_pacer.tick(&mut self.state.transcript, now) {
+            self.render_pending = true;
+        }
+    }
+
+    fn stream_reveal_pending(&self) -> bool {
+        self.state.transcript.unrevealed().is_some()
     }
 
     fn advance_activity_animation(&mut self) -> bool {
@@ -4590,6 +4619,10 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 mouse_enabled,
                 ..LiveUi::default()
             };
+            // `WISP_TUI_STREAM_PACING=0` shows each streamed delta as it arrives.
+            live_ui.state.stream_pacing =
+                std::env::var("WISP_TUI_STREAM_PACING").map_or(true, |value| value != "0");
+            live_ui.stream_trace = stream_reveal::StreamTrace::from_env();
             let mut transport_closed_diagnostic = None;
             let mut ready_event = None;
             let loop_result = async {

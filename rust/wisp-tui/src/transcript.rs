@@ -117,6 +117,11 @@ pub struct TranscriptEntry {
     history_result_projection_truncated: bool,
     history_calls: Vec<HistoricalCall>,
     history_pending_result: Option<Box<ToolResultInput>>,
+    /// Streamed reply text that has arrived but is not shown yet. The live terminal paces
+    /// it into `content`; see `crate::stream_reveal`.
+    unrevealed: String,
+    /// The reply has completed, but the entry stays `Streaming` until `unrevealed` drains.
+    completes_after_reveal: bool,
 }
 
 impl TranscriptEntry {
@@ -130,7 +135,8 @@ impl TranscriptEntry {
             text.push_str("\n\n");
         }
         text.push_str(&self.content);
-        if let Some(cost) = &self.cost {
+        // The cost closes the reply, so it waits until the whole reply is shown.
+        if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
             text.push_str(&format!("\n\n{cost}"));
         }
         self.decorated_content = Some(text);
@@ -271,6 +277,8 @@ pub struct Transcript {
     live_origins: HashMap<String, u64>,
     pending_call_origins: HashMap<String, String>,
     live_history_gap: Option<LiveHistoryGap>,
+    /// The reply whose text is still being revealed, if any.
+    revealing: Option<TranscriptEntryId>,
 }
 
 impl Transcript {
@@ -351,6 +359,75 @@ impl Transcript {
         entry_id
     }
 
+    /// Queue streamed reply text to be revealed by [`Self::reveal`] rather than shown at
+    /// once, so the terminal can show it at an even pace instead of in network bursts.
+    pub(crate) fn append_paced_message_delta(
+        &mut self,
+        turn: u64,
+        delta: &str,
+    ) -> TranscriptEntryId {
+        let entry_id = self.response_for_turn(turn);
+        if !delta.is_empty() {
+            self.entry_mut(entry_id).unrevealed.push_str(delta);
+            self.revealing = Some(entry_id);
+        }
+        entry_id
+    }
+
+    /// The reply being revealed: its shown text and the text still waiting, and whether
+    /// the reply has completed, so what is waiting is all there will be.
+    pub(crate) fn unrevealed(&self) -> Option<(TranscriptEntryId, &str, &str, bool)> {
+        let entry = self.entry(self.revealing?)?;
+        Some((
+            entry.id,
+            &entry.content,
+            &entry.unrevealed,
+            entry.completes_after_reveal,
+        ))
+    }
+
+    /// Show the next `bytes` of the revealing reply's waiting text. A completed reply
+    /// becomes `Complete` once nothing is left waiting.
+    ///
+    /// Args:
+    ///     bytes (usize): How much waiting text to show; clamped to a character boundary
+    ///         at or below the waiting length.
+    pub(crate) fn reveal(&mut self, bytes: usize) {
+        let Some(entry_id) = self.revealing else {
+            return;
+        };
+        let entry = self.entry_mut(entry_id);
+        let mut bytes = bytes.min(entry.unrevealed.len());
+        while !entry.unrevealed.is_char_boundary(bytes) {
+            bytes -= 1;
+        }
+        if bytes == 0 && !entry.unrevealed.is_empty() {
+            return;
+        }
+        let shown = entry.unrevealed.drain(..bytes).collect::<String>();
+        entry.content.push_str(&shown);
+        let drained = entry.unrevealed.is_empty();
+        if drained && entry.completes_after_reveal {
+            entry.completes_after_reveal = false;
+            entry.state = TranscriptEntryState::Complete;
+        }
+        entry.decorate();
+        Self::bump_revision(entry);
+        if drained {
+            self.revealing = None;
+        }
+        self.bump_generation();
+    }
+
+    /// Show all waiting reply text now. Anything that follows the reply in the transcript
+    /// calls this first, so a later card or prompt never appears above unshown text.
+    pub(crate) fn flush_reveal(&mut self) {
+        if let Some((_, _, waiting, _)) = self.unrevealed() {
+            let bytes = waiting.len();
+            self.reveal(bytes);
+        }
+    }
+
     pub fn append_thinking_delta(&mut self, turn: u64, delta: &str) -> TranscriptEntryId {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
@@ -413,7 +490,22 @@ impl Transcript {
         }
         let entry_id = self.response_for_turn(turn);
         let entry = self.entry_mut(entry_id);
-        if entry.content != content || entry.state != TranscriptEntryState::Complete {
+        // A paced reply keeps revealing the final text after its shown prefix, and becomes
+        // `Complete` once it is all shown. A final text that rewrites the shown prefix is
+        // shown whole at once instead.
+        if !entry.unrevealed.is_empty()
+            && content.len() > entry.content.len()
+            && content.starts_with(entry.content.as_str())
+        {
+            entry.unrevealed = content[entry.content.len()..].to_owned();
+            entry.completes_after_reveal = true;
+            entry.decorate();
+            Self::bump_revision(entry);
+            self.revealing = Some(entry_id);
+            self.bump_generation();
+        } else if entry.content != content || entry.state != TranscriptEntryState::Complete {
+            entry.unrevealed.clear();
+            entry.completes_after_reveal = false;
             if entry.content != content {
                 entry.layout_epoch = entry
                     .layout_epoch
@@ -424,6 +516,9 @@ impl Transcript {
             entry.state = TranscriptEntryState::Complete;
             entry.decorate();
             Self::bump_revision(entry);
+            if self.revealing == Some(entry_id) {
+                self.revealing = None;
+            }
             self.bump_generation();
         }
         self.completed_response = Some(entry_id);
@@ -722,7 +817,14 @@ impl Transcript {
             .map(|(_, entry_id)| entry_id)
             .or_else(|| self.pending_response.take());
         if let Some(entry_id) = entry_id {
-            self.set_entry_state(entry_id, TranscriptEntryState::Complete);
+            // A reply still revealing finishes its reveal first; nothing follows it yet,
+            // and whatever does will flush it.
+            let entry = self.entry_mut(entry_id);
+            if entry.unrevealed.is_empty() {
+                self.set_entry_state(entry_id, TranscriptEntryState::Complete);
+            } else {
+                entry.completes_after_reveal = true;
+            }
         }
     }
 
@@ -1437,6 +1539,8 @@ impl Transcript {
                 history_result_projection_truncated: false,
                 history_calls: Vec::new(),
                 history_pending_result: None,
+                unrevealed: String::new(),
+                completes_after_reveal: false,
             },
         );
         self.rebuild_entry_indexes();
@@ -2124,6 +2228,8 @@ impl Transcript {
             history_result_projection_truncated: false,
             history_calls: Vec::new(),
             history_pending_result: None,
+            unrevealed: String::new(),
+            completes_after_reveal: false,
         });
         if has_local_display {
             self.enforce_local_display_budget();
@@ -2211,10 +2317,13 @@ impl Transcript {
             history_result_projection_truncated: false,
             history_calls: Vec::new(),
             history_pending_result: None,
+            unrevealed: String::new(),
+            completes_after_reveal: false,
         })
     }
 
     fn push_entry(&mut self, mut entry: TranscriptEntry) -> TranscriptEntryId {
+        self.flush_reveal();
         if let Some(previous) = self.entries.last_mut() {
             Self::bump_revision(previous);
         }

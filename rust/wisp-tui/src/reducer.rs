@@ -735,6 +735,9 @@ pub struct UiState {
     pub cancel_requested: bool,
     pub exit_requested: bool,
     pub transcript: SharedTranscript,
+    /// Queue streamed reply text for the live terminal to reveal at an even pace instead
+    /// of showing each delta as it arrives. Off by default, so reductions stay immediate.
+    pub(crate) stream_pacing: bool,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
@@ -808,6 +811,7 @@ impl UiState {
             cancel_requested: false,
             exit_requested: false,
             transcript: SharedTranscript::default(),
+            stream_pacing: false,
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
@@ -4493,7 +4497,11 @@ fn handle_backend_event(
             delta,
             content_kind: MessageContentKind::Text,
         } => {
-            state.transcript.append_message_delta(turn, &delta);
+            if state.stream_pacing {
+                state.transcript.append_paced_message_delta(turn, &delta);
+            } else {
+                state.transcript.append_message_delta(turn, &delta);
+            }
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta {
