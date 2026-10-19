@@ -222,6 +222,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
                 continue
             if (
+                # The cards resize forces a full frame, so an idle footer appears after it.
                 cards_redraw_offset is not None
                 and not browse_sent
                 and b"idle" in output[cards_redraw_offset:]

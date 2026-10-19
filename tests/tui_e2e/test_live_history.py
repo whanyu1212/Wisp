@@ -152,6 +152,7 @@ for line in sys.stdin:
                     output.clear()
                     phase = "settling"
             elif (
+                # The resize above forces a full frame, so an idle footer appears after it.
                 phase == "settling"
                 and b"completed prompt did not report" in output
                 and b"Ask Wisp anything" in output

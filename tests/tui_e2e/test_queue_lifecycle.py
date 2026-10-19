@@ -243,6 +243,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x03")
                 phase = "cancel sent"
             elif (
+                # The steer-frame resize painted "working" during this run, so idle is redrawn.
                 phase == "cancel sent"
                 and "cancel" in command_types
                 and idle_output_offset is not None
@@ -304,14 +305,15 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\r")
                 phase = "restored prompt sent"
             elif phase == "restored prompt sent" and command_types.count("prompt") == 2:
-                phase_output_offset = len(output)
                 os.write(terminal_fd, b"\x03")
                 phase = "second cancel sent"
-            elif (
-                phase == "second cancel sent"
-                and command_types.count("cancel") == 2
-                and b"idle" in output[phase_output_offset:]
-            ):
+            elif phase == "second cancel sent" and command_types.count("cancel") == 2:
+                # The cancel can finish before "working" is painted for this run, and
+                # an unchanged idle footer is never redrawn. A resize forces a full frame.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
+                phase = "second cancel frame"
+            elif phase == "second cancel frame" and b"idle" in output[phase_output_offset:]:
                 os.write(terminal_fd, b"\x03")
                 phase = "shutdown sent"
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)

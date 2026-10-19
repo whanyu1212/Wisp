@@ -237,6 +237,7 @@ main()
         }
         offset = len(tui.output)
         tui.send(b"\x03")
+        # The provider blocks, so "working" was painted and the cancel redraws idle.
         tui.wait_for(b"idle", since=offset, failure="run did not cancel")
         # Statistics and branch metadata refresh independently after a prompt.
         # Idle status (or statistics alone) does not mean both have completed.
@@ -262,6 +263,7 @@ main()
         )
         offset = len(tui.output)
         tui.send(b"\x03")
+        # The resize above painted this blocked run as "working", so the cancel redraws idle.
         tui.wait_for(b"idle", since=offset, failure="replacement run did not cancel")
         tui.quit()
     finally:
