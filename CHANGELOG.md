@@ -10,6 +10,21 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.2.2 — 2026-10-19
+
+0.2.2 is a patch release on 0.2.1 with one terminal UI change. It changes no command, event, or
+handshake model and no session format, so 0.2.1 and 0.2.2 read each other's sessions; the backend
+and frontend must still come from the same release, which the handshake enforces.
+
+### Terminal UI
+
+- Back-to-back collapsed tool cards are separated by a thin rule instead of touching, so their
+  chips no longer merge into one block in a run of one-line calls. A chip is now only as wide as its
+  name, with plain padding keeping commands and paths in one column. A blank row separates your
+  prompt's highlighted surface from the reply or cards below it. A card showing its results keeps a
+  blank row before the next card, as before. Each rule costs a row, so a run of five collapsed cards
+  takes nine rows. (#761)
+
 ## 0.2.1 — 2026-10-19
 
 0.2.1 is a patch release on 0.2.0. It changes no command, event, or handshake model and no session

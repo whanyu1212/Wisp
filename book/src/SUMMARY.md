@@ -52,6 +52,7 @@
 - [Development setup](contributing/development.md)
 - [How Wisp is built](contributing/building.md)
 - [Testing](contributing/testing.md)
+- [0.2.2 release](contributing/0.2.2-release.md)
 - [0.2.1 release](contributing/0.2.1-release.md)
 - [0.2.0 release](contributing/0.2.0-release.md)
 - [RC5 release](contributing/rc5-release.md)
