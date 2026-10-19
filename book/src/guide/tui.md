@@ -93,11 +93,13 @@ this separate model activity.
 Compaction keeps its separate activity row. Each tool card's marker shows its state by shape as well
 as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. The marker
 is followed by a tinted chip naming the tool (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
-`Process`, or `MCP` followed by `server/tool`), padded so every command or path starts in the same
-column; monochrome mode draws the chip in reverse video. A state the marker alone does not name ends
-the row as a muted note, such as `· awaiting approval` or `· denied`. The first result row under an
-expanded card starts with `└`. Back-to-back cards stack without blank rows, so a run of tool calls
-reads as one list; a card showing its results keeps one blank row before the next card. A plain click on a card's action line, an `explored N files` row, or a
+`Process`, or `MCP` followed by `server/tool`). The chip is as wide as its name, and plain padding
+after it keeps every command or path in the same column; monochrome mode draws the chip in reverse
+video. A state the marker alone does not name ends the row as a muted note, such as
+`· awaiting approval` or `· denied`. The first result row under an expanded card starts with `└`.
+Back-to-back collapsed cards are separated by a thin rule, so a run of tool calls reads as one list;
+a card showing its results keeps a blank row before the next card, and a blank row separates your
+prompt from the reply or cards below it. A plain click on a card's action line, an `explored N files` row, or a
 thought header expands or collapses it, as `Right` and `Left` do while browsing with `F6`. The click
 keeps typing in the prompt; while browsing, it also moves the selection to that row. Clicks on result
 rows only start a text selection. A card selected with `F6` looks like the rest and ends with

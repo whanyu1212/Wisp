@@ -56,6 +56,9 @@ pub enum RowPosition {
     /// Highlighted padding above the next user's prompt. The preceding entry owns it so its
     /// `Spacer` stays a plain gap and every entry still starts at `Header`.
     UserLeadIn,
+    /// A plain gap below a prompt's highlighted surface, before the reply or card that follows.
+    /// The prompt owns it, after its `Spacer`, which is the surface's bottom padding.
+    UserLeadOut,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -94,6 +97,9 @@ pub enum TranscriptRowKind {
     CardDetail,
     CardOmission,
     Spacer,
+    /// The gap between back-to-back collapsed cards, drawn as a thin rule. Like a spacer it
+    /// holds no text, so a copied selection gets an empty line.
+    Rule,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -881,21 +887,47 @@ impl TranscriptRowCache {
                     position.absolute_byte_offset,
                     width,
                 )?,
-            RowPosition::Spacer if next_entry().is_some() => ProjectedRow {
-                row: TranscriptRow::plain(
-                    anchor,
-                    entry.role,
-                    TranscriptRowKind::Spacer,
-                    String::new(),
-                    entry.display_content().len(),
-                ),
-                next: spacer_next(transcript, entry),
-            },
+            RowPosition::Spacer if next_entry().is_some() => {
+                let rule = transcript
+                    .entry_after(entry.id)
+                    .is_some_and(|next| cards_stack(entry, next))
+                    && !self.shows_card_results(entry);
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        if rule {
+                            TranscriptRowKind::Rule
+                        } else {
+                            TranscriptRowKind::Spacer
+                        },
+                        String::new(),
+                        entry.display_content().len(),
+                    ),
+                    next: spacer_next(transcript, entry),
+                }
+            }
             RowPosition::UserLeadIn if user_lead_in(transcript, entry) == Some(anchor) => {
                 ProjectedRow {
                     row: TranscriptRow::plain(
                         anchor,
                         TranscriptRole::User,
+                        TranscriptRowKind::Spacer,
+                        String::new(),
+                        entry.display_content().len(),
+                    ),
+                    next: next_entry(),
+                }
+            }
+            RowPosition::UserLeadOut => {
+                let next = transcript.entry_after(entry.id)?;
+                if user_lead_out(transcript, entry) != Some(anchor) {
+                    return None;
+                }
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        next.role,
                         TranscriptRowKind::Spacer,
                         String::new(),
                         entry.display_content().len(),
@@ -1310,7 +1342,7 @@ impl TranscriptRowCache {
             }
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
-                    spacer_after(transcript, entry)
+                    separator_after(transcript, entry)
                 } else {
                     projection
                         .omission
@@ -1322,7 +1354,7 @@ impl TranscriptRowCache {
                                 absolute_byte_offset: 0,
                             }),
                         })
-                        .or_else(|| spacer_after(transcript, entry))
+                        .or_else(|| separator_after(transcript, entry))
                 };
                 let tone = projection.detail_tone(absolute_offset);
                 let mut projected = self.build_card_text_row(
@@ -1355,7 +1387,7 @@ impl TranscriptRowCache {
                         }),
                     })
                 } else {
-                    spacer_after(transcript, entry)
+                    separator_after(transcript, entry)
                 };
                 let mut projected = self.build_card_text_row(
                     entry,
@@ -2004,16 +2036,11 @@ impl TranscriptRowCache {
                 let previous = transcript.entry_before(entry.id)?;
                 Some(if let Some(lead_in) = user_lead_in(transcript, previous) {
                     lead_in
-                } else if let Some(start) =
-                    collapsed_group_start(&self.fold, transcript, previous.id)
-                {
-                    RowAnchor {
-                        entry_id: start,
-                        position: RowPosition::Header,
-                    }
-                } else if cards_stack(previous, entry) && !self.shows_card_results(previous) {
-                    self.last_anchor(transcript, previous, width)
+                } else if let Some(lead_out) = user_lead_out(transcript, previous) {
+                    lead_out
                 } else {
+                    // A collapsed group's gap belongs to its last member; walking back from
+                    // that gap reaches the group's row.
                     RowAnchor {
                         entry_id: previous.id,
                         position: RowPosition::Spacer,
@@ -2041,7 +2068,7 @@ impl TranscriptRowCache {
                 self.content_anchor_before(transcript, entry, position.output_offset, width)
             }
             RowPosition::Card(_) => self.card_anchor_before(transcript, entry, anchor, width),
-            RowPosition::UserLeadIn => Some(RowAnchor {
+            RowPosition::UserLeadIn | RowPosition::UserLeadOut => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
             }),
@@ -2313,7 +2340,12 @@ impl TranscriptRowCache {
             live(key.entry_id)
                 && cached.next.is_some_and(|next| {
                     next.entry_id == key.entry_id
-                        && !matches!(next.position, RowPosition::Spacer | RowPosition::UserLeadIn)
+                        && !matches!(
+                            next.position,
+                            RowPosition::Spacer
+                                | RowPosition::UserLeadIn
+                                | RowPosition::UserLeadOut
+                        )
                 })
         });
         let rows = &self.rows;
@@ -3264,7 +3296,7 @@ fn scroll_anchor_rank(
     };
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
-        RowPosition::Spacer | RowPosition::UserLeadIn => 1.0,
+        RowPosition::Spacer | RowPosition::UserLeadIn | RowPosition::UserLeadOut => 1.0,
         RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
@@ -3329,6 +3361,21 @@ fn cached_row_valid(
                         position: RowPosition::Header,
                     })
         }
+        TranscriptRowKind::Spacer if cached.row.anchor.position == RowPosition::UserLeadOut => {
+            user_lead_out(transcript, entry) == Some(cached.row.anchor)
+                && cached.next
+                    == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                        entry_id: next.id,
+                        position: RowPosition::Header,
+                    })
+        }
+        // Whether a card's gap is a rule depends on whether the card shows result rows, which
+        // can change with its content, so a changed card rebuilds it.
+        TranscriptRowKind::Spacer | TranscriptRowKind::Rule
+            if !matches!(entry.kind, TranscriptEntryKind::Message) =>
+        {
+            false
+        }
         TranscriptRowKind::Spacer => cached.next == spacer_next(transcript, entry),
         TranscriptRowKind::Content if uses_markdown(entry) => {
             let Some(snapshot) = markdown else {
@@ -3363,7 +3410,8 @@ fn cached_row_valid(
         | TranscriptRowKind::CardDetail
         | TranscriptRowKind::CardOmission
         | TranscriptRowKind::Placeholder
-        | TranscriptRowKind::Thought => false,
+        | TranscriptRowKind::Thought
+        | TranscriptRowKind::Rule => false,
     }
 }
 
@@ -3524,6 +3572,14 @@ fn normalize_anchor(
                 None => cache.last_anchor(transcript, entry, width),
             })
         }
+        // The lead-out likewise needs its prompt to still be followed by a reply or card; the
+        // prompt's own surface padding is the nearest row that exists either way.
+        RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => {
+            Some(match separator_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.last_anchor(transcript, entry, width),
+            })
+        }
         _ => Some(anchor),
     }
 }
@@ -3541,7 +3597,8 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Thought
         | RowPosition::Card(_)
         | RowPosition::Spacer
-        | RowPosition::UserLeadIn => None,
+        | RowPosition::UserLeadIn
+        | RowPosition::UserLeadOut => None,
     }
 }
 
@@ -3572,35 +3629,18 @@ fn push_styled_span(
     });
 }
 
-/// Where the row after `entry`'s last row is: its blank spacer, or, for back-to-back tool or
-/// process cards, the next card's action row, so a run of collapsed tool calls reads as one list.
+/// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed
+/// cards.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
-    let next = transcript.entry_after(entry.id)?;
-    Some(if cards_stack(entry, next) {
-        RowAnchor {
-            entry_id: next.id,
-            position: RowPosition::Header,
-        }
-    } else {
-        RowAnchor {
-            entry_id: entry.id,
-            position: RowPosition::Spacer,
-        }
-    })
-}
-
-/// The blank row after `entry`, for a card whose result rows are showing: it keeps the gap
-/// before the next card that a collapsed card gives up.
-fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
     })
 }
 
-/// Whether `next` follows `entry` with no spacer: both are tool or process cards. A card next to
-/// a message keeps its blank row, and so does a card showing its result rows, whose last row
-/// links on with `spacer_after`.
+/// Whether `next` follows `entry` as part of one list of cards, so the gap between them is a
+/// rule rather than a blank row: both are tool or process cards. A card next to a message keeps
+/// a blank row, and so does a card showing its result rows.
 fn cards_stack(entry: &TranscriptEntry, next: &TranscriptEntry) -> bool {
     let card = |entry: &TranscriptEntry| !matches!(entry.kind, TranscriptEntryKind::Message);
     card(entry) && card(next)
@@ -3620,14 +3660,29 @@ fn user_lead_in(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowA
         })
 }
 
-/// The row after `entry`'s spacer: its lead-in when one is due, else the next entry's header.
-fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
-    user_lead_in(transcript, entry).or_else(|| {
-        transcript.entry_after(entry.id).map(|next| RowAnchor {
-            entry_id: next.id,
-            position: RowPosition::Header,
+/// The plain gap owned by a user's prompt when a reply or card follows it, below the prompt's
+/// highlighted surface. A prompt followed by another prompt continues the surface instead.
+fn user_lead_out(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    transcript
+        .entry_after(entry.id)
+        .filter(|next| entry.role == TranscriptRole::User && next.role != TranscriptRole::User)
+        .map(|_| RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::UserLeadOut,
         })
-    })
+}
+
+/// The row after `entry`'s spacer: its lead-in or lead-out when one is due, else the next
+/// entry's header.
+fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    user_lead_in(transcript, entry)
+        .or_else(|| user_lead_out(transcript, entry))
+        .or_else(|| {
+            transcript.entry_after(entry.id).map(|next| RowAnchor {
+                entry_id: next.id,
+                position: RowPosition::Header,
+            })
+        })
 }
 
 fn is_explore_tool(entry: &TranscriptEntry) -> bool {
@@ -4964,7 +5019,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_stack_without_spacers() {
+    fn cards_stack_between_rules() {
         let mut transcript = Transcript::default();
         let prompt = transcript.append_prompt("tidy up".into());
         let mut finish = |call_id: &str, name: &str, arguments: serde_json::Value| {
@@ -4998,7 +5053,7 @@ mod tests {
             .skip_while(|row| row.anchor.entry_id != first)
             .map(|row| row.kind)
             .collect::<Vec<_>>();
-        tool_rows.truncate(7);
+        tool_rows.truncate(9);
         assert_eq!(
             tool_rows,
             [
@@ -5007,18 +5062,40 @@ mod tests {
                 TranscriptRowKind::CardDetail,
                 TranscriptRowKind::Spacer,
                 TranscriptRowKind::CardAction,
+                TranscriptRowKind::Rule,
                 TranscriptRowKind::CardGroup,
+                TranscriptRowKind::Rule,
                 TranscriptRowKind::CardAction,
             ]
         );
         assert!(rows.iter().any(|row| row.anchor.entry_id == group));
-        // The reply keeps its blank row after the last card.
+        // The prompt's surface padding is followed by a plain gap before the first card.
+        let after_prompt = rows
+            .iter()
+            .skip_while(|row| {
+                row.anchor.entry_id != prompt || row.kind != TranscriptRowKind::Spacer
+            })
+            .take(3)
+            .map(|row| (row.anchor.position, row.role))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            after_prompt,
+            [
+                (RowPosition::Spacer, TranscriptRole::User),
+                (RowPosition::UserLeadOut, TranscriptRole::Tool),
+                (RowPosition::Header, TranscriptRole::Tool),
+            ]
+        );
+        // The reply keeps a blank row, not a rule, after the last card.
         let after_last = rows
             .iter()
             .skip_while(|row| row.anchor.entry_id != last)
             .nth(1)
             .unwrap();
-        assert_eq!(after_last.anchor.position, RowPosition::Spacer);
+        assert_eq!(
+            (after_last.anchor.position, after_last.kind),
+            (RowPosition::Spacer, TranscriptRowKind::Spacer)
+        );
 
         // Walking back from the reply's header visits the same rows in reverse.
         let mut anchor = rows.last().unwrap().anchor;
