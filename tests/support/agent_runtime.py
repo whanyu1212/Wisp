@@ -144,6 +144,45 @@ def assert_tool_result_pairing(events: Sequence[object]) -> None:
     assert not unmatched, f"ToolExecutionEnded without ToolResultReady: {', '.join(unmatched)}"
 
 
+def assert_message_pairing(events: Sequence[object]) -> None:
+    """Require each opened model message to close exactly once before its turn ends.
+
+    Within a turn, `MessageStarted` and `MessageCompleted` alternate, beginning with
+    a start. A typed failure, an overflow, and an error the provider raises after
+    its start all close the message with ``finish_reason="error"``, so frontends,
+    persistence, and SDK clients never hold an open reply. Only a cancelled turn may
+    end with its message still open, because cancellation publishes nothing further.
+
+    Args:
+        events (Sequence[object]): Events one loop stream published, in order.
+
+    Raises:
+        AssertionError: A completion has no open start, a message starts while
+            another is open, a completed or failed turn ends with its message open,
+            or the stream ends with a message open.
+    """
+
+    open_turn: int | None = None
+    for event in events:
+        if isinstance(event, MessageStarted):
+            assert open_turn is None, (
+                f"MessageStarted for turn {event.turn} while the message for turn "
+                f"{open_turn} was still open"
+            )
+            open_turn = event.turn
+        elif isinstance(event, MessageCompleted):
+            assert open_turn == event.turn, (
+                f"MessageCompleted for turn {event.turn} without an open MessageStarted"
+            )
+            open_turn = None
+        elif isinstance(event, TurnCompleted) and open_turn is not None:
+            assert event.outcome == "cancelled", (
+                f"Turn {event.turn} ended {event.outcome!r} with its message still open"
+            )
+            open_turn = None
+    assert open_turn is None, f"MessageStarted for turn {open_turn} was never completed"
+
+
 def assert_settled_tool_calls(events: Sequence[object], call_ids: Sequence[str]) -> None:
     """Require an Ended/Ready pair for each listed call occurrence.
 
