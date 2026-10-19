@@ -198,14 +198,24 @@ class ProviderResponseLifecycle:
     def add_tool_call(self, tool_call: ToolCall) -> None:
         """Record a completed tool call for terminal-response validation.
 
+        Call IDs must be unique within one response. A repeat would run the tool
+        twice and send the provider two results with one ID, so it is rejected
+        here, before any tool in the response can run. Later responses may reuse
+        an ID, as Google's position-based fallback IDs do.
+
         Args:
             tool_call (ToolCall): Provider call in its observed stream order.
 
         Raises:
-            ProviderProtocolError: The response has not started or has terminated.
+            ProviderProtocolError: The response has not started or has terminated,
+                or it already contains a call with this ID.
         """
         self.require_open()
         require_provider_response_started(self.started)
+        if any(recorded.call_id == tool_call.call_id for recorded in self.tool_calls):
+            raise ProviderProtocolError(
+                f"Provider emitted tool call id {tool_call.call_id!r} more than once"
+            )
         self.tool_calls.append(tool_call)
 
     def complete(self, event: ProviderResponseCompleted | ProviderResponseFailed) -> None:

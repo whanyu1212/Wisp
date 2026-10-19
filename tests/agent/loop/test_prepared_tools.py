@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 import wisp.agent.loop.prepared_tools as prepared_tools_module
+from tests.agent.loop.support import RecordingToolExecutor
 from tests.support.agent_runtime import (
     assert_continuation_invariants,
     assert_settled_tool_calls,
@@ -25,13 +26,14 @@ from wisp.agent.tool_contracts import (
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     ErrorEvent,
-    ToolCallRequested,
+    MessageCompleted,
     ToolExecutionEnded,
     ToolResultReady,
     TurnCompleted,
 )
 from wisp.extensions import builtin
 from wisp.messages import Message
+from wisp.providers.base import ProviderProtocolError
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
@@ -290,27 +292,30 @@ def test_cancel_separates_tool_results_from_settlement(
     assert_continuation_invariants(events)
 
 
-def test_failure_matches_later_repeated_call() -> None:
-    calls = (
-        ToolCall(call_id="repeat", name="lookup", arguments={"n": 1}),
-        ToolCall(call_id="middle", name="lookup", arguments={"n": 2}),
-        ToolCall(call_id="repeat", name="lookup", arguments={"n": 3}),
-    )
+@pytest.mark.parametrize("path", ["sequential", "prepared"])
+def test_repeated_call_id_in_one_response_runs_no_tool(
+    path: Literal["sequential", "prepared"],
+) -> None:
+    """A response that repeats a mutating call's ID fails before any tool runs."""
+
+    repeated = ToolCall(call_id="call-1", name="bash", arguments={"command": "rm -rf build"})
+    calls = (repeated, ToolCall(call_id="call-1", name="bash", arguments={"command": "make"}))
+    ran: list[ToolCall] = []
 
     async def runner(call: ToolCall) -> ToolExecutionEnded:
-        if call.arguments["n"] == 1:
-            raise RuntimeError("first occurrence failed")
-        return ToolExecutionEnded(
-            call_id=call.call_id, name=call.name, output=str(call.arguments["n"]), is_error=False
-        )
+        ran.append(call)
+        return ToolExecutionEnded(call_id=call.call_id, name=call.name, output="", is_error=False)
+
+    sequential = RecordingToolExecutor()
+    executor = sequential if path == "sequential" else PreparedScriptExecutor(runner)
 
     async def run() -> list[object]:
         events: list[object] = []
-        with anyio.fail_after(3), pytest.raises(RuntimeError, match="first occurrence failed"):
+        with pytest.raises(ProviderProtocolError, match="'call-1' more than once"):
             async for event in run_agent_loop(
                 AgentLoopConfig(
                     provider=_scripted_tool_batch_provider(calls),
-                    tool_executor=PreparedScriptExecutor(runner),
+                    tool_executor=executor,
                 ),
                 messages=(Message(role="user", content="hi"),),
             ):
@@ -318,10 +323,12 @@ def test_failure_matches_later_repeated_call() -> None:
         return events
 
     events = anyio.run(run)
-    assert [
-        (event.call_id, event.output) for event in events if isinstance(event, ToolExecutionEnded)
-    ] == [("middle", "2"), ("repeat", "3")]
-    assert_continuation_invariants(events)
+    assert ran == [] and sequential.calls == []
+    assert not any(event.type.startswith("tool.") for event in events)
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.finish_reason, completion.tool_calls) == ("error", ())
+    terminal = events[-1]
+    assert isinstance(terminal, TurnCompleted) and terminal.outcome == "failed"
 
 
 class _BlockingPreparedExecutor:
@@ -459,47 +466,6 @@ def test_settles_cancellation_requested_by_harness(
         (event.outcome, event.finish_reason) for event in events if isinstance(event, TurnCompleted)
     ] == [("cancelled", "cancelled")]
     assert_settled_tool_calls(events, ("call-1",))
-
-
-def test_cancel_skips_already_settled_duplicate() -> None:
-    class Token:
-        cancelled = False
-
-        def is_cancelled(self) -> bool:
-            return self.cancelled
-
-    token = Token()
-    calls = (
-        ToolCall(call_id="repeat", name="lookup", arguments={"n": 1}),
-        ToolCall(call_id="repeat", name="lookup", arguments={"n": 2}),
-        ToolCall(call_id="middle", name="lookup", arguments={"n": 3}),
-    )
-
-    async def runner(call: ToolCall) -> ToolExecutionEnded:
-        raise AssertionError(f"Unexpected execution: {call.call_id}")
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        with anyio.fail_after(3):
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=_scripted_tool_batch_provider(calls),
-                    tool_executor=PreparedScriptExecutor(runner),
-                    cancellation_token=token,
-                ),
-                messages=(Message(role="user", content="hi"),),
-            ):
-                events.append(event)
-                if isinstance(event, ToolCallRequested):
-                    token.cancelled = True
-        return events
-
-    events = anyio.run(run)
-    assert [event.call_id for event in events if isinstance(event, ToolCallRequested)] == [
-        "repeat",
-        "middle",
-    ]
-    assert_continuation_invariants(events)
 
 
 def test_does_not_start_after_cooperative_cancellation() -> None:

@@ -30,6 +30,9 @@ Later slices must preserve:
   request-creation path can yield that failure with no `ProviderResponseStarted`;
   `_ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
   successful completion still require a prior start.
+- Tool-call IDs are unique within one response: `ProviderResponseLifecycle`
+  rejects a repeat as `ProviderProtocolError` before any call runs. IDs may be
+  reused across responses (Google's position-based fallback IDs do).
 - An opened model message gets exactly one `MessageCompleted` before its turn's
   terminal events. A typed failure, a raised overflow, or any other error the
   provider raises after its start closes it with `finish_reason="error"` and the

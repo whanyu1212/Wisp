@@ -79,6 +79,9 @@ Preserve these rules when changing control flow:
 - When the run's token cancels a tool batch, every requested call still ends with exactly one
   terminal/result pair, whatever executor type ran it.
 - Provider response lifecycle events remain ordered and terminal.
+- Tool-call IDs are unique within one response. A repeat is a `ProviderProtocolError` raised
+  before any call in that response runs, so a mutating tool never runs twice and the provider
+  never receives two results with one ID. A later response may reuse an ID.
 - A request-boundary `stop` wins over other decision fields.
 - Provider capabilities are detected; new optional keywords are not sent unconditionally.
 
