@@ -73,7 +73,7 @@ impl StreamPacer {
     ///     bool: Whether more of the reply is now shown.
     pub(crate) fn tick(&mut self, transcript: &mut Transcript, now: Instant) -> bool {
         let Some((entry, shown, waiting, complete)) = transcript.unrevealed() else {
-            *self = Self::default();
+            self.pause();
             return false;
         };
         let arrived = shown.len() + waiting.len();
@@ -98,7 +98,7 @@ impl StreamPacer {
         if waiting.len() > DUMP_BYTES {
             let all = waiting.len();
             transcript.reveal(all);
-            *self = Self::default();
+            self.pause();
             return true;
         }
         let backlog = waiting.graphemes(true).take(BACKLOG_COUNT_LIMIT).count() as f64;
@@ -120,11 +120,18 @@ impl StreamPacer {
         self.budget = (self.budget - spent).max(-(WORD_HOLD_GRAPHEMES as f64));
         transcript.reveal(end);
         if transcript.unrevealed().is_none() {
-            // The reply caught up. The next burst starts from a still pace rather than being
-            // shown at once for the time spent waiting for it.
-            *self = Self::default();
+            self.pause();
         }
         true
+    }
+
+    /// Start the next burst from a still pace, rather than showing it at once for the
+    /// time spent waiting for it. The reply and its fence scan are kept, so a reply that
+    /// catches up between bursts is not scanned again from its start.
+    fn pause(&mut self) {
+        self.last_tick = None;
+        self.budget = 0.0;
+        self.last_growth = None;
     }
 }
 
@@ -761,6 +768,31 @@ mod tests {
             shown(&transcript).len() - before < 20,
             "{}",
             shown(&transcript)
+        );
+    }
+
+    #[test]
+    fn pause_keeps_fence_scan() {
+        let mut transcript = Transcript::default();
+        let mut pacer = StreamPacer::default();
+        let start = Instant::now();
+        transcript.append_paced_message_delta(1, "First line here.\nSecond line here.\n");
+        let mut frame = 0;
+        while transcript.unrevealed().is_some() {
+            pacer.tick(&mut transcript, start + FRAME * frame);
+            frame += 1;
+        }
+        let scanned = pacer.fences.scanned;
+        assert!(scanned > 0);
+        // A frame with nothing waiting keeps the scan for the next burst.
+        assert!(!pacer.tick(&mut transcript, start + FRAME * frame));
+        assert_eq!(pacer.fences.scanned, scanned);
+        // The next burst continues the scan where it stopped.
+        transcript.append_paced_message_delta(1, "Third line arrives later. ");
+        pacer.tick(&mut transcript, start + Duration::from_secs(2));
+        assert_eq!(
+            pacer.fences.scanned,
+            "First line here.\nSecond line here.\n".len()
         );
     }
 
