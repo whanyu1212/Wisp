@@ -1310,7 +1310,7 @@ impl TranscriptRowCache {
             }
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
-                    separator_after(transcript, entry)
+                    spacer_after(transcript, entry)
                 } else {
                     projection
                         .omission
@@ -1322,7 +1322,7 @@ impl TranscriptRowCache {
                                 absolute_byte_offset: 0,
                             }),
                         })
-                        .or_else(|| separator_after(transcript, entry))
+                        .or_else(|| spacer_after(transcript, entry))
                 };
                 let tone = projection.detail_tone(absolute_offset);
                 let mut projected = self.build_card_text_row(
@@ -1355,7 +1355,7 @@ impl TranscriptRowCache {
                         }),
                     })
                 } else {
-                    separator_after(transcript, entry)
+                    spacer_after(transcript, entry)
                 };
                 let mut projected = self.build_card_text_row(
                     entry,
@@ -2000,8 +2000,9 @@ impl TranscriptRowCache {
     ) -> Option<RowAnchor> {
         let entry = transcript.entry(anchor.entry_id)?;
         match anchor.position {
-            RowPosition::Header => transcript.entry_before(entry.id).map(|previous| {
-                if let Some(lead_in) = user_lead_in(transcript, previous) {
+            RowPosition::Header => {
+                let previous = transcript.entry_before(entry.id)?;
+                Some(if let Some(lead_in) = user_lead_in(transcript, previous) {
                     lead_in
                 } else if let Some(start) =
                     collapsed_group_start(&self.fold, transcript, previous.id)
@@ -2010,13 +2011,15 @@ impl TranscriptRowCache {
                         entry_id: start,
                         position: RowPosition::Header,
                     }
+                } else if cards_stack(previous, entry) && !self.shows_card_results(previous) {
+                    self.last_anchor(transcript, previous, width)
                 } else {
                     RowAnchor {
                         entry_id: previous.id,
                         position: RowPosition::Spacer,
                     }
-                }
-            }),
+                })
+            }
             RowPosition::Thought => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Header,
@@ -2053,6 +2056,16 @@ impl TranscriptRowCache {
                 }
             }
         }
+    }
+
+    /// Whether `entry` is a card showing result rows, expanded or as an inline diff preview.
+    /// Its last row is then a result row, which links on to a spacer rather than the next card.
+    fn shows_card_results(&mut self, entry: &TranscriptEntry) -> bool {
+        let Some(projection) = self.card_snapshot(entry) else {
+            return false;
+        };
+        (self.fold.is_expanded(entry.id) || projection.inline_detail)
+            && card_position_after_action(entry, &projection).is_some()
     }
 
     fn content_anchor_before(
@@ -3559,11 +3572,38 @@ fn push_styled_span(
     });
 }
 
+/// Where the row after `entry`'s last row is: its blank spacer, or, for back-to-back tool or
+/// process cards, the next card's action row, so a run of collapsed tool calls reads as one list.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    let next = transcript.entry_after(entry.id)?;
+    Some(if cards_stack(entry, next) {
+        RowAnchor {
+            entry_id: next.id,
+            position: RowPosition::Header,
+        }
+    } else {
+        RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Spacer,
+        }
+    })
+}
+
+/// The blank row after `entry`, for a card whose result rows are showing: it keeps the gap
+/// before the next card that a collapsed card gives up.
+fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
     })
+}
+
+/// Whether `next` follows `entry` with no spacer: both are tool or process cards. A card next to
+/// a message keeps its blank row, and so does a card showing its result rows, whose last row
+/// links on with `spacer_after`.
+fn cards_stack(entry: &TranscriptEntry, next: &TranscriptEntry) -> bool {
+    let card = |entry: &TranscriptEntry| !matches!(entry.kind, TranscriptEntryKind::Message);
+    card(entry) && card(next)
 }
 
 /// The lead-in row owned by `entry` when a user's prompt follows a non-user entry.
@@ -4919,6 +4959,71 @@ mod tests {
         let mut anchor = header.anchor;
         for expected in [lead_in, spacer, reply] {
             anchor = cache.previous_anchor(&transcript, anchor, 40).unwrap();
+            assert_eq!(anchor, expected.anchor);
+        }
+    }
+
+    #[test]
+    fn cards_stack_without_spacers() {
+        let mut transcript = Transcript::default();
+        let prompt = transcript.append_prompt("tidy up".into());
+        let mut finish = |call_id: &str, name: &str, arguments: serde_json::Value| {
+            let id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.into(),
+                name: name.into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments,
+            });
+            let mut result = tool_result(call_id, "out\nmore");
+            result.name = name.into();
+            transcript.observe_tool_result(result);
+            id
+        };
+        let first = finish("b1", "bash", serde_json::json!({"command": "cargo build"}));
+        finish("b2", "bash", serde_json::json!({"command": "cargo test"}));
+        let group = finish("r1", "read", serde_json::json!({"path": "a.rs"}));
+        finish("r2", "read", serde_json::json!({"path": "b.rs"}));
+        let last = finish("b3", "bash", serde_json::json!({"command": "cargo clippy"}));
+        transcript.complete_message(1, "done".into());
+        let mut cache = TranscriptRowCache::default();
+        // An expanded card shows its result rows, so it keeps a blank row before the next card.
+        cache.fold_mut().expand(first);
+        let top = RowAnchor {
+            entry_id: prompt,
+            position: RowPosition::Header,
+        };
+        let rows = collect_rows(&transcript, &mut cache, top, 60, 40);
+        let mut tool_rows = rows
+            .iter()
+            .skip_while(|row| row.anchor.entry_id != first)
+            .map(|row| row.kind)
+            .collect::<Vec<_>>();
+        tool_rows.truncate(7);
+        assert_eq!(
+            tool_rows,
+            [
+                TranscriptRowKind::CardAction,
+                TranscriptRowKind::CardDetail,
+                TranscriptRowKind::CardDetail,
+                TranscriptRowKind::Spacer,
+                TranscriptRowKind::CardAction,
+                TranscriptRowKind::CardGroup,
+                TranscriptRowKind::CardAction,
+            ]
+        );
+        assert!(rows.iter().any(|row| row.anchor.entry_id == group));
+        // The reply keeps its blank row after the last card.
+        let after_last = rows
+            .iter()
+            .skip_while(|row| row.anchor.entry_id != last)
+            .nth(1)
+            .unwrap();
+        assert_eq!(after_last.anchor.position, RowPosition::Spacer);
+
+        // Walking back from the reply's header visits the same rows in reverse.
+        let mut anchor = rows.last().unwrap().anchor;
+        for expected in rows.iter().rev().skip(1) {
+            anchor = cache.previous_anchor(&transcript, anchor, 60).unwrap();
             assert_eq!(anchor, expected.anchor);
         }
     }
