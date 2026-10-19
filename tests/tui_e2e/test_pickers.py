@@ -7,7 +7,6 @@ import os
 import pty
 import re
 import select
-import signal
 import struct
 import sys
 import termios
@@ -20,6 +19,7 @@ from tests.tui_e2e.support import (
     complete_logged_commands,
     display_width,
     frame_cursor,
+    reap,
     run_settled,
     welcome_ready,
 )
@@ -144,16 +144,9 @@ SKILL_EXPANSION_MARKER
         assert termios.tcgetattr(terminal_fd) == initial_terminal
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
-        os.close(terminal_fd)
+            reap(child_pid, terminal_fd)
+        else:
+            os.close(terminal_fd)
     entries = [
         json.loads(line)
         for path in session_dir.glob("*.jsonl")
@@ -308,16 +301,9 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
         assert b"SECRET_MUST_NOT_APPEAR" not in all_output
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
-        os.close(terminal_fd)
+            reap(child_pid, terminal_fd)
+        else:
+            os.close(terminal_fd)
     messages = [
         entry["message"]
         for path in session_dir.glob("*.jsonl")

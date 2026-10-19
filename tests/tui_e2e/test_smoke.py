@@ -187,16 +187,7 @@ def test_rust_tui_cross_language_smoke(
             pytest.fail(f"Rust TUI smoke test timed out; output={bytes(output)!r}")
     finally:
         if status is None:
-            try:
-                foreground_pgrp = os.tcgetpgrp(terminal_fd)
-                os.killpg(foreground_pgrp, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
+            reap(child_pid, terminal_fd)
 
     assert prompt_sent, bytes(output)
     assert quit_sent, bytes(output)

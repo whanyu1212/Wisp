@@ -6,7 +6,6 @@ import os
 import pty
 import re
 import select
-import signal
 import struct
 import sys
 import termios
@@ -19,6 +18,7 @@ from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
     frame_cursor,
+    reap,
     rendered_without_spacing,
     welcome_ready,
 )
@@ -422,18 +422,7 @@ for line in sys.stdin:
         assert termios.tcgetattr(terminal_fd) == initial_terminal
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            # Release the PTY before reaping: macOS can otherwise leave a killed
-            # child waiting for terminal teardown after a failed screen assertion.
-            os.close(terminal_fd)
-            os.waitpid(child_pid, 0)
+            reap(child_pid, terminal_fd)
         else:
             os.close(terminal_fd)
     commands = complete_logged_commands(command_log)
