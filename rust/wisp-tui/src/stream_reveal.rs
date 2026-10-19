@@ -39,6 +39,12 @@ const MARKER_HOLD_BYTES: usize = 160;
 const LINE_HOLD_BYTES: usize = 512;
 /// Waiting text past this many graphemes all counts as a full backlog.
 const BACKLOG_COUNT_LIMIT: usize = 4_096;
+/// Waiting text larger than this is a dump rather than a stream, such as a provider that
+/// sends a whole reply at once, so it is shown at once instead of falling behind.
+const DUMP_BYTES: usize = 16 * 1024;
+/// How far back into the shown paragraph inline markers are read, to bound the work per
+/// frame in a long paragraph.
+const PARAGRAPH_LOOKBACK_BYTES: usize = 4_096;
 
 /// The pace of the reply being revealed, carried from frame to frame.
 #[derive(Debug, Default)]
@@ -86,6 +92,12 @@ impl StreamPacer {
             .min(MAX_TICK);
         self.last_tick = Some(now);
 
+        if waiting.len() > DUMP_BYTES {
+            let all = waiting.len();
+            transcript.reveal(all);
+            *self = Self::default();
+            return true;
+        }
         let backlog = waiting.graphemes(true).take(BACKLOG_COUNT_LIMIT).count() as f64;
         let rate = (backlog / DRAIN_TIME.as_secs_f64()).max(MIN_GRAPHEMES_PER_SECOND);
         self.budget = (self.budget + rate * elapsed.as_secs_f64()).min(backlog);
@@ -195,7 +207,16 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     let paragraph_start = waiting[..end].rfind("\n\n").map(|blank| blank + 2);
     let shown_paragraph = match paragraph_start {
         Some(_) => "",
-        None => &shown[shown.rfind("\n\n").map_or(0, |blank| blank + 2)..],
+        None => {
+            let mut start = shown
+                .rfind("\n\n")
+                .map_or(0, |blank| blank + 2)
+                .max(shown.len().saturating_sub(PARAGRAPH_LOOKBACK_BYTES));
+            while !shown.is_char_boundary(start) {
+                start += 1;
+            }
+            &shown[start..]
+        }
     };
     let waiting_paragraph_start = paragraph_start.unwrap_or(0);
     let paragraph = format!(
@@ -218,7 +239,7 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     };
     let opener = waiting_paragraph_start + opener;
     let rest_of_paragraph = waiting[end..].split("\n\n").next().unwrap_or_default();
-    if let Some(close) = rest_of_paragraph.find(marker) {
+    if let Some(close) = find_closer(rest_of_paragraph, marker) {
         let closed = end + close + marker.len();
         if closed - opener <= MARKER_HOLD_BYTES {
             return closed;
@@ -229,6 +250,46 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     } else {
         opener
     }
+}
+
+/// Where `marker` next closes a span in `text`, skipping escaped markers and, for `**`
+/// and `~~`, markers inside a code span, as [`open_inline_marker`] reads them.
+fn find_closer(text: &str, marker: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let marker_byte = marker.as_bytes()[0];
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'\\' && marker != "`" {
+            index += 2;
+            continue;
+        }
+        let run = bytes[index..]
+            .iter()
+            .take_while(|next| **next == byte)
+            .count();
+        if byte == marker_byte && run == marker.len() {
+            return Some(index);
+        }
+        if byte == b'`' {
+            // Skip a code span: everything up to the next run of as many backticks.
+            let after = index + run;
+            let close = (after..bytes.len()).find(|start| {
+                bytes[*start..]
+                    .iter()
+                    .take_while(|next| **next == b'`')
+                    .count()
+                    == run
+                    && bytes[*start - 1] != b'`'
+            });
+            if let Some(close) = close {
+                index = close + run;
+                continue;
+            }
+        }
+        index += run;
+    }
+    None
 }
 
 /// The first inline span opened in `text` and not closed in it, as its marker and byte
@@ -418,6 +479,27 @@ mod tests {
             reveal_end("```rust\n", "let x = a ** b; ", 40, false),
             "let x = a ** b; ".len()
         );
+    }
+
+    #[test]
+    fn closer_skips_escapes_and_code() {
+        let escaped = "Use **bold \\** still** end ";
+        assert_eq!(
+            reveal_end("", escaped, 6, false),
+            "Use **bold \\** still**".len()
+        );
+        let coded = "Use **a `**` b** c ";
+        assert_eq!(reveal_end("", coded, 6, false), "Use **a `**` b**".len());
+    }
+
+    #[test]
+    fn dump_shows_at_once() {
+        let mut transcript = Transcript::default();
+        let dump = "word ".repeat(DUMP_BYTES / 4);
+        transcript.append_paced_message_delta(1, &dump);
+        assert!(StreamPacer::default().tick(&mut transcript, Instant::now()));
+        assert_eq!(shown(&transcript), dump);
+        assert!(transcript.unrevealed().is_none());
     }
 
     #[test]
