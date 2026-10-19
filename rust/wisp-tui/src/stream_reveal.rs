@@ -225,18 +225,30 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     );
     // Markers inside a fenced code block are literal, so read only the prose after the
     // last fence line, and none at all while a fence is still open.
+    // A fence closes only on its own delimiter, at least as long as the opener, as the
+    // renderer reads it.
     let mut prose_start = 0;
-    let mut in_fence = false;
+    let mut fence: Option<(u8, usize)> = None;
     let mut offset = 0;
     for line in paragraph.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_fence = !in_fence;
-            prose_start = offset + line.len();
+        let text = line.trim_end_matches('\n');
+        match fence {
+            Some((delimiter, length)) => {
+                if crate::markdown::is_closing_fence_line(text, delimiter, length) {
+                    fence = None;
+                    prose_start = offset + line.len();
+                }
+            }
+            None => {
+                if let Some(opened) = opening_fence(text) {
+                    fence = Some(opened);
+                    prose_start = offset + line.len();
+                }
+            }
         }
         offset += line.len();
     }
-    if in_fence {
+    if fence.is_some() {
         return end;
     }
     let Some((marker, opened_at)) = open_inline_marker(&paragraph[prose_start..]) else {
@@ -260,6 +272,20 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     } else {
         opener
     }
+}
+
+/// The delimiter and length of the code fence that `line` opens, if it opens one.
+fn opening_fence(line: &str) -> Option<(u8, usize)> {
+    let candidate = line.trim_start_matches([' ', '\t', '>']);
+    let delimiter = *candidate.as_bytes().first()?;
+    if !matches!(delimiter, b'`' | b'~') {
+        return None;
+    }
+    let length = candidate
+        .bytes()
+        .take_while(|byte| *byte == delimiter)
+        .count();
+    (length >= 3).then_some((delimiter, length))
 }
 
 /// Where `marker` next closes a span in `text`, skipping escaped markers and, for `**`
@@ -489,6 +515,10 @@ mod tests {
             reveal_end("```\ncode\n```\n", "Use **bold ", 20, false),
             "Use ".len()
         );
+        // A shorter or different fence line inside a block does not close it.
+        let inner = "a **b c ";
+        assert_eq!(reveal_end("````md\n```\n", inner, 20, false), inner.len());
+        assert_eq!(reveal_end("```\n~~~\n", inner, 20, false), inner.len());
         // Markers in a fenced code block are literal.
         assert_eq!(
             reveal_end("```rust\n", "let x = a ** b; ", 40, false),

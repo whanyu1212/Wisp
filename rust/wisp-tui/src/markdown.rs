@@ -1082,7 +1082,7 @@ fn fenced_code_is_closed(source: &str, block: Range<usize>, segments: &[CodeText
         .is_some_and(|line| is_closing_fence_line(line, delimiter, opening_len))
 }
 
-fn is_closing_fence_line(line: &str, delimiter: u8, opening_len: usize) -> bool {
+pub(crate) fn is_closing_fence_line(line: &str, delimiter: u8, opening_len: usize) -> bool {
     let line = line.trim_end_matches('\r');
     let candidate = line.trim_start_matches([' ', '\t', '>']);
     let delimiter_len = candidate
