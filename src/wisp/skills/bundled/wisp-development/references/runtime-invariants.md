@@ -30,6 +30,9 @@ Later slices must preserve:
   request-creation path can yield that failure with no `ProviderResponseStarted`;
   `_ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
   successful completion still require a prior start.
+- Tool-call IDs are unique within one response: `ProviderResponseLifecycle`
+  rejects a repeat as `ProviderProtocolError` before any call runs. IDs may be
+  reused across responses (Google's position-based fallback IDs do).
 - An opened model message gets exactly one `MessageCompleted` before its turn's
   terminal events. A typed failure, a raised overflow, or any other error the
   provider raises after its start closes it with `finish_reason="error"` and the
@@ -60,26 +63,24 @@ Do not freeze these as compatibility contracts:
 When the run's cancellation token cancels a tool batch, sequential and prepared
 execution settle unfinished calls by distinct `call_id` within the batch:
 a real result when available, or an interrupted result. `ToolBatchSettlement`
-tracks requested and published IDs, not occurrences. Duplicate IDs within one
-response are deduplicated during settlement: a published result for an ID
-suppresses settlement of later occurrences, even if a later occurrence was
-requested. This is not a per-occurrence guarantee for duplicate IDs. Reusing an
-ID across separate batches does not share settlement state.
+tracks requested and published IDs. IDs are unique within a batch, because the
+provider response lifecycle rejects a response that repeats one before any call
+runs, so this is a per-call guarantee. Reusing an ID across separate batches
+does not share settlement state.
 
 Focused coverage includes `test_sequential_cancellation_settles_every_requested_call`,
 `test_cancel_settles_blocked_sequential_batch`, and
-`test_cancel_skips_already_settled_duplicate`.
+`test_repeated_call_id_in_one_response_runs_no_tool`.
 
-Apart from the duplicate-ID qualification above, calls can still be left
-unsettled in two cases: a cancellation the run did not request (the caller's
+Calls can still be left unsettled in two cases: a cancellation the run did not request (the caller's
 own scope, timeout, or task cancellation) propagates
 without settlement, and an executor error propagates after earlier calls were
 requested. The harness repairs those interrupted calls before the next provider
 request.
 
 `tests/conftest.py` applies `assert_turn_invariants` (which includes
-`assert_turn_terminals`) and `assert_tool_result_pairing` to every loop stream
-a test drives. Opt out only with `loop_invariants_exempt(reason=...)`. Helpers
+`assert_turn_terminals`), `assert_tool_result_pairing`, and
+`assert_message_pairing` to every loop stream a test drives. Opt out only with `loop_invariants_exempt(reason=...)`. Helpers
 split the rules on purpose:
 
 - `assert_turn_terminals` — every started turn has exactly one terminal.

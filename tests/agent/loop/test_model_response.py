@@ -175,6 +175,20 @@ def test_lifecycle_rejects_mismatched_finish_reason_and_tools() -> None:
         with_calls.finish()
 
 
+def test_lifecycle_rejects_a_call_id_repeated_within_one_response() -> None:
+    lifecycle = ProviderResponseLifecycle()
+    lifecycle.start(ProviderResponseStarted(model="test"))
+    lifecycle.add_tool_call(ToolCall(call_id="call-1", name="bash", arguments={}))
+    with pytest.raises(ProviderProtocolError, match="'call-1' more than once"):
+        lifecycle.add_tool_call(ToolCall(call_id="call-1", name="bash", arguments={"n": 2}))
+
+    # Uniqueness is per response: the next response may reuse the ID.
+    later = ProviderResponseLifecycle()
+    later.start(ProviderResponseStarted(model="test"))
+    later.add_tool_call(ToolCall(call_id="call-1", name="bash", arguments={}))
+    assert [call.call_id for call in later.tool_calls] == ["call-1"]
+
+
 def test_lifecycle_failed_response_does_not_require_start() -> None:
     lifecycle = ProviderResponseLifecycle()
     lifecycle.complete(ProviderResponseFailed(message="upstream failed"))

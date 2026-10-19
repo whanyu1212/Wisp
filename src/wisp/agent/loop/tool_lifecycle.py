@@ -323,9 +323,8 @@ class ToolBatchSettlement:
     results they publish. When a batch stops early, `settle_unfinished()` closes
     whatever they left open, so the guarantee holds however the calls were run.
 
-    Calls are tracked by call ID. A provider may repeat an ID within one response;
-    such a repeat is settled once, and a later occurrence's lifecycle replaces the
-    earlier one.
+    Calls are tracked by call ID, which is unique within a batch: the provider
+    response lifecycle rejects a response that repeats one before any call runs.
 
     Args:
         tool_calls (Sequence[ToolCall]): Requested calls in model order.

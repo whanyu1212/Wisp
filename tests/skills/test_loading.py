@@ -150,7 +150,7 @@ def test_bundled_architecture_guidance_tracks_protocol_and_cancellation_contract
 
 
 @pytest.mark.parametrize("resource", ["architecture.md", "runtime-invariants.md"])
-def test_bundled_cancellation_guidance_qualifies_duplicate_ids(resource: str) -> None:
+def test_bundled_cancellation_guidance_states_ids_are_unique_per_batch(resource: str) -> None:
     guidance = " ".join(
         (bundled_skills_root() / "wisp-development/references" / resource)
         .read_text(encoding="utf-8")
@@ -158,11 +158,10 @@ def test_bundled_cancellation_guidance_qualifies_duplicate_ids(resource: str) ->
     )
 
     assert "settle unfinished calls by distinct `call_id` within the batch" in guidance
-    assert "deduplicated during settlement" in guidance
-    assert "a published result for an ID suppresses settlement of later occurrences" in guidance
-    assert "even if a later occurrence was requested" in guidance
-    assert "not a per-occurrence guarantee for duplicate IDs" in guidance
+    assert "rejects a response that repeats one before any call runs" in guidance
     assert "Reusing an ID across separate batches does not share settlement state" in guidance
+    # Repeats no longer reach settlement, so the old deduplication contract must be gone.
+    assert "deduplicated during settlement" not in guidance
 
 
 def test_package_ships_only_the_wisp_development_skill(tmp_path: Path) -> None:
