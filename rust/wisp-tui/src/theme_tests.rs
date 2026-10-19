@@ -182,6 +182,36 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
 }
 
 #[test]
+fn chip_fill_reads_everywhere() {
+    for theme in crate::theme::themes() {
+        let chip = theme.palette(false).chip();
+        let (Some(fg), Some(bg)) = (chip.fg, chip.bg) else {
+            panic!("{} chip has no fill", theme.name);
+        };
+        assert!(
+            crate::theme::contrast_ratio(fg, bg) >= 4.5,
+            "{} chip contrast",
+            theme.name
+        );
+        let background = theme.palette(false).background;
+        assert!(
+            crate::theme::contrast_ratio(bg, background) >= 1.25,
+            "{} chip fill",
+            theme.name
+        );
+    }
+}
+
+#[test]
+fn no_color_chip_reverses() {
+    for theme in crate::theme::themes() {
+        let chip = theme.palette(true).chip();
+        assert_eq!((chip.fg, chip.bg), (None, None), "{}", theme.name);
+        assert!(chip.add_modifier.contains(Modifier::REVERSED));
+    }
+}
+
+#[test]
 fn preferences_round_trip_dark_history_and_preserve_unrelated_fields() {
     let home = TestHome::new();
     let store = home.store();

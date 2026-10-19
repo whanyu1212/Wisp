@@ -91,9 +91,15 @@ during intervening tool calls, and the working row returns after the final resul
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.
 Compaction keeps its separate activity row. Each tool card's marker shows its state by shape as well
-as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. While the
-run is active, an in-progress card's marker is an animated braille spinner and active shell calls
-say `Running`; finished and approval-waiting cards stay steady. Because the spinner changes shape
+as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. The marker
+is followed by a tinted chip naming the tool (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
+`Process`, or `MCP` followed by `server/tool`), padded so every command or path starts in the same
+column; monochrome mode draws the chip in reverse video. A state the marker alone does not name ends
+the row as a muted note, such as `· awaiting approval` or `· denied`. The first result row under an
+expanded card starts with `└`. While browsing with `F6`, the selected card looks like the rest and
+ends with `(→ to expand)` or `(← to collapse)`. While the
+run is active, an in-progress card's marker is an animated braille spinner; finished and
+approval-waiting cards stay steady. Because the spinner changes shape
 rather than brightness, it reads the same in monochrome mode. An in-progress card from a resumed
 session shows a steady `●`. The footer keeps a static status label. A scrollbar on the right shows
 the approximate position in retained history without laying out every offscreen row. Keyboard

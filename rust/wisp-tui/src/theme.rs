@@ -75,6 +75,27 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// A tinted label chip, such as a tool card's `Read`: accent text on a faint wash
+    /// of the accent. The wash is a colour of its own, so it stays visible over a glass
+    /// theme's terminal background. Where the accent is too faint on its wash, the text
+    /// moves toward the foreground until it reads; monochrome palettes reverse the
+    /// row's colours instead.
+    pub fn chip(self) -> Style {
+        const TINT: f64 = 0.2;
+        if self.monochrome {
+            return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        }
+        let fill = mix(self.accent, self.background, TINT);
+        let text = (0..=20)
+            .map(|step| mix(self.foreground, self.accent, f64::from(step) / 20.0))
+            .find(|text| contrast_ratio(*text, fill) >= 4.5)
+            .unwrap_or(self.foreground);
+        Style::default()
+            .fg(text)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn tool_argument(self) -> Style {
         Style::default().fg(self.secondary)
     }
@@ -252,6 +273,17 @@ pub(crate) fn contrast_ratio(foreground: Color, background: Color) -> f64 {
     let a = luminance(foreground);
     let b = luminance(background);
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// Blend `share` of `color` into `base`. Colours other than RGB come back unchanged.
+fn mix(color: Color, base: Color, share: f64) -> Color {
+    let (Color::Rgb(r, g, b), Color::Rgb(base_r, base_g, base_b)) = (color, base) else {
+        return color;
+    };
+    let channel = |value: u8, base: u8| {
+        (f64::from(base) + (f64::from(value) - f64::from(base)) * share).round() as u8
+    };
+    Color::Rgb(channel(r, base_r), channel(g, base_g), channel(b, base_b))
 }
 
 /// Find the nearest readable gray rather than encoding a palette-specific fix.

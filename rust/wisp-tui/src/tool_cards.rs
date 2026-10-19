@@ -15,6 +15,11 @@ pub const INTERRUPTED_TOOL_RESULT_TEXT: &str =
     "Tool call interrupted before completion; execution outcome is unknown.";
 const BUILTIN_ACTION_MAX_CHARS: usize = 200;
 const GENERIC_ACTION_MAX_CHARS: usize = 160;
+/// An unknown tool's name is its card label, so keep it short enough to scan.
+const TOOL_LABEL_MAX_CHARS: usize = 32;
+/// Card labels pad to one width, the longest built-in label (`Process`), so the text
+/// after every chip starts in the same column.
+const CHIP_LABEL_CHARS: usize = 7;
 const GENERIC_VALUE_MAX_CHARS: usize = 64;
 const GENERIC_MAX_ITEMS: usize = 8;
 const GENERIC_ITEMS_KEY: &str = "\0wisp.items";
@@ -436,17 +441,61 @@ impl ToolCardSnapshot {
         self.apply_result(result)
     }
 
+    /// The short tool name that labels the card, such as `Bash` or `Search`. The
+    /// status marker carries the state. An MCP tool is labelled `MCP`, with the server
+    /// and tool it calls after the label; another unknown tool by its own name.
     pub fn action_label(&self) -> String {
-        let verb = action_verb(&self.name, self.status);
-        if known_tool(&self.name) {
-            verb.to_owned()
-        } else {
-            format!("{verb} {}", self.name)
+        match self.name.as_str() {
+            "bash" => "Bash".into(),
+            "read" => "Read".into(),
+            "grep" | "find" => "Search".into(),
+            "ls" => "List".into(),
+            "edit" => "Edit".into(),
+            "write" => "Write".into(),
+            _ if self.mcp_target().is_some() => "MCP".into(),
+            name => clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
         }
     }
 
+    /// The server and remote tool an MCP card calls, such as
+    /// `github/create_pull_request`. Wisp names MCP tools `mcp__{server}__{tool}`, and
+    /// server names hold no `_`, so the first `__` after the prefix ends the server.
+    pub fn mcp_target(&self) -> Option<String> {
+        let (server, tool) = self.name.strip_prefix("mcp__")?.split_once("__")?;
+        if server.is_empty() || tool.is_empty() {
+            return None;
+        }
+        Some(clip_chars(
+            &one_line(&format!("{server}/{tool}")),
+            TOOL_LABEL_MAX_CHARS * 2,
+        ))
+    }
+
+    /// The state the action line spells out because its marker alone does not: `?`
+    /// needs saying what it waits for, and `⊘` stands for both denial and
+    /// cancellation.
+    pub fn status_note(&self) -> Option<&'static str> {
+        match self.status {
+            ToolStatus::AwaitingApproval => Some("awaiting approval"),
+            ToolStatus::Denied => Some("denied"),
+            ToolStatus::Cancelled => Some("cancelled"),
+            ToolStatus::Requested | ToolStatus::Running | ToolStatus::Done | ToolStatus::Error => {
+                None
+            }
+        }
+    }
+
+    /// The label padded to the shared chip width.
+    pub fn chip_label(&self) -> String {
+        pad_chip_label(self.action_label())
+    }
+
     pub fn action(&self) -> String {
-        let mut action = self.action_label();
+        let mut action = self.chip_label();
+        if let Some(target) = self.mcp_target() {
+            action.push_str("  ");
+            action.push_str(&target);
+        }
         if !self.arguments_available {
             action.push_str("  (arguments unavailable)");
         } else if !self.action_arguments.is_empty() {
@@ -766,30 +815,41 @@ impl ProcessCardSnapshot {
     }
 
     pub fn action_label(&self) -> &'static str {
+        "Process"
+    }
+
+    /// The state the action line spells out beyond what its marker says. Plain
+    /// running, completion and failure need no words; the marker shows them.
+    pub fn status_note(&self) -> Option<&'static str> {
         match self.display_state {
-            ProcessDisplayState::PollAwaitingApproval => "Process poll awaiting approval",
-            ProcessDisplayState::CancelAwaitingApproval => "Process cancellation awaiting approval",
-            ProcessDisplayState::Polling => "Polling process",
-            ProcessDisplayState::Cancelling => "Cancelling process",
-            ProcessDisplayState::Running => "Running process",
-            ProcessDisplayState::Completed => "Process completed",
-            ProcessDisplayState::Failed => "Process failed",
-            ProcessDisplayState::TimedOut => "Process timed out",
-            ProcessDisplayState::Cancelled => "Process cancelled",
-            ProcessDisplayState::PollDenied => "Process poll denied",
-            ProcessDisplayState::CancelDenied => "Process cancellation denied",
-            ProcessDisplayState::PollInterrupted => "Process poll interrupted",
-            ProcessDisplayState::CancelInterrupted => "Process cancellation interrupted",
-            ProcessDisplayState::PollFailed => "Process poll failed",
-            ProcessDisplayState::CancelFailed => "Process cancellation failed",
-            ProcessDisplayState::Observed => "Observed process",
+            ProcessDisplayState::Running
+            | ProcessDisplayState::Completed
+            | ProcessDisplayState::Failed => None,
+            ProcessDisplayState::PollAwaitingApproval => Some("poll awaiting approval"),
+            ProcessDisplayState::CancelAwaitingApproval => Some("cancellation awaiting approval"),
+            ProcessDisplayState::Polling => Some("polling"),
+            ProcessDisplayState::Cancelling => Some("cancelling"),
+            ProcessDisplayState::TimedOut => Some("timed out"),
+            ProcessDisplayState::Cancelled => Some("cancelled"),
+            ProcessDisplayState::PollDenied => Some("poll denied"),
+            ProcessDisplayState::CancelDenied => Some("cancellation denied"),
+            ProcessDisplayState::PollInterrupted => Some("poll interrupted"),
+            ProcessDisplayState::CancelInterrupted => Some("cancellation interrupted"),
+            ProcessDisplayState::PollFailed => Some("poll failed"),
+            ProcessDisplayState::CancelFailed => Some("cancellation failed"),
+            ProcessDisplayState::Observed => Some("observed"),
         }
     }
 
+    /// The label padded to the shared chip width.
+    pub fn chip_label(&self) -> String {
+        pad_chip_label(self.action_label().to_owned())
+    }
+
     pub fn action(&self) -> String {
-        let state = self.action_label();
+        let label = self.chip_label();
         format!(
-            "{state}  {} · {} call{} · {} poll{}",
+            "{label}  {} · {} call{} · {} poll{}",
             clip_chars(
                 &one_line(identity_for_display(&self.process_id)),
                 PROCESS_ID_DISPLAY_MAX_CHARS,
@@ -1089,83 +1149,6 @@ fn preferred_result_detail(result: &ToolResultInput, preview: &str, status: Tool
     preview.to_owned()
 }
 
-fn action_verb(name: &str, status: ToolStatus) -> &'static str {
-    let words = match name {
-        "bash" => [
-            "Running",
-            "Awaiting approval to run",
-            "Running",
-            "Ran",
-            "Failed to run",
-            "Denied running",
-            "Cancelled running",
-        ],
-        "read" => [
-            "Read",
-            "Awaiting approval to read",
-            "Reading",
-            "Read",
-            "Failed to read",
-            "Denied reading",
-            "Cancelled reading",
-        ],
-        "grep" | "find" => [
-            "Search",
-            "Awaiting approval to search",
-            "Searching",
-            "Searched",
-            "Failed to search",
-            "Denied searching",
-            "Cancelled searching",
-        ],
-        "ls" => [
-            "List",
-            "Awaiting approval to list",
-            "Listing",
-            "Listed",
-            "Failed to list",
-            "Denied listing",
-            "Cancelled listing",
-        ],
-        "edit" => [
-            "Edit",
-            "Awaiting approval to edit",
-            "Editing",
-            "Edited",
-            "Failed to edit",
-            "Denied editing",
-            "Cancelled editing",
-        ],
-        "write" => [
-            "Write",
-            "Awaiting approval to write",
-            "Writing",
-            "Wrote",
-            "Failed to write",
-            "Denied writing",
-            "Cancelled writing",
-        ],
-        _ => [
-            "Call",
-            "Awaiting approval to call",
-            "Calling",
-            "Called",
-            "Failed to call",
-            "Denied calling",
-            "Cancelled calling",
-        ],
-    };
-    words[match status {
-        ToolStatus::Requested => 0,
-        ToolStatus::AwaitingApproval => 1,
-        ToolStatus::Running => 2,
-        ToolStatus::Done => 3,
-        ToolStatus::Error => 4,
-        ToolStatus::Denied => 5,
-        ToolStatus::Cancelled => 6,
-    }]
-}
-
 fn known_tool(name: &str) -> bool {
     matches!(
         name,
@@ -1333,6 +1316,12 @@ fn bounded_reason(reason: &str) -> String {
 
 fn normalize_newlines(source: &str) -> String {
     source.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn pad_chip_label(mut label: String) -> String {
+    let padding = CHIP_LABEL_CHARS.saturating_sub(label.chars().count());
+    label.push_str(&" ".repeat(padding));
+    label
 }
 
 fn one_line(value: &str) -> String {
@@ -1516,9 +1505,43 @@ mod tests {
     }
 
     #[test]
-    fn requested_bash_action_uses_active_wording() {
-        assert_eq!(action_verb("bash", ToolStatus::Requested), "Running");
-        assert_eq!(action_verb("bash", ToolStatus::Done), "Ran");
+    fn card_labels_stay_short() {
+        let mut transcript = crate::transcript::Transcript::default();
+        let call = |name: &str| ToolCallInput {
+            call_id: name.into(),
+            name: name.into(),
+            arguments: serde_json::json!({}),
+            detail_source: ToolDetailSource::None,
+        };
+        for (name, label) in [("bash", "Bash"), ("grep", "Search"), ("find", "Search")] {
+            let id = transcript.observe_tool_call(call(name));
+            let card = transcript.entry(id).unwrap().tool_card().unwrap();
+            assert_eq!(card.action_label(), label);
+            assert_eq!(card.chip_label().len(), CHIP_LABEL_CHARS);
+            assert_eq!(card.status_note(), None);
+        }
+        let long = "extension_".repeat(5);
+        let id = transcript.observe_approval_requested(call(&long));
+        let card = transcript.entry(id).unwrap().tool_card().unwrap();
+        assert_eq!(card.action_label().chars().count(), TOOL_LABEL_MAX_CHARS);
+        assert_eq!(card.status_note(), Some("awaiting approval"));
+    }
+
+    #[test]
+    fn mcp_chip_names_its_target() {
+        let mut transcript = crate::transcript::Transcript::default();
+        let id = transcript.observe_tool_call(ToolCallInput {
+            call_id: "mcp".into(),
+            name: "mcp__github__create_pull_request".into(),
+            arguments: serde_json::json!({"title": "Fix"}),
+            detail_source: ToolDetailSource::None,
+        });
+        let card = transcript.entry(id).unwrap().tool_card().unwrap();
+        assert_eq!(card.action_label(), "MCP");
+        assert_eq!(
+            card.action(),
+            "MCP      github/create_pull_request  title=Fix"
+        );
     }
 
     #[test]
