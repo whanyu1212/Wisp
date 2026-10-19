@@ -715,12 +715,6 @@ def test_tool_round_not_segmented_when_auto_compaction_is_off(
     assert not any(isinstance(event, CompactionStarted) for event in events)
 
 
-@pytest.mark.loop_invariants_exempt(
-    reason=(
-        "A boundary overflow publishes context.overflow after the completed turn's "
-        "terminal; whether that is allowed is undecided (HY-201)."
-    )
-)
 @pytest.mark.parametrize("operation_id", [None, "prompt-1"])
 def test_stops_when_truncation_cannot_shrink_active_turn(
     tmp_path: Path,
@@ -807,14 +801,16 @@ def test_stops_when_truncation_cannot_shrink_active_turn(
         (event.turn, event.outcome) for event in first_events if isinstance(event, TurnCompleted)
     ] == [(1, "completed")]
     assert not session.read_context_messages()
-    # The rollback runs before the loop publishes the overflow, so its records land
-    # on the restored branch that later prompts continue from.
+    # The rollback runs before the loop publishes the error, so it lands on the
+    # restored branch that later prompts continue from. No request was sent, so no
+    # provider-rejection context.overflow is recorded.
     active_event_types = [
         entry.event.payload["type"]
         for entry in session.read_active_path()
         if isinstance(entry, EventSessionEntry)
     ]
-    assert active_event_types[-2:] == ["context.overflow", "error"]
+    assert active_event_types[-1:] == ["error"]
+    assert "context.overflow" not in active_event_types
 
     retry_events = anyio.run(run_retry)
     assert len(provider.calls) == 2

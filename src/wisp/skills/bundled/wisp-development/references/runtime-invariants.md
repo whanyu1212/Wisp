@@ -15,6 +15,9 @@ Later slices must preserve:
 - One started turn → exactly one terminal `TurnCompleted` (`completed` |
   `failed` | `cancelled`). A request-boundary hook or overflow failure after
   that terminal must not emit a second one.
+- `ContextOverflow` is turn-scoped: it reports a provider rejecting the open
+  turn's request. A boundary overflow after the turn completed sent no request
+  and publishes only `ErrorEvent`.
 - Unstarted turns (including nonzero `turn_offset` before the first
   `TurnStarted`) emit no matching `TurnCompleted`.
 - Each tool execution occurrence has one `ToolExecutionEnded` and one

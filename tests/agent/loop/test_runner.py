@@ -23,6 +23,7 @@ from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
+    RequestBoundarySnapshot,
 )
 from wisp.events import (
     BillableTokenUsage,
@@ -905,6 +906,56 @@ def test_provider_error_before_the_response_starts_opens_no_message() -> None:
         "error",
         "turn.completed",
     ]
+
+
+def test_boundary_overflow_after_a_completed_turn_publishes_only_the_error() -> None:
+    """An overflow raised while preparing the next request sent no request.
+
+    `ContextOverflow` reports a provider rejecting an open turn's request, so it is
+    not published here; the completed turn keeps its single terminal.
+    """
+
+    class OverflowingBoundary:
+        async def before_next_request(
+            self, *, snapshot: RequestBoundarySnapshot
+        ) -> RequestBoundaryDecision:
+            del snapshot
+            raise ContextOverflowError("next request would exceed the context window")
+
+    call = ToolCall(call_id="call-1", name="bash", arguments={})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(call,), finish_reason="tool_calls"
+                ),
+            ]
+        ]
+    )
+    events: list[agent_loop_module.AgentLoopEvent] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(
+                provider=provider,
+                tool_executor=RecordingToolExecutor(),
+                request_boundary_hook=OverflowingBoundary(),
+            ),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ContextOverflowError, match="next request would exceed"):
+        anyio.run(run)
+
+    assert len(provider.calls) == 1
+    assert not any(isinstance(event, ContextOverflow) for event in events)
+    assert [event.type for event in events][-2:] == ["turn.completed", "error"]
+    assert [
+        (event.turn, event.outcome) for event in events if isinstance(event, TurnCompleted)
+    ] == [(1, "completed")]
 
 
 def test_cancel_at_turn_start_skips_provider_request() -> None:
