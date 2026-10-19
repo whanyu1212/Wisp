@@ -5,7 +5,6 @@ import fcntl
 import os
 import pty
 import select
-import signal
 import struct
 import sys
 import termios
@@ -17,6 +16,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    reap,
     welcome_ready,
 )
 from wisp import __version__
@@ -205,13 +205,6 @@ for line in sys.stdin:
         assert termios.tcgetattr(terminal_fd) == initial_terminal
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
-        os.close(terminal_fd)
+            reap(child_pid, terminal_fd)
+        else:
+            os.close(terminal_fd)

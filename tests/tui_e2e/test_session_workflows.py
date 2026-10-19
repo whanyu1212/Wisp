@@ -7,7 +7,6 @@ import os
 import pty
 import re
 import select
-import signal
 import struct
 import sys
 import termios
@@ -18,6 +17,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
+    reap,
     welcome_ready,
 )
 from wisp import __version__
@@ -389,15 +389,7 @@ for line in sys.stdin:
             )
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
+            reap(child_pid, terminal_fd)
 
     commands = [json.loads(line) for line in command_log.read_text().splitlines()]
     workflows = [

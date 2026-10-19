@@ -6,7 +6,6 @@ import json
 import os
 import pty
 import select
-import signal
 import struct
 import sys
 import termios
@@ -15,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing, welcome_ready
+from tests.tui_e2e.support import reap, rendered_without_spacing, welcome_ready
 
 
 @pytest.mark.process
@@ -186,16 +185,9 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
             assert termios.tcgetattr(terminal_fd) == initial_terminal
         finally:
             if status is None:
-                try:
-                    os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
-                try:
-                    os.kill(child_pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                os.waitpid(child_pid, 0)
-            os.close(terminal_fd)
+                reap(child_pid, terminal_fd)
+            else:
+                os.close(terminal_fd)
 
     run_selection(restart=False, picker_only=True)
     run_selection(restart=False)

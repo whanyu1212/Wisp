@@ -5,7 +5,6 @@ import fcntl
 import os
 import pty
 import select
-import signal
 import struct
 import sys
 import termios
@@ -16,6 +15,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
+    reap,
     rendered_without_spacing,
     welcome_ready,
 )
@@ -282,15 +282,7 @@ for line in sys.stdin:
             pytest.fail(f"Rust TUI tool-card test timed out; output={bytes(output)!r}")
     finally:
         if status is None:
-            try:
-                os.killpg(os.tcgetpgrp(terminal_fd), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(child_pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.waitpid(child_pid, 0)
+            reap(child_pid, terminal_fd)
 
     assert prompt_sent, bytes(output)
     assert browse_sent, bytes(output)
