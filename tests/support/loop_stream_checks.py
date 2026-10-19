@@ -26,7 +26,11 @@ from typing import Any
 import anyio
 import pytest
 
-from tests.support.agent_runtime import assert_tool_result_pairing, assert_turn_invariants
+from tests.support.agent_runtime import (
+    assert_message_pairing,
+    assert_tool_result_pairing,
+    assert_turn_invariants,
+)
 
 type RunAgentLoop = Callable[..., AsyncGenerator[Any, None]]
 type ViolationSink = Callable[[str], None]
@@ -67,11 +71,13 @@ def assert_loop_stream_invariants(events: Sequence[object]) -> None:
 
     Raises:
         AssertionError: A started turn lacks exactly one terminal, turns are out of
-            order or contain events outside them, or tool results are not paired.
+            order or contain events outside them, tool results are not paired, or
+            an opened message does not close exactly once before its turn ends.
     """
 
     assert_turn_invariants(events)
     assert_tool_result_pairing(events)
+    assert_message_pairing(events)
 
 
 def checked_run_agent_loop(
