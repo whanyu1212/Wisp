@@ -63,8 +63,8 @@ Providers send replies in bursts, so the TUI reveals streamed text at an even pa
 each burst arrives. Text shows a word at a time, about a tenth of a second behind the stream, and
 an unfinished `**bold**`, `` `code` `` or `~~strike~~` span, table row, or code fence line waits
 until it is complete, so raw markers do not flash before the formatting applies. When the stream
-pauses or the reply ends, waiting text is shown, and a tool card or prompt that follows the reply
-first shows all of it. Set `WISP_TUI_STREAM_PACING=0` to show text as it arrives. To measure a
+pauses or the reply ends, waiting text is shown, and a tool card or prompt that follows the reply,
+the end of the run, or a closed connection first shows all of it. Set `WISP_TUI_STREAM_PACING=0` to show text as it arrives. To measure a
 provider's stream, set `WISP_TUI_STREAM_TRACE` to a file path: each text delta appends a
 tab-separated line of milliseconds since the first delta, milliseconds since the previous one,
 and its size in bytes.

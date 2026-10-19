@@ -809,6 +809,9 @@ impl Transcript {
     }
 
     pub fn finish_active_response(&mut self) {
+        // A finished run shows its whole reply, so the idle footer never sits beside a
+        // reply that is still being revealed.
+        self.flush_reveal();
         self.completed_response = None;
         self.started_turn = None;
         let entry_id = self
@@ -817,14 +820,7 @@ impl Transcript {
             .map(|(_, entry_id)| entry_id)
             .or_else(|| self.pending_response.take());
         if let Some(entry_id) = entry_id {
-            // A reply still revealing finishes its reveal first; nothing follows it yet,
-            // and whatever does will flush it.
-            let entry = self.entry_mut(entry_id);
-            if entry.unrevealed.is_empty() {
-                self.set_entry_state(entry_id, TranscriptEntryState::Complete);
-            } else {
-                entry.completes_after_reveal = true;
-            }
+            self.set_entry_state(entry_id, TranscriptEntryState::Complete);
         }
     }
 

@@ -190,16 +190,35 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
         }
     }
 
-    let Some((marker, opened_at)) = open_inline_marker(&line) else {
+    // An inline span can continue across a soft line break, so look back to the start of
+    // the paragraph rather than the line.
+    let paragraph_start = waiting[..end].rfind("\n\n").map(|blank| blank + 2);
+    let shown_paragraph = match paragraph_start {
+        Some(_) => "",
+        None => &shown[shown.rfind("\n\n").map_or(0, |blank| blank + 2)..],
+    };
+    let waiting_paragraph_start = paragraph_start.unwrap_or(0);
+    let paragraph = format!(
+        "{shown_paragraph}{}",
+        &waiting[waiting_paragraph_start..end]
+    );
+    // Markers inside a fenced code block are literal.
+    if paragraph.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("```") || trimmed.starts_with("~~~")
+    }) {
+        return end;
+    }
+    let Some((marker, opened_at)) = open_inline_marker(&paragraph) else {
         return end;
     };
     // The opener is already on screen, so holding the rest of the span gains nothing.
-    let Some(opener) = opened_at.checked_sub(shown_line.len()) else {
+    let Some(opener) = opened_at.checked_sub(shown_paragraph.len()) else {
         return end;
     };
-    let opener = waiting_line_start + opener;
-    let rest_of_line = waiting[end..].split('\n').next().unwrap_or_default();
-    if let Some(close) = rest_of_line.find(marker) {
+    let opener = waiting_paragraph_start + opener;
+    let rest_of_paragraph = waiting[end..].split("\n\n").next().unwrap_or_default();
+    if let Some(close) = rest_of_paragraph.find(marker) {
         let closed = end + close + marker.len();
         if closed - opener <= MARKER_HOLD_BYTES {
             return closed;
@@ -212,10 +231,10 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
     }
 }
 
-/// The first inline span opened in `line` and not closed in it, as its marker and byte
+/// The first inline span opened in `text` and not closed in it, as its marker and byte
 /// offset. Only `**`, `~~` and `` ` `` count: a single `*` or `_` is too often literal.
-fn open_inline_marker(line: &str) -> Option<(&'static str, usize)> {
-    let bytes = line.as_bytes();
+fn open_inline_marker(text: &str) -> Option<(&'static str, usize)> {
+    let bytes = text.as_bytes();
     let mut open: Option<(&'static str, usize)> = None;
     let mut index = 0;
     while index < bytes.len() {
@@ -381,6 +400,27 @@ mod tests {
     }
 
     #[test]
+    fn span_continues_across_soft_break() {
+        // A span opened on an earlier line is closed here, not opened.
+        assert_eq!(
+            reveal_end("Some **bold\n", "text** here ", 20, false),
+            "text** here ".len()
+        );
+        // An opener before a soft break still waits for its closer.
+        assert_eq!(reveal_end("", "Use **bold\ntext ", 20, false), "Use ".len());
+        // A blank line ends the paragraph, and the span with it.
+        assert_eq!(
+            reveal_end("", "a **b\n\nc d ", 20, false),
+            "a **b\n\nc d ".len()
+        );
+        // Markers in a fenced code block are literal.
+        assert_eq!(
+            reveal_end("```rust\n", "let x = a ** b; ", 40, false),
+            "let x = a ** b; ".len()
+        );
+    }
+
+    #[test]
     fn unclosed_code_waits() {
         assert_eq!(reveal_end("", "Run `cargo te", 20, false), "Run ".len());
         assert_eq!(reveal_end("", "a `**` b ", 20, false), "a `**` b ".len());
@@ -424,19 +464,17 @@ mod tests {
     }
 
     #[test]
-    fn finished_run_drains_tail() {
+    fn finished_run_shows_tail() {
         let mut transcript = Transcript::default();
         transcript.append_paced_message_delta(1, "The last reply of the run ");
         transcript.finish_active_response();
-        assert!(transcript.unrevealed().is_some());
-        let mut pacer = StreamPacer::default();
-        run_frames(&mut transcript, &mut pacer, Instant::now(), 20);
         let entry = &transcript.entries()[0];
         assert_eq!(entry.content, "The last reply of the run ");
         assert_eq!(
             entry.state,
             crate::transcript::TranscriptEntryState::Complete
         );
+        assert!(transcript.unrevealed().is_none());
     }
 
     #[test]

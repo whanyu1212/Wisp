@@ -1968,6 +1968,9 @@ impl LiveUi {
         limit: usize,
         error: Option<String>,
     ) -> Result<LoopControl, Error> {
+        // Reply text that arrived before the stream ended belongs on the final screen and
+        // in the partial-response diagnostic, even though no frame revealed it yet.
+        self.state.transcript.flush_reveal();
         let control = self
             .dispatch(UiAction::TransportClosed { error }, writer, limit)
             .await?;
@@ -6836,6 +6839,54 @@ mod tests {
         // A closed transport stays terminal.
         assert!(rendered.contains("backend stopped"), "{rendered}");
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn transport_close_shows_paced_text() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.stream_pacing = true;
+        live_ui.state.view_status = ViewStatus::Running;
+        live_ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::MessageDelta {
+                    turn: 1,
+                    delta: "partial reply text".into(),
+                    content_kind: reducer::MessageContentKind::Text,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.state.latest_assistant_text(), Some(""));
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        live_ui
+            .close_transport(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                },
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .to_string()
+                .contains("partial reply text")
+        );
+        assert!(
+            render_transport_closed_diagnostic(&live_ui.state)
+                .contains("partial assistant response: partial reply text")
+        );
     }
 
     #[tokio::test]
