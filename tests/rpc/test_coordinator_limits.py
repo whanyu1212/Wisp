@@ -243,6 +243,11 @@ def test_coordinator_rejects_held_messages_with_the_run_queue_error() -> None:
         )
         prompt = _RpcRunningCommand("prompt", "prompt", anyio.CancelScope())
         coordinator.running_command = prompt
+        # An outstanding read shares the command bound; it must not change which
+        # error the 101st held steer gets.
+        coordinator.auxiliary_commands["messages"] = _RpcRunningCommand(
+            "messages", "get_messages", anyio.CancelScope()
+        )
         dispatched: list[str] = []
         rejected: list[tuple[str, str]] = []
 

@@ -429,16 +429,25 @@ class RpcCoordinator:
             and not self._prompt_queue_ready
         )
         if prompt_queue_not_ready:
-            # Held messages count against the run's message limit before the shared
-            # command bound, so the same overflow gets the run's error either way.
-            message_rejection = self._held_message_rejection(selected_type)
-            if message_rejection is not None:
-                await reject(command, message_rejection)
-                return False
+            # The run's message limit, not the shared command bound, bounds held
+            # steering and follow-ups, so an overflow gets the run's error however
+            # other outstanding commands add up. The run checks each message again
+            # when it accepts them, including against messages it restored.
+            run_message_limit = (
+                self._queued_message_rejection
+                if selected_type in _QUEUED_MESSAGE_COMMAND_TYPES
+                else None
+            )
+            if run_message_limit is not None:
+                message_rejection = run_message_limit(self._held_message_count())
+                if message_rejection is not None:
+                    await reject(command, message_rejection)
+                    return False
             await self._enqueue_command(
                 command,
                 queue=self.pending_prompt_queue_commands,
                 reject=reject,
+                apply_command_bound=run_message_limit is None,
             )
             return False
         if selected_type == "get_project_files" or (
@@ -508,18 +517,12 @@ class RpcCoordinator:
             self.session_state.session = result.selected_session
         return result.should_shutdown
 
-    def _held_message_rejection(self, command_type: str) -> str | None:
-        if (
-            self._queued_message_rejection is None
-            or command_type not in _QUEUED_MESSAGE_COMMAND_TYPES
-        ):
-            return None
-        held_messages = sum(
+    def _held_message_count(self) -> int:
+        return sum(
             1
             for held in self.pending_prompt_queue_commands
             if held.command_type in _QUEUED_MESSAGE_COMMAND_TYPES
         )
-        return self._queued_message_rejection(held_messages)
 
     def _duplicate_outstanding_id(self, command: ParsedRpcCommand) -> str | None:
         command_id = command.command_id
@@ -566,8 +569,9 @@ class RpcCoordinator:
         *,
         queue: deque[ParsedRpcCommand],
         reject: RpcReject,
+        apply_command_bound: bool = True,
     ) -> None:
-        if self._outstanding_command_count() >= self._max_queued_commands:
+        if apply_command_bound and self._outstanding_command_count() >= self._max_queued_commands:
             await reject(command, "RPC command queue is full while another RPC command is running")
             return
         command_bytes = self._command_payload_size(command)
