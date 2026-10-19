@@ -41,6 +41,7 @@ from wisp.events import (
 from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
+    ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
 )
@@ -795,6 +796,115 @@ def test_unrecovered_overflow_keeps_events_and_raises(
     terminal = events[-1]
     assert isinstance(terminal, TurnCompleted)
     assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
+
+
+@pytest.mark.parametrize("raised", [False, True])
+def test_provider_failure_after_a_delta_closes_the_message_with_partial_text(
+    raised: bool,
+) -> None:
+    """A raised mid-stream error keeps the partial reply, like a typed failure does."""
+
+    error = ConnectionResetError("connection reset by peer")
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="interrupted"),
+                ProviderTextDelta(delta="partial"),
+                error
+                if raised
+                else ProviderResponseFailed(message=str(error), response_id="interrupted"),
+            ]
+        ]
+    )
+    events: list[agent_loop_module.AgentLoopEvent] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ConnectionResetError) if raised else nullcontext():
+        anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "message.started",
+        "message.delta",
+        "message.completed",
+        "error",
+        "turn.completed",
+    ]
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.content, completion.response_id, completion.finish_reason) == (
+        "partial",
+        "interrupted",
+        "error",
+    )
+    error_event = next(event for event in events if isinstance(event, ErrorEvent))
+    assert error_event.message == "connection reset by peer"
+    terminal = events[-1]
+    assert isinstance(terminal, TurnCompleted)
+    assert (terminal.outcome, terminal.finish_reason) == ("failed", "error")
+
+
+def test_stream_ending_without_a_terminal_closes_the_message_with_partial_text() -> None:
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="unterminated"),
+                ProviderTextDelta(delta="partial"),
+            ]
+        ]
+    )
+    events: list[agent_loop_module.AgentLoopEvent] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ProviderProtocolError, match="ended without a terminal response"):
+        anyio.run(run)
+
+    assert [event.type for event in events][-4:] == [
+        "message.delta",
+        "message.completed",
+        "error",
+        "turn.completed",
+    ]
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.content, completion.response_id, completion.finish_reason) == (
+        "partial",
+        "unterminated",
+        "error",
+    )
+
+
+def test_provider_error_before_the_response_starts_opens_no_message() -> None:
+    provider = ScriptedProvider([[ConnectionResetError("connection reset by peer")]])
+    events: list[agent_loop_module.AgentLoopEvent] = []
+
+    async def run() -> None:
+        async for event in run_agent_loop(
+            AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
+            messages=(Message(role="user", content="hi"),),
+        ):
+            events.append(event)
+
+    with pytest.raises(ConnectionResetError):
+        anyio.run(run)
+
+    assert [event.type for event in events] == [
+        "turn.started",
+        "context.estimated",
+        "error",
+        "turn.completed",
+    ]
 
 
 def test_cancel_at_turn_start_skips_provider_request() -> None:

@@ -30,6 +30,10 @@ Later slices must preserve:
   request-creation path can yield that failure with no `ProviderResponseStarted`;
   `_ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
   successful completion still require a prior start.
+- An opened model message gets exactly one `MessageCompleted` before its turn's
+  terminal events. A typed failure, a raised overflow, or any other error the
+  provider raises after its start closes it with `finish_reason="error"` and the
+  partial text; consumer close and cancellation publish nothing further.
 - Request-boundary decisions: `stop` wins; `messages` is a fresh replacement
   that discards native continuation; `context_rebase` keeps cursor/tool tail
   and rejects stale snapshots; `extra_messages` are plain user messages;

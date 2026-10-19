@@ -586,6 +586,44 @@ def test_maps_provider_failed_terminal_to_failed_lifecycle(tmp_path: Path) -> No
     assert assistant_messages[0].finish_reason == "error"
 
 
+def test_persists_partial_reply_when_provider_raises_mid_stream(tmp_path: Path) -> None:
+    """A raised mid-stream error persists the partial reply as a typed failure does."""
+
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test", response_id="response-1"),
+                ProviderTextDelta(delta="partial"),
+                ConnectionResetError("connection reset by peer"),
+            ]
+        ]
+    )
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
+        events: list[object] = []
+        with pytest.raises(ConnectionResetError):
+            async for event in agent.run("hello"):
+                events.append(event)
+        return events
+
+    events = anyio.run(run_agent)
+
+    completion = next(event for event in events if isinstance(event, MessageCompleted))
+    assert (completion.content, completion.finish_reason) == ("partial", "error")
+    assert [event.type for event in events[-3:]] == [
+        "error",
+        "turn.completed",
+        "agent.completed",
+    ]
+    session_started = next(event for event in events if isinstance(event, AgentStarted))
+    replayed = JsonlSessionStore(tmp_path).load(session_started.session_id).read_context_messages()
+    assistant_messages = [message for message in replayed if message.role == "assistant"]
+    assert [(message.content, message.finish_reason) for message in assistant_messages] == [
+        ("partial", "error")
+    ]
+
+
 def test_does_not_persist_empty_failed_completion(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         [

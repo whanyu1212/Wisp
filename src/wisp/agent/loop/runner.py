@@ -300,6 +300,7 @@ async def run_agent_loop(
     lifecycle = TurnLifecycle()
     consumer_closed = False
     response_cancelled = False
+    response_stream: ModelResponseStream | None = None
 
     try:
         while True:
@@ -460,6 +461,16 @@ async def run_agent_loop(
         # Cleanup cannot publish events into a closed consumer or recover a cancelled turn.
         if consumer_closed or response_cancelled:
             raise
+        # A provider that raised mid-stream leaves its message open; close it with the
+        # partial text, as a typed failure does, before the turn's terminal events.
+        unfinished = response_stream.unfinished if response_stream is not None else None
+        if unfinished is not None:
+            yield MessageCompleted(
+                turn=turn,
+                content=unfinished.content,
+                finish_reason="error",
+                response_id=unfinished.started_response_id,
+            )
         if isinstance(exc, ContextOverflowError):
             yield _context_overflow_event(config, turn=turn, message=str(exc))
         for event in lifecycle.terminal_events(str(exc), outcome="failed"):
