@@ -77,9 +77,13 @@ impl StreamPacer {
             return false;
         };
         let arrived = shown.len() + waiting.len();
-        // A reply with less text than last time is a different one, such as a reply in a
-        // replaced transcript that reuses the entry id.
-        if self.entry != Some(entry) || arrived < self.arrived {
+        // A reply with less text than last time, or less shown text than the fence scan
+        // has read, is a different one, such as a reply in a replaced transcript that
+        // reuses the entry id. Its offsets must not be applied to this reply.
+        if self.entry != Some(entry)
+            || arrived < self.arrived
+            || self.fences.scanned.max(self.fences.searched) > shown.len()
+        {
             *self = Self {
                 entry: Some(entry),
                 ..Self::default()
@@ -878,6 +882,27 @@ mod tests {
             pacer.fences.scanned,
             "First line here.\nSecond line here.\n".len()
         );
+    }
+
+    #[test]
+    fn replaced_transcript_resets_scan() {
+        let start = Instant::now();
+        let mut pacer = StreamPacer::default();
+        let mut old = Transcript::default();
+        old.append_paced_message_delta(1, "An old reply.\nWith lines.\n");
+        let mut frame = 0;
+        while old.unrevealed().is_some() {
+            pacer.tick(&mut old, start + FRAME * frame);
+            frame += 1;
+        }
+        // A new transcript reuses the entry id, and its first delta is as long as the old
+        // reply, so neither the id nor the length tells them apart.
+        let mut new = Transcript::default();
+        new.append_paced_message_delta(1, "A new reply, just as long text. ");
+        for frame in 0..40 {
+            pacer.tick(&mut new, start + Duration::from_secs(5) + FRAME * frame);
+        }
+        assert_eq!(shown(&new), "A new reply, just as long text. ");
     }
 
     #[test]

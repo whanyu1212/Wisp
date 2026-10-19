@@ -656,6 +656,7 @@ impl LiveUi {
         self.detail_view = DetailView::default();
         self.browse_selected = None;
         self.transcript_row_cache.fold_mut().clear();
+        self.stream_pacer = stream_reveal::StreamPacer::default();
     }
 
     fn deferred_queue_recovery_bytes(&self) -> usize {
