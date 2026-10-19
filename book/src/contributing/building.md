@@ -95,9 +95,10 @@ for another platform.
 
 ## Version lockstep
 
-The Python package, `wisp-tui` and `wisp-python` always carry the same version. Only the
-prerelease spelling differs: `0.2.0rc13` in `pyproject.toml` and `src/wisp/__init__.py`,
-`0.2.0-rc.13` in the two crates' `Cargo.toml` and in `Cargo.lock`. Release preparation bumps all
-five together. `tests/repository/test_tui_version.py` and `scripts/verify_rust_tui_wheel.py` fail on
+The Python package, `wisp-tui` and `wisp-python` always carry the same version, which lives in
+`pyproject.toml`, `src/wisp/__init__.py`, the two crates' `Cargo.toml`, `Cargo.lock` and `uv.lock`.
+Release preparation bumps them together. A final release such as `0.2.0` is spelled the same
+everywhere; for a prerelease only the spelling differs, `0.2.0rc13` in the Python files and
+`0.2.0-rc.13` in the Cargo files. `tests/repository/test_tui_version.py` and `scripts/verify_rust_tui_wheel.py` fail on
 any drift, and at runtime the TUI refuses a backend whose version differs. The internal crates
 `wisp-protocol`, `wisp-search` and `wisp-process-text` are never published and stay at `0.1.0`.

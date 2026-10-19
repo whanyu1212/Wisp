@@ -31,8 +31,8 @@ you ask not to be named.
 
 | Version | Security fixes |
 | --- | --- |
-| 0.2 pre-releases (the newest `0.2.0rcN`) | Yes, in the next release |
-| 0.1.x | No; upgrade to the newest 0.2 release |
+| 0.2.x | Yes, in the next 0.2 patch release |
+| 0.2.0 release candidates and 0.1.x | No; upgrade to the newest 0.2 release |
 
 ## Scope
 
