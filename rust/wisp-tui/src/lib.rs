@@ -44,6 +44,7 @@ mod session_catalog_tests;
 mod session_picker;
 mod session_tree_picker;
 mod startup_logo;
+mod stream_reveal;
 mod syntax;
 mod terminal;
 mod theme;
@@ -582,6 +583,8 @@ struct LiveUi {
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
     file_picker: FilePicker,
+    stream_pacer: stream_reveal::StreamPacer,
+    stream_trace: Option<stream_reveal::StreamTrace>,
 }
 
 impl Default for LiveUi {
@@ -634,6 +637,8 @@ impl Default for LiveUi {
             discovery_view: None,
             completion: Completion::default(),
             file_picker: FilePicker::default(),
+            stream_pacer: stream_reveal::StreamPacer::default(),
+            stream_trace: None,
         }
     }
 }
@@ -651,6 +656,7 @@ impl LiveUi {
         self.detail_view = DetailView::default();
         self.browse_selected = None;
         self.transcript_row_cache.fold_mut().clear();
+        self.stream_pacer = stream_reveal::StreamPacer::default();
     }
 
     fn deferred_queue_recovery_bytes(&self) -> usize {
@@ -1166,6 +1172,19 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if let (
+            Some(trace),
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                delta,
+                content_kind: reducer::MessageContentKind::Text,
+                ..
+            }),
+        ) = (&mut self.stream_trace, &action)
+        {
+            if !trace.record(delta.len(), std::time::Instant::now()) {
+                self.stream_trace = None;
+            }
+        }
         // Preserve the identity of input captured before buffered workflow updates.
         // Streaming text and telemetry cannot replace a selected workflow target.
         if event_loop::changes_activation_target(&action) {
@@ -1850,6 +1869,17 @@ impl LiveUi {
             .map(|(_, started)| started.elapsed())
     }
 
+    /// Show the next part of a paced reply, if one is waiting, and repaint if it changed.
+    fn advance_stream_reveal(&mut self, now: std::time::Instant) {
+        if self.stream_pacer.tick(&mut self.state.transcript, now) {
+            self.render_pending = true;
+        }
+    }
+
+    fn stream_reveal_pending(&self) -> bool {
+        self.state.transcript.unrevealed().is_some()
+    }
+
     fn advance_activity_animation(&mut self) -> bool {
         if !self.activity_animation_active() {
             return false;
@@ -1939,6 +1969,9 @@ impl LiveUi {
         limit: usize,
         error: Option<String>,
     ) -> Result<LoopControl, Error> {
+        // Reply text that arrived before the stream ended belongs on the final screen and
+        // in the partial-response diagnostic, even though no frame revealed it yet.
+        self.state.transcript.flush_reveal();
         let control = self
             .dispatch(UiAction::TransportClosed { error }, writer, limit)
             .await?;
@@ -4590,6 +4623,10 @@ async fn run(cli: Cli) -> Result<(), Error> {
                 mouse_enabled,
                 ..LiveUi::default()
             };
+            // `WISP_TUI_STREAM_PACING=0` shows each streamed delta as it arrives.
+            live_ui.state.stream_pacing =
+                std::env::var("WISP_TUI_STREAM_PACING").map_or(true, |value| value != "0");
+            live_ui.stream_trace = stream_reveal::StreamTrace::from_env();
             let mut transport_closed_diagnostic = None;
             let mut ready_event = None;
             let loop_result = async {
@@ -6803,6 +6840,54 @@ mod tests {
         // A closed transport stays terminal.
         assert!(rendered.contains("backend stopped"), "{rendered}");
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn transport_close_shows_paced_text() {
+        let (writer_tx, _writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut live_ui = LiveUi::default();
+        live_ui.state.stream_pacing = true;
+        live_ui.state.view_status = ViewStatus::Running;
+        live_ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        live_ui
+            .dispatch(
+                UiAction::BackendEvent(BackendEvent::MessageDelta {
+                    turn: 1,
+                    delta: "partial reply text".into(),
+                    content_kind: reducer::MessageContentKind::Text,
+                }),
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        assert_eq!(live_ui.state.latest_assistant_text(), Some(""));
+        let mut terminal = Terminal::new(TestBackend::new(80, 18)).unwrap();
+        live_ui
+            .close_transport(
+                &mut terminal,
+                &ConnectionInfo {
+                    backend_version: "0.1.0".into(),
+                },
+                &writer_tx,
+                MAX_APPLICATION_FRAME_BYTES,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            terminal
+                .backend()
+                .to_string()
+                .contains("partial reply text")
+        );
+        assert!(
+            render_transport_closed_diagnostic(&live_ui.state)
+                .contains("partial assistant response: partial reply text")
+        );
     }
 
     #[tokio::test]

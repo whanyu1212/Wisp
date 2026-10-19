@@ -737,6 +737,54 @@ async fn saturated_fifo_gets_a_paint_after_eight_events_and_does_not_starve_inpu
 }
 
 #[tokio::test(start_paused = true)]
+async fn paced_reply_paints_without_input() {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.state.stream_pacing = true;
+    let text = "alpha beta gamma delta epsilon zeta eta theta ";
+    let budget = Arc::new(Semaphore::new(4));
+    let (events_tx, mut events) = mpsc::channel(4);
+    events_tx
+        .send(queued(delta(text), &budget).await)
+        .await
+        .unwrap();
+    let (inputs_tx, mut inputs) = mpsc::channel(16);
+    let stop = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        inputs_tx
+            .send(Input::Error(std::io::Error::other("test stop")))
+            .await
+            .unwrap();
+    });
+    let (_reader_tx, reader_rx) = oneshot::channel();
+    let (_writer_tx, writer_rx) = oneshot::channel();
+    let mut reader = Some(reader_rx);
+    let mut writer_outcome = Some(writer_rx);
+    let mut ready_event = None;
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let result = run(
+        &mut ui,
+        &mut terminal,
+        &connection(),
+        Sources {
+            events: &mut events,
+            ready_event: &mut ready_event,
+            inputs: &mut inputs,
+            reader: &mut reader,
+            writer: &mut writer_outcome,
+        },
+        &writer,
+        8192,
+    )
+    .await;
+    assert!(matches!(result, Err(Error::Io(_))));
+    // The loop kept painting the waiting text on its own until all of it was shown.
+    assert_eq!(ui.state.latest_assistant_text(), Some(text));
+    assert!(terminal.backend().to_string().contains("theta"));
+    stop.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn later_events_do_not_extend_the_captured_input_prefix() {
     let (writer, _commands) = mpsc::channel(16);
     let mut ui = active_ui();

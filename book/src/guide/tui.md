@@ -59,6 +59,17 @@ very narrow layouts stack cells within each row. Ordinary prose also wraps at wo
 Very large unfinished blocks temporarily display as plain text and are formatted when the reply
 completes. User prompts and tool output retain their literal text.
 
+Providers send replies in bursts, so the TUI reveals streamed text at an even pace instead of as
+each burst arrives. Text shows a word at a time, about a tenth of a second behind the stream, and
+an unfinished `**bold**`, `` `code` `` or `~~strike~~` span, table row, or code fence line waits
+until it is complete, so raw markers do not flash before the formatting applies. When the stream
+pauses or the reply ends, waiting text is shown, and a tool card or prompt that follows the reply,
+the end of the run, or a closed connection first shows all of it. More than 16 KiB of waiting
+text is shown at once rather than animated. Set `WISP_TUI_STREAM_PACING=0` to show text as it arrives. To measure a
+provider's stream, set `WISP_TUI_STREAM_TRACE` to a file path: each text delta appends a
+tab-separated line of milliseconds since the first delta, milliseconds since the previous one,
+and its size in bytes.
+
 Replies that omit a table header are also supported: a paragraph beginning with at least two
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
 Single rows, mismatched columns, and pipe syntax inside code remain literal.

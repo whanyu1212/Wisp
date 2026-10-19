@@ -460,6 +460,7 @@ async fn run_with_interrupts<B: FrameBackend>(
             next_activity = now + ACTIVITY_INTERVAL;
         }
         if now >= next_paint {
+            ui.advance_stream_reveal(now.into_std());
             if ui.render_pending {
                 ui.draw(terminal, connection)?;
             }
@@ -506,7 +507,7 @@ async fn run_with_interrupts<B: FrameBackend>(
             event = sources.events.recv(), if events_open => {
                 match event { Some(event) => *sources.ready_event = Some(event), None => events_open = false }
             }
-            _ = tokio::time::sleep_until(next_paint), if ui.render_pending => {}
+            _ = tokio::time::sleep_until(next_paint), if ui.render_pending || ui.stream_reveal_pending() => {}
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() => {}
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}
         }
