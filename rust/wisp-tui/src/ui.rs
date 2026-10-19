@@ -852,11 +852,24 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
             .entry(row.anchor.entry_id)
             .is_some_and(tool_in_progress),
         TranscriptRowKind::CardGroup => {
-            crate::transcript_view::explore_run(&state.transcript, row.anchor.entry_id).is_some_and(
+            // A repeated MCP call's row carries its own marker, which shows `?` while a call
+            // awaits approval, as a single card would; the spinner must not replace it.
+            let marked = row
+                .spans
+                .iter()
+                .any(|span| span.style.inline == InlineStyle::ToolStatus);
+            crate::transcript_view::card_run(&state.transcript, row.anchor.entry_id).is_some_and(
                 |(_, members)| {
-                    members
+                    let members = members
                         .iter()
-                        .any(|id| state.transcript.entry(*id).is_some_and(tool_in_progress))
+                        .filter_map(|id| state.transcript.entry(*id))
+                        .collect::<Vec<_>>();
+                    let awaiting = members.iter().any(|entry| {
+                        entry
+                            .tool_card()
+                            .is_some_and(|card| card.status == ToolStatus::AwaitingApproval)
+                    });
+                    members.iter().copied().any(tool_in_progress) && !(marked && awaiting)
                 },
             )
         }
@@ -1038,8 +1051,8 @@ fn render_transcript_row(
         content.width -= columns;
     }
     if row.kind == TranscriptRowKind::Rule {
-        // The rule starts under the chip, after the status marker's column.
-        let start = content.width.min(1);
+        // The rule starts under the chip, after the status marker and its gap.
+        let start = content.width.min(2);
         let columns = usize::from(content.width - start);
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1088,14 +1101,21 @@ fn render_transcript_row(
     };
     // While the run is active, an in-progress marker animates as a spinner. The
     // shape changes rather than the brightness, so it reads the same in monochrome.
-    let spinner = pulse.map(|frame| format!("{} ", spinner_frame(frame)));
-    let label = (row.kind == TranscriptRowKind::CardAction)
-        .then(|| {
-            row.spans
-                .iter()
-                .position(|span| span.style.inline == InlineStyle::ToolName)
-        })
-        .flatten();
+    let spinner = pulse.map(|frame| format!("{}  ", spinner_frame(frame)));
+    let label = matches!(
+        row.kind,
+        TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
+    )
+    .then(|| {
+        row.spans
+            .iter()
+            .position(|span| span.style.inline == InlineStyle::ToolName)
+    })
+    .flatten();
+    let marked = row
+        .spans
+        .iter()
+        .any(|span| span.style.inline == InlineStyle::ToolStatus);
     let mut spans = row
         .spans
         .into_iter()
@@ -1119,7 +1139,9 @@ fn render_transcript_row(
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, base.fg(palette.muted)));
     }
-    if row.kind == TranscriptRowKind::CardGroup {
+    // An exploration group's row holds only its summary, so its marker is drawn here; a
+    // repeated MCP call's row carries its own marker like any action line.
+    if row.kind == TranscriptRowKind::CardGroup && !marked {
         let marker = base.patch(tone_style(row.tone, palette));
         let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
         spans.insert(0, Span::styled(glyph, marker));
@@ -1172,10 +1194,10 @@ pub(crate) fn spinner_frame(frame: u8) -> &'static str {
 /// The marker of an `explored N files` group, which summarizes its members' tone.
 fn group_marker(tone: TranscriptRowTone) -> &'static str {
     match tone {
-        TranscriptRowTone::Success => "✓ ",
-        TranscriptRowTone::Error => "✗ ",
-        TranscriptRowTone::Warning => "⊘ ",
-        _ => "● ",
+        TranscriptRowTone::Success => "✓  ",
+        TranscriptRowTone::Error => "✗  ",
+        TranscriptRowTone::Warning => "⊘  ",
+        _ => "●  ",
     }
 }
 
@@ -4698,6 +4720,246 @@ mod tests {
         assert!(terminal.backend().to_string().contains("more ↓"));
     }
 
+    fn observe_mcp_call(
+        state: &mut UiState,
+        call_id: &str,
+        tool: &str,
+        id: &str,
+    ) -> crate::transcript::TranscriptEntryId {
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.into(),
+                name: format!("mcp__linear__{tool}"),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"id": id}),
+            })
+    }
+
+    fn finish_call(state: &mut UiState, call_id: &str, name: &str) {
+        let mut result = tool_result(call_id, "ok");
+        result.name = name.into();
+        state.transcript.observe_tool_result(result);
+    }
+
+    fn draw_cards(state: &UiState, cache: &mut TranscriptRowCache) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    state,
+                    &mut TranscriptViewport::default(),
+                    cache,
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        terminal.backend().to_string()
+    }
+
+    #[test]
+    fn mcp_calls_group_by_tool() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        observe_mcp_call(&mut state, "l1", "list_issues", "HY-0");
+        finish_call(&mut state, "l1", "mcp__linear__list_issues");
+        for (call_id, tool, id) in [
+            ("g1", "get_issue", "HY-1"),
+            ("g2", "get_issue", "HY-2"),
+            ("g3", "get_issue", "HY-3"),
+            ("s1", "save_issue", "HY-4"),
+            ("s2", "save_issue", "HY-5"),
+        ] {
+            observe_mcp_call(&mut state, call_id, tool, id);
+            finish_call(&mut state, call_id, &format!("mcp__linear__{tool}"));
+        }
+        for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo test")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": command}),
+                });
+            finish_call(&mut state, call_id, "bash");
+        }
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("✓  MCP      linear/list_issues  id=HY-0"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("✓  MCP      linear/get_issue ×3  id=HY-1 … id=HY-3"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("✓  MCP      linear/save_issue ×2  id=HY-4 · id=HY-5"),
+            "{screen}"
+        );
+        // Bash commands differ call to call, so they keep their own rows.
+        assert!(
+            screen.contains("cargo fmt") && screen.contains("cargo test"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn mcp_group_draws_chip() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        for (call_id, id) in [("g1", "HY-1"), ("g2", "HY-2")] {
+            observe_mcp_call(&mut state, call_id, "get_issue", id);
+            finish_call(&mut state, call_id, "mcp__linear__get_issue");
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let palette = Palette::default();
+        let (_, chip_bg, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
+        assert_eq!(Some(chip_bg), palette.chip().bg);
+        let (marker_fg, marker_bg, _) = style_at_text(terminal.backend(), "✓").unwrap();
+        assert_ne!(Some(marker_bg), palette.chip().bg);
+        assert_eq!(marker_fg, palette.success);
+    }
+
+    #[test]
+    fn live_call_leads_header() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        observe_mcp_call(&mut state, "g1", "get_issue", "HY-1");
+        finish_call(&mut state, "g1", "mcp__linear__get_issue");
+        observe_mcp_call(&mut state, "g2", "get_issue", "HY-2");
+        let mut cache = TranscriptRowCache::default();
+        let screen = draw_cards(&state, &mut cache);
+        assert!(
+            screen.contains("MCP      linear/get_issue ×2  id=HY-2 · 1 of 2 done"),
+            "{screen}"
+        );
+        // The cached header follows a later member's result.
+        finish_call(&mut state, "g2", "mcp__linear__get_issue");
+        let screen = draw_cards(&state, &mut cache);
+        assert!(
+            screen.contains("✓  MCP      linear/get_issue ×2  id=HY-1 · id=HY-2"),
+            "{screen}"
+        );
+        assert!(!screen.contains("of 2 done"), "{screen}");
+    }
+
+    #[test]
+    fn approval_keeps_question_marker() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        observe_mcp_call(&mut state, "s1", "save_issue", "HY-1");
+        finish_call(&mut state, "s1", "mcp__linear__save_issue");
+        state
+            .transcript
+            .observe_approval_requested(crate::tool_cards::ToolCallInput {
+                call_id: "s2".into(),
+                name: "mcp__linear__save_issue".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"id": "HY-2"}),
+            });
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains(
+                "?  MCP      linear/save_issue ×2  id=HY-2 · 1 of 2 done · awaiting approval"
+            ),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn narrow_group_keeps_count() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        for call_id in ["c1", "c2", "c3"] {
+            observe_mcp_call(&mut state, call_id, "create_pull_request_review", "1");
+            finish_call(
+                &mut state,
+                call_id,
+                "mcp__linear__create_pull_request_review",
+            );
+        }
+        let mut terminal = Terminal::new(TestBackend::new(36, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        assert!(screen.contains("✓  MCP      linear/… ×3"), "{screen}");
+    }
+
+    #[test]
+    fn denied_group_names_state() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        observe_mcp_call(&mut state, "s1", "save_issue", "HY-1");
+        finish_call(&mut state, "s1", "mcp__linear__save_issue");
+        state
+            .transcript
+            .observe_approval_requested(crate::tool_cards::ToolCallInput {
+                call_id: "s2".into(),
+                name: "mcp__linear__save_issue".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"id": "HY-2"}),
+            });
+        state
+            .transcript
+            .observe_approval_resolved("s2", false, None);
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("⊘  MCP      linear/save_issue ×2  id=HY-1 · id=HY-2 · denied"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn expanded_mcp_group_lists_calls() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        let mut first = None;
+        for (call_id, id) in [("g1", "HY-1"), ("g2", "HY-2"), ("g3", "HY-3")] {
+            let entry = observe_mcp_call(&mut state, call_id, "get_issue", id);
+            first.get_or_insert(entry);
+            finish_call(&mut state, call_id, "mcp__linear__get_issue");
+        }
+        let mut cache = TranscriptRowCache::default();
+        assert!(draw_cards(&state, &mut cache).contains("×3"));
+        cache.fold_mut().expand_group(first.unwrap());
+        let screen = draw_cards(&state, &mut cache);
+        assert!(!screen.contains("×3"), "{screen}");
+        for id in ["HY-1", "HY-2", "HY-3"] {
+            assert!(
+                screen.contains(&format!("✓  MCP      linear/get_issue  id={id}")),
+                "{screen}"
+            );
+        }
+    }
+
     #[test]
     fn stacked_cards_draw_rules() {
         let mut state = UiState::unconfigured();
@@ -4784,6 +5046,8 @@ mod tests {
             "{screen}"
         );
         assert_ne!(bg_at(x + 8), chip_bg, "{screen}");
+        // A plain column keeps the status marker off the chip.
+        assert_ne!(bg_at(x - 2), chip_bg, "{screen}");
     }
 
     #[test]
@@ -4832,7 +5096,7 @@ mod tests {
         assert_eq!((Some(pending_fg), Some(pending_bg)), (chip.fg, chip.bg));
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
-            style_at_text(pending.backend(), "? Read").unwrap().0,
+            style_at_text(pending.backend(), "?  Read").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
@@ -4878,7 +5142,7 @@ mod tests {
         // Only the card selected in browse shows how to expand it.
         assert!(!complete.backend().to_string().contains("to expand"));
         assert_eq!(
-            style_at_text(complete.backend(), "✓ Read").unwrap().0,
+            style_at_text(complete.backend(), "✓  Read").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
@@ -5231,7 +5495,7 @@ mod tests {
         let action = row(
             TranscriptRowKind::CardAction,
             vec![
-                span("✓ ", InlineStyle::ToolStatus),
+                span("✓  ", InlineStyle::ToolStatus),
                 span("Read", InlineStyle::ToolName),
                 span("  a.rs", InlineStyle::Normal),
             ],
@@ -5268,7 +5532,7 @@ mod tests {
                 .unwrap();
             let screen = terminal.backend().to_string();
             // The hint appears only on the selected copy of the action row.
-            assert_eq!(screen.matches("✓ Read  a.rs").count(), 2, "{screen}");
+            assert_eq!(screen.matches("✓  Read  a.rs").count(), 2, "{screen}");
             assert_eq!(screen.matches("(→ to expand)").count(), 1, "{screen}");
             assert!(screen.contains("└ out"), "{screen}");
 
@@ -5767,7 +6031,7 @@ mod tests {
         let collapsed = render_bash_card(command, Some((false, None)), 40, false);
         let action = collapsed
             .lines()
-            .find(|line| line.contains("✓ Bash"))
+            .find(|line| line.contains("✓  Bash"))
             .expect("action row");
         assert!(action.contains('…'), "{collapsed}");
         assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
@@ -5775,7 +6039,7 @@ mod tests {
         let expanded = render_bash_card(command, Some((false, None)), 40, true);
         let action = expanded
             .lines()
-            .find(|line| line.contains("✓ Bash"))
+            .find(|line| line.contains("✓  Bash"))
             .expect("action row");
         assert!(!action.contains('…'), "{expanded}");
         assert!(expanded.contains("y_long_test_name"), "{expanded}");

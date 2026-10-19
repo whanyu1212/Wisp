@@ -71,7 +71,10 @@ Rows keep stable `+`/`-` signs and themed changed-row bands; `write` diffs add a
 deleted line and its replacement share words, the words that differ are bold and underlined, so a
 rewrap or a one-word change stands out without colour. Enter opens the full unified diff. Other tool
 and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
-cards group as `explored N files`. Thinking streams as a collapsed `thought` row. A collapsed
+cards group as `explored N files`, and consecutive calls to the same MCP tool group as one action
+line with a count, such as `linear/get_issue ×8  id=HY-270 … id=HY-278`, showing the first and last
+call's arguments. While a call in the group is open, the line shows that call instead, with
+`· 7 of 8 done` and, when it waits for you, `· awaiting approval`. Thinking streams as a collapsed `thought` row. A collapsed
 card keeps its action line to one row, ending in `…` when the command or path is too long (paths
 are cut at a `/` or space, and a diff's change counts stay visible). F6 browses visible card rows:
 Right expands (showing the full action line), Left collapses, Enter opens retained detail. The
@@ -91,15 +94,15 @@ during intervening tool calls, and the working row returns after the final resul
 model step is pending. A completed poll whose background process remains alive does not suppress
 this separate model activity.
 Compaction keeps its separate activity row. Each tool card's marker shows its state by shape as well
-as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. The marker
-is followed by a tinted chip naming the tool (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
+as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. A blank
+column separates the marker from a tinted chip naming the tool (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
 `Process`, or `MCP` followed by `server/tool`). The chip is as wide as its name, and plain padding
 after it keeps every command or path in the same column; monochrome mode draws the chip in reverse
 video. A state the marker alone does not name ends the row as a muted note, such as
 `· awaiting approval` or `· denied`. The first result row under an expanded card starts with `└`.
 Back-to-back collapsed cards are separated by a thin rule, so a run of tool calls reads as one list;
 a card showing its results keeps a blank row before the next card, and a blank row separates your
-prompt from the reply or cards below it. A plain click on a card's action line, an `explored N files` row, or a
+prompt from the reply or cards below it. A plain click on a card's action line, a grouped row, or a
 thought header expands or collapses it, as `Right` and `Left` do while browsing with `F6`. The click
 keeps typing in the prompt; while browsing, it also moves the selection to that row. Clicks on result
 rows only start a text selection. A card selected with `F6` looks like the rest and ends with

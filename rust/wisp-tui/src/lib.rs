@@ -121,7 +121,7 @@ use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
 use transcript_view::{
     RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
-    explore_run,
+    card_run,
 };
 use ui::{ComposerLayoutCache, ConnectionInfo};
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
@@ -2351,9 +2351,9 @@ impl LiveUi {
         "Browse: Tab select · Right expand · Left collapse · Enter details · Esc prompt".into()
     }
 
-    fn selected_explore_group(&self) -> Option<TranscriptEntryId> {
+    fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
         let selected = self.browse_selected?;
-        let (start, _) = explore_run(&self.state.transcript, selected)?;
+        let (start, _) = card_run(&self.state.transcript, selected)?;
         (!self.transcript_row_cache.fold().is_group_expanded(start)).then_some(start)
     }
 
@@ -2361,7 +2361,7 @@ impl LiveUi {
         let Some(selected) = self.browse_selected else {
             return;
         };
-        if let Some(start) = self.selected_explore_group() {
+        if let Some(start) = self.selected_closed_group() {
             self.transcript_row_cache.fold_mut().expand_group(start);
             self.browse_selected = Some(start);
         } else {
@@ -2377,7 +2377,7 @@ impl LiveUi {
     /// card was expanded on its own.
     fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId) {
         let fold = self.transcript_row_cache.fold_mut();
-        let closed_group = explore_run(&self.state.transcript, entry)
+        let closed_group = card_run(&self.state.transcript, entry)
             .map(|(start, _)| start)
             .filter(|start| !fold.is_group_expanded(*start));
         if let Some(start) = closed_group {
@@ -2399,7 +2399,7 @@ impl LiveUi {
         };
         if self.transcript_row_cache.fold().is_expanded(selected) {
             self.transcript_row_cache.fold_mut().collapse(selected);
-        } else if let Some((start, _)) = explore_run(&self.state.transcript, selected) {
+        } else if let Some((start, _)) = card_run(&self.state.transcript, selected) {
             self.transcript_row_cache.fold_mut().collapse_group(start);
             self.browse_selected = Some(start);
         }
@@ -3230,7 +3230,7 @@ impl LiveUi {
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.selected_explore_group().is_some() {
+                if self.selected_closed_group().is_some() {
                     self.expand_selected_fold();
                     return Ok(LoopControl::Continue);
                 }
