@@ -96,8 +96,12 @@ is followed by a tinted chip naming the tool (`Bash`, `Read`, `Search`, `List`, 
 `Process`, or `MCP` followed by `server/tool`), padded so every command or path starts in the same
 column; monochrome mode draws the chip in reverse video. A state the marker alone does not name ends
 the row as a muted note, such as `· awaiting approval` or `· denied`. The first result row under an
-expanded card starts with `└`. While browsing with `F6`, the selected card looks like the rest and
-ends with `(→ to expand)` or `(← to collapse)`. While the
+expanded card starts with `└`. A plain click on a card's action line, an `explored N files` row, or a
+thought header expands or collapses it, as `Right` and `Left` do while browsing with `F6`. The click
+keeps typing in the prompt; while browsing, it also moves the selection to that row. Clicks on result
+rows only start a text selection. A card selected with `F6` looks like the rest and ends with
+`(click to expand)` or `(click to collapse)`, or `(→ to expand)` and `(← to collapse)` when mouse
+capture is off. While the
 run is active, an in-progress card's marker is an animated braille spinner; finished and
 approval-waiting cards stay steady. Because the spinner changes shape
 rather than brightness, it reads the same in monochrome mode. An in-progress card from a resumed

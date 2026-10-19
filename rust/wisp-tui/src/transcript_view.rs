@@ -117,8 +117,8 @@ pub(crate) const RESULT_INDENT: &str = "  ";
 /// The action columns a card must keep before its row also reserves a fold hint.
 const ACTION_COLUMNS_BESIDE_HINT: usize = 24;
 
-/// What the selected row says Right or Left would do. Browse marks its selection
-/// only with this hint, so the row otherwise looks like any other.
+/// What the selected row says Right or Left, or a click, would do. Browse marks its
+/// selection only with this hint, so the row otherwise looks like any other.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum FoldHint {
     #[default]
@@ -127,6 +127,10 @@ pub enum FoldHint {
     Expand,
     /// Left folds the row back.
     Collapse,
+    /// `Expand`, worded for a terminal where a click also folds rows.
+    ClickExpand,
+    /// `Collapse`, worded for a terminal where a click also folds rows.
+    ClickCollapse,
 }
 
 impl FoldHint {
@@ -135,6 +139,8 @@ impl FoldHint {
             Self::None => None,
             Self::Expand => Some(" (→ to expand)"),
             Self::Collapse => Some(" (← to collapse)"),
+            Self::ClickExpand => Some(" (click to expand)"),
+            Self::ClickCollapse => Some(" (click to collapse)"),
         }
     }
 
@@ -261,12 +267,38 @@ pub struct LayoutWork {
 pub struct FoldState {
     expanded: HashSet<TranscriptEntryId>,
     expanded_groups: HashSet<TranscriptEntryId>,
+    /// Whether a click folds rows, so fold hints say "click" instead of naming the arrow
+    /// keys. It changes the hints' reserved width, so a change rewraps like a fold.
+    click_hints: bool,
     generation: u64,
 }
 
 impl FoldState {
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    pub fn set_click_hints(&mut self, click_hints: bool) {
+        if self.click_hints != click_hints {
+            self.click_hints = click_hints;
+            self.bump();
+        }
+    }
+
+    fn expand_hint(&self) -> FoldHint {
+        if self.click_hints {
+            FoldHint::ClickExpand
+        } else {
+            FoldHint::Expand
+        }
+    }
+
+    fn collapse_hint(&self) -> FoldHint {
+        if self.click_hints {
+            FoldHint::ClickCollapse
+        } else {
+            FoldHint::Collapse
+        }
     }
 
     pub fn clear(&mut self) {
@@ -955,9 +987,9 @@ impl TranscriptRowCache {
         let mut row = TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, 0);
         if !entry.thinking().is_empty() {
             row.fold_hint = if self.fold.is_expanded(entry.id) {
-                FoldHint::Collapse
+                self.fold.collapse_hint()
             } else {
-                FoldHint::Expand
+                self.fold.expand_hint()
             };
         }
         ProjectedRow { row, next }
@@ -1055,7 +1087,7 @@ impl TranscriptRowCache {
             0,
         );
         row.tone = explore_group_tone(transcript, &members);
-        row.fold_hint = FoldHint::Expand;
+        row.fold_hint = self.fold.expand_hint();
         Some(ProjectedRow {
             row,
             next: separator_after(transcript, last),
@@ -1231,12 +1263,12 @@ impl TranscriptRowCache {
                 let mut fold_hint = FoldHint::None;
                 if absolute_offset == 0 {
                     let hint = if expanded {
-                        FoldHint::Collapse
+                        self.fold.collapse_hint()
                     } else if (!projection.inline_detail
                         && card_position_after_action(entry, &projection).is_some())
                         || self.action_columns(&projection.action) > width
                     {
-                        FoldHint::Expand
+                        self.fold.expand_hint()
                     } else {
                         FoldHint::None
                     };

@@ -263,7 +263,7 @@ pub fn render_interactive(
                 Constraint::Length(1),
             ])
             .split(area);
-        let jump_painted = render_transcript(
+        let (jump_painted, _) = render_transcript(
             frame,
             chunks[0],
             state,
@@ -309,7 +309,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    let jump_to_latest = render_transcript(
+    let (jump_to_latest, fold_rows) = render_transcript(
         frame,
         chunks[0],
         state,
@@ -362,6 +362,7 @@ pub fn render_interactive(
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
+        fold_rows,
     }
 }
 
@@ -531,7 +532,7 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
-) -> Option<Rect> {
+) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
@@ -661,6 +662,7 @@ fn render_transcript(
             })
             .map(|row| row.anchor)
     });
+    let mut fold_rows = Vec::new();
     if rows.is_empty() && status_lines.is_empty() {
         let lines = empty_transcript_lines(
             state,
@@ -680,6 +682,18 @@ fn render_transcript(
                 conversation.width,
                 1,
             );
+            if matches!(
+                row.kind,
+                TranscriptRowKind::CardAction
+                    | TranscriptRowKind::CardGroup
+                    | TranscriptRowKind::Thought
+            ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_))
+            {
+                fold_rows.push(mouse::FoldRow {
+                    y: area.y,
+                    entry: row.anchor.entry_id,
+                });
+            }
             if offset == 0
                 && user_top_padding
                 && row.role == TranscriptRole::User
@@ -723,7 +737,7 @@ fn render_transcript(
         render_scrollbar(frame, rows_area, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
-    (padding > 0 && !viewport.follows_tail())
+    let jump_to_latest = (padding > 0 && !viewport.follows_tail())
         .then(|| {
             let row = Rect {
                 y: outer.bottom().saturating_sub(1),
@@ -732,7 +746,8 @@ fn render_transcript(
             };
             render_jump_to_latest(frame, content_area(row), viewport, palette, bindings)
         })
-        .flatten()
+        .flatten();
+    (jump_to_latest, fold_rows)
 }
 
 /// Draw the centered jump-to-latest label in `row`, naming its key when it fits.

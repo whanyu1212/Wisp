@@ -1559,6 +1559,9 @@ impl LiveUi {
             view.invalidate_selection();
         }
         let activity_elapsed = self.activity_elapsed();
+        self.transcript_row_cache
+            .fold_mut()
+            .set_click_hints(self.mouse_enabled);
         terminal::draw_frame(terminal, |frame| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
@@ -2365,6 +2368,28 @@ impl LiveUi {
             self.transcript_row_cache.fold_mut().expand(selected);
         }
         self.notice = Some(Self::browse_notice());
+        self.render_pending = true;
+    }
+
+    /// Fold or unfold a clicked card, group, or thought, as Right or Left would. A
+    /// click moves an existing browse selection to that row but never starts browsing,
+    /// so typing still reaches the prompt. A collapsed group opens even when its first
+    /// card was expanded on its own.
+    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId) {
+        let fold = self.transcript_row_cache.fold_mut();
+        let closed_group = explore_run(&self.state.transcript, entry)
+            .map(|(start, _)| start)
+            .filter(|start| !fold.is_group_expanded(*start));
+        if let Some(start) = closed_group {
+            fold.expand_group(start);
+        } else if fold.is_expanded(entry) {
+            fold.collapse(entry);
+        } else {
+            fold.expand(entry);
+        }
+        if self.browse_selected.is_some() {
+            self.browse_selected = Some(closed_group.unwrap_or(entry));
+        }
         self.render_pending = true;
     }
 

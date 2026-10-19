@@ -1593,3 +1593,172 @@ async fn a_release_keeps_the_recovery_notice_of_an_unsendable_response() {
     assert!(ui.transcript_selection.is_none());
     assert!(receiver.try_recv().is_err());
 }
+
+fn finish_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value, output: &str) {
+    ui.state
+        .transcript
+        .observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments,
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+    ui.state
+        .transcript
+        .observe_tool_result(crate::tool_cards::ToolResultInput {
+            call_id: call_id.into(),
+            name: name.into(),
+            output: output.into(),
+            output_tail: None,
+            output_source_bytes: output.len() as u64,
+            output_source_lines: 1,
+            output_projection_cut_mid_line: false,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: Some(0),
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+        });
+}
+
+async fn plain_click(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>, x: u16, y: u16) {
+    ui.handle_input(click(x, y), writer, 8192).await.unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x, y),
+        writer,
+        8192,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn click_toggles_a_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("build".into());
+    finish_tool(
+        &mut ui,
+        "b1",
+        "bash",
+        serde_json::json!({"command": "cargo build"}),
+        "compiled ok",
+    );
+    let card = ui.state.transcript.entries().last().unwrap().id;
+    let buffer = draw(&mut ui, 80, 24);
+    assert!(!row_text(&buffer, cell_of(&buffer, "Bash").1).contains("expand"));
+    let (x, y) = cell_of(&buffer, "cargo build");
+
+    // A click folds the card without starting browse, so typing still reaches the prompt.
+    plain_click(&mut ui, &writer, x, y).await;
+    assert_eq!(ui.browse_selected, None);
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+    let expanded = draw(&mut ui, 80, 24);
+    let (detail_x, detail_y) = cell_of(&expanded, "└ compiled ok");
+
+    // A detail row stays inert so people can press there to select its text.
+    plain_click(&mut ui, &writer, detail_x + 2, detail_y).await;
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+
+    // While browsing, the selection follows the click and the hint names it.
+    ui.browse_selected = Some(card);
+    let selected = draw(&mut ui, 80, 24);
+    assert!(row_text(&selected, y).contains("(click to collapse)"));
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(!ui.transcript_row_cache.fold().is_expanded(card));
+    assert_eq!(ui.browse_selected, Some(card));
+    let collapsed = draw(&mut ui, 80, 24);
+    assert!(row_text(&collapsed, y).contains("(click to expand)"));
+}
+
+#[tokio::test]
+async fn click_opens_a_thought() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("why".into());
+    let thought = ui
+        .state
+        .transcript
+        .append_thinking_delta(1, "secret plan\nmore");
+    ui.state
+        .transcript
+        .complete_message(1, "visible answer".into());
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "thought");
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(ui.transcript_row_cache.fold().is_expanded(thought));
+    let opened = draw(&mut ui, 80, 24);
+    cell_of(&opened, "secret plan");
+}
+
+#[tokio::test]
+async fn click_opens_explored_group() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("look".into());
+    for (call_id, path) in [("r1", "a.rs"), ("r2", "b.rs")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "read",
+            serde_json::json!({"path": path}),
+            "text",
+        );
+    }
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "explored 2 files");
+    plain_click(&mut ui, &writer, x, y).await;
+    let start = ui.state.transcript.entries()[1].id;
+    assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
+    let opened = draw(&mut ui, 80, 24);
+    assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
+}
+
+#[tokio::test]
+async fn click_keeps_its_pressed_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("build".into());
+    finish_tool(
+        &mut ui,
+        "b1",
+        "bash",
+        serde_json::json!({"command": "cargo build"}),
+        "compiled ok",
+    );
+    let card = ui.state.transcript.entries().last().unwrap().id;
+    let buffer = draw(&mut ui, 80, 12);
+    let (x, y) = cell_of(&buffer, "cargo build");
+
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    // Output arriving before the release scrolls the card away from the pressed row.
+    ui.state
+        .transcript
+        .complete_message(1, "one\ntwo\nthree\nfour\nfive".into());
+    let shifted = draw(&mut ui, 80, 12);
+    assert!(!row_text(&shifted, y).contains("cargo build"));
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+}

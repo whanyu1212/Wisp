@@ -1,5 +1,6 @@
 //! Bounded hit regions captured by the paint that users actually saw.
 
+use crate::transcript::TranscriptEntryId;
 use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus, WriterMessage};
 use crate::{OverlayKind, prompt_editor::PromptEditor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -46,6 +47,9 @@ pub(crate) struct Selection {
     area: Rect,
     anchor: Position,
     head: Position,
+    /// The foldable row under the press, found in the frame the user clicked on, so a
+    /// repaint before the release cannot retarget a plain click.
+    fold_target: Option<TranscriptEntryId>,
 }
 
 impl Selection {
@@ -56,7 +60,14 @@ impl Selection {
             area,
             anchor: at,
             head: at,
+            fold_target: None,
         })
+    }
+
+    /// Remember the foldable row a plain click on this press would fold or unfold.
+    pub fn with_fold_target(mut self, target: Option<TranscriptEntryId>) -> Self {
+        self.fold_target = target;
+        self
     }
 
     /// The transcript text area the selection was started in.
@@ -276,6 +287,15 @@ impl Editor {
     }
 }
 
+/// A painted transcript row that a plain click folds or unfolds: a card's action line, an
+/// explored group, or a thought header. Detail rows stay inert, since people press there to
+/// select text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FoldRow {
+    pub y: u16,
+    pub entry: TranscriptEntryId,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
@@ -287,6 +307,7 @@ pub(crate) struct Conversation {
     pub editor: Option<Editor>,
     pub completion: Rows,
     pub completion_visible: bool,
+    pub fold_rows: Vec<FoldRow>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -493,9 +514,15 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 if self.key_help.is_none() {
+                    let fold_target = frame
+                        .conversation
+                        .fold_rows
+                        .iter()
+                        .find(|row| row.y == event.row)
+                        .map(|row| row.entry);
                     self.transcript_selection =
                         Selection::start(frame.conversation.selectable, event)
-                            .map(|selection| (selection, None));
+                            .map(|selection| (selection.with_fold_target(fold_target), None));
                     // Paint once so even a fast drag has a frame to copy from.
                     self.render_pending |= self.transcript_selection.is_some();
                 }
@@ -530,7 +557,8 @@ impl LiveUi {
     ///
     /// A release copies from the last frame painted during the selection, which is what the
     /// user saw, even when the final drag step has not been painted yet. A plain click, or a
-    /// release before any frame was painted, copies nothing. While a response that could not be
+    /// release before any frame was painted, copies nothing; a plain click on a card's action
+    /// line, an explored group, or a thought header folds or unfolds it instead. While a response that could not be
     /// sent awaits keyboard recovery, a release only ends the selection: its notice explains
     /// what the next Ctrl+C does and must stay on screen.
     pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) {
@@ -545,6 +573,12 @@ impl LiveUi {
         let (selection, screen) = self.transcript_selection.take().expect("selection above");
         self.render_pending = true;
         if self.unsendable_current_response() {
+            return;
+        }
+        if selection.is_empty() {
+            if let Some(entry) = selection.fold_target {
+                self.toggle_clicked_fold(entry);
+            }
             return;
         }
         let Some(text) = screen
