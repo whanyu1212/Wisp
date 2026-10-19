@@ -223,16 +223,26 @@ fn hold_open_markup(shown: &str, waiting: &str, end: usize) -> usize {
         "{shown_paragraph}{}",
         &waiting[waiting_paragraph_start..end]
     );
-    // Markers inside a fenced code block are literal.
-    if paragraph.lines().any(|line| {
+    // Markers inside a fenced code block are literal, so read only the prose after the
+    // last fence line, and none at all while a fence is still open.
+    let mut prose_start = 0;
+    let mut in_fence = false;
+    let mut offset = 0;
+    for line in paragraph.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        trimmed.starts_with("```") || trimmed.starts_with("~~~")
-    }) {
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            prose_start = offset + line.len();
+        }
+        offset += line.len();
+    }
+    if in_fence {
         return end;
     }
-    let Some((marker, opened_at)) = open_inline_marker(&paragraph) else {
+    let Some((marker, opened_at)) = open_inline_marker(&paragraph[prose_start..]) else {
         return end;
     };
+    let opened_at = prose_start + opened_at;
     // The opener is already on screen, so holding the rest of the span gains nothing.
     let Some(opener) = opened_at.checked_sub(shown_paragraph.len()) else {
         return end;
@@ -473,6 +483,11 @@ mod tests {
         assert_eq!(
             reveal_end("", "a **b\n\nc d ", 20, false),
             "a **b\n\nc d ".len()
+        );
+        // Prose after a closed fence still holds its spans.
+        assert_eq!(
+            reveal_end("```\ncode\n```\n", "Use **bold ", 20, false),
+            "Use ".len()
         );
         // Markers in a fenced code block are literal.
         assert_eq!(
