@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_e2e.support import run_settled
 from wisp import __version__
 
 _PRESSURE_BACKEND = r"""
@@ -363,11 +364,8 @@ def test_finite_burst_beyond_event_queue_capacity_drains_in_order(tmp_path: Path
         offset = len(tui.output)
         tui.send(b"pressure burst\r")
         tui.wait_until(
-            lambda output: (
-                b"BURST-FIRST" in output[offset:]
-                and b"BURST-LAST" in output[offset:]
-                and output.rfind(b"idle") > output.rfind(b"running")
-            ),
+            # Ctrl+C below quits only when idle; while the run is working it cancels.
+            lambda output: run_settled(output, offset, b"BURST-FIRST", b"BURST-LAST"),
             failure="bounded burst did not reach its final event",
         )
         assert b"frontend cannot keep up" not in tui.output
@@ -500,8 +498,7 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
             lambda output: (
                 burst_done.exists()
                 and cancel_received.exists()
-                and b"BURST-LAST" in output[signal_offset:]
-                and output.rfind(b"idle") > output.rfind(b"running")
+                and run_settled(output, signal_offset, b"BURST-LAST")
             ),
             failure="finite burst did not settle after cancellation",
         )
