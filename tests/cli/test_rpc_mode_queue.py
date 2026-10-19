@@ -171,7 +171,7 @@ def test_rpc_rejects_container_queue_fields_and_remains_usable(tmp_path: Path) -
     ]
 
 
-def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
+def test_held_steers_stay_bounded(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -180,17 +180,20 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     async def build_runtime(**_kwargs: object) -> WispRuntime:
         return await runtime_with_provider(provider)
 
+    # The prompt waits in its trust check until the cancel ends it, so it never becomes
+    # ready and every steer stays held. A prompt that could become ready raced the
+    # cancel, which under load sometimes arrived first and failed the held steers.
+    async def unresolved_trust(self: RpcTrustGate) -> bool:
+        await anyio.sleep_forever()
+        raise AssertionError("cancel ends the prompt before trust resolves")
+
     monkeypatch.setattr(rpc_host_module, "build_runtime", build_runtime)
+    monkeypatch.setattr(RpcTrustGate, "resolve", unresolved_trust)
     commands = [{"id": "prompt", "type": "prompt", "prompt": "block"}]
     commands.extend(
         {"id": f"steer-{index}", "type": "steer", "content": str(index)} for index in range(101)
     )
-    commands.extend(
-        [
-            {"id": "state", "type": "get_queue_state"},
-            {"id": "cancel", "type": "cancel", "target_id": "prompt"},
-        ]
-    )
+    commands.append({"id": "cancel", "type": "cancel", "target_id": "prompt"})
     result = CliRunner().invoke(
         app,
         ["--mode", "rpc", "--session-dir", str(tmp_path)],
@@ -204,25 +207,16 @@ def test_rpc_pending_queue_is_bounded_while_prompt_is_blocked(
     terminal_ids = [record["command_id"] for record in terminals]
     assert len(terminal_ids) == len(set(terminal_ids)), terminal_ids
     finished = {record["command_id"]: record for record in terminals}
-    # Report every rejected steer with its error, so a failure names its cause.
-    rejected_steers = [
-        (record["command_id"], record["error"])
-        for record in terminals
-        if record["command_id"].startswith("steer-") and not record["ok"]
+    queue_full = "Agent queue is full (maximum 100 pending messages)"
+    # Only the steer past the run's message limit is refused while held.
+    assert [record["command_id"] for record in terminals if record.get("error") == queue_full] == [
+        "steer-100"
     ]
-    assert rejected_steers == [
-        ("steer-100", "Agent queue is full (maximum 100 pending messages)")
-    ], rejected_steers
-    assert finished["state"]["ok"] is True
+    # The cancelled prompt never accepted the held steers, so each one finishes unapplied.
+    assert all(f"steer-{index}" in finished for index in range(100))
+    assert not any(finished[f"steer-{index}"]["ok"] for index in range(100))
+    assert finished["prompt"]["ok"] is False
     assert finished["cancel"]["ok"] is True
-    state_start = next(
-        index
-        for index, record in enumerate(records)
-        if record["type"] == "rpc.command.started" and record["command_id"] == "state"
-    )
-    state = next(record for record in records[state_start:] if record["type"] == "queue.updated")
-    assert len(state["steering"]) == 100
-    assert state["follow_up"] == []
 
 
 def test_rpc_mode_rejects_duplicate_outstanding_command_id(
