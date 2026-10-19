@@ -108,8 +108,10 @@ type RpcDispatch = Callable[
 type RpcReject = Callable[[ParsedRpcCommand, str], Awaitable[None]]
 type RpcCompletionEventWriter = Callable[[WispEvent], None]
 type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
+type RpcQueuedMessageRejection = Callable[[int], str | None]
 
 _MAX_QUEUED_RPC_COMMANDS = 100
+_QUEUED_MESSAGE_COMMAND_TYPES = frozenset({"steer", "follow_up"})
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
@@ -155,6 +157,7 @@ class RpcCoordinator:
         prompt_ready_type: type[object] = _RpcPromptReady,
         completion_event_writer: RpcCompletionEventWriter | None = None,
         completion_event_renderer: RpcCompletionEventRenderer | None = None,
+        queued_message_rejection: RpcQueuedMessageRejection | None = None,
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
@@ -178,6 +181,7 @@ class RpcCoordinator:
         self._prompt_queue_ready = False
         self._completion_event_writer = completion_event_writer
         self._completion_event_renderer = completion_event_renderer
+        self._queued_message_rejection = queued_message_rejection
 
     def _ordered_auxiliary_pending(self) -> bool:
         return any(
@@ -425,10 +429,25 @@ class RpcCoordinator:
             and not self._prompt_queue_ready
         )
         if prompt_queue_not_ready:
+            # The run's message limit, not the shared command bound, bounds held
+            # steering and follow-ups, so an overflow gets the run's error however
+            # other outstanding commands add up. The run checks each message again
+            # when it accepts them, including against messages it restored.
+            run_message_limit = (
+                self._queued_message_rejection
+                if selected_type in _QUEUED_MESSAGE_COMMAND_TYPES
+                else None
+            )
+            if run_message_limit is not None:
+                message_rejection = run_message_limit(self._held_message_count())
+                if message_rejection is not None:
+                    await reject(command, message_rejection)
+                    return False
             await self._enqueue_command(
                 command,
                 queue=self.pending_prompt_queue_commands,
                 reject=reject,
+                apply_command_bound=run_message_limit is None,
             )
             return False
         if selected_type == "get_project_files" or (
@@ -498,6 +517,13 @@ class RpcCoordinator:
             self.session_state.session = result.selected_session
         return result.should_shutdown
 
+    def _held_message_count(self) -> int:
+        return sum(
+            1
+            for held in self.pending_prompt_queue_commands
+            if held.command_type in _QUEUED_MESSAGE_COMMAND_TYPES
+        )
+
     def _duplicate_outstanding_id(self, command: ParsedRpcCommand) -> str | None:
         command_id = command.command_id
         if command_id is None:
@@ -543,8 +569,9 @@ class RpcCoordinator:
         *,
         queue: deque[ParsedRpcCommand],
         reject: RpcReject,
+        apply_command_bound: bool = True,
     ) -> None:
-        if self._outstanding_command_count() >= self._max_queued_commands:
+        if apply_command_bound and self._outstanding_command_count() >= self._max_queued_commands:
             await reject(command, "RPC command queue is full while another RPC command is running")
             return
         command_bytes = self._command_payload_size(command)

@@ -16,10 +16,12 @@ from wisp.agent.context_budget import (
     estimate_context_budget,
 )
 from wisp.agent.harness import (
+    DEFAULT_MAX_PENDING_QUEUE_MESSAGES,
     AgentHarness,
     AgentHarnessConfig,
     HarnessBoundaryContext,
     QueuedMessages,
+    queue_full_error,
 )
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
@@ -384,6 +386,24 @@ class CodingSession:
         if harness is not self._active_queue_harness():
             raise RuntimeError("CodingSession active agent run changed")
         return harness.steer_message(message)
+
+    @staticmethod
+    def queued_message_rejection(queued_messages: int) -> str | None:
+        """Return the error a run would give one more steering or follow-up message.
+
+        A frontend that holds messages until a run accepts them checks each one here,
+        so it reports the same queue-full error the run reports for its own queue.
+
+        Args:
+            queued_messages (int): Steering and follow-up messages already held for
+                the run.
+
+        Returns:
+            str | None: The queue-full error, or None when one more message fits.
+        """
+        if queued_messages >= DEFAULT_MAX_PENDING_QUEUE_MESSAGES:
+            return queue_full_error(DEFAULT_MAX_PENDING_QUEUE_MESSAGES)
+        return None
 
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
         """Return the current or retained queue state without requiring an active run."""
