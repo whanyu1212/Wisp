@@ -355,18 +355,32 @@ impl FenceState {
     }
 }
 
-/// The delimiter and length of the code fence that `line` opens, if it opens one.
+/// The delimiter and length of the code fence that `line` opens, if it opens one. As in
+/// CommonMark, a fence is indented at most three spaces (inside any block quote markers),
+/// since more makes the line indented code, and a backtick fence's info string has no
+/// backtick.
 fn opening_fence(line: &str) -> Option<(u8, usize)> {
-    let candidate = line.trim_start_matches([' ', '\t', '>']);
-    let delimiter = *candidate.as_bytes().first()?;
+    let mut rest = line;
+    loop {
+        let indent = rest.len() - rest.trim_start_matches(' ').len();
+        if indent > 3 || rest[indent..].starts_with('\t') {
+            return None;
+        }
+        rest = &rest[indent..];
+        match rest.strip_prefix('>') {
+            Some(quoted) => rest = quoted,
+            None => break,
+        }
+    }
+    let delimiter = *rest.as_bytes().first()?;
     if !matches!(delimiter, b'`' | b'~') {
         return None;
     }
-    let length = candidate
-        .bytes()
-        .take_while(|byte| *byte == delimiter)
-        .count();
-    (length >= 3).then_some((delimiter, length))
+    let length = rest.bytes().take_while(|byte| *byte == delimiter).count();
+    if length < 3 || (delimiter == b'`' && rest[length..].contains('`')) {
+        return None;
+    }
+    Some((delimiter, length))
 }
 
 /// Where `marker` next closes a span in `text`, skipping escaped markers and, for `**`
@@ -612,6 +626,17 @@ mod tests {
             reveal("```\n\n", "x\n\na **b c ", 20, false),
             "x\n\na **b c ".len()
         );
+        // Indented four spaces, or with a backtick in its info string, a fence line is
+        // not a fence, so the prose after it still holds its spans.
+        assert_eq!(
+            reveal("    ```\n\n", "Use **bold ", 20, false),
+            "Use ".len()
+        );
+        assert_eq!(
+            reveal("``` a `b`\n", "Use **bold ", 20, false),
+            "Use ".len()
+        );
+        assert_eq!(reveal("> ```\n", inner, 20, false), inner.len());
         // Markers in a fenced code block are literal.
         assert_eq!(
             reveal("```rust\n", "let x = a ** b; ", 40, false),
