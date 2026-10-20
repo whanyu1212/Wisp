@@ -287,6 +287,7 @@ pub fn render_interactive(
             palette,
             bindings,
             jump_painted.is_some(),
+            false,
         );
         // The jump label is drawn but not clickable: clicks never act while deciding.
         return mouse::Conversation::default();
@@ -327,13 +328,14 @@ pub fn render_interactive(
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
+    let padded = area.height >= 16;
     let editor = render_composer(
         frame,
         chunks[2],
         state,
         composer_layout,
         composer_focused,
-        area.height >= 16,
+        padded,
         palette,
     );
     render_footer(
@@ -345,6 +347,7 @@ pub fn render_interactive(
         palette,
         bindings,
         jump_to_latest.is_some(),
+        composer_framed(state, padded, chunks[2]),
     );
     mouse::Conversation {
         transcript: Rect {
@@ -422,7 +425,46 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-fn footer_leading_parts(state: &UiState) -> Vec<String> {
+/// The mode, model, and effort the composer's bottom border shows.
+fn composer_identity(state: &UiState) -> Option<String> {
+    let identity = header_identity(state);
+    let mode = state.mode_confirmed.then(|| state.mode.as_str().to_owned());
+    match (mode, identity) {
+        (Some(mode), Some(identity)) => Some(format!("{mode} · {identity}")),
+        (mode, identity) => mode.or(identity),
+    }
+}
+
+/// Folders longer than this show only their last component.
+const WORKSPACE_MAX_COLUMNS: usize = 32;
+
+fn display_workspace(cwd: &str) -> String {
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
+    workspace_label(cwd, home.as_deref())
+}
+
+/// Show a workspace folder compactly: `~` for the home folder, and only the last
+/// component of a long path.
+fn workspace_label(cwd: &str, home: Option<&str>) -> String {
+    let shown = match home {
+        Some(home) if cwd == home => "~".to_owned(),
+        Some(home) => cwd
+            .strip_prefix(home)
+            .filter(|rest| rest.starts_with('/'))
+            .map_or_else(|| cwd.to_owned(), |rest| format!("~{rest}")),
+        None => cwd.to_owned(),
+    };
+    if shown.width() <= WORKSPACE_MAX_COLUMNS {
+        return shown;
+    }
+    let last = shown
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(&shown);
+    format!("…/{last}")
+}
+
+fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
@@ -434,16 +476,27 @@ fn footer_leading_parts(state: &UiState) -> Vec<String> {
         }
     }
     // Queue and mode stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer.
-    if state.mode_confirmed {
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
+    // framed composer names the mode on its border instead.
+    if state.mode_confirmed && !identity_in_composer {
         parts.push(state.mode.as_str().to_string());
     }
     parts
 }
 
-fn footer_trailing_parts(state: &UiState) -> Vec<String> {
+/// The footer's closing parts. While the composer's border names the mode and model,
+/// the footer shows where commands run instead; the branch is its own part so it is
+/// the first to go on a narrow row.
+fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    if let Some(identity) = header_identity(state) {
+    if identity_in_composer {
+        if let Some(cwd) = state.workspace_cwd.as_deref() {
+            parts.push(display_workspace(cwd));
+        }
+        if let Some(branch) = state.git_branch.as_deref() {
+            parts.push(branch.to_owned());
+        }
+    } else if let Some(identity) = header_identity(state) {
         parts.push(identity);
     }
     if let Some(reason) = state.context.compaction {
@@ -1420,6 +1473,12 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style
 }
 
+/// Whether the composer draws its frame, whose bottom border then names the mode
+/// and model in place of the footer.
+fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
+    editable(state) && padded && area.height >= 3
+}
+
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1433,12 +1492,20 @@ fn render_composer(
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
     let border_style = Style::default().fg(status_color(state, palette));
-    let framed_input = editable(state) && padded && area.height >= 3;
+    let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
-        Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(border_style)
+            .border_style(border_style);
+        match composer_identity(state) {
+            Some(identity) => block.title_bottom(
+                Line::from(format!(" {} ", sanitize_for_terminal(&identity)))
+                    .style(Style::default().fg(palette.muted))
+                    .right_aligned(),
+            ),
+            None => block,
+        }
     } else {
         Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
@@ -2336,6 +2403,7 @@ fn render_footer(
     palette: Palette,
     bindings: &Bindings,
     jump_painted: bool,
+    identity_in_composer: bool,
 ) {
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow.
@@ -2360,14 +2428,14 @@ fn render_footer(
     } else {
         (terminal_width / 2).max(19)
     };
-    let leading = footer_leading_parts(state);
+    let leading = footer_leading_parts(state, identity_in_composer);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
     let ctx_width = status_budget
         .saturating_sub(leading_width)
         .saturating_sub(if leading_width == 0 { 0 } else { 3 });
     let mut status = leading;
     status.push(crate::context_view::indicator(state, ctx_width));
-    status.extend(footer_trailing_parts(state));
+    status.extend(footer_trailing_parts(state, identity_in_composer));
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
     } else if !jump_painted && viewport.has_unseen_output() {
@@ -4495,6 +4563,64 @@ mod tests {
         assert!(unresolved.2.contains(Modifier::UNDERLINED));
         assert_eq!((editor.cursor_row(), editor.cursor_column()), cursor);
         assert_eq!(editor.text(), "/theme @src/main.rs @missing");
+    }
+
+    #[test]
+    fn workspace_label_shortens() {
+        let home = Some("/Users/ana");
+        assert_eq!(workspace_label("/Users/ana", home), "~");
+        assert_eq!(workspace_label("/Users/ana/Wisp", home), "~/Wisp");
+        assert_eq!(
+            workspace_label("/Users/anabel/Wisp", home),
+            "/Users/anabel/Wisp"
+        );
+        assert_eq!(workspace_label("/srv/wisp", None), "/srv/wisp");
+        assert_eq!(
+            workspace_label("/Users/ana/work/organization/team/deeply-nested-repo", home),
+            "…/deeply-nested-repo"
+        );
+    }
+
+    #[test]
+    fn framed_composer_moves_identity() {
+        let draw = |height: u16| {
+            let mut state =
+                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+            state.mode_confirmed = true;
+            state.workspace_cwd = Some("/srv/wisp".into());
+            state.git_branch = Some("feat/x".into());
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row = |y: u16| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            (row(height - 2), row(height - 1))
+        };
+
+        let (border, footer) = draw(20);
+        assert!(border.contains(" build · fake/model-x · high "), "{border}");
+        assert!(footer.contains("/srv/wisp · feat/x"), "{footer}");
+        assert!(!footer.contains("model-x"), "{footer}");
+
+        // Too short to frame the composer: the footer keeps the identity.
+        let (_, footer) = draw(12);
+        assert!(footer.contains("fake/model-x · high"), "{footer}");
+        assert!(!footer.contains("/srv/wisp"), "{footer}");
     }
 
     #[test]

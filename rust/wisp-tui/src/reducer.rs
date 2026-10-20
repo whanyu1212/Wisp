@@ -710,6 +710,10 @@ pub struct UiState {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Where the session's commands run, as the backend last reported it.
+    pub workspace_cwd: Option<String>,
+    /// The Git branch checked out there, or the short commit for a detached HEAD.
+    pub git_branch: Option<String>,
     pub mode: AgentMode,
     pub mode_confirmed: bool,
     pub(crate) command_catalog: Option<CommandCatalog>,
@@ -785,6 +789,8 @@ impl UiState {
             provider,
             model,
             effort,
+            workspace_cwd: None,
+            git_branch: None,
             mode: AgentMode::Build,
             mode_confirmed: false,
             command_catalog: None,
@@ -1129,6 +1135,11 @@ pub enum BackendEvent {
         turn: u64,
         content: String,
         cost: Option<String>,
+    },
+    /// Where the session's commands run and the branch checked out there.
+    WorkspaceReported {
+        cwd: String,
+        git_branch: Option<String>,
     },
     /// A run finished; its totals close the run's last reply.
     RunCompleted {
@@ -4560,6 +4571,11 @@ fn handle_backend_event(
                 .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::WorkspaceReported { cwd, git_branch } => {
+            state.workspace_cwd = Some(cwd);
+            state.git_branch = git_branch;
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::RunCompleted {
             outcome,
             duration_ms,
@@ -6103,6 +6119,34 @@ mod tests {
         assert_eq!(result.stderr.as_deref(), Some("err"));
         assert_eq!(result.stdout_dropped_bytes, 11);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn workspace_event_updates_state() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let value = serde_json::json!({
+            "type": "rpc.workspace",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "cwd": "/srv/wisp",
+            "git_branch": "main"
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let event = BackendEvent::from_live(&live).unwrap();
+        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        assert_eq!(state.workspace_cwd.as_deref(), Some("/srv/wisp"));
+        assert_eq!(state.git_branch.as_deref(), Some("main"));
+
+        let outside = serde_json::json!({
+            "type": "rpc.workspace",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "cwd": "/tmp",
+            "git_branch": null
+        });
+        let live = wisp_protocol::events::deserialize(outside).unwrap();
+        let event = BackendEvent::from_live(&live).unwrap();
+        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        assert_eq!(state.git_branch, None);
     }
 
     #[test]
