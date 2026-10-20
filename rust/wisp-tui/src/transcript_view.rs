@@ -1051,11 +1051,15 @@ impl TranscriptRowCache {
             .lines()
             .filter(|line| !line.is_empty())
             .count();
-        let text = if line_count > 1 {
+        let mut text = if line_count > 1 {
             format!("thought · {line_count} lines")
         } else {
             "thought".into()
         };
+        if let Some(milliseconds) = entry.thinking_ms() {
+            text.push_str(" · ");
+            text.push_str(&crate::tool_cards::format_duration(u64::from(milliseconds)));
+        }
         let next = if self.fold.is_expanded(entry.id) && !entry.thinking().is_empty() {
             Some(RowAnchor {
                 entry_id: entry.id,
@@ -4480,6 +4484,27 @@ mod tests {
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
+    }
+
+    #[test]
+    fn thought_row_shows_duration() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("think".into());
+        let answer = transcript.append_thinking_delta(1, "first\nsecond");
+        transcript.append_message_delta(1, "answer");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+
+        let thought = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .find(|row| row.anchor.entry_id == answer && row.kind == TranscriptRowKind::Thought)
+            .map(|row| row.plain_text())
+            .unwrap();
+
+        assert!(thought.starts_with("thought · 2 lines · "), "{thought}");
+        assert!(thought.ends_with('s'), "{thought}");
     }
 
     #[test]

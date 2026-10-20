@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Instant;
 
 mod recovery;
 pub(crate) use recovery::LiveHistoryGap;
@@ -102,6 +103,11 @@ pub struct TranscriptEntry {
     local_display: Option<String>,
     /// Display-only reasoning streamed for this assistant turn.
     thinking: String,
+    /// When this reply's first reasoning arrived, until its first answer text.
+    thinking_started: Option<Instant>,
+    /// How long the reply reasoned before answering. Live replies only: reasoning is
+    /// not kept in session history.
+    thinking_ms: Option<u32>,
     searches: Vec<String>,
     cost: Option<String>,
     /// Display-only summary closing the last reply of a finished run.
@@ -188,6 +194,21 @@ impl TranscriptEntry {
 
     pub fn thinking(&self) -> &str {
         &self.thinking
+    }
+
+    pub(crate) fn thinking_ms(&self) -> Option<u32> {
+        self.thinking_ms
+    }
+
+    /// Stop the reasoning clock once answer text arrives or the reply completes.
+    /// Returns whether the entry changed.
+    fn finish_thinking(&mut self) -> bool {
+        let Some(started) = self.thinking_started.take() else {
+            return false;
+        };
+        let elapsed = started.elapsed().as_millis();
+        self.thinking_ms = Some(u32::try_from(elapsed).unwrap_or(u32::MAX));
+        true
     }
 
     pub fn tool_card(&self) -> Option<&ToolCardSnapshot> {
@@ -377,6 +398,7 @@ impl Transcript {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
             let entry = self.entry_mut(entry_id);
+            entry.finish_thinking();
             entry.content.push_str(delta);
             entry.decorate();
             Self::bump_revision(entry);
@@ -394,7 +416,11 @@ impl Transcript {
     ) -> TranscriptEntryId {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
-            self.entry_mut(entry_id).unrevealed.push_str(delta);
+            let entry = self.entry_mut(entry_id);
+            if entry.finish_thinking() {
+                Self::bump_revision(entry);
+            }
+            entry.unrevealed.push_str(delta);
             self.revealing = Some(entry_id);
         }
         entry_id
@@ -465,6 +491,9 @@ impl Transcript {
                     take -= 1;
                 }
                 if take > 0 {
+                    if entry.thinking.is_empty() && entry.thinking_ms.is_none() {
+                        entry.thinking_started = Some(Instant::now());
+                    }
                     entry.thinking.push_str(&delta[..take]);
                     Self::bump_revision(entry);
                     self.bump_generation();
@@ -541,6 +570,9 @@ impl Transcript {
         }
         let entry_id = self.response_for_turn(turn);
         let entry = self.entry_mut(entry_id);
+        if entry.finish_thinking() {
+            Self::bump_revision(entry);
+        }
         // A paced reply keeps revealing the final text after its shown prefix, and becomes
         // `Complete` once it is all shown. A final text that rewrites the shown prefix is
         // shown whole at once instead.
@@ -1585,6 +1617,8 @@ impl Transcript {
                 searches: Vec::new(),
                 cost: None,
                 run_summary: None,
+                thinking_started: None,
+                thinking_ms: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
@@ -2275,6 +2309,8 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            thinking_started: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
@@ -2365,6 +2401,8 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            thinking_started: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind,
