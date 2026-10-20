@@ -213,6 +213,22 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
 
 
 # The label starts a word and is followed by its separator or the end of the row.
+def screen_shows(output: bytes | bytearray, text: str) -> bool:
+    """Return whether the last complete frame's screen shows ``text`` on one row.
+
+    Typed characters read in separate wake-ups paint in separate frames, so a
+    phrase may never appear whole in the byte stream even though it is on screen.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output so far.
+        text (str): Text that must appear within a single screen row.
+
+    Returns:
+        bool: True when a row of the replayed screen contains ``text``.
+    """
+    return any(text in row for row in screen_rows(complete_frames(output)))
+
+
 _STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s·|\s*$)")
 
 
