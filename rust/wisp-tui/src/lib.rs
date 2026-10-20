@@ -2540,7 +2540,11 @@ impl LiveUi {
         if self.browse_selected.is_none() || self.detail_view.is_open() {
             return;
         }
-        let selected = self.current_browse_target(self.browse_selected.expect("checked above"));
+        let previous = self.browse_selected.expect("checked above");
+        let selected = self.current_browse_target(previous);
+        if let (BrowseTarget::Group(from), BrowseTarget::Group(to)) = (previous, selected) {
+            self.transcript_viewport.follow_moved_group_header(from, to);
+        }
         let entries = self.visible_foldable_entries();
         if entries.contains(&selected) {
             self.browse_selected = Some(selected);

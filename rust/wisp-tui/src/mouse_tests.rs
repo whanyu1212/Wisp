@@ -1904,6 +1904,79 @@ async fn group_selection_follows_new_start() {
 }
 
 #[tokio::test]
+async fn scrolled_group_header_stays_on_top() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    start_tool(
+        &mut ui,
+        "zero",
+        "bash",
+        serde_json::json!({"command": "echo zero"}),
+    );
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    ui.state.transcript.append_prompt("next".into());
+    ui.state.transcript.complete_message(1, "line\n".repeat(40));
+    let entries = ui.state.transcript.entries();
+    let (late, first) = (entries[0].id, entries[1].id);
+    let header = |entry_id| crate::transcript_view::RowAnchor {
+        entry_id,
+        position: crate::transcript_view::RowPosition::Header,
+    };
+    draw(&mut ui, 80, 12);
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::Home,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    while ui.transcript_viewport.scrolled_top() != Some(header(first)) {
+        assert_eq!(
+            ui.transcript_viewport
+                .reduce(
+                    TranscriptViewAction::ScrollLines(1),
+                    &ui.state.transcript,
+                    &mut ui.transcript_row_cache,
+                )
+                .consumed_rows,
+            1
+        );
+    }
+    draw(&mut ui, 80, 12);
+    for key in [KeyCode::F(6), KeyCode::Right] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    draw(&mut ui, 80, 12);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(first)));
+    assert_eq!(ui.transcript_viewport.scrolled_top(), Some(header(first)));
+
+    complete_tool(&mut ui, "zero", "bash", "result");
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::OutputChanged,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    draw(&mut ui, 80, 12);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    assert_eq!(ui.transcript_viewport.scrolled_top(), Some(header(late)));
+    let buffer = draw(&mut ui, 80, 12);
+    let selected = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    assert!(selected.contains("(click to"), "{selected}");
+}
+
+#[tokio::test]
 async fn click_keeps_its_pressed_card() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = ui("");

@@ -3296,6 +3296,22 @@ impl TranscriptViewport {
         }
     }
 
+    /// Keep a run's header as the top row when an earlier call joins the run and the
+    /// header moves to it; the old start's `Header` anchor now draws a member card.
+    pub(crate) fn follow_moved_group_header(
+        &mut self,
+        from: TranscriptEntryId,
+        to: TranscriptEntryId,
+    ) {
+        let header = |entry_id| RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        };
+        if !self.follow_tail && self.top == Some(header(from)) {
+            self.top = Some(header(to));
+        }
+    }
+
     pub fn follows_tail(&self) -> bool {
         self.follow_tail
     }
