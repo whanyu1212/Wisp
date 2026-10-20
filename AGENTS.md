@@ -246,9 +246,8 @@ These rules apply only when the user asks for a commit, push, pull request, or m
 - Codex reviews each pull request automatically. Verify each finding against the code. Fix a valid
   one narrowly, with a regression test where it applies, then reply with the fixing commit and
   resolve the thread only after the fix is pushed. Answer an invalid one with evidence instead of
-  changing code to silence it. After addressing findings, comment `@codex review` and wait for a
-  result tied to the current head commit: a 👀 reaction means queued, and silence is not approval.
+  changing code to silence it. Do not comment `@codex review` to request a re-review after
+  addressing findings; handle any further findings Codex posts on its own.
 - A pull request is ready to merge when it is not a draft, GitHub reports it mergeable, every check
-  on the current head passed, no actionable review thread is unresolved, and the latest review of
-  that head is clean.
+  on the current head passed, and no actionable review thread is unresolved.
 - Never amend, rebase, force-push, merge, release, or delete branches unless the user asks.
