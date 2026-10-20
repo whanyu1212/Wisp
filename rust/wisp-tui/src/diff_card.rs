@@ -42,7 +42,10 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
         .rows
         .iter()
         .any(|row| row.old_line.is_some() || row.new_line.is_some());
-    let rows = coherent_preview_rows(&card_rows(&detail.rows));
+    let rows = coherent_preview_rows(
+        &card_rows(&detail.rows),
+        detail.additions.saturating_add(detail.deletions),
+    );
     let emphasis = row_emphasis(&rows);
     let mut preview = DiffCardPreview {
         text: String::new(),
@@ -99,7 +102,7 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
 
 /// Keep short hunks intact. Larger previews end at a hunk boundary when possible;
 /// never splice the tail of a function onto its beginning across hidden changes.
-fn coherent_preview_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
+fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRow> {
     const MAX_ROWS: usize = 16;
     let mut bytes = 0usize;
     let limit = rows
@@ -121,10 +124,13 @@ fn coherent_preview_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
         end -= 1;
     }
     let hidden = &rows[end..];
-    let changed = hidden
+    // Retained rows may already contain an omission from the detail budget.
+    // The presentation totals still count those source changes.
+    let displayed_changes = rows[..end]
         .iter()
         .filter(|row| matches!(row.kind, DetailRowKind::Addition | DetailRowKind::Deletion))
-        .count();
+        .count() as u64;
+    let changed = total_changes.saturating_sub(displayed_changes);
     let mut selected = rows[..end].to_vec();
     selected.push(DetailRow {
         key: hidden.first().map_or(0, |row| row.key),
@@ -345,17 +351,56 @@ mod tests {
         let short = (0..12)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
-        assert_eq!(coherent_preview_rows(&short), short);
+        assert_eq!(coherent_preview_rows(&short, 12), short);
         let long = (0..30)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
-        let preview = coherent_preview_rows(&long);
+        let preview = coherent_preview_rows(&long, 30);
         assert_eq!(preview[15].text, "line 15");
         assert_eq!(
             preview[16].text,
             "▸ 14 more changed lines · Enter to review"
         );
         assert!(!preview.iter().any(|row| row.text == "line 29"));
+    }
+
+    #[test]
+    fn preview_omission_includes_changes_evicted_by_the_retained_detail_budget() {
+        use crate::tool_detail::{
+            DETAIL_EXPANDED_MAX_BYTES, DETAIL_EXPANDED_MAX_ROWS, DetailPresentationKind,
+            select_detail_rows,
+        };
+        for kind in [DetailRowKind::Addition, DetailRowKind::Deletion] {
+            let source = (0..500)
+                .map(|n| row(kind, &format!("line {n}")))
+                .collect::<Vec<_>>();
+            let rows =
+                select_detail_rows(&source, DETAIL_EXPANDED_MAX_ROWS, DETAIL_EXPANDED_MAX_BYTES);
+            assert!(rows.iter().any(|row| row.kind == DetailRowKind::Omission));
+            let detail = ToolDetailPresentation {
+                kind: DetailPresentationKind::DiffModify,
+                title: "M file.txt".into(),
+                summary: String::new(),
+                additions: if kind == DetailRowKind::Addition {
+                    500
+                } else {
+                    0
+                },
+                deletions: if kind == DetailRowKind::Deletion {
+                    500
+                } else {
+                    0
+                },
+                rows,
+                truncated: false,
+            };
+            let preview = preview(&detail);
+            assert!(
+                preview.text.contains("484 more changed lines"),
+                "{}",
+                preview.text
+            );
+        }
     }
 
     #[test]
