@@ -222,6 +222,8 @@ pub struct ToolCardSnapshot {
     pub call_id: String,
     pub name: String,
     pub action_arguments: String,
+    pub command_summary: Option<CommandSummary>,
+    pub process_id: Option<String>,
     pub status: ToolStatus,
     pub arguments_available: bool,
     pub detail: String,
@@ -239,6 +241,8 @@ impl ToolCardSnapshot {
             call_id: call_identity_for_display(&input.call_id),
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
+            command_summary: command_summary(input),
+            process_id: None,
             status,
             arguments_available: true,
             detail: String::new(),
@@ -288,6 +292,7 @@ impl ToolCardSnapshot {
         }
         self.name = name;
         self.action_arguments = action_arguments;
+        self.command_summary = command_summary(input);
         self.arguments_available = true;
         true
     }
@@ -323,6 +328,11 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        self.process_id = input
+            .process_id
+            .as_ref()
+            .filter(|id| id.len() <= PROCESS_ID_DISPLAY_MAX_CHARS)
+            .cloned();
         let retain_tail = self.status == ToolStatus::Error
             || (self.status == ToolStatus::Done && self.name == "bash");
         let selected_output = if retain_tail && self.status == ToolStatus::Done {
@@ -505,6 +515,25 @@ impl ToolCardSnapshot {
         action
     }
 
+    /// A concise display summary; the original arguments remain in retained detail.
+    pub fn display_arguments(&self) -> String {
+        if self.name == "bash" {
+            return self
+                .command_summary
+                .map(CommandSummary::label)
+                .unwrap_or_else(|| self.action_arguments.clone());
+        }
+        if matches!(self.name.as_str(), "read" | "edit" | "write" | "ls") {
+            if let Ok(root) = std::env::current_dir() {
+                let prefix = format!("{}/", root.display());
+                if let Some(relative) = self.action_arguments.strip_prefix(&prefix) {
+                    return relative.to_owned();
+                }
+            }
+        }
+        self.action_arguments.clone()
+    }
+
     pub fn preview(&self) -> &str {
         &self.detail
     }
@@ -517,6 +546,7 @@ impl ToolCardSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessCardSnapshot {
     pub process_id: String,
+    pub task_label: Option<String>,
     pub display_state: ProcessDisplayState,
     pub poll_count: u32,
     pub call_count: u32,
@@ -533,6 +563,7 @@ impl ProcessCardSnapshot {
     pub fn new(process_id: String) -> Self {
         Self {
             process_id,
+            task_label: None,
             display_state: ProcessDisplayState::Observed,
             poll_count: 0,
             call_count: 0,
@@ -757,6 +788,7 @@ impl ProcessCardSnapshot {
         retained.dropped_bytes = retained.base_offset;
         retained.dropped_lines = source_lines.saturating_sub(logical_line_count(&retained.text));
 
+        self.task_label = newer.task_label.clone().or_else(|| self.task_label.clone());
         self.display_state = newer.display_state;
         self.poll_count = self.poll_count.saturating_add(newer.poll_count);
         self.call_count = self.call_count.saturating_add(newer.call_count);
@@ -1204,6 +1236,58 @@ fn format_find(arguments: &Map<String, Value>) -> String {
     format!("{} in {path}", clip_chars(&one_line(&pattern), 64))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandSummary(u8);
+
+impl CommandSummary {
+    fn label(self) -> String {
+        [
+            "Python tests",
+            "Python quality checks",
+            "Rust tests",
+            "Rust build",
+            "Rust lint checks",
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, label)| (self.0 & (1 << index) != 0).then_some(label))
+        .collect::<Vec<_>>()
+        .join(" + ")
+    }
+}
+
+// Classify the complete source command before display normalization or clipping.
+fn command_summary(input: &ToolCallInput) -> Option<CommandSummary> {
+    if input.name != "bash" {
+        return None;
+    }
+    summarize_command(input.arguments.get("command")?.as_str()?)
+}
+
+fn summarize_command(command: &str) -> Option<CommandSummary> {
+    if command.contains([';', '|', '`', '$', '\n', '\r', '>', '<', '\'', '"']) {
+        return None;
+    }
+    let mut flags = 0;
+    for part in command.split("&&") {
+        if part.contains('&') {
+            return None;
+        }
+        let words = part.split_whitespace().collect::<Vec<_>>();
+        let words = words.strip_prefix(&["uv", "run"]).unwrap_or(&words);
+        flags |= match words {
+            ["pytest", ..] => 1,
+            ["ruff" | "mypy", ..] => 2,
+            ["cargo", "test", ..] => 4,
+            ["cargo", "build", ..] => 8,
+            ["cargo", "clippy", ..] => 16,
+            ["cd", _] => continue,
+            _ => return None,
+        };
+    }
+    (flags != 0).then_some(CommandSummary(flags))
+}
+
 fn format_bash(arguments: &Map<String, Value>) -> String {
     let operation = arguments
         .get("operation")
@@ -1470,6 +1554,61 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_summaries_only_label_known_invocations() {
+        assert_eq!(
+            summarize_command("cd /project && uv run pytest -q")
+                .unwrap()
+                .label(),
+            "Python tests"
+        );
+        assert_eq!(
+            summarize_command("uv run ruff check . && uv run mypy")
+                .unwrap()
+                .label(),
+            "Python quality checks"
+        );
+        for command in [
+            "echo pytest",
+            "cargo test && rm -rf cache",
+            "pytest; deploy",
+            "start cargo test",
+        ] {
+            assert!(summarize_command(command).is_none());
+        }
+    }
+
+    #[test]
+    fn command_summaries_do_not_hide_shell_separators_or_clipped_suffixes() {
+        for command in [
+            "pytest & deploy".to_owned(),
+            "pytest\ndeploy".into(),
+            "pytest && deploy".into(),
+            format!("pytest {} ; deploy", "x".repeat(300)),
+        ] {
+            let input = ToolCallInput {
+                call_id: "test".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                detail_source: ToolDetailSource::None,
+            };
+            let card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+            assert_eq!(card.display_arguments(), card.action_arguments);
+            assert!(card.command_summary.is_none());
+        }
+    }
+
+    #[test]
+    fn historical_merges_keep_known_process_task_labels() {
+        let older = ProcessCardSnapshot::new("process-1".into());
+        let mut live = older.clone();
+        live.task_label = Some("Python tests".into());
+        live.prepend_historical_older(&older);
+        assert_eq!(live.task_label.as_deref(), Some("Python tests"));
+        live.merge_historical_newer(&older);
+        assert_eq!(live.task_label.as_deref(), Some("Python tests"));
+    }
 
     fn result(output: &str) -> ToolResultInput {
         ToolResultInput {

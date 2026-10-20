@@ -1663,14 +1663,14 @@ async fn click_toggles_a_card() {
     let card = ui.state.transcript.entries().last().unwrap().id;
     let buffer = draw(&mut ui, 80, 24);
     assert!(!row_text(&buffer, cell_of(&buffer, "Bash").1).contains("expand"));
-    let (x, y) = cell_of(&buffer, "cargo build");
+    let (x, y) = cell_of(&buffer, "Rust build");
 
     // A click folds the card without starting browse, so typing still reaches the prompt.
     plain_click(&mut ui, &writer, x, y).await;
     assert_eq!(ui.browse_selected, None);
     assert!(ui.transcript_row_cache.fold().is_expanded(card));
     let expanded = draw(&mut ui, 80, 24);
-    let (detail_x, detail_y) = cell_of(&expanded, "└ compiled ok");
+    let (detail_x, detail_y) = cell_of(&expanded, "compiled ok");
 
     // A detail row stays inert so people can press there to select its text.
     plain_click(&mut ui, &writer, detail_x + 2, detail_y).await;
@@ -1744,7 +1744,7 @@ async fn click_keeps_its_pressed_card() {
     );
     let card = ui.state.transcript.entries().last().unwrap().id;
     let buffer = draw(&mut ui, 80, 12);
-    let (x, y) = cell_of(&buffer, "cargo build");
+    let (x, y) = cell_of(&buffer, "Rust build");
 
     ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
     // Output arriving before the release scrolls the card away from the pressed row.
@@ -1752,7 +1752,7 @@ async fn click_keeps_its_pressed_card() {
         .transcript
         .complete_message(1, "one\ntwo\nthree\nfour\nfive".into());
     let shifted = draw(&mut ui, 80, 12);
-    assert!(!row_text(&shifted, y).contains("cargo build"));
+    assert!(!row_text(&shifted, y).contains("Rust build"));
     ui.handle_input(
         drag(MouseEventKind::Up(MouseButton::Left), x, y),
         &writer,

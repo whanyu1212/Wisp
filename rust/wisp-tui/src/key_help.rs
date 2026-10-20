@@ -130,6 +130,9 @@ impl KeyHelp {
             }
             Owner::Overlay(OverlayKind::Detail) => &[
                 "Details: arrows/Page/Home/End scroll; Esc returns to card browse.",
+                "Diff review: [ / ] previous/next hunk; Tab / Shift+Tab next/previous retained edit.",
+                "s toggles side-by-side (wide terminals); c shows/hides retained context.",
+                "Review compares one tool edit's before/after, not the working tree against HEAD.",
                 "Ctrl+C retains normal cancellation/exit behavior.",
             ],
             Owner::Composer => &[

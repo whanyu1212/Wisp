@@ -81,7 +81,7 @@ impl Palette {
     /// moves toward the foreground until it reads; monochrome palettes reverse the
     /// row's colours instead.
     pub fn chip(self) -> Style {
-        const TINT: f64 = 0.2;
+        const TINT: f64 = 0.1;
         if self.monochrome {
             return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         }
@@ -101,11 +101,52 @@ impl Palette {
     }
 
     pub fn tool_command(self) -> Style {
-        self.semantic_command()
+        Style::default().fg(self.secondary)
     }
 
     pub fn tool_path(self) -> Style {
-        self.semantic_path(true)
+        Style::default().fg(self.foreground)
+    }
+
+    /// Emphasize only changed words, preserving a non-color cue in monochrome.
+    pub fn diff_change(self, base: Style) -> Style {
+        if self.monochrome {
+            return base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        }
+        let tint = if base.bg == Some(self.deletion_background) {
+            self.error
+        } else {
+            self.success
+        };
+        let background = base.bg.unwrap_or(self.background);
+        // Keep normal text legible even for the light palettes.
+        let fill = (0..=8)
+            .map(|step| mix(tint, background, 0.24 - f64::from(step) * 0.03))
+            .find(|fill| contrast_ratio(self.foreground, *fill) >= 4.5)
+            .unwrap_or(background);
+        base.fg(self.foreground)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    }
+
+    pub fn syntax(self, base: Style, class: crate::syntax::SyntaxClass) -> Style {
+        use crate::syntax::SyntaxClass;
+        let color = match class {
+            SyntaxClass::Plain => return base,
+            SyntaxClass::Comment => self.muted,
+            SyntaxClass::Keyword => self.accent,
+            SyntaxClass::String => self.success,
+            SyntaxClass::Number | SyntaxClass::Constant | SyntaxClass::Operator => self.warning,
+            SyntaxClass::Type => self.secondary,
+            SyntaxClass::Function => self.primary,
+            SyntaxClass::Variable | SyntaxClass::Punctuation => self.foreground,
+        };
+        let color = if base.bg.is_some_and(|bg| contrast_ratio(color, bg) < 4.5) {
+            self.foreground
+        } else {
+            color
+        };
+        base.fg(color)
     }
 
     pub fn semantic_command(self) -> Style {
@@ -192,17 +233,6 @@ impl Palette {
 
     pub fn border(self) -> Style {
         Style::default().fg(self.muted)
-    }
-
-    /// The thin rule between back-to-back tool cards: the muted colour, halfway faded into
-    /// the background so the rule separates rows without competing with their text. A glass
-    /// theme shows the terminal's own background instead of `background`, so its rule keeps
-    /// the plain muted colour rather than fading toward a colour that isn't on screen.
-    pub fn rule(self) -> Style {
-        if self.monochrome || self.terminal_background {
-            return Style::default().fg(self.muted);
-        }
-        Style::default().fg(mix(self.muted, self.background, 0.5))
     }
 
     pub fn selection(self) -> Style {

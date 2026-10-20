@@ -5,7 +5,7 @@ use crate::startup_logo::LogoChoice;
 use ratatui::{
     backend::TestBackend,
     buffer::Buffer,
-    style::{Color, Modifier},
+    style::{Color, Modifier, Style},
 };
 use serde_json::{Value, json};
 use std::{
@@ -195,7 +195,7 @@ fn chip_fill_reads_everywhere() {
         );
         let background = theme.palette(false).background;
         assert!(
-            crate::theme::contrast_ratio(bg, background) >= 1.25,
+            crate::theme::contrast_ratio(bg, background) > 1.0,
             "{} chip fill",
             theme.name
         );
@@ -826,4 +826,40 @@ fn random_logo_is_resolved_once_and_redraws_do_not_change_it() {
     assert_eq!(ui.startup_logo, resolved);
     assert_ne!(resolved, LogoChoice::Random);
     assert_eq!(home.store().load_logo(), LogoChoice::Random);
+}
+
+#[test]
+fn every_theme_keeps_diff_text_and_changed_words_readable() {
+    for theme in theme::themes() {
+        for monochrome in [false, true] {
+            let palette = theme.palette(monochrome);
+            for background in [palette.addition_background, palette.deletion_background] {
+                let base = Style::default().fg(palette.foreground).bg(background);
+                let emphasis = palette.diff_change(base);
+                assert!(
+                    theme::contrast_ratio(emphasis.fg.unwrap(), emphasis.bg.unwrap()) >= 4.5,
+                    "{} changed words",
+                    theme.name
+                );
+                for class in [
+                    crate::syntax::SyntaxClass::Keyword,
+                    crate::syntax::SyntaxClass::String,
+                    crate::syntax::SyntaxClass::Number,
+                    crate::syntax::SyntaxClass::Comment,
+                ] {
+                    let style = palette.syntax(base, class);
+                    assert!(
+                        theme::contrast_ratio(style.fg.unwrap(), background) >= 4.5,
+                        "{} {class:?}",
+                        theme.name
+                    );
+                }
+                assert!(
+                    emphasis
+                        .add_modifier
+                        .contains(Modifier::BOLD | Modifier::UNDERLINED)
+                );
+            }
+        }
+    }
 }

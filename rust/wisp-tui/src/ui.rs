@@ -937,9 +937,9 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
 }
 
 /// What the agent is waiting on while no reply text or tool card shows progress.
-fn activity_phase(state: &UiState) -> &'static str {
+fn activity_phase(state: &UiState) -> String {
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        return "Compacting context";
+        return "Compacting context".into();
     }
     let thinking = state
         .transcript
@@ -952,7 +952,33 @@ fn activity_phase(state: &UiState) -> &'static str {
                 && entry.state == crate::transcript::TranscriptEntryState::Streaming
                 && !entry.thinking().is_empty()
         });
-    if thinking { "Thinking" } else { "Working" }
+    if !thinking {
+        if let Some(card) = state
+            .transcript
+            .entries()
+            .iter()
+            .rev()
+            .take_while(|entry| entry.role != TranscriptRole::User)
+            .find_map(|entry| {
+                let card = entry.process_card()?;
+                matches!(
+                    card.display_state,
+                    ProcessDisplayState::Running | ProcessDisplayState::Polling
+                )
+                .then_some(card)
+            })
+        {
+            return format!(
+                "Running {}",
+                card.task_label.as_deref().unwrap_or("background command")
+            );
+        }
+    }
+    if thinking {
+        "Thinking".into()
+    } else {
+        "Working".into()
+    }
 }
 
 /// `9s`, `1m 05s` or `1h 02m`.
@@ -1051,16 +1077,7 @@ fn render_transcript_row(
         content.width -= columns;
     }
     if row.kind == TranscriptRowKind::Rule {
-        // The rule starts under the chip, after the status marker and its gap.
-        let start = content.width.min(2);
-        let columns = usize::from(content.width - start);
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "─".repeat(columns),
-                base.patch(palette.rule()),
-            )),
-            Rect::new(content.x + start, content.y, content.width - start, 1),
-        );
+        // Preserve the existing viewport anchors, but separate routine tools with air.
         return;
     }
     if code {
@@ -1257,7 +1274,11 @@ fn render_detail(
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(&heading)).block(
             Block::default()
-                .title(" live retained detail ")
+                .title(if crate::diff_review::is_diff(presentation) {
+                    " review · this tool edit · before ↔ after "
+                } else {
+                    " live retained detail "
+                })
                 .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
@@ -1266,17 +1287,21 @@ fn render_detail(
 
     let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
     let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
-    view.set_geometry(presentation, width, height);
-    let rows = view.visible_rows(presentation);
-    let lines = if rows.is_empty() {
-        vec![Line::styled(
-            "(no retained detail rows)",
-            Style::default().fg(palette.muted),
-        )]
+    let lines = if crate::diff_review::is_diff(presentation) {
+        view.review.lines(presentation, width, height, palette)
     } else {
-        rows.into_iter()
-            .map(|row| detail_line(row, palette))
-            .collect()
+        view.set_geometry(presentation, width, height);
+        let rows = view.visible_rows(presentation);
+        if rows.is_empty() {
+            vec![Line::styled(
+                "(no retained detail rows)",
+                Style::default().fg(palette.muted),
+            )]
+        } else {
+            rows.into_iter()
+                .map(|row| detail_line(row, palette))
+                .collect()
+        }
     };
     let title = if presentation.truncated {
         " detail • retained content incomplete "
@@ -1293,8 +1318,12 @@ fn render_detail(
         chunks[1],
     );
     frame.render_widget(
-        Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc close")
-            .style(Style::default().fg(palette.muted)),
+        Paragraph::new(if crate::diff_review::is_diff(presentation) {
+            "↑/↓ scroll · [/] hunk · Tab edit · s split · c context · Esc close"
+        } else {
+            "↑/↓ scroll · PgUp/PgDn · Home/End · Esc close"
+        })
+        .style(Style::default().fg(palette.muted)),
         chunks[2],
     );
 }
@@ -1339,20 +1368,23 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         InlineStyle::ToolArgument => style.patch(palette.tool_argument()),
         InlineStyle::ToolStatus => style,
         // Modifiers, not colour, so the changed words stay visible in monochrome.
-        InlineStyle::DiffChange => style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        InlineStyle::DiffChange => palette.diff_change(style),
+        InlineStyle::DiffGutter => style.fg(palette.muted),
+        InlineStyle::DiffSign => style.fg(if style.bg == Some(palette.deletion_background) {
+            palette.error
+        } else if style.bg == Some(palette.addition_background) {
+            palette.success
+        } else {
+            palette.muted
+        }),
     };
-    style = match semantic.syntax {
-        SyntaxClass::Plain => style,
-        SyntaxClass::Comment => style.fg(palette.muted).add_modifier(Modifier::ITALIC),
-        SyntaxClass::Keyword => style.fg(palette.accent).add_modifier(Modifier::BOLD),
-        SyntaxClass::String => style.fg(palette.success),
-        SyntaxClass::Number | SyntaxClass::Constant => style.fg(palette.warning),
-        SyntaxClass::Type => style.fg(palette.secondary),
-        SyntaxClass::Function => style.fg(palette.primary),
-        SyntaxClass::Variable => style.fg(palette.foreground),
-        SyntaxClass::Operator => style.fg(palette.warning),
-        SyntaxClass::Punctuation => style.fg(palette.foreground),
-    };
+    style = palette.syntax(style, semantic.syntax);
+    if semantic.syntax == SyntaxClass::Comment {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if semantic.syntax == SyntaxClass::Keyword {
+        style = style.add_modifier(Modifier::BOLD);
+    }
     if semantic.strong {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -2248,11 +2280,6 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
                 "{} later",
                 primary_label(bindings, KeyAction::AlternateSubmit)
             ),
-            "Esc/Ctrl-C cancels".into(),
-            format!(
-                "{} restore",
-                primary_label(bindings, KeyAction::RestoreQueue)
-            ),
             "Ctrl+G help".into(),
             browse_hint(state, bindings),
         ]
@@ -2274,9 +2301,6 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
             // Ahead of `@ files` so it still fits the 56-column cap of narrower
             // terminals once there is something to browse.
             browse_hint(state, bindings),
-            "@ files".into(),
-            format!("{} history", primary_label(bindings, KeyAction::History)),
-            format!("{} newline", primary_label(bindings, KeyAction::Newline)),
         ]
     };
     join_hints(parts, width)
@@ -3680,7 +3704,7 @@ mod tests {
             .find(|line| line.contains("Ask Wisp anything"))
             .unwrap();
         assert!(welcome_action.contains("Ctrl+Enter"));
-        assert!(rendered.contains("F4 history"));
+        assert!(!rendered.contains("F4 history"));
         assert!(rendered.contains("Ctrl+G help"));
         assert!(!rendered.contains("Unbound theme"));
         assert!(!rendered.contains("Ctrl+T theme"));
@@ -4802,7 +4826,7 @@ mod tests {
         );
         // Bash commands differ call to call, so they keep their own rows.
         assert!(
-            screen.contains("cargo fmt") && screen.contains("cargo test"),
+            screen.contains("cargo fmt") && screen.contains("Rust tests"),
             "{screen}"
         );
     }
@@ -4961,7 +4985,7 @@ mod tests {
     }
 
     #[test]
-    fn stacked_cards_draw_rules() {
+    fn stacked_cards_have_quiet_spacing() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("check".into());
         for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo test")] {
@@ -5016,10 +5040,11 @@ mod tests {
             lines[first - 1].trim_matches(['"', ' ']).is_empty(),
             "{screen}"
         );
-        assert!(lines[first + 1].contains("──────"), "{screen}");
-        assert!(lines[first + 2].contains("cargo test"), "{screen}");
-        let (fg, _, _) = style_at_text(terminal.backend(), "──────").unwrap();
-        assert_eq!(Some(fg), Palette::default().rule().fg);
+        assert!(
+            lines[first + 1].trim_matches(['"', ' ']).is_empty(),
+            "{screen}"
+        );
+        assert!(lines[first + 2].contains("Rust tests"), "{screen}");
         let palette = Palette::default();
         let user_bg = palette.user_text().bg;
         let gap_row = u16::try_from(first - 1).unwrap();
@@ -5147,10 +5172,10 @@ mod tests {
         );
         assert_eq!(
             style_at_text(complete.backend(), "README.md").unwrap().0,
-            Palette::default().success
+            Palette::default().foreground
         );
         assert!(
-            style_at_text(complete.backend(), "README.md")
+            !style_at_text(complete.backend(), "README.md")
                 .unwrap()
                 .2
                 .contains(Modifier::UNDERLINED)
@@ -5171,9 +5196,9 @@ mod tests {
         shell_result.name = "bash".into();
         shell.transcript.observe_tool_result(shell_result);
         let shell = draw(&shell);
-        let command = style_at_text(shell.backend(), "cargo test --workspace").unwrap();
-        assert_eq!(command.0, Palette::default().primary);
-        assert!(command.2.contains(Modifier::BOLD));
+        let command = style_at_text(shell.backend(), "Rust tests").unwrap();
+        assert_eq!(command.0, Palette::default().secondary);
+        assert!(!command.2.contains(Modifier::BOLD));
     }
 
     fn render_edit_card(arguments: serde_json::Value, width: u16) -> (String, TestBackend) {
@@ -5292,8 +5317,8 @@ mod tests {
             false,
             100,
         );
-        assert!(rendered.contains("   2 │ - b"), "{rendered}");
-        assert!(rendered.contains("   2 │ + B"), "{rendered}");
+        assert!(rendered.contains("   2      - b"), "{rendered}");
+        assert!(rendered.contains("      2 + B"), "{rendered}");
         assert!(
             rendered.contains("⏎ trailing newline removed"),
             "{rendered}"
@@ -5307,7 +5332,7 @@ mod tests {
             100,
         );
         assert!(created.contains("new.txt  new file"), "{created}");
-        assert!(created.contains("   1 │ + first"), "{created}");
+        assert!(created.contains("      1 + first"), "{created}");
 
         let (unterminated, _) = render_file_card(
             "write",
@@ -5316,7 +5341,7 @@ mod tests {
             true,
             100,
         );
-        assert!(unterminated.contains("   2 │ + second"), "{unterminated}");
+        assert!(unterminated.contains("      2 + second"), "{unterminated}");
         assert!(!unterminated.contains('⏎'), "{unterminated}");
 
         // Appending an unterminated line keeps the old final line as context.
@@ -5413,9 +5438,9 @@ mod tests {
             style_at_text(browse_terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, deleted_background, _) =
             style_at_text(browse_terminal.backend(), "- old�[2J").unwrap();
-        assert_eq!(added_fg, Palette::default().addition);
+        assert_eq!(added_fg, Palette::default().success);
         assert_eq!(added_background, Palette::default().addition_background);
-        assert_eq!(deleted_fg, Palette::default().deletion);
+        assert_eq!(deleted_fg, Palette::default().error);
         assert_eq!(deleted_background, Palette::default().deletion_background);
 
         let card = state
@@ -5461,13 +5486,13 @@ mod tests {
             })
             .unwrap();
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("live retained detail"));
-        assert!(rendered.contains("- old�[2J"));
+        assert!(rendered.contains("this tool edit"));
+        assert!(rendered.contains("− old�[2J"));
         assert!(rendered.contains("+ new value"));
         let (added_fg, _, _) = style_at_text(terminal.backend(), "+ new value").unwrap();
-        let (deleted_fg, _, _) = style_at_text(terminal.backend(), "- old�[2J").unwrap();
-        assert_eq!(added_fg, Palette::default().addition);
-        assert_eq!(deleted_fg, Palette::default().deletion);
+        let (deleted_fg, _, _) = style_at_text(terminal.backend(), "− old�[2J").unwrap();
+        assert_eq!(added_fg, Palette::default().success);
+        assert_eq!(deleted_fg, Palette::default().error);
     }
 
     #[test]
@@ -5882,8 +5907,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(tool_command.fg, Some(palette.primary));
-        assert!(tool_command.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(tool_command.fg, Some(palette.secondary));
+        assert!(!tool_command.add_modifier.contains(Modifier::BOLD));
 
         let tool_path = markdown_span_style(
             Style::default().fg(palette.muted),
@@ -5893,8 +5918,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(tool_path.fg, Some(palette.success));
-        assert!(tool_path.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(tool_path.fg, Some(palette.foreground));
+        assert!(!tool_path.add_modifier.contains(Modifier::UNDERLINED));
 
         let tool_argument = markdown_span_style(
             Style::default().fg(palette.muted),
@@ -6033,7 +6058,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("✓  Bash"))
             .expect("action row");
-        assert!(action.contains('…'), "{collapsed}");
+        assert!(action.contains("Rust tests"), "{collapsed}");
         assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
 
         let expanded = render_bash_card(command, Some((false, None)), 40, true);
@@ -6042,7 +6067,7 @@ mod tests {
             .find(|line| line.contains("✓  Bash"))
             .expect("action row");
         assert!(!action.contains('…'), "{expanded}");
-        assert!(expanded.contains("y_long_test_name"), "{expanded}");
+        assert!(expanded.contains("ong_test_name"), "{expanded}");
 
         // A diff's change counts stay visible when its path is cut.
         let (diff, _) = render_file_card(
@@ -6325,11 +6350,11 @@ mod tests {
         state.transcript.observe_tool_result(process_result);
         let process_between_steps = render_to_string_with_activity(80, 18, &state, 3);
         assert!(
-            process_between_steps.contains("Process  process-1"),
+            process_between_steps.contains("Process  Background command"),
             "{process_between_steps}"
         );
         assert!(
-            process_between_steps.contains("⠸ Working"),
+            process_between_steps.contains("⠸ Running background command"),
             "{process_between_steps}"
         );
 
@@ -6353,7 +6378,10 @@ mod tests {
         result.process_state = Some("running".into());
         state.transcript.observe_tool_result(result);
         let after_poll = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(after_poll.contains("⠸ Working"), "{after_poll}");
+        assert!(
+            after_poll.contains("⠸ Running background command"),
+            "{after_poll}"
+        );
 
         for status in [
             ViewStatus::Idle,

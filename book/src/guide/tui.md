@@ -76,19 +76,33 @@ Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
 Ctrl+G lists every resolved binding. Successful `edit` and `write` cards show a bounded inline diff
 preview under the action line, which carries the change counts (and `new file` for a created file).
-Rows keep stable `+`/`-` signs and themed changed-row bands; `write` diffs add a line-number gutter
-(`edit` arguments carry no line numbers). Separate hunks or edits are divided by `⋯`, and a
-`⏎ trailing newline added/removed` row appears only when the final newline actually changed. When a
-deleted line and its replacement share words, the words that differ are bold and underlined, so a
-rewrap or a one-word change stands out without colour. Enter opens the full unified diff. Other tool
-and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
+Rows keep stable `+`/`-` signs, quiet themed backgrounds, and syntax coloring where the
+file extension is recognized. Old/new line-number gutters locate changes; edit fragments use
+**fragment-relative** numbers because the edit arguments do not carry file positions. Short hunks
+stay intact. Larger previews end at a hunk boundary when possible; an omission says how many
+changed lines remain and points to Enter for review. Wrapped continuations keep an indented gutter.
+Separate hunks are divided by `⋯`, and `⏎ trailing newline added/removed` appears only when the
+final newline actually changed. Changed words have stronger backgrounds, bold, and underline;
+monochrome retains the non-color emphasis.
+
+Enter opens review of **this tool edit, before ↔ after**. `[` / `]` jump to the previous/next hunk;
+Tab / Shift+Tab move to the next/previous available retained edit. `s` toggles side-by-side review
+when the content area is at least 100 columns wide (narrower terminals use unified review).
+`c` shows/hides retained unchanged context. Arrows, Page Up/Down, Home/End scroll; Esc returns to
+browse. This view is not a cumulative working-tree diff against HEAD, and cannot recover context
+that was not retained. Full file locations remain in the review heading.
+
+Other tool and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
 cards group as `explored N files`, and consecutive calls to the same MCP tool group as one action
 line with a count, such as `linear/get_issue ×8  id=HY-270 … id=HY-278`, showing the first and last
 call's arguments. While a call in the group is open, the line shows that call instead, with
 `· 7 of 8 done` and, when it waits for you, `· awaiting approval`. Thinking streams as a collapsed `thought` row. A collapsed
 card keeps its action line to one row, ending in `…` when the command or path is too long (paths
 are cut at a `/` or space, and a diff's change counts stay visible). F6 browses visible card rows:
-Right expands (showing the full action line), Left collapses, Enter opens retained detail. The
+Right expands (showing original command arguments and retained output), Left collapses, Enter opens retained detail. Paths under the launch directory are displayed relatively. Familiar shell commands use concise labels
+such as `Python tests` or `Rust build`; expanding preserves the original command. Process rows reuse
+the originating command label when available, with process IDs and poll counts in expanded detail.
+Routine tool rows use blank spacing rather than full-width rules. The
 footer shows the browse key once (`F6 browse`) whenever the transcript has rows, instead of a hint
 under every card. While following the tail, the latest user prompt stays pinned at the top of the conversation
 pane until you scroll away. The live view contains only that prompt and the replies and tools that
@@ -233,7 +247,7 @@ trust controls take precedence. Below 30×8 no hidden selection can be inserted.
 opt-in, and modified submission shortcuts retain their existing meanings.
 
 Rust supports `/theme` and `/theme <name>` with curated Vapor, Glass, Orchid, Ember, Storm,
-Grove, Wave, Paper, and Dawn palettes. Glass leaves the main canvas on the terminal's
+Grove, Wave, Paper, and Dawn palettes. Paper is the main light theme (`wisp-light` internally), with Dawn as a warmer light alternative. Each palette uses coordinated diff backgrounds and word highlights; user panels and tool chips stay subdued. Glass leaves the main canvas on the terminal's
 default background, with smoky graphite surfaces and luminous ice, lilac, and mint accents. Configure
 opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate those effects. The
 picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
