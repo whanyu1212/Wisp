@@ -189,6 +189,7 @@ impl TranscriptEntry {
                 .len()
                 .saturating_add(card.name.len())
                 .saturating_add(card.action_arguments.len())
+                .saturating_add(card.process_id.as_ref().map_or(0, String::len))
                 .saturating_add(card.detail.len())
                 .saturating_add(card.retained_output.text.len())
                 .saturating_add(card.detail_source.retained_bytes())
@@ -196,6 +197,7 @@ impl TranscriptEntry {
             TranscriptEntryKind::Process(card) => card
                 .process_id
                 .len()
+                .saturating_add(card.task_label.as_ref().map_or(0, String::len))
                 .saturating_add(card.retained_output.text.len()),
         };
         self.content
@@ -1129,6 +1131,13 @@ impl Transcript {
             .retain(|candidate| candidate != call_id);
     }
 
+    fn process_task_label(&self, process_id: &str) -> Option<String> {
+        self.entries.iter().rev().find_map(|entry| {
+            let card = entry.tool_card()?;
+            (card.process_id.as_deref() == Some(process_id)).then(|| card.display_arguments())
+        })
+    }
+
     fn process_entry_for(&mut self, process_id: &str) -> Option<TranscriptEntryId> {
         if let Some(processes) = &self.history_projection_processes {
             let entry_id = if let Some(entry_id) = processes.get(process_id) {
@@ -1137,9 +1146,11 @@ impl Transcript {
                 if identity_for_display(process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES {
                     return None;
                 }
-                let entry_id = self.push_card(TranscriptEntryKind::Process(
-                    ProcessCardSnapshot::new(process_id.to_owned()),
-                ));
+                let entry_id = self.push_card(TranscriptEntryKind::Process({
+                    let mut card = ProcessCardSnapshot::new(process_id.to_owned());
+                    card.task_label = self.process_task_label(process_id);
+                    card
+                }));
                 self.history_projection_processes
                     .as_mut()
                     .expect("history projection is active")
@@ -1173,9 +1184,9 @@ impl Transcript {
                 return None;
             }
         }
-        let entry_id = self.push_card(TranscriptEntryKind::Process(ProcessCardSnapshot::new(
-            process_id.to_owned(),
-        )));
+        let mut card = ProcessCardSnapshot::new(process_id.to_owned());
+        card.task_label = self.process_task_label(process_id);
+        let entry_id = self.push_card(TranscriptEntryKind::Process(card));
         self.process_entries.insert(process_id.to_owned(), entry_id);
         self.process_order.push_back(process_id.to_owned());
         self.process_index_bytes = self.process_index_bytes.saturating_add(process_id.len());
@@ -2470,6 +2481,44 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
         }
+    }
+
+    #[test]
+    fn process_label_comes_from_the_matching_start_and_keeps_diagnostics() {
+        let mut transcript = Transcript::default();
+        transcript.observe_tool_call(call(
+            "start",
+            "bash",
+            serde_json::json!({"operation": "start", "command": "uv run pytest -q"}),
+        ));
+        let mut started = result("start", "");
+        started.name = "bash".into();
+        started.process_id = Some("process-test".into());
+        started.process_state = Some("running".into());
+        transcript.observe_tool_result(started);
+        let poll = transcript.observe_tool_call(call(
+            "poll",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-test"}),
+        ));
+        let card = transcript.entry(poll).unwrap().process_card().unwrap();
+        assert_eq!(card.task_label.as_deref(), Some("Python tests"));
+        assert!(card.action().contains("process-test"));
+        assert_eq!(card.poll_count, 1);
+        let other = transcript.observe_tool_call(call(
+            "other",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "unrelated"}),
+        ));
+        assert!(
+            transcript
+                .entry(other)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .task_label
+                .is_none()
+        );
     }
 
     #[test]

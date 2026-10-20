@@ -11,6 +11,7 @@ mod connection_panel;
 mod context_view;
 mod detail_view;
 mod diff_card;
+mod diff_review;
 mod discovery_view;
 mod event_loop;
 mod file_picker;
@@ -3234,6 +3235,52 @@ impl LiveUi {
             self.render_pending = true;
             return LoopControl::Continue;
         };
+        if crate::diff_review::is_diff(presentation) {
+            match key.code {
+                KeyCode::Up => self.detail_view.review.scroll(-1),
+                KeyCode::Down => self.detail_view.review.scroll(1),
+                KeyCode::PageUp => self.detail_view.review.page(false),
+                KeyCode::PageDown => self.detail_view.review.page(true),
+                KeyCode::Home => self.detail_view.review.home(),
+                KeyCode::End => self.detail_view.review.end(),
+                KeyCode::Char(']') => self.detail_view.review.jump_hunk(true),
+                KeyCode::Char('[') => self.detail_view.review.jump_hunk(false),
+                KeyCode::Char('s') => {
+                    self.detail_view.review.split = !self.detail_view.review.split
+                }
+                KeyCode::Char('c') => {
+                    self.detail_view.review.context = !self.detail_view.review.context
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let diffs = self
+                        .state
+                        .transcript
+                        .entries()
+                        .iter()
+                        .filter_map(|entry| {
+                            retained_detail(&self.state, entry.id)
+                                .filter(|detail| crate::diff_review::is_diff(detail))
+                                .map(|_| entry.id)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(index) = diffs.iter().position(|id| *id == entry_id) {
+                        let next = if key.code == KeyCode::BackTab {
+                            (index + diffs.len() - 1) % diffs.len()
+                        } else {
+                            (index + 1) % diffs.len()
+                        };
+                        let id = diffs[next];
+                        if let Some(detail) = retained_detail(&self.state, id) {
+                            self.detail_view.open(id, detail);
+                            self.browse_selected = Some(id);
+                        }
+                    }
+                }
+                _ => return LoopControl::Continue,
+            }
+            self.render_pending = true;
+            return LoopControl::Continue;
+        }
         match key.code {
             KeyCode::Up => self.detail_view.scroll_lines(presentation, -1),
             KeyCode::Down => self.detail_view.scroll_lines(presentation, 1),

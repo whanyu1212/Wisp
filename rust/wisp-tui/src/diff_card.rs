@@ -3,8 +3,8 @@
 //! The retained detail rows follow unified-diff conventions (hunk headers, "no
 //! newline" notes) and still back the Enter-details view unchanged. The card shows a
 //! quieter projection of the same rows: hunk headers become `⋯` separators, a
-//! trailing-newline change becomes one `⏎` row, `write` diffs get a line-number
-//! gutter, and the words that differ between a deleted line and its replacement
+//! trailing-newline change becomes one `⏎` row, changes get old/new line-number
+//! gutters (fragment-relative for edits), and the words that differ between a deleted line and its replacement
 //! are marked so a rewrap reads as a rewrap.
 
 use std::ops::Range;
@@ -12,8 +12,7 @@ use std::ops::Range;
 use similar::{ChangeTag, TextDiff};
 
 use crate::tool_detail::{
-    DETAIL_COLLAPSED_MAX_BYTES, DETAIL_COLLAPSED_MAX_ROWS, DetailRow, DetailRowKind,
-    ToolDetailPresentation, select_detail_rows,
+    DETAIL_COLLAPSED_MAX_BYTES, DetailRow, DetailRowKind, ToolDetailPresentation,
 };
 use crate::transcript_view::TranscriptRowTone;
 
@@ -30,6 +29,8 @@ pub(crate) struct DiffCardPreview {
     pub text: String,
     pub tones: Vec<(Range<usize>, TranscriptRowTone)>,
     pub emphasis: Vec<Range<usize>>,
+    pub syntax: Vec<crate::syntax::SyntaxToken>,
+    pub gutters: Vec<Range<usize>>,
 }
 
 /// Build the collapsed card preview for a diff presentation.
@@ -41,16 +42,14 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
         .rows
         .iter()
         .any(|row| row.old_line.is_some() || row.new_line.is_some());
-    let rows = select_detail_rows(
-        &card_rows(&detail.rows),
-        DETAIL_COLLAPSED_MAX_ROWS,
-        DETAIL_COLLAPSED_MAX_BYTES,
-    );
+    let rows = coherent_preview_rows(&card_rows(&detail.rows));
     let emphasis = row_emphasis(&rows);
     let mut preview = DiffCardPreview {
         text: String::new(),
         tones: Vec::new(),
         emphasis: Vec::new(),
+        syntax: Vec::new(),
+        gutters: Vec::new(),
     };
     for (row, emphasis) in rows.iter().zip(emphasis) {
         if !preview.text.is_empty() {
@@ -65,6 +64,24 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
             preview.tones.push((start..end, tone));
         }
         let offset = start + content_start;
+        if content_start > 0 {
+            preview.gutters.push(start..offset);
+        }
+        if matches!(
+            row.kind,
+            DetailRowKind::Addition | DetailRowKind::Deletion | DetailRowKind::Context
+        ) {
+            let language = detail.title.rsplit('.').next().unwrap_or("");
+            if let Ok(highlight) = crate::syntax::highlight_fence(language, &row.text) {
+                preview
+                    .syntax
+                    .extend(highlight.tokens.into_iter().map(|mut token| {
+                        token.range = offset + token.range.start..offset + token.range.end;
+                        token
+                    }));
+            }
+        }
+
         preview.emphasis.extend(
             emphasis
                 .into_iter()
@@ -78,6 +95,47 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
         );
     }
     preview
+}
+
+/// Keep short hunks intact. Larger previews end at a hunk boundary when possible;
+/// never splice the tail of a function onto its beginning across hidden changes.
+fn coherent_preview_rows(rows: &[DetailRow]) -> Vec<DetailRow> {
+    const MAX_ROWS: usize = 16;
+    let mut bytes = 0usize;
+    let limit = rows
+        .iter()
+        .take(MAX_ROWS)
+        .take_while(|row| {
+            bytes = bytes.saturating_add(row.text.len());
+            bytes <= DETAIL_COLLAPSED_MAX_BYTES
+        })
+        .count();
+    if limit == rows.len() {
+        return rows.to_vec();
+    }
+    let boundary = rows[..limit]
+        .iter()
+        .rposition(|row| row.kind == DetailRowKind::Hunk);
+    let mut end = boundary.filter(|index| *index > 0).unwrap_or(limit);
+    while end > 0 && rows[end - 1].text.trim().is_empty() {
+        end -= 1;
+    }
+    let hidden = &rows[end..];
+    let changed = hidden
+        .iter()
+        .filter(|row| matches!(row.kind, DetailRowKind::Addition | DetailRowKind::Deletion))
+        .count();
+    let mut selected = rows[..end].to_vec();
+    selected.push(DetailRow {
+        key: hidden.first().map_or(0, |row| row.key),
+        kind: DetailRowKind::Omission,
+        text: format!("▸ {changed} more changed lines · Enter to review"),
+        old_line: None,
+        new_line: None,
+        hidden_rows: hidden.len() as u64,
+        hidden_bytes: hidden.iter().map(|row| row.text.len() as u64).sum(),
+    });
+    selected
 }
 
 impl DiffCardPreview {
@@ -150,7 +208,7 @@ fn is_note(row: &DetailRow, side: &str) -> bool {
 /// Format one card row, returning the line and the byte offset where its source
 /// text starts (emphasis ranges are relative to that text).
 fn format_row(row: &DetailRow, gutter: bool) -> (String, usize) {
-    let (sign, number) = match row.kind {
+    let (sign, _number) = match row.kind {
         DetailRowKind::Addition => ("+", row.new_line),
         DetailRowKind::Deletion => ("-", row.old_line),
         DetailRowKind::Context => (" ", row.new_line.or(row.old_line)),
@@ -158,8 +216,9 @@ fn format_row(row: &DetailRow, gutter: bool) -> (String, usize) {
     };
     let prefix = if gutter {
         format!(
-            "{:>4} │ {sign} ",
-            number.map_or(String::new(), |line| line.to_string())
+            "{:>4} {:>4} {sign} ",
+            row.old_line.map_or(String::new(), |line| line.to_string()),
+            row.new_line.map_or(String::new(), |line| line.to_string()),
         )
     } else {
         format!("{sign} ")
@@ -172,7 +231,7 @@ fn row_tone(kind: DetailRowKind) -> TranscriptRowTone {
         DetailRowKind::Addition => TranscriptRowTone::DiffAddition,
         DetailRowKind::Deletion => TranscriptRowTone::DiffDeletion,
         DetailRowKind::Hunk | DetailRowKind::Note => TranscriptRowTone::Muted,
-        DetailRowKind::Omission => TranscriptRowTone::Warning,
+        DetailRowKind::Omission => TranscriptRowTone::Muted,
         _ => TranscriptRowTone::Default,
     }
 }
@@ -181,7 +240,7 @@ fn row_tone(kind: DetailRowKind) -> TranscriptRowTone {
 /// lines is paired line by line with the added lines that follow it; a pair with
 /// nothing in common gets no emphasis, since marking every word adds nothing to the
 /// row band.
-fn row_emphasis(rows: &[DetailRow]) -> Vec<Vec<Range<usize>>> {
+pub(crate) fn row_emphasis(rows: &[DetailRow]) -> Vec<Vec<Range<usize>>> {
     let mut emphasis = vec![Vec::new(); rows.len()];
     let mut index = 0;
     while index < rows.len() {
@@ -279,6 +338,24 @@ mod tests {
 
     fn marked<'a>(text: &'a str, ranges: &[Range<usize>]) -> Vec<&'a str> {
         ranges.iter().map(|range| &text[range.clone()]).collect()
+    }
+
+    #[test]
+    fn small_functions_stay_complete_and_large_hunks_do_not_splice_tails() {
+        let short = (0..12)
+            .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
+            .collect::<Vec<_>>();
+        assert_eq!(coherent_preview_rows(&short), short);
+        let long = (0..30)
+            .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
+            .collect::<Vec<_>>();
+        let preview = coherent_preview_rows(&long);
+        assert_eq!(preview[15].text, "line 15");
+        assert_eq!(
+            preview[16].text,
+            "▸ 14 more changed lines · Enter to review"
+        );
+        assert!(!preview.iter().any(|row| row.text == "line 29"));
     }
 
     #[test]
@@ -415,7 +492,7 @@ mod tests {
         addition.new_line = Some(118);
         assert_eq!(
             format_row(&addition, true),
-            (" 118 │ + value".into(), " 118 │ + ".len())
+            ("      118 + value".into(), "      118 + ".len())
         );
     }
 }

@@ -246,7 +246,7 @@ for line in sys.stdin:
             if (
                 browse_sent
                 and not detail_seen
-                and b"live retained detail" in output
+                and b"this tool edit" in output
                 and b"Esc close" in output
             ):
                 detail_seen = True
@@ -287,12 +287,14 @@ for line in sys.stdin:
     assert quit_sent, bytes(output)
     assert b"README.md" in output
     # The resize repaints whole frames, where the completed marker sits beside the chip.
-    assert "✓Processprocess-1".encode() in rendered_without_spacing(output[cards_redraw_offset:])
+    assert "✓ProcessBackgroundcommand".encode() in rendered_without_spacing(
+        output[cards_redraw_offset:]
+    )
     assert b"safe" in output
     assert b"safe\xef\xbf\xbd[2J" in output
     assert b"safe\x1b[2J" not in output
     assert b"old\xef\xbf\xbd[2J" in output
     assert b"old\x1b[2J" not in output
-    assert b"live retained detail" in output
+    assert b"this tool edit" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal

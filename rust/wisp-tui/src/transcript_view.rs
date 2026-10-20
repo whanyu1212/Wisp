@@ -64,6 +64,7 @@ pub enum RowPosition {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CardSection {
     Action,
+    Metadata,
     Detail,
     Omission,
 }
@@ -396,6 +397,8 @@ struct CardRowStyle<'a> {
     argument_style: crate::markdown::InlineStyle,
     suffix_start: usize,
     emphasis: &'a [std::ops::Range<usize>],
+    syntax: &'a [crate::syntax::SyntaxToken],
+    gutters: &'a [std::ops::Range<usize>],
 }
 
 impl CardRowStyle<'_> {
@@ -406,6 +409,8 @@ impl CardRowStyle<'_> {
         argument_style: crate::markdown::InlineStyle::Normal,
         suffix_start: usize::MAX,
         emphasis: &[],
+        syntax: &[],
+        gutters: &[],
     };
 
     fn inline_at(&self, kind: TranscriptRowKind, offset: usize) -> crate::markdown::InlineStyle {
@@ -414,6 +419,13 @@ impl CardRowStyle<'_> {
             kind,
             TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
         ) {
+            if let Some(range) = self.gutters.iter().find(|range| range.contains(&offset)) {
+                return if offset + 2 >= range.end {
+                    InlineStyle::DiffSign
+                } else {
+                    InlineStyle::DiffGutter
+                };
+            }
             return if self.emphasis.iter().any(|range| range.contains(&offset)) {
                 InlineStyle::DiffChange
             } else {
@@ -441,11 +453,14 @@ struct CardProjection {
     action_label_end: usize,
     action_argument_start: usize,
     action_argument_style: crate::markdown::InlineStyle,
+    metadata: String,
     detail: String,
     detail_base: usize,
     detail_tones: Vec<CardDetailTone>,
     /// Byte ranges of `detail` holding changed words in a diff preview.
     detail_emphasis: Vec<std::ops::Range<usize>>,
+    detail_syntax: Vec<crate::syntax::SyntaxToken>,
+    detail_gutters: Vec<std::ops::Range<usize>>,
     /// Where a status note or a diff's `+N -M` summary starts in `action`. It is
     /// styled like plain text and kept whole when the row is truncated.
     action_suffix_start: usize,
@@ -460,6 +475,7 @@ impl CardProjection {
         self.action
             .len()
             .saturating_add(self.detail.len())
+            .saturating_add(self.metadata.len())
             .saturating_add(
                 self.detail_tones
                     .len()
@@ -467,6 +483,16 @@ impl CardProjection {
             )
             .saturating_add(
                 self.detail_emphasis
+                    .len()
+                    .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
+            )
+            .saturating_add(
+                self.detail_syntax
+                    .len()
+                    .saturating_mul(std::mem::size_of::<crate::syntax::SyntaxToken>()),
+            )
+            .saturating_add(
+                self.detail_gutters
                     .len()
                     .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
             )
@@ -1319,6 +1345,8 @@ impl TranscriptRowCache {
                     argument_style: projection.action_argument_style,
                     suffix_start: projection.action_suffix_start,
                     emphasis: &[],
+                    syntax: &[],
+                    gutters: &[],
                 };
                 // A collapsed card keeps its action on one row; expanding it (Right in
                 // browse) wraps the full command or path instead and shows any hidden
@@ -1373,6 +1401,25 @@ impl TranscriptRowCache {
                 projected.row.fold_hint = fold_hint;
                 Some(projected)
             }
+            CardSection::Metadata if !projection.metadata.is_empty() => {
+                let next = card_position_after_metadata(entry, &projection)
+                    .or_else(|| separator_after(transcript, entry));
+                let mut projected = self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    &projection.metadata,
+                    0,
+                    absolute_offset,
+                    result_width(width),
+                    TranscriptRowKind::CardDetail,
+                    TranscriptRowTone::Default,
+                    CardRowStyle::PLAIN,
+                    next,
+                );
+                projected.row.gutter = result_gutter(entry, &projection, anchor);
+                Some(projected)
+            }
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
                     separator_after(transcript, entry)
@@ -1402,6 +1449,8 @@ impl TranscriptRowCache {
                     tone,
                     CardRowStyle {
                         emphasis: &projection.detail_emphasis,
+                        syntax: &projection.detail_syntax,
+                        gutters: &projection.detail_gutters,
                         ..CardRowStyle::PLAIN
                     },
                     next,
@@ -1438,7 +1487,7 @@ impl TranscriptRowCache {
                 projected.row.gutter = result_gutter(entry, &projection, anchor);
                 Some(projected)
             }
-            CardSection::Detail => None,
+            CardSection::Detail | CardSection::Metadata => None,
         }
     }
 
@@ -1611,7 +1660,36 @@ impl TranscriptRowCache {
 
         let mut text = String::new();
         let mut action_spans: Vec<TranscriptSpan> = Vec::new();
-        let mut column = 0_usize;
+        let logical_start = source[..relative_start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let indent = if relative_start > logical_start {
+            style
+                .gutters
+                .iter()
+                .find(|range| range.start == logical_start)
+                .map_or(0, |range| range.len())
+        } else {
+            0
+        };
+        let indent = if width > indent + 4 { indent } else { 0 };
+        let mut column = indent;
+        if indent > 0 {
+            let prefix = format!("{}↪ ", " ".repeat(indent.saturating_sub(2)));
+            text.push_str(&prefix);
+            action_spans.push(TranscriptSpan {
+                text: prefix,
+                style: TranscriptSpanStyle {
+                    inline: crate::markdown::InlineStyle::DiffGutter,
+                    ..TranscriptSpanStyle::default()
+                },
+                affinity: SourceAffinity {
+                    source_offset: relative_start,
+                    source_end: relative_start,
+                    output_offset: 0,
+                },
+            });
+        }
         let mut next_offset = None;
         let mut preserve_terminal_break = false;
         for (offset, grapheme) in source[relative_start..].grapheme_indices(true) {
@@ -1629,11 +1707,20 @@ impl TranscriptRowCache {
                 next_offset = Some(relative);
                 break;
             }
-            if kind == TranscriptRowKind::CardAction || !style.emphasis.is_empty() {
+            if kind == TranscriptRowKind::CardAction
+                || !style.emphasis.is_empty()
+                || !style.syntax.is_empty()
+                || !style.gutters.is_empty()
+            {
                 let inline = style.inline_at(kind, relative);
+                let syntax = style
+                    .syntax
+                    .iter()
+                    .find(|token| token.range.contains(&relative))
+                    .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class);
                 if let Some(last) = action_spans
                     .last_mut()
-                    .filter(|last| last.style.inline == inline)
+                    .filter(|last| last.style.inline == inline && last.style.syntax == syntax)
                 {
                     last.text.push_str(&safe);
                     last.affinity.source_end = relative + grapheme.len();
@@ -1642,6 +1729,7 @@ impl TranscriptRowCache {
                         text: safe.clone(),
                         style: TranscriptSpanStyle {
                             inline,
+                            syntax,
                             ..TranscriptSpanStyle::default()
                         },
                         affinity: SourceAffinity {
@@ -2473,7 +2561,19 @@ fn tool_action_projection(
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
     (
-        format!("{marker}{}", card.action()),
+        format!(
+            "{marker}{}",
+            if card.mcp_target().is_none() && card.arguments_available {
+                let arguments = card.display_arguments();
+                if arguments.is_empty() {
+                    card.chip_label()
+                } else {
+                    format!("{}  {arguments}", card.chip_label())
+                }
+            } else {
+                card.action()
+            }
+        ),
         marker.len(),
         label_end,
         argument_start,
@@ -2511,42 +2611,52 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
                 );
                 let mut action_suffix_start = note_start;
-                let (preview, detail_tones, detail_emphasis) = if diff {
-                    // The action line already names the file; carry the change counts
-                    // there instead of a separate `M path +N -M` heading row.
-                    action_suffix_start = action_suffix_start.min(action.len());
-                    if detail.kind == DetailPresentationKind::DiffCreate {
-                        action.push_str("  new file");
-                    }
-                    if !detail.summary.is_empty() {
-                        action.push_str("  ");
-                        action.push_str(&detail.summary);
-                    }
-                    let preview = crate::diff_card::preview(detail);
-                    let tones = preview
-                        .tones
-                        .into_iter()
-                        .map(|(range, tone)| CardDetailTone {
-                            start: range.start,
-                            end: range.end,
-                            tone,
-                        })
-                        .collect();
-                    (preview.text, tones, preview.emphasis)
-                } else {
-                    let (preview, tones) = structured_card_preview(detail);
-                    (preview, tones, Vec::new())
-                };
+                let (preview, detail_tones, detail_emphasis, detail_syntax, detail_gutters) =
+                    if diff {
+                        // The action line already names the file; carry the change counts
+                        // there instead of a separate `M path +N -M` heading row.
+                        action_suffix_start = action_suffix_start.min(action.len());
+                        if detail.kind == DetailPresentationKind::DiffCreate {
+                            action.push_str("  new file");
+                        }
+                        if !detail.summary.is_empty() {
+                            action.push_str("  ");
+                            action.push_str(&detail.summary);
+                        }
+                        let preview = crate::diff_card::preview(detail);
+                        let tones = preview
+                            .tones
+                            .into_iter()
+                            .map(|(range, tone)| CardDetailTone {
+                                start: range.start,
+                                end: range.end,
+                                tone,
+                            })
+                            .collect();
+                        (
+                            preview.text,
+                            tones,
+                            preview.emphasis,
+                            preview.syntax,
+                            preview.gutters,
+                        )
+                    } else {
+                        let (preview, tones) = structured_card_preview(detail);
+                        (preview, tones, Vec::new(), Vec::new(), Vec::new())
+                    };
                 return Some(CardProjection {
                     action,
                     action_marker_end,
                     action_label_end,
                     action_argument_start,
                     action_argument_style,
+                    metadata: String::new(),
                     detail: preview,
                     detail_base: 0,
                     detail_tones,
                     detail_emphasis,
+                    detail_syntax,
+                    detail_gutters,
                     action_suffix_start,
                     inline_detail: diff,
                     omission: None,
@@ -2561,13 +2671,19 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
             } else {
                 card.retained_output.preview_head()
             };
-            let detail = if card.detail.is_empty() {
-                retained_preview.text.clone()
-            } else if retained_preview.text.is_empty() || retained_preview.text == card.detail {
-                card.detail.clone()
+            let mut metadata = if card.detail == retained_preview.text {
+                String::new()
             } else {
-                format!("{}\n{}", card.detail, retained_preview.text)
+                card.detail.clone()
             };
+            if card.display_arguments() != card.action_arguments {
+                metadata = if metadata.is_empty() {
+                    card.action_arguments.clone()
+                } else {
+                    format!("{}\n{metadata}", card.action_arguments)
+                };
+            }
+            let detail = retained_preview.text.clone();
             let shown_output_bytes = retained_preview.text.len() as u64;
             let omitted = card
                 .retained_output
@@ -2580,6 +2696,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 action_label_end,
                 action_argument_start,
                 action_argument_style,
+                metadata,
                 detail,
                 detail_base: if tail_preview {
                     usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
@@ -2588,6 +2705,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 },
                 detail_tones: Vec::new(),
                 detail_emphasis: Vec::new(),
+                detail_syntax: Vec::new(),
+                detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
                 inline_detail: false,
                 omission,
@@ -2601,7 +2720,12 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .base_offset
                 .saturating_add(card.backend_dropped_bytes);
             let omission = card_omission(omitted, card.backend_truncated, true);
-            let mut action = format!("{}{}", process_marker(card), card.action());
+            let mut action = format!(
+                "{}{}  {}",
+                process_marker(card),
+                card.chip_label(),
+                card.task_label.as_deref().unwrap_or("Background command")
+            );
             let note_start = push_status_note(&mut action, card.status_note());
             Some(CardProjection {
                 action,
@@ -2609,10 +2733,13 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 action_label_end: process_marker(card).len() + card.chip_label().len(),
                 action_argument_start: usize::MAX,
                 action_argument_style: crate::markdown::InlineStyle::Normal,
+                metadata: card.action(),
                 detail: preview.text,
                 detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
                 detail_tones: Vec::new(),
                 detail_emphasis: Vec::new(),
+                detail_syntax: Vec::new(),
+                detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
                 inline_detail: false,
                 omission,
@@ -2741,6 +2868,9 @@ fn result_gutter(
     projection: &CardProjection,
     anchor: RowAnchor,
 ) -> RowGutter {
+    if projection.inline_detail {
+        return RowGutter::Indent;
+    }
     if card_position_after_action(entry, projection) == Some(anchor) {
         RowGutter::Connector
     } else {
@@ -2749,6 +2879,22 @@ fn result_gutter(
 }
 
 fn card_position_after_action(
+    entry: &TranscriptEntry,
+    projection: &CardProjection,
+) -> Option<RowAnchor> {
+    if !projection.metadata.is_empty() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Metadata,
+                absolute_byte_offset: 0,
+            }),
+        });
+    }
+    card_position_after_metadata(entry, projection)
+}
+
+fn card_position_after_metadata(
     entry: &TranscriptEntry,
     projection: &CardProjection,
 ) -> Option<RowAnchor> {
@@ -2885,6 +3031,8 @@ impl McpGroupHeader {
             argument_style: crate::markdown::InlineStyle::ToolArgument,
             suffix_start: self.suffix_start,
             emphasis: &[],
+            syntax: &[],
+            gutters: &[],
         }
     }
 
@@ -3504,14 +3652,27 @@ fn scroll_anchor_rank(
         RowPosition::Markdown(position) => content_fraction(position.source_offset),
         RowPosition::Card(position) => {
             let card = cache.card_snapshot(entry)?;
-            let total = card.action.len().saturating_add(card.detail.len()).max(1);
+            let total = card
+                .action
+                .len()
+                .saturating_add(card.metadata.len())
+                .saturating_add(card.detail.len())
+                .max(1);
             let offset = match position.section {
                 CardSection::Action => position.absolute_byte_offset,
-                CardSection::Detail => card.action.len().saturating_add(
-                    position
-                        .absolute_byte_offset
-                        .saturating_sub(card.detail_base),
-                ),
+                CardSection::Metadata => card
+                    .action
+                    .len()
+                    .saturating_add(position.absolute_byte_offset),
+                CardSection::Detail => card
+                    .action
+                    .len()
+                    .saturating_add(card.metadata.len())
+                    .saturating_add(
+                        position
+                            .absolute_byte_offset
+                            .saturating_sub(card.detail_base),
+                    ),
                 CardSection::Omission => total,
             };
             0.05 + 0.9 * (offset as f64 / total as f64).min(1.0)
@@ -3717,6 +3878,15 @@ fn normalize_anchor(
                         },
                     }
                 }
+                CardSection::Metadata if !projection.metadata.is_empty() => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Card(CardPosition {
+                        section: CardSection::Metadata,
+                        absolute_byte_offset: position
+                            .absolute_byte_offset
+                            .min(projection.metadata.len()),
+                    }),
+                },
                 CardSection::Detail if !projection.detail.is_empty() => {
                     let end = projection
                         .detail_base
@@ -4645,7 +4815,11 @@ mod tests {
                 .count(),
             1
         );
-        assert!(card_rows[0].plain_text().contains("2 calls · 2 polls"));
+        assert!(
+            card_rows
+                .iter()
+                .any(|row| row.plain_text().contains("2 calls · 2 polls"))
+        );
         assert_eq!(card_rows[0].tone, TranscriptRowTone::Success);
         let omission = card_rows
             .iter()
@@ -4891,6 +5065,24 @@ mod tests {
             before
                 .iter()
                 .any(|row| row.kind == TranscriptRowKind::CardDetail)
+        );
+
+        let output_row = before
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.anchor.position,
+                    RowPosition::Card(CardPosition {
+                        section: CardSection::Detail,
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        assert_eq!(output_row.plain_text(), "first");
+        assert_eq!(
+            output_row.spans.first().unwrap().affinity.source_offset,
+            first_base
         );
 
         transcript.observe_tool_call(call("poll-2"));
@@ -5274,12 +5466,12 @@ mod tests {
                 TranscriptRowKind::CardAction,
                 TranscriptRowKind::CardDetail,
                 TranscriptRowKind::CardDetail,
+                TranscriptRowKind::CardDetail,
                 TranscriptRowKind::Spacer,
                 TranscriptRowKind::CardAction,
                 TranscriptRowKind::Rule,
                 TranscriptRowKind::CardGroup,
                 TranscriptRowKind::Rule,
-                TranscriptRowKind::CardAction,
             ]
         );
         assert!(rows.iter().any(|row| row.anchor.entry_id == group));

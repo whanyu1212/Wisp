@@ -390,7 +390,7 @@ fn run_sample(
     ui.draw(&mut terminal, &connection)?;
     let detail_open_ms = elapsed_ms(detail_open_started);
     let rendered_detail = terminal.backend().to_string();
-    let detail_rendered = rendered_detail.contains("live retained detail")
+    let detail_rendered = rendered_detail.contains("this tool edit")
         && rendered_detail.contains("old value 0")
         && rendered_detail.contains("new value 0");
     let last_detail_row_key = detail.rows.last().map(|row| row.key);
@@ -398,14 +398,11 @@ fn run_sample(
     let mut detail_ms = Vec::with_capacity(config.detail_frames);
     for _ in 0..config.detail_frames {
         let started = Instant::now();
-        ui.detail_view.page_down(&detail);
+        ui.detail_view.review.page(true);
         ui.draw(&mut terminal, &connection)?;
         detail_ms.push(elapsed_ms(started));
-        detail_tail_rendered = ui
-            .detail_view
-            .visible_rows(&detail)
-            .iter()
-            .any(|row| Some(row.anchor.row_key) == last_detail_row_key);
+        detail_tail_rendered =
+            last_detail_row_key.is_some_and(|key| ui.detail_view.review.visible_key(key));
         if detail_tail_rendered {
             break;
         }
