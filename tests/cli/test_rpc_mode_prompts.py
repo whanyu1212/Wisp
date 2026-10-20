@@ -44,10 +44,13 @@ def test_rpc_mode_reports_workspace(tmp_path: Path, monkeypatch: MonkeyPatch) ->
     records = [json.loads(line) for line in result.stdout.splitlines()]
     types = [record["type"] for record in records]
     workspace = [record for record in records if record["type"] == "rpc.workspace"]
-    # Once at startup, then once as the prompt finishes.
-    assert len(workspace) == 2
+    # At startup, as the prompt starts (before any tool runs), and as it finishes.
+    assert len(workspace) == 3
     assert types[:2] == ["rpc.handshake.accepted", "rpc.workspace"]
-    assert types.index("rpc.workspace", 2) == types.index("rpc.command.finished") - 1
+    run_start = types.index("rpc.workspace", 2)
+    assert types.index("rpc.command.started") < run_start < types.index("agent.started")
+    finish = types.index("rpc.workspace", run_start + 1)
+    assert finish == types.index("rpc.command.finished") - 1
     assert all(Path(str(record["cwd"])) == cwd.resolve() for record in workspace)
     # The isolated folder is not a Git work tree.
     assert all(record["git_branch"] is None for record in workspace)

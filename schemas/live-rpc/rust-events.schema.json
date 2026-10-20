@@ -4672,7 +4672,7 @@
     },
     "RpcWorkspaceReported": {
       "additionalProperties": false,
-      "description": "Where the session's commands run and the Git branch checked out there.\n\nThe host sends it at startup and after each prompt run, so a frontend can show\nthe folder and keep the branch current after a run switches it. A branch\nswitched outside Wisp while idle shows after the next run.",
+      "description": "Where the session's commands run and the Git branch checked out there.\n\nThe host sends it at startup, as each prompt run starts, and as it finishes, so a\nfrontend can show the folder and keep the branch current after a run switches\nit. A run's tools may work outside the session folder (``/init`` works from the\nproject root); the report at its start names the folder they use. A branch\nswitched outside Wisp while idle shows after the next run.",
       "properties": {
         "cwd": {
           "format": "path",

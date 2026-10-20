@@ -5080,7 +5080,8 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("Bash     ▸ 2 commands · cargo fmt, cargo test"),
+            // The preview uses each command's own row text, which names `cargo test`.
+            screen.contains("Bash     ▸ 2 commands · cargo fmt, Rust tests"),
             "{screen}"
         );
         assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
@@ -5257,6 +5258,29 @@ mod tests {
         let narrow = screen(36);
         assert!(narrow.contains("▸ 5 commands"), "{narrow}");
         assert!(!narrow.contains("git status"), "{narrow}");
+    }
+
+    #[test]
+    fn group_preview_is_relative() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("look".into());
+        state.transcript.set_tool_cwd("/repo");
+        for (call_id, path) in [("r1", "/repo/src/a.rs"), ("r2", "/repo/src/b.rs")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "read".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"path": path}),
+                });
+            finish_call(&mut state, call_id, "read");
+        }
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("▸ 2 actions · read src/a.rs, read src/b.rs"),
+            "{screen}"
+        );
     }
 
     #[test]

@@ -497,6 +497,9 @@ async def run_rpc_prompt_command(
             operation_context = (
                 tool_context_factory() if tool_context_factory is not None else tool_context
             )
+            # Tools may run outside the session folder (/init works from the project
+            # root), so report where this run's commands run before any tool row.
+            write_event(await rpc_workspace_report((operation_context or agent.tool_context).cwd))
             agent_events = (
                 agent.run(
                     prompt,

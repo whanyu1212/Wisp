@@ -384,8 +384,10 @@ class RpcPermissionsReported(WispEvent):
 class RpcWorkspaceReported(WispEvent):
     """Where the session's commands run and the Git branch checked out there.
 
-    The host sends it at startup and after each prompt run, so a frontend can show
-    the folder and keep the branch current after a run switches it. A branch
+    The host sends it at startup, as each prompt run starts, and as it finishes, so a
+    frontend can show the folder and keep the branch current after a run switches
+    it. A run's tools may work outside the session folder (``/init`` works from the
+    project root); the report at its start names the folder they use. A branch
     switched outside Wisp while idle shows after the next run.
     """
 

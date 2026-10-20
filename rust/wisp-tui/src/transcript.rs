@@ -89,7 +89,8 @@ pub enum TranscriptEntryState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TranscriptEntryKind {
     Message,
-    Tool(ToolCardSnapshot),
+    /// Boxed so message entries, most of a transcript, don't reserve a tool card's size.
+    Tool(Box<ToolCardSnapshot>),
     Process(ProcessCardSnapshot),
 }
 
@@ -299,6 +300,9 @@ struct HistoricalCall {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Transcript {
     entries: Vec<TranscriptEntry>,
+    /// The folder the backend last said tools run in; each new tool card keeps it so
+    /// its paths read against the folder its own run used.
+    tool_cwd: Option<Arc<str>>,
     entry_indexes: HashMap<TranscriptEntryId, usize>,
     next_entry_id: u64,
     next_history_group: u64,
@@ -513,6 +517,11 @@ impl Transcript {
             Self::bump_revision(entry);
             self.bump_generation();
         }
+    }
+
+    /// Record where tools run from now on, as the backend reported it.
+    pub(crate) fn set_tool_cwd(&mut self, cwd: &str) {
+        self.tool_cwd = Some(Arc::from(cwd));
     }
 
     /// Close the run with its summary line under its last reply. The run must end on
@@ -736,7 +745,7 @@ impl Transcript {
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             self.prepare_non_message_entry();
             let card = ToolCardSnapshot::result_without_request(&input);
-            let entry_id = self.push_card(TranscriptEntryKind::Tool(card));
+            let entry_id = self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
             let binding = self.new_tool_binding(entry_id, ToolBindingKind::Tool, true);
             self.insert_tool_binding(input.call_id.clone(), binding);
             return entry_id;
@@ -972,7 +981,7 @@ impl Transcript {
                 self.prepare_non_message_entry();
                 let mut card = ToolCardSnapshot::requested(input, initial_status);
                 card.cancel("call ID was reused; result correlation is ambiguous");
-                return self.push_card(TranscriptEntryKind::Tool(card));
+                return self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
             } else {
                 if binding.kind == ToolBindingKind::Tool {
                     let changed = {
@@ -1017,7 +1026,7 @@ impl Transcript {
         if !self.prepare_unresolved_tool_binding(&input.call_id) {
             let mut card = ToolCardSnapshot::requested(input, initial_status);
             card.cancel("too many concurrent tool calls to track");
-            return self.push_card(TranscriptEntryKind::Tool(card));
+            return self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
         }
         if let Some(ProcessCallIdentity {
             process_id,
@@ -1066,9 +1075,8 @@ impl Transcript {
             }
         }
 
-        let entry_id = self.push_card(TranscriptEntryKind::Tool(ToolCardSnapshot::requested(
-            input,
-            initial_status,
+        let entry_id = self.push_card(TranscriptEntryKind::Tool(Box::new(
+            ToolCardSnapshot::requested(input, initial_status),
         )));
         let binding = self.new_tool_binding(entry_id, ToolBindingKind::Tool, false);
         self.insert_tool_binding(input.call_id.clone(), binding);
@@ -2392,7 +2400,10 @@ impl Transcript {
         }
     }
 
-    fn push_card(&mut self, kind: TranscriptEntryKind) -> TranscriptEntryId {
+    fn push_card(&mut self, mut kind: TranscriptEntryKind) -> TranscriptEntryId {
+        if let TranscriptEntryKind::Tool(card) = &mut kind {
+            card.display_base = self.tool_cwd.clone();
+        }
         let state = match &kind {
             TranscriptEntryKind::Tool(card) if card.status.terminal() => {
                 TranscriptEntryState::Complete
@@ -2546,6 +2557,41 @@ fn escape_markdown(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cards_keep_their_run_folder() {
+        let bash = |transcript: &mut Transcript, call_id: &str, command: &str| {
+            let id = transcript.observe_tool_call(ToolCallInput {
+                call_id: call_id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                detail_source: ToolDetailSource::None,
+            });
+            transcript
+                .entry(id)
+                .unwrap()
+                .tool_card()
+                .unwrap()
+                .display_arguments()
+        };
+        let mut transcript = Transcript::default();
+        // /init's tools run from the project root, not the launch folder.
+        transcript.set_tool_cwd("/repo");
+        assert_eq!(
+            bash(&mut transcript, "a", "cd /repo && ls /repo/src"),
+            "ls src"
+        );
+        assert_eq!(
+            bash(&mut transcript, "b", "cd /repo/app && ls"),
+            "cd /repo/app && ls"
+        );
+        let first = transcript.entries()[0].id;
+        transcript.set_tool_cwd("/repo/app");
+        assert_eq!(bash(&mut transcript, "c", "cd /repo/app && ls"), "ls");
+        // An earlier card keeps the folder its own run used.
+        let card = transcript.entry(first).unwrap().tool_card().unwrap();
+        assert_eq!(card.display_arguments(), "ls src");
+    }
     use crate::tool_cards::ProcessDisplayState;
     use serde_json::Value;
 

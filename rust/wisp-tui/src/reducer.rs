@@ -4572,6 +4572,7 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::WorkspaceReported { cwd, git_branch } => {
+            state.transcript.set_tool_cwd(&cwd);
             state.workspace_cwd = Some(cwd);
             state.git_branch = git_branch;
             Ok(vec![UiEffect::RequestRender])

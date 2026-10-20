@@ -238,6 +238,8 @@ pub struct ToolCardSnapshot {
     pub structured_detail: DetailAvailability,
     /// Kept as 32 bits, which spans 49 days, so the card stays compact.
     pub duration_ms: Option<u32>,
+    /// The folder this call's run used, which its paths are shown relative to.
+    pub display_base: Option<std::sync::Arc<str>>,
 }
 
 impl ToolCardSnapshot {
@@ -258,6 +260,7 @@ impl ToolCardSnapshot {
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
             duration_ms: None,
+            display_base: None,
         }
     }
 
@@ -533,13 +536,15 @@ impl ToolCardSnapshot {
     }
 
     /// A concise display summary; the original arguments remain in retained detail.
-    /// The arguments as the action line shows them, relative to the folder the
-    /// session's commands run in. The launcher starts the TUI and its backend in the
-    /// same folder, so the TUI's own working directory is that folder.
+    /// The arguments as the action line shows them, relative to the folder the call's
+    /// run used. Before the backend has reported one, the TUI's own working directory
+    /// stands in: the launcher starts the TUI and its backend in the same folder.
     pub fn display_arguments(&self) -> String {
-        let cwd = std::env::current_dir()
-            .ok()
-            .map(|root| root.display().to_string());
+        let cwd = self.display_base.as_deref().map(str::to_owned).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|root| root.display().to_string())
+        });
         let Some(cwd) = cwd.as_deref().filter(|cwd| cwd.len() > 1) else {
             return self
                 .command_summary
