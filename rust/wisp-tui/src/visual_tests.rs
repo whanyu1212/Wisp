@@ -65,6 +65,7 @@ fn fixture(scenario: &str) -> LiveUi {
         stderr_truncated: false,
         stdout_dropped_bytes: 0,
         stderr_dropped_bytes: 0,
+        duration_ms: None,
     };
     ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);

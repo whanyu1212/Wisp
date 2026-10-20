@@ -6002,12 +6002,14 @@ mod tests {
             "stdout_truncated": true,
             "stderr_truncated": false,
             "stdout_dropped_bytes": 11,
-            "stderr_dropped_bytes": 12
+            "stderr_dropped_bytes": 12,
+            "duration_ms": 1250
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let BackendEvent::ToolResult(result) = BackendEvent::from_live(&live).unwrap() else {
             panic!("tool result expected");
         };
+        assert_eq!(result.duration_ms, Some(1250));
         assert_eq!(result.call_id, bounded_identity("call-7"));
         assert_eq!(result.exit_code, Some(1));
         assert_eq!(result.failure_code.as_deref(), Some("internal_error"));

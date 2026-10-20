@@ -695,6 +695,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -758,6 +759,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -2480,6 +2482,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 

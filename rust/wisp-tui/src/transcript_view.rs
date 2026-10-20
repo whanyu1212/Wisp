@@ -2733,6 +2733,19 @@ fn tool_action_projection(
     )
 }
 
+/// Close a finished call's action line with how long it ran, such as ` · 4m 12s`.
+/// Returns where the duration starts, so a truncated row keeps it whole, or
+/// `usize::MAX` without one.
+fn push_duration(action: &mut String, card: &crate::tool_cards::ToolCardSnapshot) -> usize {
+    let Some(duration) = card.duration_label() else {
+        return usize::MAX;
+    };
+    let start = action.len();
+    action.push_str(" · ");
+    action.push_str(&duration);
+    start
+}
+
 /// Close an action line with its status note, such as ` · denied`. Returns where the
 /// note starts, so a truncated row keeps it whole, or `usize::MAX` without one.
 fn push_status_note(action: &mut String, note: Option<&str>) -> usize {
@@ -2796,6 +2809,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                         let (preview, tones) = structured_card_preview(detail);
                         (preview, tones, Vec::new(), Vec::new(), Vec::new())
                     };
+                action_suffix_start = action_suffix_start.min(push_duration(&mut action, card));
                 return Some(CardProjection {
                     action,
                     action_marker_end,
@@ -2842,6 +2856,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
+            let duration_start = push_duration(&mut action, card);
             Some(CardProjection {
                 action,
                 action_marker_end,
@@ -2859,7 +2874,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
-                action_suffix_start: note_start,
+                action_suffix_start: note_start.min(duration_start),
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
@@ -4724,6 +4739,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 

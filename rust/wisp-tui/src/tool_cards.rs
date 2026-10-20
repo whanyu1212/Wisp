@@ -209,6 +209,9 @@ pub struct ToolResultInput {
     pub stderr_truncated: bool,
     pub stdout_dropped_bytes: u64,
     pub stderr_dropped_bytes: u64,
+    /// How long the tool ran, as the backend measured it; `None` for results that
+    /// never ran or were recorded before durations were kept.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -233,6 +236,7 @@ pub struct ToolCardSnapshot {
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
+    pub duration_ms: Option<u64>,
 }
 
 impl ToolCardSnapshot {
@@ -252,6 +256,7 @@ impl ToolCardSnapshot {
             retryable: false,
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
+            duration_ms: None,
         }
     }
 
@@ -328,6 +333,7 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        self.duration_ms = input.duration_ms;
         self.process_id = input
             .process_id
             .as_ref()
@@ -484,6 +490,14 @@ impl ToolCardSnapshot {
     /// The state the action line spells out because its marker alone does not: `?`
     /// needs saying what it waits for, and `⊘` stands for both denial and
     /// cancellation.
+    /// How long a finished call ran, for its action line. Calls that were denied,
+    /// cancelled, or never ran show none.
+    pub fn duration_label(&self) -> Option<String> {
+        matches!(self.status, ToolStatus::Done | ToolStatus::Error)
+            .then_some(self.duration_ms?)
+            .map(format_duration)
+    }
+
     pub fn status_note(&self) -> Option<&'static str> {
         match self.status {
             ToolStatus::AwaitingApproval => Some("awaiting approval"),
@@ -1551,9 +1565,41 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
     .saturating_add(u64::from(!source.ends_with('\n')))
 }
 
+/// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
+pub(crate) fn format_duration(milliseconds: u64) -> String {
+    match milliseconds {
+        0..100 => "<0.1s".into(),
+        100..10_000 => format!("{:.1}s", milliseconds as f64 / 1000.0),
+        10_000..60_000 => format!("{}s", milliseconds / 1000),
+        60_000..3_600_000 => {
+            let seconds = milliseconds / 1000;
+            format!("{}m {:02}s", seconds / 60, seconds % 60)
+        }
+        _ => {
+            let minutes = milliseconds / 60_000;
+            format!("{}h {:02}m", minutes / 60, minutes % 60)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_formats_compactly() {
+        let cases = [
+            (40, "<0.1s"),
+            (250, "0.2s"),
+            (4_500, "4.5s"),
+            (12_400, "12s"),
+            (252_000, "4m 12s"),
+            (3_900_000, "1h 05m"),
+        ];
+        for (milliseconds, label) in cases {
+            assert_eq!(format_duration(milliseconds), label);
+        }
+    }
 
     #[test]
     fn command_summaries_only_label_known_invocations() {
@@ -1640,6 +1686,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
