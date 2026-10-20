@@ -87,6 +87,8 @@ pub struct MarkdownBlock {
     pub spans: Vec<TranscriptSpan>,
     has_table: bool,
     tables: Vec<MarkdownTable>,
+    /// Span ranges of tables already laid out to a width, which keep that width.
+    table_spans: Vec<Range<usize>>,
     syntax_source_bytes: usize,
     syntax_fragments: usize,
     syntax_attempted_source_bytes: usize,
@@ -153,8 +155,13 @@ pub struct MarkdownDocument {
 }
 
 impl MarkdownBlock {
-    pub(crate) fn has_table(&self) -> bool {
-        self.has_table
+    /// Whether span `index` draws part of a table. A laid-out table already fits its
+    /// width, and one left unlaid keeps its parsed span range.
+    pub(crate) fn span_in_table(&self, index: usize) -> bool {
+        self.table_spans
+            .iter()
+            .chain(self.tables.iter().map(|table| &table.spans))
+            .any(|range| range.contains(&index))
     }
 }
 
@@ -430,6 +437,7 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
         source: base_offset..(base_offset + source.len()),
         has_table: false,
         tables: Vec::new(),
+        table_spans: Vec::new(),
         spans: if source.is_empty() {
             Vec::new()
         } else {
@@ -456,6 +464,7 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
         source: source_offset..source_offset,
         has_table: false,
         tables: Vec::new(),
+        table_spans: Vec::new(),
         spans: vec![TranscriptSpan {
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
@@ -1563,6 +1572,7 @@ fn render_block(
             .any(|(event, _)| matches!(event, Event::Start(Tag::Table(_)))),
         spans: rendered.spans,
         tables: rendered.tables,
+        table_spans: Vec::new(),
         syntax_source_bytes: syntax_budget
             .usage
             .source_bytes
@@ -2252,6 +2262,7 @@ mod tests {
                 source: start..start + 1,
                 has_table: false,
                 tables: Vec::new(),
+                table_spans: Vec::new(),
                 spans: (0..fragments)
                     .map(|_| TranscriptSpan {
                         text: "x".repeat(fragment_bytes),

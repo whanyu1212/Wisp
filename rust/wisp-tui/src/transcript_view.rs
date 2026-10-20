@@ -2150,6 +2150,7 @@ impl TranscriptRowCache {
         let mut cursor = start;
         let mut word_break = None::<(usize, usize, usize)>;
         let mut previous_space = false;
+        let mut row_full_width = false;
         while cursor < snapshot.output_len {
             let block_index = snapshot
                 .block_starts
@@ -2176,7 +2177,7 @@ impl TranscriptRowCache {
             let local = cursor.saturating_sub(block_start);
             let mut span_start = 0_usize;
             let mut advanced = false;
-            for span in &block.spans {
+            for (span_index, span) in block.spans.iter().enumerate() {
                 let span_end = span_start + span.text.len();
                 if local >= span_end {
                     span_start = span_end;
@@ -2231,12 +2232,15 @@ impl TranscriptRowCache {
                         }
                     }
                     previous_space = space;
-                    // A row's first span decides its measure, so a code line keeps the
-                    // full width while prose around it wraps at the prose measure.
-                    let row_style = spans
-                        .first()
-                        .map_or(span.style.block, |first: &TranscriptSpan| first.style.block);
-                    let wrap_width = prose_wrap_width(block, row_style, width);
+                    // Code and tables keep the full width from where they start in a
+                    // row, even after a list or quote marker; prose wraps at the measure.
+                    let full_width = keeps_full_width(block, span_index, span);
+                    row_full_width |= full_width;
+                    let wrap_width = if row_full_width {
+                        width
+                    } else {
+                        width.min(PROSE_COLUMNS)
+                    };
                     if !spans.is_empty() && column.saturating_add(grapheme_width) > wrap_width {
                         if let Some((offset, count, last_len)) = word_break {
                             spans.truncate(count);
@@ -4187,23 +4191,17 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
 /// Assistant prose wraps at a readable measure even on wide terminals.
 const PROSE_COLUMNS: usize = 100;
 
-/// Paragraphs, headings and lists wrap at [`PROSE_COLUMNS`]; code, raw HTML and tables
-/// keep the full width so their columns stay aligned.
-fn prose_wrap_width(
+/// Whether a span keeps the full width: code, raw HTML and tables stay aligned, while
+/// paragraphs, headings and lists wrap at [`PROSE_COLUMNS`].
+fn keeps_full_width(
     block: &crate::markdown::MarkdownBlock,
-    style: crate::markdown::BlockStyle,
-    width: usize,
-) -> usize {
-    let full_width = block.has_table()
-        || matches!(
-            style,
-            crate::markdown::BlockStyle::Code | crate::markdown::BlockStyle::RawHtml
-        );
-    if full_width {
-        width
-    } else {
-        width.min(PROSE_COLUMNS)
-    }
+    index: usize,
+    span: &TranscriptSpan,
+) -> bool {
+    matches!(
+        span.style.block,
+        crate::markdown::BlockStyle::Code | crate::markdown::BlockStyle::RawHtml
+    ) || block.span_in_table(index)
 }
 
 /// Large messages stay fully readable as plain text without building an oversized Markdown tree.
@@ -4428,12 +4426,19 @@ mod tests {
         let prose = "word ".repeat(40);
         let code = format!("let value = {};", "x".repeat(130));
         let item = format!("- item {prose}\n\n  ```rust\n  {code}\n  ```");
+        let quote = format!("> quoted {prose}\n>\n> ```\n> {code}\n> ```");
+        let cell = "y".repeat(120);
+        let table =
+            format!("- table {prose}\n\n  | a | b |\n  |---|---|\n  | {cell} | z |\n\n  {prose}");
         let answer = transcript
-            .complete_message(1, format!("{prose}\n\n```rust\n{code}\n```\n\n{item}"))
+            .complete_message(
+                1,
+                format!("{prose}\n\n```rust\n{code}\n```\n\n{item}\n\n{quote}\n\n{table}"),
+            )
             .unwrap();
         let mut viewport = TranscriptViewport::default();
         let mut cache = TranscriptRowCache::default();
-        viewport.set_geometry(&transcript, &mut cache, 160, 80);
+        viewport.set_geometry(&transcript, &mut cache, 160, 120);
 
         let rows = viewport
             .visible_rows(&transcript, &mut cache)
@@ -4442,16 +4447,23 @@ mod tests {
             .map(|row| row.plain_text())
             .collect::<Vec<_>>();
 
-        // A list holding a code fence still caps its prose.
-        let prose_rows = rows
-            .iter()
-            .filter(|row| row.trim_start().starts_with("word") || row.contains("item"));
-        assert!(prose_rows.clone().count() >= 4, "{rows:#?}");
+        // Lists and quotes holding code or a table still cap their prose, while the
+        // code and table rows inside them keep the full width.
+        let prose_rows = rows.iter().filter(|row| {
+            row.contains("word") && !row.contains("let value") && !row.contains(&cell)
+        });
+        assert!(prose_rows.clone().count() >= 10, "{rows:#?}");
         assert!(
             prose_rows.clone().all(|row| row.trim_end().width() <= 100),
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&code)), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("│ ") && row.contains(&code)),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
     }
 
     #[test]

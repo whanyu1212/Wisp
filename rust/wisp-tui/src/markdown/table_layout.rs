@@ -33,9 +33,12 @@ pub(crate) fn layout_document(
         }
         let mut output = BlockRenderer::default();
         let mut previous = 0;
+        let mut table_spans = Vec::new();
         for table in &block.tables {
             copy_spans(&mut output, &block.spans[previous..table.spans.start]);
+            let start = output.spans.len();
             render_table(&mut output, block, table, width);
+            table_spans.push(start..output.spans.len());
             previous = table.spans.end;
             if output.truncated {
                 break;
@@ -56,6 +59,7 @@ pub(crate) fn layout_document(
         let mut laid_out = (**block).clone();
         laid_out.spans = output.spans;
         laid_out.tables.clear();
+        laid_out.table_spans = table_spans;
         blocks.push(Arc::new(laid_out));
     }
     enforce_document_budget(
