@@ -117,6 +117,11 @@ class _ToolResultEvent(_MessageOriginEvent):
     summary: str | None = None
     # Whether the tool itself capped output before constructing this event.
     truncated: bool = False
+    # Wall time the executor spent on the call, in milliseconds, excluding any wait
+    # for approval. Executor-built failures (denials, invalid arguments) are timed
+    # too; None only for results the loop settles itself, such as interrupted calls
+    # and calls from a truncated response.
+    duration_ms: int | None = Field(default=None, ge=0)
     # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
     # consumers. These are bounded scalars/chunks, not the raw result mapping.
     process_id: str | None = None

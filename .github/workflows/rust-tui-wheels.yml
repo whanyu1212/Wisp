@@ -8,8 +8,10 @@ on:
   push:
     branches:
       - main
-  # Pull requests build wheels only when they touch Rust, packaging, the
-  # wheel scripts and tests, or the Python code that loads a native binary.
+  # Pull requests build wheels only when they touch packaging, the native crates
+  # the wheel bundles beyond the TUI, the wheel scripts and tests, or the Python
+  # code that loads a native binary. TUI-only changes are compiled and tested by
+  # CI and get their wheel build on merge.
   pull_request:
     branches:
       - main
@@ -23,7 +25,6 @@ on:
       - "rust/wisp-protocol/**"
       - "rust/wisp-python/**"
       - "rust/wisp-search/**"
-      - "rust/wisp-tui/**"
       - "scripts/smoke_installed_rust_tui.py"
       - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"

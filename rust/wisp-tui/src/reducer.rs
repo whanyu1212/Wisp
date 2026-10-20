@@ -1130,6 +1130,13 @@ pub enum BackendEvent {
         content: String,
         cost: Option<String>,
     },
+    /// A run finished; its totals close the run's last reply.
+    RunCompleted {
+        outcome: String,
+        duration_ms: Option<u64>,
+        tool_calls: u64,
+        output_tokens: Option<u64>,
+    },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
     ToolApprovalResolved {
@@ -4553,6 +4560,19 @@ fn handle_backend_event(
                 .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::RunCompleted {
+            outcome,
+            duration_ms,
+            tool_calls,
+            output_tokens,
+        } => {
+            let summary = run_summary_line(state, &outcome, duration_ms, tool_calls, output_tokens);
+            if state.transcript.attach_run_summary(summary) {
+                Ok(vec![UiEffect::RequestRender])
+            } else {
+                Ok(Vec::new())
+            }
+        }
         BackendEvent::ToolCall(input) => {
             let call_id = input.call_id.clone();
             let target = state.transcript.observe_tool_call(input);
@@ -4786,6 +4806,71 @@ fn handle_backend_event(
             Ok(effects)
         }
     }
+}
+
+/// The run's summary line, such as `╰ Build · gpt-6-astra · high · 6m 41s · 14 tools ·
+/// 31k tokens`. Mode, model, and effort are the session's settings when the run ends;
+/// parts that are unknown are left out, and a run that did not complete says how it
+/// ended.
+fn run_summary_line(
+    state: &UiState,
+    outcome: &str,
+    duration_ms: Option<u64>,
+    tool_calls: u64,
+    output_tokens: Option<u64>,
+) -> String {
+    let mut parts = Vec::new();
+    if state.mode_confirmed {
+        parts.push(match state.mode {
+            AgentMode::Build => "Build".to_owned(),
+            AgentMode::Plan => "Plan".to_owned(),
+        });
+    }
+    if let Some(model) = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref())
+    {
+        parts.push(model.to_owned());
+    }
+    if let Some(effort) = state.effort.as_deref() {
+        parts.push(effort.to_owned());
+    }
+    if let Some(duration_ms) = duration_ms {
+        parts.push(crate::tool_cards::format_duration(duration_ms));
+    }
+    match tool_calls {
+        0 => {}
+        1 => parts.push("1 tool".to_owned()),
+        count => parts.push(format!("{count} tools")),
+    }
+    if let Some(tokens) = output_tokens.filter(|tokens| *tokens > 0) {
+        parts.push(format!("{} tokens", abbreviated_count(tokens)));
+    }
+    if outcome != "completed" {
+        parts.push(outcome.to_owned());
+    }
+    format!("╰ {}", parts.join(" · "))
+}
+
+/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit. Each unit is chosen after
+/// rounding, so 999.6k reads `1.0m`.
+fn abbreviated_count(count: u64) -> String {
+    if count < 1_000 {
+        return count.to_string();
+    }
+    for (unit, size) in [("k", 1_000_u64), ("m", 1_000_000)] {
+        let tenths = count.saturating_add(size / 20) / (size / 10);
+        if tenths < 100 {
+            return format!("{}.{}{unit}", tenths / 10, tenths % 10);
+        }
+        let whole = count.saturating_add(size / 2) / size;
+        if whole < 1_000 || unit == "m" {
+            return format!("{whole}{unit}");
+        }
+    }
+    unreachable!("the last unit always returns")
 }
 
 #[cfg(test)]
@@ -6002,12 +6087,14 @@ mod tests {
             "stdout_truncated": true,
             "stderr_truncated": false,
             "stdout_dropped_bytes": 11,
-            "stderr_dropped_bytes": 12
+            "stderr_dropped_bytes": 12,
+            "duration_ms": 1250
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let BackendEvent::ToolResult(result) = BackendEvent::from_live(&live).unwrap() else {
             panic!("tool result expected");
         };
+        assert_eq!(result.duration_ms, Some(1250));
         assert_eq!(result.call_id, bounded_identity("call-7"));
         assert_eq!(result.exit_code, Some(1));
         assert_eq!(result.failure_code.as_deref(), Some("internal_error"));
@@ -6016,6 +6103,110 @@ mod tests {
         assert_eq!(result.stderr.as_deref(), Some("err"));
         assert_eq!(result.stdout_dropped_bytes, 11);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn counts_round_before_units() {
+        let cases = [
+            (999, "999"),
+            (1_234, "1.2k"),
+            (9_960, "10k"),
+            (31_400, "31k"),
+            (999_600, "1.0m"),
+            (12_300_000, "12m"),
+        ];
+        for (count, label) in cases {
+            assert_eq!(abbreviated_count(count), label);
+        }
+    }
+
+    #[test]
+    fn cancelled_run_keeps_card_last() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: bounded_identity("call-1"),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 1,
+                output_tokens: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(effects.is_empty());
+        let reply = &state.transcript.entries()[1];
+        assert_eq!(reply.display_content(), "Running the tests.");
+
+        state.transcript.complete_message(2, "Stopped.".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 1,
+                output_tokens: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let last = state.transcript.entries().last().unwrap();
+        assert_eq!(
+            last.display_content(),
+            "Stopped.\n\n╰ 4.0s · 1 tool · cancelled"
+        );
+    }
+
+    #[test]
+    fn run_summary_closes_last_reply() {
+        let mut state = UiState::new("fake".into(), Some("gpt_x".into()), None);
+        state.mode = AgentMode::Build;
+        state.mode_confirmed = true;
+        state.effort = Some("high".into());
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hello".into());
+        let value = serde_json::json!({
+            "type": "agent.completed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "session_id": "s",
+            "turns": 2,
+            "outcome": "completed",
+            "duration_ms": 252_000,
+            "tool_calls": 3,
+            "output_tokens": 1_234
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let completed = BackendEvent::from_live(&live).unwrap();
+
+        // No reply yet: the summary has nowhere to go.
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(completed.clone()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+
+        state.transcript.complete_message(1, "Done.".into());
+        reduce(&mut state, UiAction::BackendEvent(completed), &mut ids).unwrap();
+        let reply = state.transcript.entries().last().unwrap();
+        assert_eq!(
+            reply.display_content(),
+            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 1.2k tokens"
+        );
+        assert_eq!(reply.content, "Done.");
     }
 
     #[test]

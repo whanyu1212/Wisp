@@ -1051,11 +1051,15 @@ impl TranscriptRowCache {
             .lines()
             .filter(|line| !line.is_empty())
             .count();
-        let text = if line_count > 1 {
+        let mut text = if line_count > 1 {
             format!("thought · {line_count} lines")
         } else {
             "thought".into()
         };
+        if let Some(milliseconds) = entry.thinking_ms() {
+            text.push_str(" · ");
+            text.push_str(&crate::tool_cards::format_duration(u64::from(milliseconds)));
+        }
         let next = if self.fold.is_expanded(entry.id) && !entry.thinking().is_empty() {
             Some(RowAnchor {
                 entry_id: entry.id,
@@ -1959,7 +1963,7 @@ impl TranscriptRowCache {
             let old_bytes = cached.retained_bytes;
             let build = (cached.entry_revision != Some(entry.revision())).then(|| {
                 cached.state.build(
-                    &entry.content[start..],
+                    &entry.markdown_source()[start..],
                     start,
                     entry.layout_epoch(),
                     entry.state == TranscriptEntryState::Complete,
@@ -2733,6 +2737,19 @@ fn tool_action_projection(
     )
 }
 
+/// Close a finished call's action line with how long it ran, such as ` · 4m 12s`.
+/// Returns where the duration starts, so a truncated row keeps it whole, or
+/// `usize::MAX` without one.
+fn push_duration(action: &mut String, card: &crate::tool_cards::ToolCardSnapshot) -> usize {
+    let Some(duration) = card.duration_label() else {
+        return usize::MAX;
+    };
+    let start = action.len();
+    action.push_str(" · ");
+    action.push_str(&duration);
+    start
+}
+
 /// Close an action line with its status note, such as ` · denied`. Returns where the
 /// note starts, so a truncated row keeps it whole, or `usize::MAX` without one.
 fn push_status_note(action: &mut String, note: Option<&str>) -> usize {
@@ -2796,6 +2813,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                         let (preview, tones) = structured_card_preview(detail);
                         (preview, tones, Vec::new(), Vec::new(), Vec::new())
                     };
+                action_suffix_start = action_suffix_start.min(push_duration(&mut action, card));
                 return Some(CardProjection {
                     action,
                     action_marker_end,
@@ -2842,6 +2860,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
             let omission = card_omission(omitted, card.backend_truncated, tail_preview);
+            let duration_start = push_duration(&mut action, card);
             Some(CardProjection {
                 action,
                 action_marker_end,
@@ -2859,7 +2878,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
-                action_suffix_start: note_start,
+                action_suffix_start: note_start.min(duration_start),
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
@@ -2879,6 +2898,9 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 card.task_label.as_deref().unwrap_or("Background command")
             );
             let note_start = push_status_note(&mut action, card.status_note());
+            // Background output has no completion line, so the row names the exit code.
+            let exit = card.exit_code.map(|code| format!("exit {code}"));
+            let exit_start = push_status_note(&mut action, exit.as_deref());
             Some(CardProjection {
                 action,
                 action_marker_end: process_marker(card).len(),
@@ -2892,7 +2914,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
-                action_suffix_start: note_start,
+                action_suffix_start: note_start.min(exit_start),
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
@@ -4468,6 +4490,27 @@ mod tests {
     }
 
     #[test]
+    fn thought_row_shows_duration() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("think".into());
+        let answer = transcript.append_thinking_delta(1, "first\nsecond");
+        transcript.append_message_delta(1, "answer");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+
+        let thought = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .find(|row| row.anchor.entry_id == answer && row.kind == TranscriptRowKind::Thought)
+            .map(|row| row.plain_text())
+            .unwrap();
+
+        assert!(thought.starts_with("thought · 2 lines · "), "{thought}");
+        assert!(thought.ends_with('s'), "{thought}");
+    }
+
+    #[test]
     fn follow_tail_backfills_short_current_turn_and_scrolls_contiguously() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("older prompt".into());
@@ -4724,6 +4767,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 

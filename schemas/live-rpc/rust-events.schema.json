@@ -3,6 +3,19 @@
     "AgentCompleted": {
       "additionalProperties": false,
       "properties": {
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedDurationMs"
+        },
         "outcome": {
           "enum": [
             "completed",
@@ -12,6 +25,19 @@
           "title": "AgentCompletedOutcome",
           "type": "string"
         },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedOutputTokens"
+        },
         "session_id": {
           "title": "AgentCompletedSessionId",
           "type": "string"
@@ -20,6 +46,12 @@
           "format": "date-time",
           "title": "AgentCompletedTimestamp",
           "type": "string"
+        },
+        "tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "AgentCompletedToolCalls",
+          "type": "integer"
         },
         "turns": {
           "title": "AgentCompletedTurns",
@@ -37,7 +69,10 @@
         "timestamp",
         "session_id",
         "turns",
-        "outcome"
+        "outcome",
+        "duration_ms",
+        "tool_calls",
+        "output_tokens"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -2792,6 +2827,19 @@
           "title": "RpcMessageToolResultSnapshotCreated",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotDurationMs"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -2852,7 +2900,8 @@
         "before_text",
         "created",
         "summary",
-        "truncated"
+        "truncated",
+        "duration_ms"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -5256,6 +5305,19 @@
           "title": "ToolExecutionEndedCreated",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionEndedDurationMs"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -5477,6 +5539,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",
@@ -5552,6 +5615,19 @@
           "default": false,
           "title": "ToolResultReadyCreated",
           "type": "boolean"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolResultReadyDurationMs"
         },
         "exit_code": {
           "anyOf": [
@@ -5774,6 +5850,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",

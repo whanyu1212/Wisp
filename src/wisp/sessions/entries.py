@@ -70,6 +70,8 @@ class ToolResultPresentationSnapshot(BaseModel):
     created: bool = False
     summary: str | None = None
     truncated: bool = False
+    # Execution time in milliseconds; absent for results recorded before it was kept.
+    duration_ms: int | None = Field(default=None, ge=0)
 
 
 class RepositoryStatusSnapshot(BaseModel):

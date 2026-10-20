@@ -14,13 +14,15 @@ from wisp.agent.context_budget import (
     observe_context,
 )
 from wisp.coding.compaction import should_auto_compact
-from wisp.coding.stats import build_session_stats
+from wisp.coding.stats import RunStats, build_session_stats
 from wisp.events import (
     CompactionPolicyStatus,
     ContextEstimate,
     ContextEstimated,
+    MessageCompleted,
     SessionStatsReported,
     TokenUsage,
+    ToolResultReady,
     wisp_event_from_json,
 )
 from wisp.messages import CompactionRecord, Message, NativeOutput
@@ -742,3 +744,31 @@ def test_stats_use_branch_count_but_lifetime_usage() -> None:
     assert stats.usage.total_tokens == 96
     assert stats.context.observed_tokens == 21
     assert stats.context.observed_is_current is True
+
+
+def test_run_stats_totals() -> None:
+    stats = RunStats()
+    usage = TokenUsage(input_tokens=5, output_tokens=7, total_tokens=12)
+    stats.observe(MessageCompleted(turn=1, content="a", finish_reason="tool_calls", usage=usage))
+    stats.observe(ToolResultReady(call_id="c", name="read", output="x", is_error=False))
+    stats.observe(MessageCompleted(turn=2, content="b", finish_reason="stop"))
+    stats.observe(
+        MessageCompleted(
+            turn=2,
+            content="c",
+            finish_reason="stop",
+            usage=usage.model_copy(update={"output_tokens": 3}),
+        )
+    )
+
+    completed = stats.completed(session_id="s", turns=2, outcome="completed")
+
+    assert (completed.tool_calls, completed.output_tokens) == (1, 10)
+    assert completed.duration_ms is not None
+    assert completed.duration_ms >= 0
+
+
+def test_run_stats_without_usage() -> None:
+    completed = RunStats().completed(session_id="s", turns=0, outcome="failed")
+
+    assert (completed.tool_calls, completed.output_tokens) == (0, None)

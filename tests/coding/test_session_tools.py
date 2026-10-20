@@ -326,6 +326,9 @@ def test_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> 
     tool_result = next(event for event in events if isinstance(event, ToolResultReady))
     assert tool_result.output == "echo: hello"
     assert tool_result.is_error is False
+    completed = next(event for event in events if isinstance(event, AgentCompleted))
+    assert completed.tool_calls == 1
+    assert completed.duration_ms is not None
     assert emitted_event_types == [
         "agent.started",
         "turn.started",
@@ -386,7 +389,11 @@ def test_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> 
     assert tool_message["tool_name"] == "echo"
     assert tool_message["content"] == "echo: hello"
     assert tool_message["is_error"] is False
-    assert message_records[5]["tool_result"] == {
+    persisted_result = dict(message_records[5]["tool_result"])
+    duration_ms = persisted_result.pop("duration_ms")
+    assert isinstance(duration_ms, int)
+    assert duration_ms >= 0
+    assert persisted_result == {
         "status": "done",
         "created": False,
         "output_has_exit_status": False,
@@ -397,7 +404,9 @@ def test_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> 
         for entry in JsonlSessionStore(tmp_path).load(saved.path).read_entries()
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
     )
-    assert loaded_tool_entry.tool_result == ToolResultPresentationSnapshot(status="done")
+    assert loaded_tool_entry.tool_result == ToolResultPresentationSnapshot(
+        status="done", duration_ms=duration_ms
+    )
     final_message = message_records[6]["message"]
     assert final_message["content"] == "final answer"
     assert final_message["finish_reason"] == "stop"

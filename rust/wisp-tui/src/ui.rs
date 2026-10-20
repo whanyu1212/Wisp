@@ -3246,6 +3246,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
@@ -5121,6 +5122,56 @@ mod tests {
             screen.contains("▸ 2 actions · read src/a.rs +1"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn finished_rows_show_duration() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("run".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        let mut result = tool_result("b1", "ok");
+        result.name = "bash".into();
+        result.duration_ms = Some(252_000);
+        state.transcript.observe_tool_result(result);
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(screen.contains("Rust tests · 4m 12s"), "{screen}");
+    }
+
+    #[test]
+    fn run_summary_renders_italic() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("hello".into());
+        state.transcript.complete_message(1, "Done.".into());
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("╰ Build · gpt_x · 4m 12s".into())
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        let summary = style_at_text(terminal.backend(), "╰ Build · gpt_x · 4m 12s");
+        assert!(summary.is_some(), "{screen}");
+        assert!(summary.unwrap().2.contains(Modifier::ITALIC));
     }
 
     #[test]

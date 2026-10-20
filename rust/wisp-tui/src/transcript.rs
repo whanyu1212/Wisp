@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Instant;
 
 mod recovery;
 pub(crate) use recovery::LiveHistoryGap;
@@ -102,8 +103,15 @@ pub struct TranscriptEntry {
     local_display: Option<String>,
     /// Display-only reasoning streamed for this assistant turn.
     thinking: String,
+    /// When this reply's first reasoning arrived, until its first answer text.
+    thinking_started: Option<Instant>,
+    /// How long the reply reasoned before answering. Live replies only: reasoning is
+    /// not kept in session history.
+    thinking_ms: Option<u32>,
     searches: Vec<String>,
     cost: Option<String>,
+    /// Display-only summary closing the last reply of a finished run.
+    run_summary: Option<String>,
     decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
@@ -125,9 +133,10 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Compose display-only search evidence and cost without changing model text.
+    /// Compose display-only search evidence, cost, and the run summary without
+    /// changing model text.
     fn decorate(&mut self) {
-        if self.searches.is_empty() && self.cost.is_none() {
+        if self.searches.is_empty() && self.cost.is_none() && self.run_summary.is_none() {
             return;
         }
         let mut text = self.searches.join("\n\n");
@@ -138,6 +147,13 @@ impl TranscriptEntry {
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
             text.push_str(&format!("\n\n{cost}"));
+        }
+        if let Some(summary) = self
+            .run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())
+        {
+            text.push_str(&format!("\n\n{summary}"));
         }
         self.decorated_content = Some(text);
     }
@@ -162,8 +178,37 @@ impl TranscriptEntry {
             .unwrap_or(&self.content)
     }
 
+    /// The Markdown a reply renders: its text, closed by the run summary once the
+    /// whole reply is shown. The summary only follows the text, so offsets into
+    /// [`Self::content`] stay valid in the rendered source.
+    pub(crate) fn markdown_source(&self) -> std::borrow::Cow<'_, str> {
+        match self
+            .run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())
+        {
+            Some(summary) => format!("{}\n\n*{}*", self.content, escape_markdown(summary)).into(),
+            None => self.content.as_str().into(),
+        }
+    }
+
     pub fn thinking(&self) -> &str {
         &self.thinking
+    }
+
+    pub(crate) fn thinking_ms(&self) -> Option<u32> {
+        self.thinking_ms
+    }
+
+    /// Stop the reasoning clock once answer text arrives or the reply completes.
+    /// Returns whether the entry changed.
+    fn finish_thinking(&mut self) -> bool {
+        let Some(started) = self.thinking_started.take() else {
+            return false;
+        };
+        let elapsed = started.elapsed().as_millis();
+        self.thinking_ms = Some(u32::try_from(elapsed).unwrap_or(u32::MAX));
+        true
     }
 
     pub fn tool_card(&self) -> Option<&ToolCardSnapshot> {
@@ -353,6 +398,7 @@ impl Transcript {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
             let entry = self.entry_mut(entry_id);
+            entry.finish_thinking();
             entry.content.push_str(delta);
             entry.decorate();
             Self::bump_revision(entry);
@@ -370,7 +416,11 @@ impl Transcript {
     ) -> TranscriptEntryId {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
-            self.entry_mut(entry_id).unrevealed.push_str(delta);
+            let entry = self.entry_mut(entry_id);
+            if entry.finish_thinking() {
+                Self::bump_revision(entry);
+            }
+            entry.unrevealed.push_str(delta);
             self.revealing = Some(entry_id);
         }
         entry_id
@@ -441,6 +491,9 @@ impl Transcript {
                     take -= 1;
                 }
                 if take > 0 {
+                    if entry.thinking.is_empty() && entry.thinking_ms.is_none() {
+                        entry.thinking_started = Some(Instant::now());
+                    }
                     entry.thinking.push_str(&delta[..take]);
                     Self::bump_revision(entry);
                     self.bump_generation();
@@ -460,6 +513,44 @@ impl Transcript {
             Self::bump_revision(entry);
             self.bump_generation();
         }
+    }
+
+    /// Close the run with its summary line under its last reply. The run must end on
+    /// that reply: when a tool or process card follows it, as after a cancelled call,
+    /// the line would sit mid-run, so the run keeps none.
+    pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
+        let prompt = self.latest_user_entry();
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|entry| Some(entry.id) != prompt)
+            .find(|entry| {
+                !(entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && entry.content.is_empty()
+                    && entry.unrevealed.is_empty())
+            });
+        let Some(id) = last
+            .filter(|entry| {
+                entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+            })
+            .map(|entry| entry.id)
+        else {
+            return false;
+        };
+        let entry = self.entry_mut(id);
+        entry.run_summary = Some(summary);
+        // Reparse the whole reply with its new ending, so the line renders the same
+        // whether or not the reply was already laid out.
+        entry.layout_epoch = entry
+            .layout_epoch
+            .checked_add(1)
+            .expect("transcript layout epoch exhausted");
+        entry.decorate();
+        Self::bump_revision(entry);
+        true
     }
 
     pub(crate) fn complete_message_with_cost(
@@ -492,6 +583,9 @@ impl Transcript {
         }
         let entry_id = self.response_for_turn(turn);
         let entry = self.entry_mut(entry_id);
+        if entry.finish_thinking() {
+            Self::bump_revision(entry);
+        }
         // A paced reply keeps revealing the final text after its shown prefix, and becomes
         // `Complete` once it is all shown. A final text that rewrites the shown prefix is
         // shown whole at once instead.
@@ -695,6 +789,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -758,6 +853,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -1533,6 +1629,9 @@ impl Transcript {
                 thinking: String::new(),
                 searches: Vec::new(),
                 cost: None,
+                run_summary: None,
+                thinking_started: None,
+                thinking_ms: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
@@ -2222,6 +2321,9 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
+            thinking_started: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
@@ -2311,6 +2413,9 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
+            thinking_started: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind,
@@ -2423,6 +2528,21 @@ impl Transcript {
     }
 }
 
+/// Backslash-escape Markdown punctuation so names render literally.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2480,6 +2600,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 

@@ -389,6 +389,12 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 text: crate::web_search::search(value),
             },
+            "agent.completed" => Self::RunCompleted {
+                outcome: string_field(value, &event_type, "outcome")?,
+                duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
+                tool_calls: u64_field_or(value, &event_type, "tool_calls", 0)?,
+                output_tokens: optional_u64_field(value, &event_type, "output_tokens")?,
+            },
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
@@ -535,6 +541,7 @@ impl BackendEvent {
                         "stderr_dropped_bytes",
                         0,
                     )?,
+                    duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
                 }))
             }
             "trust.requested" => Self::TrustRequested {
@@ -1631,6 +1638,23 @@ fn optional_i64_field(
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_i64()
+            .map(Some)
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
+    }
+}
+
+fn optional_u64_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<u64>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_u64()
             .map(Some)
             .ok_or_else(|| EventProjectionError::InvalidField {
                 event_type: event_type.to_owned(),

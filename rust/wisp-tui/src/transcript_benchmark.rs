@@ -605,6 +605,7 @@ fn tool_result(call_id: &str, name: &str, output: &str) -> ToolResultInput {
         stderr_truncated: false,
         stdout_dropped_bytes: 0,
         stderr_dropped_bytes: 0,
+        duration_ms: None,
     }
 }
 

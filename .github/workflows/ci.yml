@@ -100,25 +100,74 @@ jobs:
       - name: Test Rust workspace
         run: cargo test --workspace --all-features
 
+  # The PTY handoff tests run beside lint and unit tests rather than after them.
+  # macOS runs them only on main: they flake on GitHub's macOS runners (HY-29) and
+  # never gate there, so pull requests skip that wait.
+  tui-handoff:
+    name: TUI handoff (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install Python dependencies
+        run: uv sync --locked
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        with:
+          key: tui-handoff-${{ matrix.os }}
+
       - name: Build Rust TUI
         run: cargo build -p wisp-tui
 
       - name: Test Python/Rust TUI handoff
-        # These PTY tests flake on GitHub's macOS runners only (HY-29). Report
-        # failures there without failing the job; Linux still gates on them.
+        # Report macOS failures without failing the job; Linux still gates on them.
         continue-on-error: ${{ runner.os == 'macOS' }}
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
-        # tests/benchmarks is included so the benchmark harnesses' PTY runs
-        # (skipped without the binary) keep working against the current CLI.
+          # Linux runs the end-to-end tests across workers; each spawns its own PTY
+          # and backend. macOS keeps one worker.
+          WORKERS: ${{ runner.os == 'Linux' && '4' || '0' }}
         # The per-test timeout turns a silent hang into a named failure with a
         # traceback instead of letting it consume the whole job timeout. The
         # signal method fails only that test, so later tests and the JUnit
         # report still run.
         run: >-
-          uv run pytest tests/tui_e2e tests/benchmarks --durations=20
+          uv run pytest tests/tui_e2e -n "$WORKERS" --durations=20
           --timeout=90 --timeout-method=signal
-          --junitxml=test-results/rust-smoke/junit.xml
+          --junitxml=test-results/rust-smoke/e2e.xml
+
+      - name: Test TUI benchmark harnesses
+        # The benchmark harnesses' PTY runs (skipped without the binary) keep
+        # working against the current CLI. They measure timing, so they run on
+        # one worker.
+        continue-on-error: ${{ runner.os == 'macOS' }}
+        env:
+          RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
+        run: >-
+          uv run pytest tests/benchmarks --durations=20
+          --timeout=90 --timeout-method=signal
+          --junitxml=test-results/rust-smoke/benchmarks.xml
 
       - name: Upload Rust handoff test results
         if: always()
@@ -271,7 +320,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: ${{ always() }}
-    needs: [quality, rust-workspace, package, python-tests, macos-smoke]
+    needs: [quality, rust-workspace, tui-handoff, package, python-tests, macos-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

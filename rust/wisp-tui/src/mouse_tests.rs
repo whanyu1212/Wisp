@@ -1644,6 +1644,7 @@ fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         });
 }
 

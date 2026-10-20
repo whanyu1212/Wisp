@@ -351,6 +351,11 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         .map(|value| optional_i64(value, index, "tool_result.exit_code"))
         .transpose()?
         .flatten();
+    let duration_ms = result
+        .and_then(|result| result.get("duration_ms"))
+        .map(|value| optional_u64(value, index, "tool_result.duration_ms"))
+        .transpose()?
+        .flatten();
     let call_id = optional_string(message, index, "tool_call_id")?
         .map(bounded_identity)
         .unwrap_or_else(|| format!("s:history-result-boundary-{index}"));
@@ -400,6 +405,7 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         stderr_truncated: false,
         stdout_dropped_bytes: 0,
         stderr_dropped_bytes: 0,
+        duration_ms,
     })
 }
 
@@ -608,6 +614,20 @@ fn object_bool(
         .get(field.rsplit('.').next().expect("field has a member"))
         .and_then(Value::as_bool)
         .ok_or(HistoryProjectionError::InvalidField { index, field })
+}
+
+fn optional_u64(
+    value: &Value,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<u64>, HistoryProjectionError> {
+    match value {
+        Value::Null => Ok(None),
+        value => value
+            .as_u64()
+            .map(Some)
+            .ok_or(HistoryProjectionError::InvalidField { index, field }),
+    }
 }
 
 fn optional_i64(
@@ -1458,6 +1478,25 @@ mod tests {
             .unwrap();
         assert!(!card.arguments_available);
         assert_eq!(card.status.as_str(), "done");
+    }
+
+    #[test]
+    fn history_keeps_tool_duration() {
+        let mut result = message("tool", "done");
+        result["tool_call_id"] = json!("timed");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({"status": "done", "duration_ms": 252_000});
+        let transcript = project_rpc_messages(&[result]).unwrap();
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                TranscriptEntryKind::Tool(card) => Some(card),
+                TranscriptEntryKind::Message | TranscriptEntryKind::Process(_) => None,
+            })
+            .unwrap();
+        assert_eq!(card.duration_ms, Some(252_000));
+        assert_eq!(card.duration_label().as_deref(), Some("4m 12s"));
     }
 
     #[test]

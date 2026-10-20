@@ -209,6 +209,9 @@ pub struct ToolResultInput {
     pub stderr_truncated: bool,
     pub stdout_dropped_bytes: u64,
     pub stderr_dropped_bytes: u64,
+    /// How long the tool ran, as the backend measured it; `None` for results that
+    /// never ran or were recorded before durations were kept.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -233,6 +236,8 @@ pub struct ToolCardSnapshot {
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
+    /// Kept as 32 bits, which spans 49 days, so the card stays compact.
+    pub duration_ms: Option<u32>,
 }
 
 impl ToolCardSnapshot {
@@ -252,6 +257,7 @@ impl ToolCardSnapshot {
             retryable: false,
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
+            duration_ms: None,
         }
     }
 
@@ -328,6 +334,9 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        self.duration_ms = input
+            .duration_ms
+            .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
         self.process_id = input
             .process_id
             .as_ref()
@@ -481,6 +490,14 @@ impl ToolCardSnapshot {
         ))
     }
 
+    /// How long a finished call ran, for its action line. Calls that were denied,
+    /// cancelled, or never ran show none.
+    pub fn duration_label(&self) -> Option<String> {
+        matches!(self.status, ToolStatus::Done | ToolStatus::Error)
+            .then_some(self.duration_ms?)
+            .map(|milliseconds| format_duration(u64::from(milliseconds)))
+    }
+
     /// The state the action line spells out because its marker alone does not: `?`
     /// needs saying what it waits for, and `⊘` stands for both denial and
     /// cancellation.
@@ -553,6 +570,8 @@ pub struct ProcessCardSnapshot {
     pub retained_output: BoundedText,
     pub backend_truncated: bool,
     pub backend_dropped_bytes: u64,
+    /// The finished process's exit code; background output carries no exit line.
+    pub exit_code: Option<i32>,
     last_stream_label: Option<&'static str>,
     last_sequence: Option<u64>,
     approval_sequence: Option<u64>,
@@ -570,6 +589,7 @@ impl ProcessCardSnapshot {
             retained_output: BoundedText::default(),
             backend_truncated: false,
             backend_dropped_bytes: 0,
+            exit_code: None,
             last_stream_label: None,
             last_sequence: None,
             approval_sequence: None,
@@ -728,6 +748,15 @@ impl ProcessCardSnapshot {
             );
         if update_display_state {
             self.display_state = process_result_state(operation, result);
+            self.exit_code = result
+                .exit_code
+                .and_then(|code| i32::try_from(code).ok())
+                .filter(|_| {
+                    matches!(
+                        self.display_state,
+                        ProcessDisplayState::Completed | ProcessDisplayState::Failed
+                    )
+                });
         }
         true
     }
@@ -790,6 +819,7 @@ impl ProcessCardSnapshot {
 
         self.task_label = newer.task_label.clone().or_else(|| self.task_label.clone());
         self.display_state = newer.display_state;
+        self.exit_code = newer.exit_code;
         self.poll_count = self.poll_count.saturating_add(newer.poll_count);
         self.call_count = self.call_count.saturating_add(newer.call_count);
         self.retained_output = retained;
@@ -1551,9 +1581,47 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
     .saturating_add(u64::from(!source.ends_with('\n')))
 }
 
+/// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
+/// Each unit is chosen after rounding, so 9.96 s reads `10s` rather than `10.0s`.
+pub(crate) fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 100 {
+        return "<0.1s".into();
+    }
+    let tenths = milliseconds.saturating_add(50) / 100;
+    if tenths < 100 {
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let seconds = milliseconds.saturating_add(500) / 1000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3600 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    let minutes = milliseconds.saturating_add(30_000) / 60_000;
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_formats_compactly() {
+        let cases = [
+            (40, "<0.1s"),
+            (250, "0.3s"),
+            (9_960, "10s"),
+            (59_600, "1m 00s"),
+            (4_500, "4.5s"),
+            (12_400, "12s"),
+            (252_000, "4m 12s"),
+            (3_900_000, "1h 05m"),
+        ];
+        for (milliseconds, label) in cases {
+            assert_eq!(format_duration(milliseconds), label);
+        }
+    }
 
     #[test]
     fn command_summaries_only_label_known_invocations() {
@@ -1640,6 +1708,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
@@ -2050,6 +2119,21 @@ mod tests {
         assert!(card.observe(ProcessOperation::Poll, &failed, 0));
         assert_eq!(card.display_state, ProcessDisplayState::Failed);
         assert!(card.display_state.terminal());
+        assert_eq!(card.exit_code, Some(2));
+    }
+
+    #[test]
+    fn running_process_has_no_exit() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut running = result("partial");
+        running.name = "bash".into();
+        running.exit_code = Some(0);
+        running.process_id = Some("process-1".into());
+        running.process_state = Some("running".into());
+
+        assert!(card.observe(ProcessOperation::Poll, &running, 0));
+        assert_eq!(card.exit_code, None);
     }
 
     #[test]

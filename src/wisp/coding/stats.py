@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from typing import cast
 
 from pydantic import ValidationError
@@ -15,12 +17,17 @@ from wisp.agent.context_budget import (
 from wisp.coding.compaction import NothingToCompactError, plan_manual_compaction
 from wisp.coding.costs import aggregate_session_cost
 from wisp.events import (
+    AgentCompleted,
     CompactionPolicyStatus,
     ContextBudget,
     ContextObservation,
+    MessageCompleted,
+    RunOutcome,
     SessionStats,
     TokenUsage,
+    ToolResultReady,
     UsageCost,
+    WispEvent,
 )
 from wisp.messages import Message
 from wisp.providers.base import ToolSpec
@@ -31,6 +38,51 @@ from wisp.sessions.entries import (
     SessionEntry,
 )
 from wisp.sessions.replay import SessionReplay
+
+
+@dataclass(slots=True)
+class RunStats:
+    """Totals for one run, reported on the `AgentCompleted` that ends it.
+
+    The run observes each event it publishes; the clock starts when the tracker is
+    created.
+    """
+
+    started: float = field(default_factory=time.monotonic)
+    tool_calls: int = 0
+    output_tokens: int | None = None
+
+    def observe(self, event: WispEvent) -> None:
+        """Count a published tool result or a response's output tokens.
+
+        Args:
+            event (WispEvent): Event the run just published.
+        """
+        if isinstance(event, ToolResultReady):
+            self.tool_calls += 1
+        elif isinstance(event, MessageCompleted) and event.usage is not None:
+            self.output_tokens = (self.output_tokens or 0) + event.usage.output_tokens
+
+    def completed(self, *, session_id: str, turns: int, outcome: RunOutcome) -> AgentCompleted:
+        """Build the run's terminal event with its totals.
+
+        Args:
+            session_id (str): Session the run belongs to.
+            turns (int): Turns the run completed.
+            outcome (RunOutcome): How the run ended.
+
+        Returns:
+            AgentCompleted: Terminal event carrying the run's duration, tool count, and
+                output tokens.
+        """
+        return AgentCompleted(
+            session_id=session_id,
+            turns=turns,
+            outcome=outcome,
+            duration_ms=max(0, round((time.monotonic() - self.started) * 1000)),
+            tool_calls=self.tool_calls,
+            output_tokens=self.output_tokens,
+        )
 
 
 def build_session_stats(

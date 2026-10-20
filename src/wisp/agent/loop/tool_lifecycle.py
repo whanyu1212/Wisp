@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -169,6 +170,21 @@ def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
         name=tool_call.name,
         arguments=deepcopy(dict(tool_call.arguments)),
     )
+
+
+def with_execution_duration(terminal: ToolExecutionEnded, started: float) -> ToolExecutionEnded:
+    """Stamp a terminal result with the time its tool spent executing.
+
+    Args:
+        terminal (ToolExecutionEnded): Result the executor returned.
+        started (float): `time.monotonic()` reading taken when execution began.
+
+    Returns:
+        ToolExecutionEnded: A copy carrying `duration_ms`; the executor's own event is
+            left untouched.
+    """
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    return terminal.model_copy(update={"duration_ms": elapsed_ms})
 
 
 @dataclass(slots=True)

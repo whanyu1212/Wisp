@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 
@@ -23,6 +24,7 @@ from .tool_lifecycle import (
     ToolBatchSettlement,
     ToolExecutionLifecycle,
     tool_execution_started,
+    with_execution_duration,
 )
 
 _MAX_PARALLEL_TOOL_EXECUTIONS = 8
@@ -74,7 +76,12 @@ async def _run_prepared_chunk(
             call (_PreparedCallState): Prepared execution to invoke.
         """
         try:
-            outcomes[index].terminal = await call.execution.run()
+            started = time.monotonic()
+            terminal = await call.execution.run()
+            # A malformed result keeps flowing to lifecycle validation unchanged.
+            if isinstance(terminal, ToolExecutionEnded):
+                terminal = with_execution_duration(terminal, started)
+            outcomes[index].terminal = terminal
         except Exception as exc:  # noqa: BLE001 - preserve the original fatal error
             outcomes[index].error = exc
 
