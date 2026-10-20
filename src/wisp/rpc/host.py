@@ -25,6 +25,7 @@ from wisp.events import (
     PermissionMode,
     PermissionState,
     RpcCommandFinished,
+    RpcGitDiffReported,
     RpcProjectFilesReported,
     SkillCatalogUpdated,
     TrustRequested,
@@ -902,7 +903,7 @@ class RpcHost:
             self._published_events_drained.set()
 
     async def _publish_project_files(
-        self, report: RpcProjectFilesReported, scope: anyio.CancelScope
+        self, report: RpcProjectFilesReported | RpcGitDiffReported, scope: anyio.CancelScope
     ) -> bool:
         """Commit only a current result, serialized against policy invalidation."""
 

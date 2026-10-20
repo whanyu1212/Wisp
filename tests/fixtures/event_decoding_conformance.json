@@ -1492,6 +1492,129 @@
    "accepted": false
   },
   {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "generation"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "head"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "after"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "before"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "kind"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "notice"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "status"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "add_unknown",
+   "path": [
+    "files",
+    0
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.mcp",
    "operation": "remove",
    "path": [

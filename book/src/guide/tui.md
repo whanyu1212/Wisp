@@ -92,6 +92,25 @@ when the content area is at least 100 columns wide (narrower terminals use unifi
 browse. This view is not a cumulative working-tree diff against HEAD, and cannot recover context
 that was not retained. Full file locations remain in the review heading.
 
+Use `/diff` for a separate **working tree ↔ HEAD** review. It reads the current
+repository through the backend, combines staged and unstaged tracked edits, and
+lists untracked files separately without reading their contents. The changed-file
+list groups folders with counts; Enter expands a folder or focuses its file diff.
+Tab switches between the file list and diff. `[` / `]`, `s`, `c`, and scrolling
+work as in retained-edit review. On narrow terminals, Tab switches between full-width
+file navigation and the selected diff. Esc closes the view.
+
+Press `r` to capture a new snapshot. The view is read-only and does not watch the
+filesystem: a snapshot may become stale while Wisp or another program edits files.
+Protected and unsafe paths are omitted. Binary, oversized, or unreadable content
+receives an unavailable notice; symlinks, submodules, and files above the scan
+budget may be omitted. Reports and rendered previews are
+bounded, with partial/truncated labels; counts cover available text only. A Git
+working tree with a HEAD commit is required. The comparison reads disk text and HEAD blobs with built-in newline/ident
+normalization, without executing Git clean, external-diff, or textconv helpers.
+Files requiring filter or working-tree-encoding transformations are omitted and
+mark the snapshot partial; unchanged files beyond the scan budget may also be omitted.
+
 Other tool and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
 cards group as `explored N files`, and consecutive calls to the same MCP tool group as one action
 line with a count, such as `linear/get_issue ×8  id=HY-270 … id=HY-278`, showing the first and last

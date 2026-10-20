@@ -2192,6 +2192,119 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcGitDiffFile": {
+      "additionalProperties": false,
+      "description": "One authorized file pair, or an explicit unavailable-content notice.",
+      "properties": {
+        "after": {
+          "maxLength": 50000,
+          "title": "After",
+          "type": "string"
+        },
+        "before": {
+          "maxLength": 50000,
+          "title": "Before",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "notice": {
+          "maxLength": 256,
+          "title": "Notice",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?!(?:.*\\/)?\\.\\.?(?:\\/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+)*(?![\\s\\S])",
+          "title": "Path",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "modified",
+            "added",
+            "deleted",
+            "untracked"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "status",
+        "before",
+        "after",
+        "notice"
+      ],
+      "title": "RpcGitDiffFile",
+      "type": "object"
+    },
+    "RpcGitDiffReported": {
+      "additionalProperties": false,
+      "description": "Bounded read-only Git snapshot; untracked content is never included.",
+      "properties": {
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/RpcGitDiffFile"
+          },
+          "maxItems": 256,
+          "title": "Files",
+          "type": "array"
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "head": {
+          "maxLength": 64,
+          "title": "Head",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.git_diff",
+          "default": "rpc.git_diff",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "generation",
+        "head",
+        "files",
+        "truncated"
+      ],
+      "title": "RpcGitDiffReported",
+      "type": "object"
+    },
     "RpcMcpHeaderFrom": {
       "additionalProperties": false,
       "description": "One HTTP header whose value Wisp builds from an environment variable.\n\nThe header is sent as ``\"{scheme} {value}\"``, or the bare value when\n``scheme`` is None. Showing it tells the user which variable's value goes to\nthe server.",
@@ -6682,6 +6795,7 @@
       "rpc.connection_catalog": "#/$defs/RpcConnectionCatalogReported",
       "rpc.device_code": "#/$defs/RpcDeviceCodeReported",
       "rpc.device_code.progress": "#/$defs/RpcDeviceCodeProgressReported",
+      "rpc.git_diff": "#/$defs/RpcGitDiffReported",
       "rpc.mcp": "#/$defs/RpcMcpStatusReported",
       "rpc.mcp.login": "#/$defs/RpcMcpLoginStarted",
       "rpc.mcp.preview": "#/$defs/RpcMcpSnippetPreviewed",
@@ -6822,6 +6936,9 @@
     },
     {
       "$ref": "#/$defs/RpcSkillsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcGitDiffReported"
     },
     {
       "$ref": "#/$defs/RpcProjectFilesReported"
@@ -7123,6 +7240,24 @@
       "provider": "openai-codex",
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.device_code.progress"
+    },
+    "rpc.git_diff": {
+      "command_id": "diff-1",
+      "files": [
+        {
+          "after": "new\n",
+          "before": "old\n",
+          "kind": "file",
+          "notice": "",
+          "path": "src/example.py",
+          "status": "modified"
+        }
+      ],
+      "generation": 1,
+      "head": "abc123",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "truncated": false,
+      "type": "rpc.git_diff"
     },
     "rpc.mcp": {
       "command_id": "command-1",

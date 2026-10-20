@@ -100,6 +100,7 @@ _EXPECTED_RPC_EXPORTS = {
     "GetSessionsCommand",
     "GetSkillsCommand",
     "GetProjectFilesCommand",
+    "GetGitDiffCommand",
     "GetStateCommand",
     "InitCommand",
     "JsonlSubprocessRpcTransport",

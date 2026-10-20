@@ -594,6 +594,33 @@
       "title": "GetConnectionCatalogCommand",
       "type": "object"
     },
+    "GetGitDiffCommand": {
+      "additionalProperties": false,
+      "description": "Read a bounded HEAD-to-working-tree snapshot under active file policy.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "GetGitDiffCommandId"
+        },
+        "type": {
+          "const": "get_git_diff",
+          "default": "get_git_diff",
+          "title": "GetGitDiffCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetGitDiffCommand",
+      "type": "object"
+    },
     "GetMcpStatusCommand": {
       "additionalProperties": false,
       "description": "Return sanitized MCP server and registered-tool status.",
@@ -1850,6 +1877,7 @@
       "fork_session": "#/$defs/ForkSessionCommand",
       "get_commands": "#/$defs/GetCommandsCommand",
       "get_connection_catalog": "#/$defs/GetConnectionCatalogCommand",
+      "get_git_diff": "#/$defs/GetGitDiffCommand",
       "get_mcp_status": "#/$defs/GetMcpStatusCommand",
       "get_messages": "#/$defs/GetMessagesCommand",
       "get_model_catalog": "#/$defs/GetModelCatalogCommand",
@@ -1926,6 +1954,9 @@
     },
     {
       "$ref": "#/$defs/GetSkillsCommand"
+    },
+    {
+      "$ref": "#/$defs/GetGitDiffCommand"
     },
     {
       "$ref": "#/$defs/GetProjectFilesCommand"

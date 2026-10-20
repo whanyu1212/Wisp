@@ -38,6 +38,7 @@ from wisp.rpc.commands import (
     ForkSessionCommand,
     GetCommandsCommand,
     GetConnectionCatalogCommand,
+    GetGitDiffCommand,
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
@@ -226,6 +227,19 @@ class RpcController:
         selected_id = command_id or self._command_id_factory("device-code")
         await self._transport.send(BeginDeviceCodeCommand(id=selected_id, provider=provider))
         return selected_id
+
+    async def get_git_diff(self, *, command_id: str | None = None) -> str:
+        """Request a bounded read-only HEAD-to-working-tree snapshot.
+
+        Args:
+            command_id (str | None): Optional request correlation identifier.
+
+        Returns:
+            str: Correlation identifier for the report and terminal event.
+        """
+        resolved_id = command_id or self._command_id_factory("get_git_diff")
+        await self._transport.send(GetGitDiffCommand(id=resolved_id))
+        return resolved_id
 
     async def get_project_files(self, *, command_id: str | None = None) -> str:
         """Request a fresh bounded snapshot of backend-approved project paths.

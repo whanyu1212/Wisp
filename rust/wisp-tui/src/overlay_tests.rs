@@ -9,12 +9,13 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 12] = [
+const KINDS: [OverlayKind; 13] = [
     OverlayKind::Theme,
     OverlayKind::Logo,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
     OverlayKind::Context,
+    OverlayKind::GitDiff,
     OverlayKind::Queue,
     OverlayKind::Help,
     OverlayKind::Model,
@@ -100,6 +101,7 @@ fn open(ui: &mut LiveUi, kind: OverlayKind) {
             ui.open_prompt_history();
         }
         OverlayKind::Discovery => ui.discovery_view = Some(DiscoveryView::skills(None)),
+        OverlayKind::GitDiff => ui.git_diff_view = Some(git_diff_view::GitDiffView::default()),
         OverlayKind::Context => ui.context_view = Some(context_view::ContextView::default()),
         OverlayKind::Queue => ui.queue_view = Some(queue_view::QueueView::default()),
         OverlayKind::Help => ui.command_help = Some(Help::default()),

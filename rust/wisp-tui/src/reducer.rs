@@ -20,6 +20,7 @@ mod context;
 mod discovery;
 use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
+pub(crate) mod git_diff;
 mod model_selection;
 pub(crate) mod project_files;
 pub mod queue_management;
@@ -752,6 +753,7 @@ pub struct UiState {
     /// An MCP sign-in waiting for the user's browser.
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
+    pub(crate) git_diff: git_diff::GitDiff,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -823,6 +825,7 @@ impl UiState {
             mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
+            git_diff: git_diff::GitDiff::default(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -982,6 +985,7 @@ pub enum CommandKind {
     ChangeMcpServers,
     Permissions,
     GetProjectFiles,
+    GetGitDiff,
     GetSessions,
     NewSession,
     SelectSession,
@@ -1023,6 +1027,7 @@ impl CommandKind {
             Self::PreviewMcpSnippet => "preview_mcp_snippet",
             Self::ChangeMcpServers => "mcp_change",
             Self::Permissions => "permissions",
+            Self::GetGitDiff => "get_git_diff",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
             Self::NewSession => "new_session",
@@ -1068,6 +1073,10 @@ pub enum BackendEvent {
     /// Carries a session-assigned result origin; presentation waits for `tool.result`.
     ToolExecutionEnded {
         call_id: String,
+    },
+    GitDiffReported {
+        command_id: String,
+        snapshot: git_diff::GitDiffReport,
     },
     ProjectFilesReported {
         command_id: String,
@@ -1252,6 +1261,8 @@ pub enum UiAction {
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     SetProjectFilesOpen(bool),
     LoadContext,
+    SetGitDiffOpen(bool),
+    RefreshGitDiff,
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -1448,6 +1459,14 @@ pub fn reduce(
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
         }
+        UiAction::SetGitDiffOpen(open) => {
+            state.git_diff.set_open(open);
+            Ok(vec![UiEffect::RequestRender])
+        }
+        UiAction::RefreshGitDiff => {
+            state.git_diff.refresh();
+            Ok(vec![UiEffect::RequestRender])
+        }
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
@@ -1552,6 +1571,7 @@ pub fn reduce(
             state.mcp_preview.close();
             state.permissions.close();
             state.project_files.close();
+            state.git_diff.close();
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
@@ -1572,6 +1592,7 @@ pub fn reduce(
     }?;
     effects.extend(context::refresh_if_ready(state, ids)?);
     effects.extend(project_files::refresh_if_ready(state, ids)?);
+    effects.extend(git_diff::refresh_if_ready(state, ids)?);
     Ok(effects)
 }
 
@@ -4397,6 +4418,9 @@ fn handle_backend_event(
     if let Some(effects) = queue_management::finish(state, &event, ids)? {
         return Ok(effects);
     }
+    if let Some(effects) = state.git_diff.observe(&event) {
+        return Ok(effects);
+    }
     if let Some(effects) = state.project_files.observe(&event) {
         return Ok(effects);
     }
@@ -4652,7 +4676,8 @@ fn handle_backend_event(
                 .append_prompt_with_display(content, local_display);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::ProjectFilesReported { .. }
+        BackendEvent::GitDiffReported { .. }
+        | BackendEvent::ProjectFilesReported { .. }
         | BackendEvent::ProjectFilesInvalidated(_)
         | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)

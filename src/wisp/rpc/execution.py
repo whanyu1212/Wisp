@@ -24,6 +24,7 @@ from wisp.rpc.commands import (
     ForkSessionCommand,
     GetCommandsCommand,
     GetConnectionCatalogCommand,
+    GetGitDiffCommand,
     GetMcpStatusCommand,
     GetMessagesCommand,
     GetModelCatalogCommand,
@@ -237,7 +238,7 @@ class RpcCommandExecutor:
         if isinstance(known, GetConnectionCatalogCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_connection_catalog(known, running_command)
-        if isinstance(known, GetProjectFilesCommand):
+        if isinstance(known, (GetProjectFilesCommand, GetGitDiffCommand)):
             if self.project_files is None or self.publish_project_files is None:
                 RpcCommandLifecycle.for_command(known, write_event=self.write_event).fail(
                     "Project file discovery unavailable"

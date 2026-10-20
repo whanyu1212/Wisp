@@ -16,6 +16,7 @@ mod discovery_view;
 mod event_loop;
 mod file_picker;
 mod framing;
+mod git_diff_view;
 pub mod history;
 mod hydration_profile;
 mod key_help;
@@ -496,6 +497,7 @@ enum OverlayKind {
     PromptHistory,
     Discovery,
     Context,
+    GitDiff,
     Queue,
     Help,
     Model,
@@ -580,6 +582,7 @@ struct LiveUi {
     rendered_overlay: Option<OverlayKind>,
     command_help: Option<Help>,
     context_view: Option<context_view::ContextView>,
+    git_diff_view: Option<git_diff_view::GitDiffView>,
     queue_view: Option<queue_view::QueueView>,
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
@@ -634,6 +637,7 @@ impl Default for LiveUi {
             rendered_overlay: None,
             command_help: None,
             context_view: None,
+            git_diff_view: None,
             queue_view: None,
             discovery_view: None,
             completion: Completion::default(),
@@ -760,6 +764,7 @@ impl LiveUi {
                                     | "set_mcp_server_enabled"
                                     | "reconnect_mcp"
                                     | "get_project_files"
+                                    | "get_git_diff"
                                     | "get_sessions"
                             )
                         ) || (command_type == Some("configure")
@@ -1259,6 +1264,8 @@ impl LiveUi {
             self.rendered_model_picker = false;
             self.command_help = None;
             self.context_view = None;
+            self.git_diff_view = None;
+            self.state.git_diff.set_open(false);
             self.discovery_view = None;
             self.prompt_history_view = None;
             self.completion.dismiss();
@@ -1520,6 +1527,8 @@ impl LiveUi {
             Some(OverlayKind::Discovery)
         } else if self.queue_view.is_some() {
             Some(OverlayKind::Queue)
+        } else if self.git_diff_view.is_some() {
+            Some(OverlayKind::GitDiff)
         } else if self.context_view.is_some() {
             Some(OverlayKind::Context)
         } else if self.command_help.is_some() {
@@ -1756,6 +1765,15 @@ impl LiveUi {
                     &self.state,
                     palette,
                 ),
+                OverlayKind::GitDiff => {
+                    self.git_diff_view.as_mut().expect("active diff").render(
+                        frame,
+                        area,
+                        &self.state.git_diff,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
                 OverlayKind::Context => {
                     self.context_view.as_mut().expect("active context").render(
                         frame,
@@ -2653,6 +2671,13 @@ impl LiveUi {
                 self.queue_view = Some(queue_view::QueueView::default());
                 self.render_pending = true;
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+            }
+            Command::Diff => {
+                self.git_diff_view = Some(git_diff_view::GitDiffView::default());
+                self.editor.clear();
+                self.render_pending = true;
+                self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                     .await
             }
             Command::Context => {
@@ -4074,6 +4099,24 @@ impl LiveUi {
                     _ => Ok(LoopControl::Continue),
                 }
             }
+            Input::Key(key) if overlay == Some(OverlayKind::GitDiff) => {
+                self.render_pending = true;
+                if is_escape(key) || is_ctrl_c(key) {
+                    self.git_diff_view = None;
+                    return self
+                        .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                        .await;
+                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+                    return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
+                } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
+                    self.git_diff_view
+                        .as_mut()
+                        .expect("open diff")
+                        .key(key.code);
+                }
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::GitDiff) => Ok(LoopControl::Continue),
             Input::Key(key) if overlay == Some(OverlayKind::Context) => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.context_view = None;
