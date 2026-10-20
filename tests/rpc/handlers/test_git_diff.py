@@ -203,3 +203,38 @@ def test_index_removal_and_remaining_untracked_file_are_distinct(repo: Path, con
     assert [file.status for file in entries] == ["deleted", "untracked"]
     assert entries[0].before == "original\n" and entries[0].after == ""
     assert entries[1].before == entries[1].after == ""
+
+
+def test_sparse_checkout_preserves_staged_out_of_pattern_edits(repo: Path) -> None:
+    for folder in ("inside", "outside"):
+        (repo / folder).mkdir()
+        (repo / folder / "file.py").write_text("original\n")
+    git(repo, "add", "inside", "outside")
+    git(repo, "commit", "-m", "directories")
+    (repo / "outside" / "file.py").write_text("staged\n")
+    (repo / "outside" / "added.py").write_text("added\n")
+    git(repo, "add", "outside")
+    git(repo, "sparse-checkout", "init", "--cone")
+    git(repo, "sparse-checkout", "set", "inside")
+    assert not (repo / "outside" / "file.py").exists()
+    entries = {file.path: file for file in snapshot(repo).files}
+    assert set(entries) == {"outside/file.py", "outside/added.py"}
+    assert entries["outside/file.py"].before == "original\n"
+    assert entries["outside/file.py"].after == "staged\n"
+    assert entries["outside/added.py"].status == "added"
+    assert entries["outside/added.py"].after == "added\n"
+
+
+def test_filemode_false_preserves_staged_permission_change(repo: Path) -> None:
+    git(repo, "config", "core.filemode", "false")
+    git(repo, "update-index", "--chmod=+x", "file.py")
+    entry = next(file for file in snapshot(repo).files if file.path == "file.py")
+    assert "Executable permission changed" in entry.notice
+
+
+def test_deleted_empty_file_remains_visible(repo: Path) -> None:
+    (repo / "empty").touch()
+    git(repo, "add", "empty")
+    git(repo, "commit", "-m", "empty")
+    (repo / "empty").unlink()
+    assert [(file.path, file.status) for file in snapshot(repo).files] == [("empty", "deleted")]

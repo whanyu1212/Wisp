@@ -153,7 +153,8 @@ def collect_git_diff(
             indexed[raw_path] = (mode, oid)
     flags = _git(root, ["ls-files", "-t", "-z"], cancelled, deadline)
     sparse = {record[2:] for record in flags.split(b"\0") if record.startswith(b"S ")}
-    names = (blobs.keys() | indexed.keys()) - sparse
+    unchanged_sparse = {path for path in sparse if indexed.get(path) == blobs.get(path)}
+    names = (blobs.keys() | indexed.keys()) - unchanged_sparse
     attributes: dict[bytes, dict[bytes, bytes]] = {}
     if names:
         values = _git(
@@ -211,41 +212,58 @@ def collect_git_diff(
                     continue
                 if not blob:
                     status = "added"
-                try:
-                    # An index removal is a tracked deletion even if the same
-                    # pathname remains on disk as a separate untracked file.
-                    if raw not in indexed:
-                        raise FileNotFoundError
-                    selected.path.lstat()
-                except FileNotFoundError:
-                    if not blob:
-                        continue
-                    status = "deleted"
-                    data = b""
-                    executable = False
+                if raw in sparse:
+                    # Sparse paths use the index as their effective working tree.
+                    # Its bytes are already canonical; do not apply attributes twice.
+                    mode, oid = indexed[raw]
+                    if mode not in (b"100644", b"100755"):
+                        raise GitReadUnavailable
+                    data = _git(
+                        root,
+                        ["cat-file", "blob", oid.decode("ascii")],
+                        cancelled,
+                        deadline,
+                        _FILE_BYTES,
+                    )
+                    executable = mode == b"100755"
                 else:
-                    with open_file(selected) as fd:
-                        file_size = os.fstat(fd).st_size
-                        if file_size > min(2 * 1024 * 1024, read_budget):
-                            truncated = True
+                    try:
+                        # An index removal is a tracked deletion even if the same
+                        # pathname remains on disk as a separate untracked file.
+                        if raw not in indexed:
+                            raise FileNotFoundError
+                        selected.path.lstat()
+                    except FileNotFoundError:
+                        if not blob:
                             continue
-                        chunks: list[bytes] = []
-                        remaining = min(2 * 1024 * 1024, read_budget) + 1
-                        while remaining and (chunk := os.read(fd, min(65536, remaining))):
-                            chunks.append(chunk)
-                            remaining -= len(chunk)
-                            if cancelled.is_set():
-                                raise ProjectScanCancelled
-                        data = b"".join(chunks)
-                        read_budget -= len(data)
-                        if remaining == 0:
-                            truncated = True
-                            continue
-                        executable = bool(os.fstat(fd).st_mode & stat.S_IXUSR)
+                        status = "deleted"
+                        data = b""
+                        executable = False
+                    else:
+                        with open_file(selected) as fd:
+                            file_size = os.fstat(fd).st_size
+                            if file_size > min(2 * 1024 * 1024, read_budget):
+                                truncated = True
+                                continue
+                            chunks: list[bytes] = []
+                            remaining = min(2 * 1024 * 1024, read_budget) + 1
+                            while remaining and (chunk := os.read(fd, min(65536, remaining))):
+                                chunks.append(chunk)
+                                remaining -= len(chunk)
+                                if cancelled.is_set():
+                                    raise ProjectScanCancelled
+                            data = b"".join(chunks)
+                            read_budget -= len(data)
+                            if remaining == 0:
+                                truncated = True
+                                continue
+                            executable = bool(os.fstat(fd).st_mode & stat.S_IXUSR)
+                    if not filemode and raw in indexed:
+                        executable = indexed[raw][0] == b"100755"
                 # Attribute transformations cannot be reproduced safely by running
                 # repository helpers. Omit such comparisons instead of reporting
                 # clean smudged files (for example LFS) as edits.
-                if status != "deleted":
+                if status != "deleted" and raw not in sparse:
                     attrs = attributes[raw]
                     if any(
                         attrs[name] not in (b"unspecified", b"unset")
@@ -261,14 +279,14 @@ def collect_git_diff(
                         data = data.replace(b"\r\n", b"\n")
                     if attrs[b"ident"] == b"set":
                         data = re.sub(rb"\$Id:[^$\r\n]*\$", b"$Id$", data)
-                    if blob:
-                        digest = hashlib.new("sha1" if len(blob[1]) == 40 else "sha256")
-                        digest.update(f"blob {len(data)}\0".encode("ascii"))
-                        digest.update(data)
-                        if digest.hexdigest().encode("ascii") == blob[1]:
-                            if not filemode or executable == (blob[0] == b"100755"):
-                                continue
-                            notice = "Executable permission changed; no text changes"
+                if blob and status != "deleted":
+                    digest = hashlib.new("sha1" if len(blob[1]) == 40 else "sha256")
+                    digest.update(f"blob {len(data)}\0".encode("ascii"))
+                    digest.update(data)
+                    if digest.hexdigest().encode("ascii") == blob[1]:
+                        if executable == (blob[0] == b"100755"):
+                            continue
+                        notice = "Executable permission changed; no text changes"
                 after = _text(data)
                 if blob:
                     before = _text(
