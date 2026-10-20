@@ -184,6 +184,47 @@ def test_overlaps_execution_and_publishes_in_source_order() -> None:
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
+def test_parallel_calls_time_themselves() -> None:
+    calls = (
+        ToolCall(call_id="call-1", name="read", arguments={}),
+        ToolCall(call_id="call-2", name="read", arguments={}),
+    )
+    provider = _scripted_tool_batch_provider(calls)
+
+    async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
+        await anyio.sleep(0.3 if tool_call.call_id == "call-1" else 0)
+        return ToolExecutionEnded(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            output="ok",
+            is_error=False,
+        )
+
+    async def run() -> list[object]:
+        with anyio.fail_after(2):
+            return [
+                event
+                async for event in run_agent_loop(
+                    AgentLoopConfig(
+                        provider=provider,
+                        tool_executor=PreparedScriptExecutor(runner),
+                    ),
+                    messages=(Message(role="user", content="hi"),),
+                )
+            ]
+
+    events = anyio.run(run)
+
+    durations = {
+        event.call_id: event.duration_ms for event in events if isinstance(event, ToolResultReady)
+    }
+    assert durations["call-1"] is not None
+    assert durations["call-1"] >= 250
+    # The quick sibling reports its own time, not the wait for the slow one.
+    assert durations["call-2"] is not None
+    assert durations["call-2"] < 200
+
+
 def test_parallel_batch_isolates_one_tool_failure() -> None:
     calls = (
         ToolCall(call_id="call-1", name="first", arguments={}),

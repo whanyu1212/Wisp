@@ -6,9 +6,25 @@
    "event": "agent.completed",
    "operation": "remove",
    "path": [
+    "duration_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
     "outcome"
    ],
    "accepted": false
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "output_tokens"
+   ],
+   "accepted": true
   },
   {
    "event": "agent.completed",
@@ -23,6 +39,14 @@
    "operation": "remove",
    "path": [
     "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "tool_calls"
    ],
    "accepted": true
   },
@@ -3952,6 +3976,14 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "duration_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "exit_code"
    ],
    "accepted": true
@@ -4189,6 +4221,14 @@
    "operation": "remove",
    "path": [
     "created"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "duration_ms"
    ],
    "accepted": true
   },

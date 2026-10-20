@@ -3,6 +3,19 @@
     "AgentCompleted": {
       "additionalProperties": false,
       "properties": {
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
         "outcome": {
           "enum": [
             "completed",
@@ -12,6 +25,19 @@
           "title": "Outcome",
           "type": "string"
         },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
         "session_id": {
           "title": "Session Id",
           "type": "string"
@@ -20,6 +46,12 @@
           "format": "date-time",
           "title": "Timestamp",
           "type": "string"
+        },
+        "tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
         },
         "turns": {
           "title": "Turns",
@@ -37,7 +69,10 @@
         "timestamp",
         "session_id",
         "turns",
-        "outcome"
+        "outcome",
+        "duration_ms",
+        "tool_calls",
+        "output_tokens"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -2993,6 +3028,19 @@
           "title": "Created",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -3053,7 +3101,8 @@
         "before_text",
         "created",
         "summary",
-        "truncated"
+        "truncated",
+        "duration_ms"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -5703,6 +5752,19 @@
           "title": "Created",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -5924,6 +5986,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",
@@ -6042,6 +6105,19 @@
           "default": false,
           "title": "Created",
           "type": "boolean"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
         },
         "exit_code": {
           "anyOf": [
@@ -6264,6 +6340,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",
@@ -7007,9 +7084,12 @@
   "title": "Wisp current live event output",
   "x-wisp-conformance-fixtures": {
     "agent.completed": {
+      "duration_ms": null,
       "outcome": "completed",
+      "output_tokens": null,
       "session_id": "session-1",
       "timestamp": "2026-01-02T03:04:05Z",
+      "tool_calls": 0,
       "turns": 1,
       "type": "agent.completed"
     },
@@ -7594,6 +7674,7 @@
       "before_text": null,
       "call_id": "call-1",
       "created": false,
+      "duration_ms": null,
       "exit_code": null,
       "failure_code": null,
       "is_error": false,
@@ -7628,6 +7709,7 @@
       "before_text": null,
       "call_id": "call-1",
       "created": false,
+      "duration_ms": null,
       "exit_code": null,
       "failure_code": null,
       "is_error": false,

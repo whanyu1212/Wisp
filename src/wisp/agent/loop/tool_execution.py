@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -10,7 +11,7 @@ from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolExecutor,
 )
-from wisp.events import ToolExecutionEnded, ToolResultReady
+from wisp.events import ToolApprovalResolved, ToolExecutionEnded, ToolResultReady
 from wisp.providers.base import ToolCallResult
 from wisp.providers.events import ToolCall
 
@@ -23,6 +24,7 @@ from .tool_lifecycle import (
     ToolBatchSettlement,
     ToolExecutionLifecycle,
     tool_execution_started,
+    with_execution_duration,
 )
 
 
@@ -33,7 +35,9 @@ async def _execute_tool_call(
     """Drive one executor stream through its lifecycle and forward approval events.
 
     The terminal result stays in `lifecycle` for the caller to publish, so a batch can
-    record it as settled before anything reaches the consumer.
+    record it as settled before anything reaches the consumer. Its `duration_ms`
+    counts from the start of the stream, or from the approval decision when one was
+    needed, so time spent waiting on the user is left out.
 
     Args:
         executor (ToolExecutor): Executor supplying approval and terminal events.
@@ -47,9 +51,14 @@ async def _execute_tool_call(
         ToolExecutionProtocolError: The executor's event stream is malformed.
         Exception: Executor errors propagate rather than becoming synthetic tool outputs.
     """
+    started = time.monotonic()
     async with closing_stream(executor.execute(lifecycle.tool_call)) as execution:
         async for raw_event in execution:
+            if isinstance(raw_event, ToolExecutionEnded):
+                raw_event = with_execution_duration(raw_event, started)
             event = lifecycle.accept(raw_event)
+            if isinstance(event, ToolApprovalResolved):
+                started = time.monotonic()
             if not isinstance(event, ToolExecutionEnded):
                 # Approval arguments may alias the executor's pending inputs.
                 yield event.model_copy(deep=True)

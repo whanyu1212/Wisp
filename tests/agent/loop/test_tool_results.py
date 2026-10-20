@@ -15,6 +15,7 @@ from tests.agent.loop.support import (
     RecordingToolExecutor,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
+from wisp.agent.loop.tool_lifecycle import ToolBatchSettlement
 from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolExecutionProtocolError,
@@ -118,6 +119,7 @@ def test_projection_keeps_the_complete_wire_payload() -> None:
         stderr_truncated=True,
         stdout_dropped_bytes=11,
         stderr_dropped_bytes=12,
+        duration_ms=1250,
     )
 
     result = ToolResultReady.from_execution_ended(ended)
@@ -136,6 +138,7 @@ def test_projection_keeps_the_complete_wire_payload() -> None:
         "created": True,
         "summary": "summary",
         "truncated": True,
+        "duration_ms": 1250,
         "process_id": "proc-1",
         "process_state": "failed",
         "process_error": "process failed",
@@ -629,6 +632,69 @@ def test_accepts_denied_approval_with_error_result() -> None:
     assert provider.calls[1].tool_results == (
         ToolCallResult(call_id="call-1", output="denied", is_error=True),
     )
+
+
+class SlowApprovalExecutor:
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        del tool_call
+        yield _approval_request()
+        await anyio.sleep(0.3)  # The user takes a while to decide.
+        yield _approval_resolution()
+        await anyio.sleep(0.05)
+        yield _terminal_result()
+
+
+def test_duration_skips_approval_wait() -> None:
+    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=call),
+                ProviderResponseCompleted(
+                    content="",
+                    tool_calls=(call,),
+                    finish_reason="tool_calls",
+                ),
+            ],
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderResponseCompleted(content="done"),
+            ],
+        ]
+    )
+
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in run_agent_loop(
+                AgentLoopConfig(provider=provider, tool_executor=SlowApprovalExecutor()),
+                messages=(Message(role="user", content="run pwd"),),
+            )
+        ]
+
+    emitted = anyio.run(run)
+
+    ended = next(event for event in emitted if isinstance(event, ToolExecutionEnded))
+    result = next(event for event in emitted if isinstance(event, ToolResultReady))
+    assert ended.duration_ms is not None
+    assert 30 <= ended.duration_ms < 250
+    assert result.duration_ms == ended.duration_ms
+
+
+def test_interrupted_results_have_no_duration() -> None:
+    calls = (
+        ToolCall(call_id="a", name="read", arguments={}),
+        ToolCall(call_id="b", name="read", arguments={}),
+    )
+    settlement = ToolBatchSettlement(calls)
+    settlement.request(calls[0])
+
+    settled = list(settlement.settle_unfinished())
+
+    results = [event for event in settled if isinstance(event, ToolResultReady)]
+    assert [result.call_id for result in results] == ["a", "b"]
+    assert all(result.duration_ms is None for result in results)
 
 
 class WriteSnapshotExecutor:

@@ -61,11 +61,10 @@ from wisp.coding.prompt import (
     extend_custom_prompt_messages,
     read_repository_status,
 )
-from wisp.coding.stats import build_session_stats
+from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     DEFAULT_AGENT_MODE,
-    AgentCompleted,
     AgentMode,
     AgentStarted,
     CodingSessionState,
@@ -651,8 +650,12 @@ class CodingSession:
         )
         self._active_persistence = persistence
 
+        run_stats = RunStats()
+
         async def emit(event: WispEvent) -> WispEvent:
-            return await self._emit(event, session=session, operation_id=operation_id)
+            published = await self._emit(event, session=session, operation_id=operation_id)
+            run_stats.observe(published)
+            return published
 
         operation_registry = self._operation_tool_registry()
         effective_tools, executor = self._run_tools(
@@ -780,7 +783,7 @@ class CodingSession:
                 await compaction.rollback_active_prompt()
                 yield await emit(ErrorEvent(message=error_message))
                 yield await emit(
-                    AgentCompleted(
+                    run_stats.completed(
                         session_id=session.session_id,
                         turns=0,
                         outcome="failed",
@@ -821,7 +824,7 @@ class CodingSession:
                         await compaction.rollback_active_prompt()
                         yield await emit(ErrorEvent(message=error_message))
                         yield await emit(
-                            AgentCompleted(
+                            run_stats.completed(
                                 session_id=session.session_id,
                                 turns=0,
                                 outcome="failed",
@@ -924,7 +927,7 @@ class CodingSession:
                     ):
                         yield await emit(terminal_event)
                 yield await emit(
-                    AgentCompleted(
+                    run_stats.completed(
                         session_id=session.session_id,
                         turns=turn_lifecycle.latest_turn,
                         outcome="failed",
@@ -956,7 +959,7 @@ class CodingSession:
                 ):
                     yield await emit(terminal_event)
             yield await emit(
-                AgentCompleted(
+                run_stats.completed(
                     session_id=session.session_id,
                     turns=turn_lifecycle.latest_turn,
                     outcome="failed",
@@ -978,7 +981,7 @@ class CodingSession:
                 yield compaction_event
         if not auto_compaction_saved and not auto_compaction_status.skip_final_save:
             yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
-        completed = AgentCompleted(
+        completed = run_stats.completed(
             session_id=session.session_id,
             turns=turn_lifecycle.latest_turn,
             outcome=terminal_outcome,
@@ -1868,6 +1871,7 @@ class CodingSession:
                 created=event.created,
                 summary=event.summary,
                 truncated=event.truncated,
+                duration_ms=event.duration_ms,
             )
             if isinstance(event, ToolExecutionEnded)
             else None
