@@ -2405,8 +2405,8 @@ impl LiveUi {
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
         let selected = self.browse_selected?;
-        let (start, _) = card_run(&self.state.transcript, selected)?;
-        (!self.transcript_row_cache.fold().is_group_expanded(start)).then_some(start)
+        let (start, members) = card_run(&self.state.transcript, selected)?;
+        (!self.transcript_row_cache.fold().is_run_expanded(&members)).then_some(start)
     }
 
     fn expand_selected_fold(&mut self) {
@@ -2427,20 +2427,25 @@ impl LiveUi {
     /// click moves an existing browse selection to that row but never starts browsing,
     /// so typing still reaches the prompt. A collapsed group opens even when its first
     /// card was expanded on its own.
-    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId) {
+    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId, group: bool) {
         let fold = self.transcript_row_cache.fold_mut();
-        let closed_group = card_run(&self.state.transcript, entry)
-            .map(|(start, _)| start)
-            .filter(|start| !fold.is_group_expanded(*start));
-        if let Some(start) = closed_group {
-            fold.expand_group(start);
+        let mut selected = entry;
+        if group {
+            if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+                if fold.is_run_expanded(&members) {
+                    fold.collapse_group(&members);
+                } else {
+                    fold.expand_group(start);
+                }
+                selected = start;
+            }
         } else if fold.is_expanded(entry) {
             fold.collapse(entry);
         } else {
             fold.expand(entry);
         }
         if self.browse_selected.is_some() {
-            self.browse_selected = Some(closed_group.unwrap_or(entry));
+            self.browse_selected = Some(selected);
         }
         self.render_pending = true;
     }
@@ -2451,8 +2456,10 @@ impl LiveUi {
         };
         if self.transcript_row_cache.fold().is_expanded(selected) {
             self.transcript_row_cache.fold_mut().collapse(selected);
-        } else if let Some((start, _)) = card_run(&self.state.transcript, selected) {
-            self.transcript_row_cache.fold_mut().collapse_group(start);
+        } else if let Some((start, members)) = card_run(&self.state.transcript, selected) {
+            self.transcript_row_cache
+                .fold_mut()
+                .collapse_group(&members);
             self.browse_selected = Some(start);
         }
         self.notice = Some(Self::browse_notice());

@@ -1708,7 +1708,7 @@ async fn click_opens_a_thought() {
 }
 
 #[tokio::test]
-async fn click_opens_explored_group() {
+async fn click_toggles_explored_group() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = ui("");
     ui.state.transcript.append_prompt("look".into());
@@ -1722,12 +1722,61 @@ async fn click_opens_explored_group() {
         );
     }
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "explored 2 files");
+    let (x, y) = cell_of(&buffer, "Explored  ▸ 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let opened = draw(&mut ui, 80, 24);
     assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
+    let (x, y) = cell_of(&opened, "Explored  ▾ 2 actions");
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
+    cell_of(&draw(&mut ui, 80, 24), "Explored  ▸ 2 actions");
+}
+
+#[tokio::test]
+async fn click_toggles_consecutive_bash_group_and_member_details() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("check".into());
+    finish_tool(
+        &mut ui,
+        "first-shell",
+        "bash",
+        serde_json::json!({"command": "git diff --stat"}),
+        "text",
+    );
+    finish_tool(
+        &mut ui,
+        "shell",
+        "bash",
+        serde_json::json!({"command": "git status"}),
+        "clean",
+    );
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "Bash     ▸ 2 commands");
+    plain_click(&mut ui, &writer, x, y).await;
+    let start = ui.state.transcript.entries()[1].id;
+    assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
+    let opened = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&opened, "git diff --stat");
+    cell_of(&opened, "git status");
+    // The first command and the persistent group header have separate click targets.
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(ui.transcript_row_cache.fold().is_expanded(start));
+    assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
+    let detailed = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&detailed, "Bash     ▾ 2 commands");
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
+    let collapsed = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&collapsed, "Bash     ▸ 2 commands");
+    assert!(!(0..collapsed.area.height).any(|y| row_text(&collapsed, y).contains("git status")));
+    plain_click(&mut ui, &writer, x, y).await;
+    let reopened = draw(&mut ui, 80, 24);
+    cell_of(&reopened, "git diff --stat");
+    cell_of(&reopened, "git status");
+    assert!(ui.transcript_row_cache.fold().is_expanded(start));
 }
 
 #[tokio::test]

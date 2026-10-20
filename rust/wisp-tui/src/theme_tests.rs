@@ -184,28 +184,43 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
 #[test]
 fn chip_fill_reads_everywhere() {
     for theme in crate::theme::themes() {
-        let chip = theme.palette(false).chip();
-        let (Some(fg), Some(bg)) = (chip.fg, chip.bg) else {
-            panic!("{} chip has no fill", theme.name);
-        };
-        assert!(
-            crate::theme::contrast_ratio(fg, bg) >= 4.5,
-            "{} chip contrast",
-            theme.name
-        );
-        let background = theme.palette(false).background;
-        assert!(
-            crate::theme::contrast_ratio(bg, background) > 1.0,
-            "{} chip fill",
-            theme.name
-        );
+        let palette = theme.palette(false);
+        let mut fills = Vec::new();
+        for label in [
+            "Read", "Search", "List", "Explored", "Bash", "Edit", "Write", "MCP", "Process",
+        ] {
+            let chip = palette.chip(label);
+            let (Some(fg), Some(bg)) = (chip.fg, chip.bg) else {
+                panic!("{} {label} chip has no fill", theme.name);
+            };
+            assert!(
+                crate::theme::contrast_ratio(fg, bg) >= 4.5,
+                "{} {label} chip contrast",
+                theme.name
+            );
+            assert!(
+                crate::theme::contrast_ratio(bg, palette.background) > 1.0,
+                "{} {label} chip fill",
+                theme.name
+            );
+            assert!(
+                !fills.contains(&bg),
+                "{} {label} repeats a chip color",
+                theme.name
+            );
+            fills.push(bg);
+            assert!(chip.add_modifier.contains(Modifier::BOLD));
+            assert!(!chip.add_modifier.contains(Modifier::UNDERLINED));
+            assert_ne!(palette.chip_edge(chip, true).bg, chip.bg);
+            assert_ne!(palette.chip_edge(chip, false).bg, chip.bg);
+        }
     }
 }
 
 #[test]
 fn no_color_chip_reverses() {
     for theme in crate::theme::themes() {
-        let chip = theme.palette(true).chip();
+        let chip = theme.palette(true).chip("Read");
         assert_eq!((chip.fg, chip.bg), (None, None), "{}", theme.name);
         assert!(chip.add_modifier.contains(Modifier::REVERSED));
     }

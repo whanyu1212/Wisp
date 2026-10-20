@@ -49,7 +49,7 @@ pub(crate) struct Selection {
     head: Position,
     /// The foldable row under the press, found in the frame the user clicked on, so a
     /// repaint before the release cannot retarget a plain click.
-    fold_target: Option<TranscriptEntryId>,
+    fold_target: Option<FoldRow>,
 }
 
 impl Selection {
@@ -65,7 +65,7 @@ impl Selection {
     }
 
     /// Remember the foldable row a plain click on this press would fold or unfold.
-    pub fn with_fold_target(mut self, target: Option<TranscriptEntryId>) -> Self {
+    pub fn with_fold_target(mut self, target: Option<FoldRow>) -> Self {
         self.fold_target = target;
         self
     }
@@ -294,6 +294,7 @@ impl Editor {
 pub(crate) struct FoldRow {
     pub y: u16,
     pub entry: TranscriptEntryId,
+    pub group: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -519,7 +520,7 @@ impl LiveUi {
                         .fold_rows
                         .iter()
                         .find(|row| row.y == event.row)
-                        .map(|row| row.entry);
+                        .copied();
                     self.transcript_selection =
                         Selection::start(frame.conversation.selectable, event)
                             .map(|selection| (selection.with_fold_target(fold_target), None));
@@ -576,8 +577,8 @@ impl LiveUi {
             return;
         }
         if selection.is_empty() {
-            if let Some(entry) = selection.fold_target {
-                self.toggle_clicked_fold(entry);
+            if let Some(target) = selection.fold_target {
+                self.toggle_clicked_fold(target.entry, target.group);
             }
             return;
         }

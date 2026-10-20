@@ -167,6 +167,65 @@ fn fixture(scenario: &str) -> LiveUi {
         }));
         ui.discovery_view = Some(DiscoveryView::permissions());
     }
+    if matches!(scenario, "activity-rail" | "activity-rail-expanded") {
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("Inspect the project, update the docs, and run the checks.".into());
+        for (index, (name, arguments)) in [
+            ("read", json!({"path": "AGENTS.md"})),
+            (
+                "grep",
+                json!({"pattern": "Deploy", "path": ".github/workflows"}),
+            ),
+            ("ls", json!({"path": ".github/workflows"})),
+            ("bash", json!({"command": "git status --short"})),
+            ("bash", json!({"command": "gh pr view 766"})),
+            ("bash", json!({"command": "gh pr checks 766"})),
+            ("bash", json!({"command": "gh pr diff 766 --stat"})),
+            ("bash", json!({"command": "git log -1 --oneline"})),
+            (
+                "edit",
+                json!({"path": "README.md", "old_string": "old", "new_string": "new"}),
+            ),
+            ("bash", json!({"command": "git diff --check"})),
+            ("bash", json!({"command": "git diff --stat"})),
+            (
+                "write",
+                json!({"path": "notes.md", "content": "Checked workflows."}),
+            ),
+            ("mcp__github__get_pull_request", json!({"number": 766})),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call_id = format!("activity-{index}");
+            ui.state.transcript.observe_tool_call(ToolCallInput {
+                call_id: call_id.clone(),
+                name: name.into(),
+                arguments,
+                detail_source: tool_detail::ToolDetailSource::None,
+            });
+            let mut finished = result.clone();
+            finished.call_id = call_id;
+            finished.name = name.into();
+            ui.state.transcript.observe_tool_result(finished);
+        }
+        ui.state.transcript.complete_message(
+            1,
+            "Updated the project documentation.\n\n- Checked the deployment workflows.\n- Updated README.md and wrote notes.md.\n- Inspected PR #766.".into(),
+        );
+        ui.editor = PromptEditor::default();
+        if scenario == "activity-rail-expanded" {
+            let first_bash = ui.state.transcript.entries()[4].id;
+            ui.transcript_row_cache.fold_mut().expand_group(first_bash);
+            ui.transcript_viewport.reduce(
+                TranscriptViewAction::Home,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+            );
+        }
+    }
     ui
 }
 
@@ -611,7 +670,7 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
     let text = screen_text(&draw(&mut ui, 30, 8));
     let compact: String = text
         .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃'))
+        .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '▎'))
         .collect();
     assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
     assert!(text.contains("⠋ Working"), "{text}");
@@ -627,6 +686,7 @@ fn capture_conversation_screens() {
     for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
         for (variant, selected, no_color) in [
             ("dark", theme::default_theme(), false),
+            ("grove", theme::resolve("grove").unwrap(), false),
             ("light", theme::paper_theme(), false),
             ("mono", theme::default_theme(), true),
         ] {
@@ -640,6 +700,8 @@ fn capture_conversation_screens() {
                 "permissions",
                 "new-turn",
                 "scrollback",
+                "activity-rail",
+                "activity-rail-expanded",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
@@ -668,7 +730,9 @@ fn capture_conversation_screens() {
                     let cells = terminal.backend().buffer().content.iter().map(|cell| json!({
                     "text": cell.symbol(), "fg": rgb(cell.fg), "bg": rgb(cell.bg),
                     "bold": cell.modifier.contains(Modifier::BOLD), "dim": cell.modifier.contains(Modifier::DIM), "italic": cell.modifier.contains(Modifier::ITALIC),
-                    "underline": cell.modifier.contains(Modifier::UNDERLINED), "reverse": cell.modifier.contains(Modifier::REVERSED),
+                    "underline": cell.modifier.contains(Modifier::UNDERLINED),
+                    "underline_color": match cell.underline_color { Color::Rgb(..) => Some(rgb(cell.underline_color)), _ => None },
+                    "reverse": cell.modifier.contains(Modifier::REVERSED),
                     "strike": cell.modifier.contains(Modifier::CROSSED_OUT)
                 })).collect::<Vec<_>>();
                     let suffix = if tick == 0 {

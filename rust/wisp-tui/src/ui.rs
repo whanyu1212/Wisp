@@ -705,6 +705,7 @@ fn render_transcript(
                 fold_rows.push(mouse::FoldRow {
                     y: area.y,
                     entry: row.anchor.entry_id,
+                    group: row.kind == TranscriptRowKind::CardGroup,
                 });
             }
             if offset == 0
@@ -1059,6 +1060,18 @@ fn render_transcript_row(
     };
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
+    // Use the existing inset: decoration must not shift wrapping, copied text, or
+    // mouse hit targets. Tool spacers keep consecutive activities connected.
+    if content.x > area.x && (user || row.role == TranscriptRole::Tool) {
+        let rail = if user { "▎" } else { "│" };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                rail,
+                base.fg(if user { palette.primary } else { palette.muted }),
+            )),
+            Rect::new(area.x, area.y, 1, 1),
+        );
+    }
     let gutter = match row.gutter {
         RowGutter::None => None,
         RowGutter::Connector => Some(RESULT_CONNECTOR),
@@ -1129,10 +1142,6 @@ fn render_transcript_row(
             .position(|span| span.style.inline == InlineStyle::ToolName)
     })
     .flatten();
-    let marked = row
-        .spans
-        .iter()
-        .any(|span| span.style.inline == InlineStyle::ToolStatus);
     let mut spans = row
         .spans
         .into_iter()
@@ -1150,18 +1159,13 @@ fn render_transcript_row(
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
-        let chip = spans[label].style.patch(palette.chip());
-        fill_label_chip(&mut spans, label, chip);
+        let chip = spans[label]
+            .style
+            .patch(palette.chip(spans[label].content.trim()));
+        fill_label_chip(&mut spans, label, chip, palette);
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, base.fg(palette.muted)));
-    }
-    // An exploration group's row holds only its summary, so its marker is drawn here; a
-    // repeated MCP call's row carries its own marker like any action line.
-    if row.kind == TranscriptRowKind::CardGroup && !marked {
-        let marker = base.patch(tone_style(row.tone, palette));
-        let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
-        spans.insert(0, Span::styled(glyph, marker));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
 }
@@ -1171,7 +1175,7 @@ fn render_transcript_row(
 /// is either the label's own alignment padding or the gap after it, so the row's text, width
 /// and copied selection stay the same. The rest of the alignment padding stays plain, so
 /// stacked chips differ in width instead of forming one block.
-fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style) {
+fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style, palette: Palette) {
     let content = spans[label].content.to_string();
     let name = content.trim_end_matches(' ');
     let mut text = name.to_owned();
@@ -1195,10 +1199,21 @@ fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style) {
         after.content.to_mut().remove(0);
         text.push(' ');
     }
-    spans[label] = Span::styled(text, chip);
-    if !padding.is_empty() {
-        spans.insert(label + 1, Span::styled(padding, plain));
+    let mut face = text.as_str();
+    let mut decorated = Vec::new();
+    if let Some(rest) = face.strip_prefix(' ') {
+        decorated.push(Span::styled(" ", palette.chip_edge(chip, true)));
+        face = rest;
     }
+    let trailing = face.ends_with(' ');
+    decorated.push(Span::styled(face.trim_end_matches(' ').to_owned(), chip));
+    if trailing {
+        decorated.push(Span::styled(" ", palette.chip_edge(chip, false)));
+    }
+    if !padding.is_empty() {
+        decorated.push(Span::styled(padding, plain));
+    }
+    spans.splice(label..=label, decorated);
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
@@ -1206,16 +1221,6 @@ pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼"
 
 pub(crate) fn spinner_frame(frame: u8) -> &'static str {
     SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
-}
-
-/// The marker of an `explored N files` group, which summarizes its members' tone.
-fn group_marker(tone: TranscriptRowTone) -> &'static str {
-    match tone {
-        TranscriptRowTone::Success => "✓  ",
-        TranscriptRowTone::Error => "✗  ",
-        TranscriptRowTone::Warning => "⊘  ",
-        _ => "●  ",
-    }
 }
 
 fn selected_detail<'a>(
@@ -4767,7 +4772,8 @@ mod tests {
     }
 
     fn draw_cards(state: &UiState, cache: &mut TranscriptRowCache) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        // Fit the expanded command fixture as well as its collapsed summaries.
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         terminal
             .draw(|frame| {
                 render(
@@ -4785,7 +4791,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_calls_group_by_tool() {
+    fn consecutive_tools_group_without_merging_different_tools() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("plan".into());
         observe_mcp_call(&mut state, "l1", "list_issues", "HY-0");
@@ -4811,7 +4817,13 @@ mod tests {
                 });
             finish_call(&mut state, call_id, "bash");
         }
-        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let first = state.transcript.entries()[7].id;
+        let mut cache = TranscriptRowCache::default();
+        let screen = draw_cards(&state, &mut cache);
+        assert!(screen.contains("Bash     ▸ 2 commands"), "{screen}");
+        assert!(!screen.contains("cargo fmt"), "{screen}");
+        cache.fold_mut().expand_group(first);
+        let screen = draw_cards(&state, &mut cache);
         assert!(
             screen.contains("✓  MCP      linear/list_issues  id=HY-0"),
             "{screen}"
@@ -4824,7 +4836,7 @@ mod tests {
             screen.contains("✓  MCP      linear/save_issue ×2  id=HY-4 · id=HY-5"),
             "{screen}"
         );
-        // Bash commands differ call to call, so they keep their own rows.
+        // Expanding the group reveals every command's individual row.
         assert!(
             screen.contains("cargo fmt") && screen.contains("Rust tests"),
             "{screen}"
@@ -4855,9 +4867,9 @@ mod tests {
             .unwrap();
         let palette = Palette::default();
         let (_, chip_bg, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
-        assert_eq!(Some(chip_bg), palette.chip().bg);
+        assert_eq!(Some(chip_bg), palette.chip("MCP").bg);
         let (marker_fg, marker_bg, _) = style_at_text(terminal.backend(), "✓").unwrap();
-        assert_ne!(Some(marker_bg), palette.chip().bg);
+        assert_ne!(Some(marker_bg), palette.chip("MCP").bg);
         assert_eq!(marker_fg, palette.success);
     }
 
@@ -4975,7 +4987,7 @@ mod tests {
         assert!(draw_cards(&state, &mut cache).contains("×3"));
         cache.fold_mut().expand_group(first.unwrap());
         let screen = draw_cards(&state, &mut cache);
-        assert!(!screen.contains("×3"), "{screen}");
+        assert!(screen.contains("×3"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
                 screen.contains(&format!("✓  MCP      linear/get_issue  id={id}")),
@@ -5015,6 +5027,10 @@ mod tests {
         poll.process_id = Some("process-1".into());
         poll.process_state = Some("running".into());
         state.transcript.observe_tool_result(poll);
+        let mut cache = TranscriptRowCache::default();
+        cache
+            .fold_mut()
+            .expand_group(state.transcript.entries()[1].id);
         let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
         terminal
             .draw(|frame| {
@@ -5022,7 +5038,7 @@ mod tests {
                     frame,
                     &state,
                     &mut TranscriptViewport::default(),
-                    &mut TranscriptRowCache::default(),
+                    &mut cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -5035,25 +5051,28 @@ mod tests {
             .iter()
             .position(|line| line.contains("cargo fmt"))
             .unwrap();
-        // A plain row separates the prompt's surface from the first card.
+        // A plain row separates the prompt from the persistent group header.
+        assert!(lines[first - 1].contains("▾ 2 commands"), "{screen}");
         assert!(
-            lines[first - 1].trim_matches(['"', ' ']).is_empty(),
+            lines[first - 2].trim_matches(['"', ' ']).is_empty(),
             "{screen}"
         );
         assert!(
-            lines[first + 1].trim_matches(['"', ' ']).is_empty(),
+            lines[first + 1].trim_matches(['"', ' ', '│']).is_empty(),
             "{screen}"
         );
+        assert!(lines[first + 1].contains('│'), "{screen}");
         assert!(lines[first + 2].contains("Rust tests"), "{screen}");
         let palette = Palette::default();
         let user_bg = palette.user_text().bg;
-        let gap_row = u16::try_from(first - 1).unwrap();
+        let gap_row = u16::try_from(first - 2).unwrap();
         assert_ne!(
             Some(terminal.backend().buffer()[(5, gap_row)].bg),
             user_bg,
             "{screen}"
         );
-        let chip_bg = palette.chip().bg;
+        let chip = palette.chip("Process");
+        let chip_bg = chip.bg;
         let buffer = terminal.backend().buffer();
         let (x, y) = (0..buffer.area.height)
             .find_map(|y| {
@@ -5067,7 +5086,11 @@ mod tests {
         let bg_at = |x: u16| Some(buffer[(x, y)].bg);
         assert_eq!(
             (bg_at(x - 1), bg_at(x), bg_at(x + 7)),
-            (chip_bg, chip_bg, chip_bg),
+            (
+                palette.chip_edge(chip, true).bg,
+                chip_bg,
+                palette.chip_edge(chip, false).bg,
+            ),
             "{screen}"
         );
         assert_ne!(bg_at(x + 8), chip_bg, "{screen}");
@@ -5117,7 +5140,7 @@ mod tests {
         let palette = Palette::default();
         let (pending_fg, pending_bg, pending_modifiers) =
             style_at_text(pending.backend(), "Read     README.md").unwrap();
-        let chip = palette.chip();
+        let chip = palette.chip("Read");
         assert_eq!((Some(pending_fg), Some(pending_bg)), (chip.fg, chip.bg));
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
@@ -5154,7 +5177,7 @@ mod tests {
         // after it stays plain, so stacked chips of different names differ in width.
         assert_eq!(
             Some(style_at_text(complete.backend(), " Read ").unwrap().1),
-            chip.bg
+            palette.chip_edge(chip, true).bg
         );
         assert_ne!(
             Some(
@@ -5561,8 +5584,8 @@ mod tests {
             assert_eq!(screen.matches("(→ to expand)").count(), 1, "{screen}");
             assert!(screen.contains("└ out"), "{screen}");
 
-            let (fg, bg, modifiers) = style_at_text(terminal.backend(), " Read ").unwrap();
-            let chip = palette.chip();
+            let (fg, bg, modifiers) = style_at_text(terminal.backend(), "Read ").unwrap();
+            let chip = palette.chip("Read");
             if no_color {
                 assert!(modifiers.contains(Modifier::REVERSED));
             } else {
