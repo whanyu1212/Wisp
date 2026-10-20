@@ -1597,6 +1597,11 @@ async fn a_release_keeps_the_recovery_notice_of_an_unsendable_response() {
 }
 
 fn finish_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value, output: &str) {
+    start_tool(ui, call_id, name, arguments);
+    complete_tool(ui, call_id, name, output);
+}
+
+fn start_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value) {
     ui.state
         .transcript
         .observe_tool_call(crate::tool_cards::ToolCallInput {
@@ -1605,6 +1610,9 @@ fn finish_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value, out
             arguments,
             detail_source: crate::tool_detail::ToolDetailSource::None,
         });
+}
+
+fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
     ui.state
         .transcript
         .observe_tool_result(crate::tool_cards::ToolResultInput {
@@ -1839,6 +1847,60 @@ async fn keyboard_browse_distinguishes_group_header_from_first_member() {
         let selected_line = row_text(&buffer, cell_of(&buffer, text).1);
         assert!(selected_line.contains("(click to"), "{selected_line}");
     }
+}
+
+#[tokio::test]
+async fn group_selection_follows_new_start() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    start_tool(
+        &mut ui,
+        "zero",
+        "bash",
+        serde_json::json!({"command": "echo zero"}),
+    );
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    let entries = ui.state.transcript.entries();
+    let (late, first) = (entries[0].id, entries[1].id);
+    draw(&mut ui, 80, 24);
+    for key in [KeyCode::F(6), KeyCode::Right] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(first)));
+
+    complete_tool(&mut ui, "zero", "bash", "result");
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    let buffer = draw(&mut ui, 80, 24);
+    let header = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    assert!(header.contains("(click to"), "{header}");
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(late));
+    assert!(!ui.transcript_row_cache.fold().is_expanded(late));
 }
 
 #[tokio::test]

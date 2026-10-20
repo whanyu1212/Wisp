@@ -2525,12 +2525,26 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    /// A run's header moves to an earlier call that joins the run after it was selected,
+    /// such as a same-tool call that finishes late, so a group target follows the run's
+    /// current start.
+    fn current_browse_target(&self, target: BrowseTarget) -> BrowseTarget {
+        match target {
+            BrowseTarget::Group(entry) => card_run(&self.state.transcript, entry)
+                .map_or(target, |(start, _)| BrowseTarget::Group(start)),
+            BrowseTarget::Entry(_) => target,
+        }
+    }
+
     fn reconcile_browse_selection(&mut self) {
         if self.browse_selected.is_none() || self.detail_view.is_open() {
             return;
         }
+        let selected = self.current_browse_target(self.browse_selected.expect("checked above"));
         let entries = self.visible_foldable_entries();
-        if !entries.contains(&self.browse_selected.expect("checked above")) {
+        if entries.contains(&selected) {
+            self.browse_selected = Some(selected);
+        } else {
             self.browse_selected = entries.last().copied();
             self.notice = if self.browse_selected.is_some() {
                 Some(Self::browse_notice())
