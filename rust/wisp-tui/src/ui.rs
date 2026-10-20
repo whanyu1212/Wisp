@@ -5152,7 +5152,7 @@ mod tests {
         assert!(
             state
                 .transcript
-                .attach_run_summary("*╰ Build · gpt\\_x · 4m 12s*".into())
+                .attach_run_summary("╰ Build · gpt_x · 4m 12s".into())
         );
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         terminal

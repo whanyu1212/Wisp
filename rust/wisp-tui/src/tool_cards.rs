@@ -490,9 +490,6 @@ impl ToolCardSnapshot {
         ))
     }
 
-    /// The state the action line spells out because its marker alone does not: `?`
-    /// needs saying what it waits for, and `⊘` stands for both denial and
-    /// cancellation.
     /// How long a finished call ran, for its action line. Calls that were denied,
     /// cancelled, or never ran show none.
     pub fn duration_label(&self) -> Option<String> {
@@ -501,6 +498,9 @@ impl ToolCardSnapshot {
             .map(|milliseconds| format_duration(u64::from(milliseconds)))
     }
 
+    /// The state the action line spells out because its marker alone does not: `?`
+    /// needs saying what it waits for, and `⊘` stands for both denial and
+    /// cancellation.
     pub fn status_note(&self) -> Option<&'static str> {
         match self.status {
             ToolStatus::AwaitingApproval => Some("awaiting approval"),
@@ -1582,20 +1582,24 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
 }
 
 /// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
+/// Each unit is chosen after rounding, so 9.96 s reads `10s` rather than `10.0s`.
 pub(crate) fn format_duration(milliseconds: u64) -> String {
-    match milliseconds {
-        0..100 => "<0.1s".into(),
-        100..10_000 => format!("{:.1}s", milliseconds as f64 / 1000.0),
-        10_000..60_000 => format!("{}s", milliseconds / 1000),
-        60_000..3_600_000 => {
-            let seconds = milliseconds / 1000;
-            format!("{}m {:02}s", seconds / 60, seconds % 60)
-        }
-        _ => {
-            let minutes = milliseconds / 60_000;
-            format!("{}h {:02}m", minutes / 60, minutes % 60)
-        }
+    if milliseconds < 100 {
+        return "<0.1s".into();
     }
+    let tenths = milliseconds.saturating_add(50) / 100;
+    if tenths < 100 {
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let seconds = milliseconds.saturating_add(500) / 1000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3600 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    let minutes = milliseconds.saturating_add(30_000) / 60_000;
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
 #[cfg(test)]
@@ -1606,7 +1610,9 @@ mod tests {
     fn duration_formats_compactly() {
         let cases = [
             (40, "<0.1s"),
-            (250, "0.2s"),
+            (250, "0.3s"),
+            (9_960, "10s"),
+            (59_600, "1m 00s"),
             (4_500, "4.5s"),
             (12_400, "12s"),
             (252_000, "4m 12s"),

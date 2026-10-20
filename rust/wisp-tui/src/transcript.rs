@@ -187,7 +187,7 @@ impl TranscriptEntry {
             .as_ref()
             .filter(|_| self.unrevealed.is_empty())
         {
-            Some(summary) => format!("{}\n\n{summary}", self.content).into(),
+            Some(summary) => format!("{}\n\n*{}*", self.content, escape_markdown(summary)).into(),
             None => self.content.as_str().into(),
         }
     }
@@ -515,19 +515,26 @@ impl Transcript {
         }
     }
 
-    /// Close the run's last reply with its summary line. A run that ended without a
-    /// reply after its prompt keeps none.
+    /// Close the run with its summary line under its last reply. The run must end on
+    /// that reply: when a tool or process card follows it, as after a cancelled call,
+    /// the line would sit mid-run, so the run keeps none.
     pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
         let prompt = self.latest_user_entry();
-        let Some(id) = self
+        let last = self
             .entries
             .iter()
             .rev()
             .take_while(|entry| Some(entry.id) != prompt)
             .find(|entry| {
+                !(entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && entry.content.is_empty()
+                    && entry.unrevealed.is_empty())
+            });
+        let Some(id) = last
+            .filter(|entry| {
                 entry.role == TranscriptRole::Assistant
                     && matches!(entry.kind, TranscriptEntryKind::Message)
-                    && !(entry.content.is_empty() && entry.unrevealed.is_empty())
             })
             .map(|entry| entry.id)
         else {
@@ -535,6 +542,12 @@ impl Transcript {
         };
         let entry = self.entry_mut(id);
         entry.run_summary = Some(summary);
+        // Reparse the whole reply with its new ending, so the line renders the same
+        // whether or not the reply was already laid out.
+        entry.layout_epoch = entry
+            .layout_epoch
+            .checked_add(1)
+            .expect("transcript layout epoch exhausted");
         entry.decorate();
         Self::bump_revision(entry);
         true
@@ -2513,6 +2526,21 @@ impl Transcript {
             .checked_add(1)
             .expect("transcript generation exhausted");
     }
+}
+
+/// Backslash-escape Markdown punctuation so names render literally.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 #[cfg(test)]

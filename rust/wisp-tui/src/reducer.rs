@@ -1132,6 +1132,7 @@ pub enum BackendEvent {
     },
     /// A run finished; its totals close the run's last reply.
     RunCompleted {
+        outcome: String,
         duration_ms: Option<u64>,
         tool_calls: u64,
         output_tokens: Option<u64>,
@@ -4560,11 +4561,12 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::RunCompleted {
+            outcome,
             duration_ms,
             tool_calls,
             output_tokens,
         } => {
-            let summary = run_summary_line(state, duration_ms, tool_calls, output_tokens);
+            let summary = run_summary_line(state, &outcome, duration_ms, tool_calls, output_tokens);
             if state.transcript.attach_run_summary(summary) {
                 Ok(vec![UiEffect::RequestRender])
             } else {
@@ -4807,11 +4809,12 @@ fn handle_backend_event(
 }
 
 /// The run's summary line, such as `╰ Build · gpt-6-astra · high · 6m 41s · 14 tools ·
-/// 31.2k tokens`, set in italics so it reads apart from the reply. Mode, model, and
-/// effort are the session's settings when the run ends; parts that are unknown are
-/// left out.
+/// 31k tokens`. Mode, model, and effort are the session's settings when the run ends;
+/// parts that are unknown are left out, and a run that did not complete says how it
+/// ended.
 fn run_summary_line(
     state: &UiState,
+    outcome: &str,
     duration_ms: Option<u64>,
     tool_calls: u64,
     output_tokens: Option<u64>,
@@ -4845,37 +4848,29 @@ fn run_summary_line(
     if let Some(tokens) = output_tokens.filter(|tokens| *tokens > 0) {
         parts.push(format!("{} tokens", abbreviated_count(tokens)));
     }
-    let line = format!("╰ {}", parts.join(" · "));
-    format!("*{}*", escape_markdown(&line))
+    if outcome != "completed" {
+        parts.push(outcome.to_owned());
+    }
+    format!("╰ {}", parts.join(" · "))
 }
 
-/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit.
+/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit. Each unit is chosen after
+/// rounding, so 999.6k reads `1.0m`.
 fn abbreviated_count(count: u64) -> String {
-    let (value, unit) = match count {
-        0..1_000 => return count.to_string(),
-        1_000..1_000_000 => (count as f64 / 1_000.0, "k"),
-        _ => (count as f64 / 1_000_000.0, "m"),
-    };
-    if value < 10.0 {
-        format!("{value:.1}{unit}")
-    } else {
-        format!("{value:.0}{unit}")
+    if count < 1_000 {
+        return count.to_string();
     }
-}
-
-/// Backslash-escape Markdown punctuation so names render literally.
-fn escape_markdown(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if matches!(
-            character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
-        ) {
-            escaped.push('\\');
+    for (unit, size) in [("k", 1_000_u64), ("m", 1_000_000)] {
+        let tenths = count.saturating_add(size / 20) / (size / 10);
+        if tenths < 100 {
+            return format!("{}.{}{unit}", tenths / 10, tenths % 10);
         }
-        escaped.push(character);
+        let whole = count.saturating_add(size / 2) / size;
+        if whole < 1_000 || unit == "m" {
+            return format!("{whole}{unit}");
+        }
     }
-    escaped
+    unreachable!("the last unit always returns")
 }
 
 #[cfg(test)]
@@ -6111,6 +6106,70 @@ mod tests {
     }
 
     #[test]
+    fn counts_round_before_units() {
+        let cases = [
+            (999, "999"),
+            (1_234, "1.2k"),
+            (9_960, "10k"),
+            (31_400, "31k"),
+            (999_600, "1.0m"),
+            (12_300_000, "12m"),
+        ];
+        for (count, label) in cases {
+            assert_eq!(abbreviated_count(count), label);
+        }
+    }
+
+    #[test]
+    fn cancelled_run_keeps_card_last() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: bounded_identity("call-1"),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 1,
+                output_tokens: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert!(effects.is_empty());
+        let reply = &state.transcript.entries()[1];
+        assert_eq!(reply.display_content(), "Running the tests.");
+
+        state.transcript.complete_message(2, "Stopped.".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 1,
+                output_tokens: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let last = state.transcript.entries().last().unwrap();
+        assert_eq!(
+            last.display_content(),
+            "Stopped.\n\n╰ 4.0s · 1 tool · cancelled"
+        );
+    }
+
+    #[test]
     fn run_summary_closes_last_reply() {
         let mut state = UiState::new("fake".into(), Some("gpt_x".into()), None);
         state.mode = AgentMode::Build;
@@ -6145,7 +6204,7 @@ mod tests {
         let reply = state.transcript.entries().last().unwrap();
         assert_eq!(
             reply.display_content(),
-            "Done.\n\n*╰ Build · gpt\\_x · high · 4m 12s · 3 tools · 1.2k tokens*"
+            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 1.2k tokens"
         );
         assert_eq!(reply.content, "Done.");
     }
