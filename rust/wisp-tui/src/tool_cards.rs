@@ -236,7 +236,8 @@ pub struct ToolCardSnapshot {
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
-    pub duration_ms: Option<u64>,
+    /// Kept as 32 bits, which spans 49 days, so the card stays compact.
+    pub duration_ms: Option<u32>,
 }
 
 impl ToolCardSnapshot {
@@ -333,7 +334,9 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
-        self.duration_ms = input.duration_ms;
+        self.duration_ms = input
+            .duration_ms
+            .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
         self.process_id = input
             .process_id
             .as_ref()
@@ -495,7 +498,7 @@ impl ToolCardSnapshot {
     pub fn duration_label(&self) -> Option<String> {
         matches!(self.status, ToolStatus::Done | ToolStatus::Error)
             .then_some(self.duration_ms?)
-            .map(format_duration)
+            .map(|milliseconds| format_duration(u64::from(milliseconds)))
     }
 
     pub fn status_note(&self) -> Option<&'static str> {
