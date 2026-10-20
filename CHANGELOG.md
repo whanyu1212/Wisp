@@ -10,6 +10,38 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.2.4 — 2026-10-20
+
+0.2.4 is a patch release on 0.2.3 with Codex transport diagnostics and terminal UI improvements.
+It changes no command, event, handshake model, or session format. Sessions remain compatible;
+the backend and frontend must still come from the same release.
+
+### Terminal UI
+
+- Retained edit/write review supports unified and side-by-side layouts, hunk navigation with
+  `[` / `]`, edit navigation with Tab / Shift+Tab, and retained-context toggling with `c`.
+  Press `s` for split review; narrow terminals use unified review. This is review of one retained
+  tool edit, not a cumulative working-tree diff against HEAD. (#767)
+- Inline diffs use old/new gutters, syntax colors, stronger changed-word highlights, and coherent
+  preview folding. Edit line numbers are fragment-relative. Omission counts include changes
+  beyond the retained-detail limit. (#767)
+- Routine tool rows use quieter spacing, relative paths, and conservative command summaries.
+  Expanded rows retain original arguments and process diagnostics. Process cards use task names
+  where available, and the footer is shorter. All nine existing themes have coordinated diff
+  colors and softer panels/chips; Paper remains the main light theme. (#767)
+
+### Codex provider
+
+- Transport failures retain safe diagnostics: exception type, timeout phase and configured limit,
+  attempt number, and current response ID when available. Session history preserves these
+  diagnostics without transport exception text, request URLs, or headers. Started responses are
+  not automatically replayed; completed tool results and partial replies remain available when
+  resuming the session. (#766)
+- Configure read inactivity with the user-only `codex_read_timeout_seconds` setting,
+  `WISP_CODEX_READ_TIMEOUT_SECONDS`, or SDK configuration. The default stays at 300 seconds;
+  values must be positive and finite. This is an idle timeout, not a total response deadline.
+  Caller-injected HTTP clients keep their own timeout policy. (#766)
+
 ## 0.2.3 — 2026-10-20
 
 0.2.3 is a patch release on 0.2.2 with two terminal UI changes. It changes no command, event, or
