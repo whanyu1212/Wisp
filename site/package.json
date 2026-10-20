@@ -1,0 +1,33 @@
+{
+  "name": "wisp-docs",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=22.22.0"
+  },
+  "packageManager": "npm@10.9.4",
+  "scripts": {
+    "dev": "astro dev --host 127.0.0.1",
+    "check": "astro check",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "build": "astro build && node --import tsx scripts/check-output.ts",
+    "preview": "astro preview --host 127.0.0.1",
+    "format:check": "prettier --check src scripts tests astro.config.mjs content-map.json package.json tsconfig.json README.md"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "7.3.3",
+    "astro": "7.4.1",
+    "cheerio": "1.2.0",
+    "mermaid": "12.2.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.11",
+    "@types/node": "22.20.5",
+    "prettier": "3.9.10",
+    "prettier-plugin-astro": "1.1.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

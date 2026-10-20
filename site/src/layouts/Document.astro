@@ -1,0 +1,198 @@
+---
+import { getCollection } from "astro:content";
+import { href } from "../content/paths";
+import { navigation } from "../content/navigation";
+import type { PageMetadata } from "../content/metadata";
+import type { Heading } from "../content/render";
+import Diagrams from "../components/Diagrams.astro";
+import "../styles/site.css";
+interface Props {
+  page: PageMetadata;
+  headings?: Heading[];
+  compatibility?: boolean;
+}
+const { page, headings = [], compatibility = false } = Astro.props;
+const pages = (await getCollection("pages")).map((entry) => entry.data);
+const groups = navigation(pages);
+const current = groups.find((group) => group.key === page.section);
+const siblings = current?.pages ?? [];
+const index = siblings.findIndex((item) => item.source === page.source);
+const previous = siblings[index - 1],
+  next = siblings[index + 1];
+const toc = headings.filter(
+  (heading) => heading.depth > 1 && heading.depth < 4,
+);
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={page.description} />
+    <title>{page.title === 'Wisp' ? 'Wisp — a coding agent you can steer' : `${page.title} · Wisp`}</title>
+    <link rel="canonical" href={new URL(href(page.route), Astro.site)} />
+    {(!page.searchable || compatibility) && (
+      <meta name="robots" content="noindex" />
+    )}
+    <link rel="icon" href={href("assets/favicon.png")} />
+    <script is:inline>
+      try {
+        document.documentElement.dataset.theme =
+          localStorage.getItem("wisp-theme") ||
+          (matchMedia("(prefers-color-scheme: dark)").matches
+            ? "dark"
+            : "light");
+      } catch {
+        document.documentElement.dataset.theme = matchMedia(
+          "(prefers-color-scheme: dark)",
+        ).matches
+          ? "dark"
+          : "light";
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">
+      Skip to content
+    </a>
+    <header class="site-header">
+      <a class="brand" href={href("index.html")}>
+        wisp<span>.</span>
+      </a>
+      <nav aria-label="Primary">
+        {groups.map(
+          (group) =>
+            group.pages[0] && (
+              <a
+                href={href(group.pages[0].route)}
+                aria-current={
+                  group.key === page.section && page.layout !== "home"
+                    ? "true"
+                    : undefined
+                }
+              >
+                {group.title}
+              </a>
+            ),
+        )}
+      </nav>
+      <button id="theme-toggle" type="button" aria-label="Switch color theme">
+        Theme
+      </button>
+      <a class="github" href="https://github.com/whanyu1212/Wisp">
+        GitHub ↗
+      </a>
+    </header>
+    <details class="mobile-navigation">
+      <summary>Browse documentation</summary>
+      <nav aria-label="Mobile documentation">
+        {groups.map((group) => (
+          <section>
+            <strong>{group.title}</strong>
+            {group.pages.map((item) => (
+              <a
+                href={href(item.route)}
+                aria-current={item.source === page.source ? "page" : undefined}
+              >
+                {item.navTitle ?? item.title}
+              </a>
+            ))}
+          </section>
+        ))}
+      </nav>
+    </details>
+    <div class:list={["page", { home: page.layout === "home" }]}>
+      {page.layout !== "home" && (
+        <aside class="sidebar">
+          <nav aria-label={current?.title ?? "Archive"}>
+            <strong>{current?.title ?? "Maintainer archive"}</strong>
+            {siblings.map((item) => (
+              <a
+                href={href(item.route)}
+                aria-current={item.source === page.source ? "page" : undefined}
+              >
+                {item.navTitle ?? item.title}
+              </a>
+            ))}
+          </nav>
+        </aside>
+      )}
+      <main
+        id="main"
+        data-pagefind-body={page.searchable && !compatibility ? "" : undefined}
+      >
+        {page.layout !== "home" && (
+          <div class="eyebrow">
+            {page.layout === "archive"
+              ? "Maintainer archive · historical record"
+              : current?.title}
+            {page.chapter && ` / Chapter ${page.chapter}`}
+          </div>
+        )}
+        {toc.length > 0 && page.layout !== "home" && (
+          <details class="mobile-toc">
+            <summary>On this page</summary>
+            {toc.map((h) => (
+              <a href={`#${h.slug}`}>{h.text}</a>
+            ))}
+          </details>
+        )}
+        <slot />
+        {page.checkpoint && (
+          <p class="checkpoint">
+            <a
+              href={`https://github.com/whanyu1212/Wisp/blob/main/${page.checkpoint}`}
+            >
+              Runnable checkpoint source ↗
+            </a>
+          </p>
+        )}
+        {page.layout !== "home" && !compatibility && (
+          <nav class="previous-next" aria-label="Adjacent pages">
+            {previous ? (
+              <a href={href(previous.route)}>
+                ← {previous.navTitle ?? previous.title}
+              </a>
+            ) : (
+              <span />
+            )}
+            {next && (
+              <a href={href(next.route)}>{next.navTitle ?? next.title} →</a>
+            )}
+          </nav>
+        )}
+      </main>
+      {page.layout !== "home" && (
+        <aside class="toc">
+          <strong>On this page</strong>
+          {toc.map((h) => (
+            <a href={`#${h.slug}`}>{h.text}</a>
+          ))}
+        </aside>
+      )}
+    </div>
+    <footer>
+      One shared runtime. TUI · CLI · RPC · Python SDK.{" "}
+      <a
+        href={`https://github.com/whanyu1212/Wisp/edit/main/book/src/${page.source}`}
+      >
+        Edit this page
+      </a>
+    </footer>
+    <Diagrams />
+    <script>
+      document.getElementById("theme-toggle")?.addEventListener("click", () => {
+        const theme =
+          document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+        document.documentElement.dataset.theme = theme;
+        try {
+          localStorage.setItem("wisp-theme", theme);
+        } catch {
+          /* Reading works without storage. */
+        }
+        document.dispatchEvent(new Event("wisp-theme"));
+      });
+    </script>
+  </body>
+</html>

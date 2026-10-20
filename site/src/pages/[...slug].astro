@@ -1,0 +1,29 @@
+---
+import { getCollection } from "astro:content";
+import ContentPage from "../layouts/ContentPage.astro";
+export async function getStaticPaths() {
+  const entries = [
+    ...(await getCollection("pages")),
+    ...(await getCollection("maintainerRecords")),
+  ];
+  return entries
+    .filter(
+      (entry) =>
+        !entry.data.route.endsWith("/index.html") &&
+        entry.data.route !== "index.html",
+    )
+    .flatMap((entry) => {
+      const canonical = entry.data.route.replace(/\.html$/, "");
+      const old = entry.data.source.replace(/\.md$/, "");
+      const path = (slug: string, compatibility: boolean) => ({
+        params: { slug },
+        props: { entry, compatibility },
+      });
+      return canonical === old
+        ? [path(canonical, false)]
+        : [path(canonical, false), path(old, true)];
+    });
+}
+---
+
+<ContentPage {...Astro.props} />
