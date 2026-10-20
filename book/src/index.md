@@ -24,7 +24,7 @@ wisp
 ```
 
 > [!TIP]
-> **Wisp 0.2.3 is available**
+> **Wisp 0.2.4 is available**
 >
 > 0.2 makes the Rust terminal UI the interactive interface, adds MCP server management and the
 > providers' own web search, and never saves trust or YOLO for your home folder. Read the
