@@ -12,8 +12,8 @@ use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    RESULT_CONNECTOR, RESULT_INDENT, RowAnchor, RowGutter, RowPosition, TranscriptRow,
-    TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
+    BrowseTarget, RESULT_CONNECTOR, RESULT_INDENT, RowAnchor, RowGutter, RowPosition,
+    TranscriptRow, TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
@@ -223,7 +223,7 @@ pub fn render_interactive(
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
     activity_frame: u8,
@@ -526,7 +526,7 @@ fn render_transcript(
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     connection: &ConnectionInfo,
     activity_frame: u8,
     activity_elapsed: Option<std::time::Duration>,
@@ -652,7 +652,7 @@ fn render_transcript(
     let selected_row = browse_selected.and_then(|selected_entry| {
         rows.iter()
             .find(|row| {
-                row.anchor.entry_id == selected_entry
+                BrowseTarget::for_row(row) == selected_entry
                     && matches!(
                         row.kind,
                         TranscriptRowKind::CardAction
@@ -666,7 +666,7 @@ fn render_transcript(
             })
             .or_else(|| {
                 rows.iter().find(|row| {
-                    row.anchor.entry_id == selected_entry
+                    BrowseTarget::for_row(row) == selected_entry
                         && matches!(
                             row.kind,
                             TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
@@ -5436,7 +5436,7 @@ mod tests {
                     &PromptEditor::default(),
                     &connection(),
                     None,
-                    Some(card_id),
+                    Some(BrowseTarget::Entry(card_id)),
                     true,
                     None,
                     0,
@@ -5493,7 +5493,7 @@ mod tests {
                     &PromptEditor::default(),
                     &connection(),
                     None,
-                    Some(card_id),
+                    Some(BrowseTarget::Entry(card_id)),
                     false,
                     None,
                     0,
@@ -6270,7 +6270,7 @@ mod tests {
                             .entries()
                             .iter()
                             .find(|entry| entry.tool_card().is_some())
-                            .map(|entry| entry.id);
+                            .map(|entry| BrowseTarget::Entry(entry.id));
                         assert_ne!(
                             draw(&state, 0, palette, selected),
                             draw(&state, 4, palette, selected)

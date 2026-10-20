@@ -90,7 +90,7 @@ fn fixture(scenario: &str) -> LiveUi {
     }
     if scenario == "tools" {
         ui.transcript_row_cache.fold_mut().expand(tool);
-        ui.browse_selected = Some(tool);
+        ui.browse_selected = Some(BrowseTarget::Entry(tool));
         ui.transcript_viewport.reduce(
             TranscriptViewAction::Home,
             &ui.state.transcript,

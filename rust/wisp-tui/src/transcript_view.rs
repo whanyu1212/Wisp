@@ -87,6 +87,29 @@ pub struct RowAnchor {
     pub position: RowPosition,
 }
 
+/// Groups and their first member share an entry ID but have independent controls.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BrowseTarget {
+    Entry(TranscriptEntryId),
+    Group(TranscriptEntryId),
+}
+
+impl BrowseTarget {
+    pub fn entry_id(self) -> TranscriptEntryId {
+        match self {
+            Self::Entry(id) | Self::Group(id) => id,
+        }
+    }
+
+    pub fn for_row(row: &TranscriptRow) -> Self {
+        if row.kind == TranscriptRowKind::CardGroup {
+            Self::Group(row.anchor.entry_id)
+        } else {
+            Self::Entry(row.anchor.entry_id)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptRowKind {
     Header,

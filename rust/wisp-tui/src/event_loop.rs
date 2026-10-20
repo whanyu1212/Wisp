@@ -47,7 +47,7 @@ struct ActivationTarget {
     help_owner: Option<crate::key_help::Owner>,
     editor_revision: u64,
     editor_editable: bool,
-    browse_entry: Option<crate::TranscriptEntryId>,
+    browse_entry: Option<crate::BrowseTarget>,
     detail_entry: Option<crate::TranscriptEntryId>,
     rendered_decision: Option<RenderedDecisionContext>,
     rendered_decision_choice: Option<usize>,

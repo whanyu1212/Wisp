@@ -643,7 +643,7 @@ async fn rebound_browse_enter_keeps_fixed_detail_activation() {
     };
     ui.state.transcript.observe_tool_result(*result);
     draw(&mut ui, 80, 24);
-    ui.browse_selected = Some(id);
+    ui.browse_selected = Some(BrowseTarget::Entry(id));
     let (writer, mut received) = mpsc::channel(8);
     ui.handle_input(
         Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),

@@ -123,8 +123,8 @@ use tokio::time::{Instant, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
 use transcript_view::{
-    RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
-    card_run,
+    BrowseTarget, RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction,
+    TranscriptViewport, card_run,
 };
 use ui::{ComposerLayoutCache, ConnectionInfo};
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
@@ -553,7 +553,7 @@ struct LiveUi {
     transcript_row_cache: TranscriptRowCache,
     pending_history_navigation: Option<PendingHistoryNavigation>,
     detail_view: DetailView,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     editor: PromptEditor,
     clipboard: Box<dyn ClipboardBackend>,
     composer_layout_cache: ComposerLayoutCache,
@@ -1099,7 +1099,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::OpenExactDetail(entry_id) => {
-                    if self.browse_selected != Some(entry_id) {
+                    if self.browse_selected != Some(BrowseTarget::Entry(entry_id)) {
                         self.state.history.active_exact_detail = None;
                         continue;
                     }
@@ -1287,7 +1287,7 @@ impl LiveUi {
             }
             if self
                 .browse_selected
-                .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
+                .is_some_and(|target| retained_detail(&self.state, target.entry_id()).is_none())
             {
                 self.browse_selected = None;
             }
@@ -2376,7 +2376,7 @@ impl LiveUi {
         Ok(None)
     }
 
-    fn visible_foldable_entries(&mut self) -> Vec<TranscriptEntryId> {
+    fn visible_foldable_entries(&mut self) -> Vec<BrowseTarget> {
         let rows = self
             .transcript_viewport
             .visible_rows(&self.state.transcript, &mut self.transcript_row_cache);
@@ -2391,10 +2391,11 @@ impl LiveUi {
                     | TranscriptRowKind::CardOmission
                     | TranscriptRowKind::Thought
             ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_));
-            if !foldable || !seen.insert(row.anchor.entry_id) {
+            let target = BrowseTarget::for_row(&row);
+            if !foldable || !seen.insert(target) {
                 continue;
             }
-            entries.push(row.anchor.entry_id);
+            entries.push(target);
         }
         entries
     }
@@ -2404,7 +2405,9 @@ impl LiveUi {
     }
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
-        let selected = self.browse_selected?;
+        let BrowseTarget::Group(selected) = self.browse_selected? else {
+            return None;
+        };
         let (start, members) = card_run(&self.state.transcript, selected)?;
         (!self.transcript_row_cache.fold().is_run_expanded(&members)).then_some(start)
     }
@@ -2413,11 +2416,14 @@ impl LiveUi {
         let Some(selected) = self.browse_selected else {
             return;
         };
-        if let Some(start) = self.selected_closed_group() {
-            self.transcript_row_cache.fold_mut().expand_group(start);
-            self.browse_selected = Some(start);
-        } else {
-            self.transcript_row_cache.fold_mut().expand(selected);
+        match selected {
+            BrowseTarget::Group(_) => {
+                if let Some(start) = self.selected_closed_group() {
+                    self.transcript_row_cache.fold_mut().expand_group(start);
+                    self.browse_selected = Some(BrowseTarget::Group(start));
+                }
+            }
+            BrowseTarget::Entry(entry) => self.transcript_row_cache.fold_mut().expand(entry),
         }
         self.notice = Some(Self::browse_notice());
         self.render_pending = true;
@@ -2445,7 +2451,11 @@ impl LiveUi {
             fold.expand(entry);
         }
         if self.browse_selected.is_some() {
-            self.browse_selected = Some(selected);
+            self.browse_selected = Some(if group {
+                BrowseTarget::Group(selected)
+            } else {
+                BrowseTarget::Entry(selected)
+            });
         }
         self.render_pending = true;
     }
@@ -2454,13 +2464,16 @@ impl LiveUi {
         let Some(selected) = self.browse_selected else {
             return;
         };
-        if self.transcript_row_cache.fold().is_expanded(selected) {
-            self.transcript_row_cache.fold_mut().collapse(selected);
-        } else if let Some((start, members)) = card_run(&self.state.transcript, selected) {
+        let entry = selected.entry_id();
+        if matches!(selected, BrowseTarget::Entry(_))
+            && self.transcript_row_cache.fold().is_expanded(entry)
+        {
+            self.transcript_row_cache.fold_mut().collapse(entry);
+        } else if let Some((start, members)) = card_run(&self.state.transcript, entry) {
             self.transcript_row_cache
                 .fold_mut()
                 .collapse_group(&members);
-            self.browse_selected = Some(start);
+            self.browse_selected = Some(BrowseTarget::Group(start));
         }
         self.notice = Some(Self::browse_notice());
         self.render_pending = true;
@@ -2528,7 +2541,7 @@ impl LiveUi {
     }
 
     fn open_selected_detail(&mut self) {
-        let Some(entry_id) = self.browse_selected else {
+        let Some(BrowseTarget::Entry(entry_id)) = self.browse_selected else {
             return;
         };
         let Some(presentation) = retained_detail(&self.state, entry_id) else {
@@ -2545,7 +2558,7 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let Some(entry_id) = self.browse_selected else {
+        let Some(BrowseTarget::Entry(entry_id)) = self.browse_selected else {
             return Ok(LoopControl::Continue);
         };
         if self
@@ -3304,7 +3317,7 @@ impl LiveUi {
                         let id = diffs[next];
                         if let Some(detail) = retained_detail(&self.state, id) {
                             self.detail_view.open(id, detail);
-                            self.browse_selected = Some(id);
+                            self.browse_selected = Some(BrowseTarget::Entry(id));
                         }
                     }
                 }
@@ -3342,11 +3355,15 @@ impl LiveUi {
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.selected_closed_group().is_some() {
-                    self.expand_selected_fold();
+                if matches!(self.browse_selected, Some(BrowseTarget::Group(_))) {
+                    if self.selected_closed_group().is_some() {
+                        self.expand_selected_fold();
+                    } else {
+                        self.collapse_selected_fold();
+                    }
                     return Ok(LoopControl::Continue);
                 }
-                let selected = self.browse_selected;
+                let selected = self.browse_selected.map(BrowseTarget::entry_id);
                 let has_detail = selected.is_some_and(|entry_id| {
                     retained_detail(&self.state, entry_id).is_some()
                         || self
@@ -6759,7 +6776,7 @@ mod tests {
             .transcript
             .entries()
             .first()
-            .map(|entry| entry.id);
+            .map(|entry| BrowseTarget::Entry(entry.id));
         assert!(!live_ui.transcript_viewport.follows_tail());
         assert!(live_ui.transcript_viewport.has_unseen_output());
         assert!(live_ui.browse_selected.is_some());
@@ -9377,7 +9394,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
         assert_eq!(live_ui.editor.text(), "draft");
 
         live_ui
@@ -9408,7 +9425,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!live_ui.detail_view.is_open());
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -9520,7 +9537,7 @@ mod tests {
             &mut live_ui.transcript_row_cache,
         );
         live_ui.enter_or_cycle_browse();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
 
         live_ui.transcript_viewport.set_geometry(
             &live_ui.state.transcript,
@@ -9544,7 +9561,7 @@ mod tests {
             );
         }
         assert!(live_ui.visible_foldable_entries().is_empty());
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
 
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
@@ -9599,8 +9616,11 @@ mod tests {
             1,
         );
         live_ui.enter_or_cycle_browse();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
-        assert_eq!(live_ui.visible_foldable_entries(), vec![card_id]);
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
+        assert_eq!(
+            live_ui.visible_foldable_entries(),
+            vec![BrowseTarget::Entry(card_id)]
+        );
 
         let (writer_tx, _writer_rx) = mpsc::channel(4);
         live_ui

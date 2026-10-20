@@ -1043,7 +1043,9 @@ async fn clicking_unchanged_empty_composer_returns_focus_from_card_browse() {
         .area;
     // Use any retained entry identity: the click must clear browse focus even
     // when placing the empty editor's cursor does not mutate it.
-    ui.browse_selected = Some(ui.state.transcript.append_prompt("card".into()));
+    ui.browse_selected = Some(BrowseTarget::Entry(
+        ui.state.transcript.append_prompt("card".into()),
+    ));
     let (writer, _) = mpsc::channel(8);
     ui.handle_input(click(area.x, area.y), &writer, MAX_APPLICATION_FRAME_BYTES)
         .await
@@ -1677,12 +1679,12 @@ async fn click_toggles_a_card() {
     assert!(ui.transcript_row_cache.fold().is_expanded(card));
 
     // While browsing, the selection follows the click and the hint names it.
-    ui.browse_selected = Some(card);
+    ui.browse_selected = Some(BrowseTarget::Entry(card));
     let selected = draw(&mut ui, 80, 24);
     assert!(row_text(&selected, y).contains("(click to collapse)"));
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_expanded(card));
-    assert_eq!(ui.browse_selected, Some(card));
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Entry(card)));
     let collapsed = draw(&mut ui, 80, 24);
     assert!(row_text(&collapsed, y).contains("(click to expand)"));
 }
@@ -1777,6 +1779,66 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
     cell_of(&reopened, "git diff --stat");
     cell_of(&reopened, "git status");
     assert!(ui.transcript_row_cache.fold().is_expanded(start));
+}
+
+#[tokio::test]
+async fn keyboard_browse_distinguishes_group_header_from_first_member() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    let start = ui.state.transcript.entries()[0].id;
+    draw(&mut ui, 80, 24);
+    for (key, selected, group_open, member_open) in [
+        (KeyCode::F(6), BrowseTarget::Group(start), false, false),
+        (KeyCode::Right, BrowseTarget::Group(start), true, false),
+        (KeyCode::Right, BrowseTarget::Group(start), true, false),
+        (KeyCode::Tab, BrowseTarget::Entry(start), true, false),
+        (KeyCode::Right, BrowseTarget::Entry(start), true, true),
+        (KeyCode::Left, BrowseTarget::Entry(start), true, false),
+        (KeyCode::Right, BrowseTarget::Entry(start), true, true),
+        (KeyCode::BackTab, BrowseTarget::Group(start), true, true),
+        (KeyCode::Left, BrowseTarget::Group(start), false, true),
+        (KeyCode::Enter, BrowseTarget::Group(start), true, true),
+        (KeyCode::Enter, BrowseTarget::Group(start), false, true),
+    ] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        let buffer = draw(&mut ui, 80, 24);
+        assert_eq!(ui.browse_selected, Some(selected), "{key:?}");
+        assert_eq!(
+            ui.transcript_row_cache.fold().is_group_expanded(start),
+            group_open
+        );
+        assert_eq!(
+            ui.transcript_row_cache.fold().is_expanded(start),
+            member_open
+        );
+        let text = match selected {
+            BrowseTarget::Group(_) => {
+                if group_open {
+                    "▾ 2 commands"
+                } else {
+                    "▸ 2 commands"
+                }
+            }
+            BrowseTarget::Entry(_) => "echo one",
+        };
+        let selected_line = row_text(&buffer, cell_of(&buffer, text).1);
+        assert!(selected_line.contains("(click to"), "{selected_line}");
+    }
 }
 
 #[tokio::test]
