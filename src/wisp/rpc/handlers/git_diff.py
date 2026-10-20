@@ -151,7 +151,9 @@ def collect_git_diff(
             meta, raw_path = record.split(b"\t", 1)
             mode, oid, _ = meta.split(b" ")
             indexed[raw_path] = (mode, oid)
-    names = blobs.keys() | indexed.keys()
+    flags = _git(root, ["ls-files", "-t", "-z"], cancelled, deadline)
+    sparse = {record[2:] for record in flags.split(b"\0") if record.startswith(b"S ")}
+    names = (blobs.keys() | indexed.keys()) - sparse
     attributes: dict[bytes, dict[bytes, bytes]] = {}
     if names:
         values = _git(
@@ -176,7 +178,7 @@ def collect_git_diff(
     entries: list[RpcGitDiffFile] = []
     truncated = False
     for raw, is_untracked in [(p, False) for p in sorted(names)] + [
-        (p, True) for p in sorted(set(untracked.split(b"\0")) - set(blobs) - set(indexed)) if p
+        (p, True) for p in sorted(set(untracked.split(b"\0")) - set(indexed)) if p
     ]:
         if cancelled.is_set():
             raise ProjectScanCancelled
@@ -210,6 +212,10 @@ def collect_git_diff(
                 if not blob:
                     status = "added"
                 try:
+                    # An index removal is a tracked deletion even if the same
+                    # pathname remains on disk as a separate untracked file.
+                    if raw not in indexed:
+                        raise FileNotFoundError
                     selected.path.lstat()
                 except FileNotFoundError:
                     if not blob:

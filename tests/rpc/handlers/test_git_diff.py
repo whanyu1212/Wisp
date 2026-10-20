@@ -179,3 +179,27 @@ def test_filemode_false_ignores_permission_only_change(repo: Path) -> None:
     git(repo, "config", "core.filemode", "false")
     (repo / "file.py").chmod(0o755)
     assert not snapshot(repo).files
+
+
+def test_sparse_checkout_does_not_report_unmaterialized_files_as_deleted(repo: Path) -> None:
+    for folder in ("inside", "outside"):
+        (repo / folder).mkdir()
+        (repo / folder / "file.py").write_text("original\n")
+    git(repo, "add", "inside", "outside")
+    git(repo, "commit", "-m", "directories")
+    git(repo, "sparse-checkout", "init", "--cone")
+    git(repo, "sparse-checkout", "set", "inside")
+    assert not (repo / "outside" / "file.py").exists()
+    assert not snapshot(repo).files
+    (repo / "inside" / "file.py").write_text("changed\n")
+    assert {file.path for file in snapshot(repo).files} == {"inside/file.py"}
+
+
+@pytest.mark.parametrize("contents", ["original\n", "changed\n"])
+def test_index_removal_and_remaining_untracked_file_are_distinct(repo: Path, contents: str) -> None:
+    git(repo, "rm", "--cached", "file.py")
+    (repo / "file.py").write_text(contents)
+    entries = [file for file in snapshot(repo).files if file.path == "file.py"]
+    assert [file.status for file in entries] == ["deleted", "untracked"]
+    assert entries[0].before == "original\n" and entries[0].after == ""
+    assert entries[1].before == entries[1].after == ""
