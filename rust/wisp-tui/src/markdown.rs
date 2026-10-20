@@ -1275,7 +1275,17 @@ impl BlockRenderer {
             Tag::Heading { level, .. } => {
                 self.style.block = BlockStyle::Heading(heading_level(*level));
             }
-            Tag::CodeBlock(_) => self.style.block = BlockStyle::Code,
+            Tag::CodeBlock(_) => {
+                // Like a nested paragraph, a fence inside a list item or quote starts on
+                // its own line rather than running on from the text before it.
+                if self.paragraph_inline {
+                    self.paragraph_inline = false;
+                } else if self.line_has_content && (!self.lists.is_empty() || self.quote_depth > 0)
+                {
+                    self.emit_break(source_offset);
+                }
+                self.style.block = BlockStyle::Code;
+            }
             Tag::Emphasis => self.style.emphasis = true,
             Tag::Strong => self.style.strong = true,
             Tag::Strikethrough => self.style.struck = true,
@@ -1608,6 +1618,18 @@ mod tests {
                 .flat_map(|block| &block.spans)
                 .any(|span| span.style.inline == InlineStyle::Code)
         );
+    }
+
+    #[test]
+    fn nested_fence_starts_new_line() {
+        let source = "- item text\n\n  ```rust\n  let value = 1;\n  ```\n\n> quoted\n>\n> ```\n> code\n> ```";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let rendered = build.document.plain_text();
+        assert!(
+            rendered.contains("• item text\nlet value = 1;"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("│ quoted\n│ code"), "{rendered:?}");
     }
 
     #[test]
