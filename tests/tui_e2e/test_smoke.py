@@ -42,7 +42,7 @@ def test_run_settled_ignores_partial_frame() -> None:
 
     assert not run_settled(partial, len(welcome), b"fake", b"response", b"to:")
     assert not run_settled(welcome + running, len(welcome), b"fake", b"response", b"to:")
-    settled = welcome + running + _frame(b"idle")
+    settled = welcome + running + _frame(b"\x1b[2;1Hidle")
     assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
 
 
@@ -54,6 +54,10 @@ def test_screen_rows_join_partial_repaints() -> None:
     reused = _frame(b"\x1b[2;1Hidea") + _frame(b"\x1b[2;3Hl\x1b[2;4He")
     assert screen_rows(reused)[-1] == "idle"
     assert run_settled(reused + _frame(b""), 0, b"l")
+
+    # A branch named after a status word does not settle a working run.
+    branch = _frame(b"\x1b[2;1Hworking \xc2\xb7 ~/Wisp \xc2\xb7 fix/idle")
+    assert not run_settled(branch, 0, b"Wisp")
 
 
 def test_run_settled_respects_offset() -> None:

@@ -575,8 +575,7 @@ async def run_rpc_prompt_command(
         if error is None:
             error = str(exc)
     # A run may have switched branches; report the current one before it finishes.
-    with anyio.CancelScope(shield=True):
-        workspace = await rpc_workspace_report(agent.tool_context.cwd)
+    workspace = await rpc_workspace_report(agent.tool_context.cwd)
     async with send:
         if cancelled:
             assert error is not None

@@ -220,11 +220,17 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
     )
 
 
+# Longer than the shared Git deadline, so it only ends a Git process that hangs.
+_WORKSPACE_BRANCH_TIMEOUT_SECONDS = 3.0
+
+
 async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
     """Report the folder commands run in and the Git branch checked out there.
 
-    Git runs in a worker thread under the shared Git deadline. Any failure leaves the
-    branch unset, so reporting never fails the startup or command that sends it.
+    Git runs in a worker thread under the shared Git deadline, and the wait is
+    abandoned after a few seconds even if Git ignores its own timeout (a hung network
+    mount). Any failure leaves the branch unset, so reporting never fails or holds up
+    the startup or command that sends it.
 
     Args:
         cwd (Path): Working directory the session's commands run in.
@@ -232,10 +238,14 @@ async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
     Returns:
         RpcWorkspaceReported: The folder and its current branch, if any.
     """
-    try:
-        branch = await anyio.to_thread.run_sync(read_current_branch, cwd, abandon_on_cancel=True)
-    except Exception:  # noqa: BLE001 - a missing branch must not fail the caller
-        branch = None
+    branch: str | None = None
+    with anyio.move_on_after(_WORKSPACE_BRANCH_TIMEOUT_SECONDS):
+        try:
+            branch = await anyio.to_thread.run_sync(
+                read_current_branch, cwd, abandon_on_cancel=True
+            )
+        except Exception:  # noqa: BLE001 - a missing branch must not fail the caller
+            branch = None
     return RpcWorkspaceReported(cwd=cwd, git_branch=branch)
 
 

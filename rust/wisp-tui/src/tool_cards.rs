@@ -551,11 +551,15 @@ impl ToolCardSnapshot {
                 || workspace_relative_command(&self.action_arguments, cwd),
                 CommandSummary::label,
             ),
-            "read" | "edit" | "write" | "ls" => self
+            "read" | "edit" | "write" | "ls" => match self
                 .action_arguments
                 .strip_prefix(cwd)
                 .and_then(|rest| rest.strip_prefix('/'))
-                .map_or_else(|| self.action_arguments.clone(), str::to_owned),
+            {
+                Some("") => ".".to_owned(),
+                Some(relative) => relative.to_owned(),
+                None => self.action_arguments.clone(),
+            },
             "grep" | "find" => match self.action_arguments.rsplit_once(" in ") {
                 Some((pattern, path)) => match path.strip_prefix(cwd) {
                     Some("") => format!("{pattern} in ."),
@@ -1600,12 +1604,21 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
 
 /// A Bash command as its action line shows it when it runs in `cwd`: a leading
 /// `cd <cwd> &&` is a no-op there and is dropped, and `<cwd>/` path prefixes become
-/// relative. A `cd` anywhere else stays, since it changes where the command runs.
+/// relative. Once the command changes folder (`cd`, `pushd`), relative paths would
+/// read against the wrong folder, so the rest is shown as written.
 fn workspace_relative_command(command: &str, cwd: &str) -> String {
     let (start, rest) = command
         .strip_prefix("start ")
         .map_or(("", command), |rest| ("start ", rest));
     let rest = strip_redundant_cd(rest, cwd).unwrap_or(rest);
+    let changes_folder = rest
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(')
+        })
+        .any(|word| matches!(word, "cd" | "pushd" | "popd"));
+    if changes_folder {
+        return format!("{start}{rest}");
+    }
     let prefix = format!("{cwd}/");
     let mut shown = String::with_capacity(rest.len());
     let mut remaining = rest;
@@ -1617,10 +1630,17 @@ fn workspace_relative_command(command: &str, cwd: &str) -> String {
             .next_back()
             .is_none_or(|before| before.is_whitespace() || matches!(before, '\'' | '"' | '='));
         shown.push_str(&remaining[..index]);
+        remaining = &remaining[index + prefix.len()..];
         if !starts_word {
             shown.push_str(&prefix);
+        } else if remaining
+            .chars()
+            .next()
+            .is_none_or(|after| after.is_whitespace() || matches!(after, '\'' | '"'))
+        {
+            // The folder itself, written with a trailing slash.
+            shown.push('.');
         }
-        remaining = &remaining[index + prefix.len()..];
     }
     shown.push_str(remaining);
     format!("{start}{shown}")
@@ -1675,10 +1695,18 @@ mod tests {
             shown("start cd /Users/ana/Wisp && npm run dev"),
             "start npm run dev"
         );
-        // A cd that changes folder stays.
+        // A cd that changes folder stays, and paths after it are shown as written.
         assert_eq!(
             shown("cd /Users/ana/Wisp/rust && cargo test"),
-            "cd rust && cargo test"
+            "cd /Users/ana/Wisp/rust && cargo test"
+        );
+        assert_eq!(
+            shown("cd rust && cat /Users/ana/Wisp/README.md"),
+            "cd rust && cat /Users/ana/Wisp/README.md"
+        );
+        assert_eq!(
+            shown("cd /Users/ana/Wisp && cd rust && ls /Users/ana/Wisp/a"),
+            "cd rust && ls /Users/ana/Wisp/a"
         );
         assert_eq!(shown("cd .. && ls"), "cd .. && ls");
         assert_eq!(
@@ -1725,6 +1753,11 @@ mod tests {
             "ls /mnt/Users/ana/Wisp/x"
         );
         assert_eq!(shown("ls /Users/ana/Wisp"), "ls /Users/ana/Wisp");
+        assert_eq!(shown("rm -rf /Users/ana/Wisp/"), "rm -rf .");
+        assert_eq!(
+            shown("make --prefix=/Users/ana/Wisp/ x"),
+            "make --prefix=. x"
+        );
     }
 
     #[test]

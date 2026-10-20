@@ -425,18 +425,27 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-/// The mode, model, and effort the composer's bottom border shows.
-fn composer_identity(state: &UiState) -> Option<String> {
-    let identity = header_identity(state);
-    let mode = state.mode_confirmed.then(|| state.mode.as_str().to_owned());
-    match (mode, identity) {
-        (Some(mode), Some(identity)) => Some(format!("{mode} · {identity}")),
-        (mode, identity) => mode.or(identity),
-    }
-}
-
 /// Folders longer than this show only their last component.
 const WORKSPACE_MAX_COLUMNS: usize = 32;
+
+/// Branch names longer than this end in `…`.
+const BRANCH_MAX_COLUMNS: usize = 32;
+
+/// Shorten `text` to `columns` display columns, ending in `…` when cut.
+fn clip_columns(text: &str, columns: usize) -> String {
+    if text.width() <= columns {
+        return text.to_owned();
+    }
+    let mut clipped = String::new();
+    for character in text.chars() {
+        if clipped.width() + character.to_string().width() + 1 > columns {
+            break;
+        }
+        clipped.push(character);
+    }
+    clipped.push('…');
+    clipped
+}
 
 fn display_workspace(cwd: &str) -> String {
     let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
@@ -464,7 +473,7 @@ fn workspace_label(cwd: &str, home: Option<&str>) -> String {
     format!("…/{last}")
 }
 
-fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
+fn footer_leading_parts(state: &UiState) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
@@ -476,9 +485,8 @@ fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<Stri
         }
     }
     // Queue and mode stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
-    // framed composer names the mode on its border instead.
-    if state.mode_confirmed && !identity_in_composer {
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer.
+    if state.mode_confirmed {
         parts.push(state.mode.as_str().to_string());
     }
     parts
@@ -490,11 +498,16 @@ fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<Stri
 fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = Vec::new();
     if identity_in_composer {
+        // Folder and branch names come from the file system and the repository, so
+        // they are cleaned of terminal controls before they are painted.
         if let Some(cwd) = state.workspace_cwd.as_deref() {
-            parts.push(display_workspace(cwd));
+            parts.push(display_workspace(&sanitize_for_terminal(cwd)));
         }
         if let Some(branch) = state.git_branch.as_deref() {
-            parts.push(branch.to_owned());
+            parts.push(clip_columns(
+                &sanitize_for_terminal(branch),
+                BRANCH_MAX_COLUMNS,
+            ));
         }
     } else if let Some(identity) = header_identity(state) {
         parts.push(identity);
@@ -1498,7 +1511,7 @@ fn render_composer(
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(border_style);
-        match composer_identity(state) {
+        match header_identity(state) {
             Some(identity) => block.title_bottom(
                 Line::from(format!(" {} ", sanitize_for_terminal(&identity)))
                     .style(Style::default().fg(palette.muted))
@@ -2428,7 +2441,7 @@ fn render_footer(
     } else {
         (terminal_width / 2).max(19)
     };
-    let leading = footer_leading_parts(state, identity_in_composer);
+    let leading = footer_leading_parts(state);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
     let ctx_width = status_budget
         .saturating_sub(leading_width)
@@ -4582,6 +4595,24 @@ mod tests {
     }
 
     #[test]
+    fn workspace_parts_are_cleaned() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.workspace_cwd = Some("/srv/evil\u{1b}[2Jdir".into());
+        state.git_branch = Some(format!("main\u{202e}{}", "x".repeat(60)));
+        let parts = footer_trailing_parts(&state, true);
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{1b}')),
+            "{parts:?}"
+        );
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{202e}')),
+            "{parts:?}"
+        );
+        assert!(parts[1].width() <= BRANCH_MAX_COLUMNS, "{parts:?}");
+        assert!(parts[1].ends_with('…'), "{parts:?}");
+    }
+
+    #[test]
     fn framed_composer_moves_identity() {
         let draw = |height: u16| {
             let mut state =
@@ -4613,7 +4644,8 @@ mod tests {
         };
 
         let (border, footer) = draw(20);
-        assert!(border.contains(" build · fake/model-x · high "), "{border}");
+        assert!(border.contains(" fake/model-x · high "), "{border}");
+        assert!(footer.contains("idle · build"), "{footer}");
         assert!(footer.contains("/srv/wisp · feat/x"), "{footer}");
         assert!(!footer.contains("model-x"), "{footer}");
 

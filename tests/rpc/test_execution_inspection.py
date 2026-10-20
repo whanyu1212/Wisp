@@ -25,6 +25,7 @@ from wisp.events import (
     RpcModelCatalogReported,
     RpcSkillsReported,
     RpcStateReported,
+    RpcWorkspaceReported,
     WispEvent,
 )
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
@@ -483,4 +484,30 @@ def test_workspace_report_survives_git_failure(tmp_path: Path, monkeypatch: Monk
     report = anyio.run(inspection_module.rpc_workspace_report, tmp_path)
 
     assert report.cwd == tmp_path
+    assert report.git_branch is None
+
+
+def test_workspace_report_abandons_hung_git(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    import threading
+
+    import wisp.rpc.handlers.inspection as inspection_module
+
+    release = threading.Event()
+
+    def hung(cwd: Path) -> str | None:
+        release.wait(5)
+        return "late"
+
+    monkeypatch.setattr(inspection_module, "read_current_branch", hung)
+    monkeypatch.setattr(inspection_module, "_WORKSPACE_BRANCH_TIMEOUT_SECONDS", 0.1)
+
+    async def report_within_deadline() -> RpcWorkspaceReported:
+        with anyio.fail_after(2):
+            return await inspection_module.rpc_workspace_report(tmp_path)
+
+    try:
+        report = anyio.run(report_within_deadline)
+    finally:
+        release.set()
+
     assert report.git_branch is None

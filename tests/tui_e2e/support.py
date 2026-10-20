@@ -212,6 +212,10 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
     return rows
 
 
+# The label starts a word and is followed by its separator or the end of the row.
+_STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s·|\s*$)")
+
+
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
     """Return whether complete frames show the fragments and the run back at idle.
 
@@ -226,14 +230,17 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
 
     Returns:
         bool: True when every fragment is in a complete frame after ``offset`` and
-        the footer of the last complete frame shows ``idle`` after any ``working``.
+        the first status word on the last complete frame's footer is ``idle``.
     """
     frames = complete_frames(output)
     phase = frames[offset:]
     if not all(fragment in phase for fragment in fragments):
         return False
     footer = next((row for row in reversed(screen_rows(frames)) if row.strip()), "")
-    return footer.rfind("idle") > footer.rfind("working")
+    # The status label is the footer's first status word; a branch or folder name
+    # later on the row must not count.
+    label = _STATUS_LABEL.search(footer)
+    return label is not None and label.group(1) == "idle"
 
 
 def welcome_ready(output: bytes | bytearray) -> bool:

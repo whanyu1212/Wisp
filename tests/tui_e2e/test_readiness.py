@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing, run_settled
+from tests.tui_e2e.support import (
+    complete_frames,
+    rendered_without_spacing,
+    run_settled,
+    screen_rows,
+)
 
 
 def _rust_binary() -> Path:
@@ -200,11 +205,10 @@ def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_p
             failure="Rust TUI did not settle the backend-owned initialization lifecycle",
         )
 
-        offset = len(tui.output)
         tui.send(b"after init")
-        tui.wait_for(
-            b"after init",
-            since=offset,
+        # Typed characters can reach the screen across several frames.
+        tui.wait_until(
+            lambda output: any("after init" in row for row in screen_rows(complete_frames(output))),
             failure="Rust TUI did not restore composer editing after initialization failed",
         )
         tui.quit()
