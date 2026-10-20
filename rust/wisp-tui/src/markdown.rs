@@ -87,6 +87,8 @@ pub struct MarkdownBlock {
     pub spans: Vec<TranscriptSpan>,
     has_table: bool,
     tables: Vec<MarkdownTable>,
+    /// Span ranges of tables already laid out to a width, which keep that width.
+    table_spans: Vec<Range<usize>>,
     syntax_source_bytes: usize,
     syntax_fragments: usize,
     syntax_attempted_source_bytes: usize,
@@ -144,12 +146,28 @@ impl MarkdownBlock {
                     })
                     .sum::<usize>(),
             )
+            .saturating_add(
+                self.table_spans
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Range<usize>>()),
+            )
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MarkdownDocument {
     pub blocks: Vec<Arc<MarkdownBlock>>,
+}
+
+impl MarkdownBlock {
+    /// Whether span `index` draws part of a table. A laid-out table already fits its
+    /// width, and one left unlaid keeps its parsed span range.
+    pub(crate) fn span_in_table(&self, index: usize) -> bool {
+        self.table_spans
+            .iter()
+            .chain(self.tables.iter().map(|table| &table.spans))
+            .any(|range| range.contains(&index))
+    }
 }
 
 impl MarkdownDocument {
@@ -424,6 +442,7 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
         source: base_offset..(base_offset + source.len()),
         has_table: false,
         tables: Vec::new(),
+        table_spans: Vec::new(),
         spans: if source.is_empty() {
             Vec::new()
         } else {
@@ -450,6 +469,7 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
         source: source_offset..source_offset,
         has_table: false,
         tables: Vec::new(),
+        table_spans: Vec::new(),
         spans: vec![TranscriptSpan {
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
@@ -1269,7 +1289,17 @@ impl BlockRenderer {
             Tag::Heading { level, .. } => {
                 self.style.block = BlockStyle::Heading(heading_level(*level));
             }
-            Tag::CodeBlock(_) => self.style.block = BlockStyle::Code,
+            Tag::CodeBlock(_) => {
+                // Like a nested paragraph, a fence inside a list item or quote starts on
+                // its own line rather than running on from the text before it.
+                if self.paragraph_inline {
+                    self.paragraph_inline = false;
+                } else if self.line_has_content && (!self.lists.is_empty() || self.quote_depth > 0)
+                {
+                    self.emit_break(source_offset);
+                }
+                self.style.block = BlockStyle::Code;
+            }
             Tag::Emphasis => self.style.emphasis = true,
             Tag::Strong => self.style.strong = true,
             Tag::Strikethrough => self.style.struck = true,
@@ -1547,6 +1577,7 @@ fn render_block(
             .any(|(event, _)| matches!(event, Event::Start(Tag::Table(_)))),
         spans: rendered.spans,
         tables: rendered.tables,
+        table_spans: Vec::new(),
         syntax_source_bytes: syntax_budget
             .usage
             .source_bytes
@@ -1602,6 +1633,33 @@ mod tests {
                 .flat_map(|block| &block.spans)
                 .any(|span| span.style.inline == InlineStyle::Code)
         );
+    }
+
+    #[test]
+    fn laid_out_tables_count_bytes() {
+        let source = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let parsed = &build.document.blocks[0];
+        let mut laid_out = (**parsed).clone();
+        laid_out.tables.clear();
+        let without_ranges = laid_out.retained_bytes();
+        laid_out.table_spans = vec![0..1, 1..2];
+        assert_eq!(
+            laid_out.retained_bytes(),
+            without_ranges + 2 * std::mem::size_of::<Range<usize>>()
+        );
+    }
+
+    #[test]
+    fn nested_fence_starts_new_line() {
+        let source = "- item text\n\n  ```rust\n  let value = 1;\n  ```\n\n> quoted\n>\n> ```\n> code\n> ```";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let rendered = build.document.plain_text();
+        assert!(
+            rendered.contains("• item text\nlet value = 1;"),
+            "{rendered:?}"
+        );
+        assert!(rendered.contains("│ quoted\n│ code"), "{rendered:?}");
     }
 
     #[test]
@@ -2224,6 +2282,7 @@ mod tests {
                 source: start..start + 1,
                 has_table: false,
                 tables: Vec::new(),
+                table_spans: Vec::new(),
                 spans: (0..fragments)
                     .map(|_| TranscriptSpan {
                         text: "x".repeat(fragment_bytes),

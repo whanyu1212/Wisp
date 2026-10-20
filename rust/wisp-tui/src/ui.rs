@@ -17,7 +17,7 @@ use crate::transcript_view::{
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
@@ -379,6 +379,24 @@ fn status_label(state: &UiState) -> String {
             ViewStatus::WaitingForTrust => "trust".into(),
             ViewStatus::Error => "error".into(),
         }
+    }
+}
+
+/// The colour of the footer's status label, shared by the composer border so the
+/// prompt shows at a glance whether Wisp is idle, working, or waiting on you.
+fn status_color(state: &UiState, palette: Palette) -> Color {
+    let active = matches!(
+        state.view_status,
+        ViewStatus::Running
+            | ViewStatus::WaitingForApproval
+            | ViewStatus::WaitingForTrust
+            | ViewStatus::Error
+    ) || state.interaction_status == crate::reducer::InteractionStatus::Compacting;
+    match state.view_status {
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => palette.warning,
+        ViewStatus::Error => palette.error,
+        _ if active => palette.primary,
+        _ => palette.muted,
     }
 }
 
@@ -1414,10 +1432,7 @@ fn render_composer(
     let queued_total = state
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
-    let border_style = match state.view_status {
-        ViewStatus::Error => Style::default().fg(palette.error),
-        _ => palette.border(),
-    };
+    let border_style = Style::default().fg(status_color(state, palette));
     let framed_input = editable(state) && padded && area.height >= 3;
     let block = if framed_input {
         Block::default()
@@ -2386,20 +2401,10 @@ fn render_footer(
     let label = status_label(state);
     let mut spans = Vec::new();
     if let Some(tail) = status_line.strip_prefix(&label) {
-        let active = matches!(
-            state.view_status,
-            ViewStatus::Running
-                | ViewStatus::WaitingForApproval
-                | ViewStatus::WaitingForTrust
-                | ViewStatus::Error
-        ) || state.interaction_status == crate::reducer::InteractionStatus::Compacting;
-        let color = match state.view_status {
-            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => palette.warning,
-            ViewStatus::Error => palette.error,
-            _ if active => palette.primary,
-            _ => palette.muted,
-        };
-        spans.push(Span::styled(label, Style::default().fg(color)));
+        spans.push(Span::styled(
+            label,
+            Style::default().fg(status_color(state, palette)),
+        ));
         spans.push(Span::styled(
             tail.to_owned(),
             Style::default().fg(palette.muted),
@@ -2410,6 +2415,11 @@ fn render_footer(
             Style::default().fg(palette.muted),
         ));
     }
+    let rest = if notice.is_some() {
+        Line::from(rest)
+    } else {
+        keycap_hints(&rest, palette)
+    };
     frame.render_widget(
         Paragraph::new(rest).style(rest_style),
         Rect {
@@ -2425,6 +2435,25 @@ fn render_footer(
             ..area
         },
     );
+}
+
+/// Style joined `key action` hints with each key as a keycap. Keys never contain
+/// spaces, so the first space ends the key; widths match the plain string.
+fn keycap_hints(hints: &str, palette: Palette) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, hint) in hints.split(" · ").enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" · "));
+        }
+        match hint.split_once(' ') {
+            Some((key, action)) => {
+                spans.push(Span::styled(key.to_owned(), palette.keycap()));
+                spans.push(Span::raw(format!(" {action}")));
+            }
+            None => spans.push(Span::raw(hint.to_owned())),
+        }
+    }
+    Line::from(spans)
 }
 
 fn editable(state: &UiState) -> bool {
@@ -4468,6 +4497,76 @@ mod tests {
     }
 
     #[test]
+    fn footer_keys_render_as_keycaps() {
+        let state = UiState::new("fake".into(), None, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let palette = Palette::default();
+        let key = style_at_text(terminal.backend(), "Ctrl+G").unwrap();
+        assert_eq!((key.0, key.1), (palette.foreground, palette.panel));
+        let action = style_at_text(terminal.backend(), " help").unwrap();
+        assert_eq!(action.0, palette.muted);
+        assert_ne!(action.1, palette.panel);
+    }
+
+    #[test]
+    fn composer_border_tracks_status() {
+        let border = |state: &UiState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            let mut viewport = TranscriptViewport::default();
+            let mut row_cache = TranscriptRowCache::default();
+            let mut composer_cache = ComposerLayoutCache::default();
+            terminal
+                .draw(|frame| {
+                    render_interactive(
+                        frame,
+                        state,
+                        &mut viewport,
+                        &mut row_cache,
+                        &mut composer_cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                        None,
+                        true,
+                        None,
+                        0,
+                        Palette::default(),
+                        &Bindings::default(),
+                        LogoChoice::AdalBraille,
+                        None,
+                        None,
+                    );
+                })
+                .unwrap();
+            style_at_text(terminal.backend(), "╭").unwrap().0
+        };
+        let palette = Palette::default();
+        let mut state = UiState::new("fake".into(), None, None);
+        assert_eq!(border(&state), palette.muted);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        assert!(state.editor_editable());
+        assert_eq!(border(&state), palette.primary);
+    }
+
+    #[test]
     fn composer_styles_markdown_structure_without_changing_source() {
         let state = UiState::new("fake".into(), None, None);
         let source = "# Heading\n- list with `code`\n```rust\nfn main() {}\n```";
@@ -4513,7 +4612,8 @@ mod tests {
         assert!(heading.2.contains(Modifier::BOLD));
         assert_eq!(marker.0, palette.primary);
         assert!(marker.2.contains(Modifier::BOLD));
-        assert_eq!(inline.0, palette.warning);
+        assert_eq!(inline.0, palette.foreground);
+        assert_eq!(inline.1, palette.panel);
         assert_eq!(fence.0, palette.secondary);
         assert!(fence.2.contains(Modifier::BOLD));
         assert_eq!(info.0, palette.accent);
@@ -4820,8 +4920,11 @@ mod tests {
         let first = state.transcript.entries()[7].id;
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
-        assert!(screen.contains("Bash     ▸ 2 commands"), "{screen}");
-        assert!(!screen.contains("cargo fmt"), "{screen}");
+        assert!(
+            screen.contains("Bash     ▸ 2 commands · cargo fmt, cargo test"),
+            "{screen}"
+        );
+        assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
         cache.fold_mut().expand_group(first);
         let screen = draw_cards(&state, &mut cache);
         assert!(
@@ -4947,6 +5050,77 @@ mod tests {
             .unwrap();
         let screen = terminal.backend().to_string();
         assert!(screen.contains("✓  MCP      linear/… ×3"), "{screen}");
+    }
+
+    #[test]
+    fn group_preview_counts_hidden_members() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("check".into());
+        for (call_id, command) in [
+            ("b1", "git status"),
+            ("b2", "git diff --stat"),
+            ("b3", "git log -1"),
+            ("b4", "git branch --show-current"),
+            ("b5", "git remote -v"),
+        ] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": command}),
+                });
+            finish_call(&mut state, call_id, "bash");
+        }
+        let screen = |width| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().to_string()
+        };
+        let wide = screen(80);
+        assert!(
+            wide.contains("▸ 5 commands · git status, git diff --stat +3"),
+            "{wide}"
+        );
+        let narrow = screen(36);
+        assert!(narrow.contains("▸ 5 commands"), "{narrow}");
+        assert!(!narrow.contains("git status"), "{narrow}");
+    }
+
+    #[test]
+    fn preview_counts_unknown_members() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("look".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "r1".into(),
+                name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"path": "src/a.rs"}),
+            });
+        finish_call(&mut state, "r1", "read");
+        // A result with no call event leaves its arguments unknown.
+        finish_call(&mut state, "r2", "read");
+        let mut cache = TranscriptRowCache::default();
+        let screen = draw_cards(&state, &mut cache);
+        assert!(
+            screen.contains("▸ 2 actions · read src/a.rs +1"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -5909,8 +6083,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(code.fg, Some(palette.warning));
-        assert!(code.bg.is_some());
+        assert_eq!(code.fg, Some(palette.foreground));
+        assert_eq!(code.bg, Some(palette.panel));
 
         let link = markdown_span_style(
             Style::default(),

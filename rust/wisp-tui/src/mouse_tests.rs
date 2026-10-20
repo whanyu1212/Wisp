@@ -1781,7 +1781,13 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
     let collapsed = draw(&mut ui, 80, 24);
     let (x, y) = cell_of(&collapsed, "Bash     ▸ 2 commands");
-    assert!(!(0..collapsed.area.height).any(|y| row_text(&collapsed, y).contains("git status")));
+    // Only the closed header's preview names the commands; their rows are folded away.
+    assert!(
+        (0..collapsed.area.height)
+            .map(|y| row_text(&collapsed, y))
+            .filter(|row| row.contains("git status"))
+            .all(|row| row.contains("▸ 2 commands"))
+    );
     plain_click(&mut ui, &writer, x, y).await;
     let reopened = draw(&mut ui, 80, 24);
     cell_of(&reopened, "git diff --stat");

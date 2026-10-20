@@ -1207,18 +1207,26 @@ impl TranscriptRowCache {
                 CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
             };
             let arrow = if expanded { "▾" } else { "▸" };
-            let source = format!("{marker}{label}  {arrow} {} {unit}", members.len());
+            let mut source = format!("{marker}{label}  {arrow} {} {unit}", members.len());
+            let count_end = source.len();
             let (row_width, fold_hint) = if width >= ACTION_COLUMNS_BESIDE_HINT + hint.width() {
                 (width - hint.width(), hint)
             } else {
                 (width, FoldHint::None)
             };
+            // An open group lists its members below, so only a closed one previews them.
+            if !expanded {
+                let budget = row_width.saturating_sub(self.action_columns(&source));
+                source.push_str(&self.group_preview(transcript, &kind, &members, budget));
+            }
             let spans = self.single_action_row_spans(
                 &source,
                 row_width,
                 CardRowStyle {
                     marker_end: marker.len(),
                     label_end: marker.len() + label.len(),
+                    argument_start: count_end,
+                    argument_style: crate::markdown::InlineStyle::ToolArgument,
                     ..CardRowStyle::PLAIN
                 },
                 TranscriptRowKind::CardGroup,
@@ -1607,6 +1615,63 @@ impl TranscriptRowCache {
         row.tone = tone;
         row.spans = spans;
         Some(ProjectedRow { row, next })
+    }
+
+    /// What a closed group ran, in order, as `" · first, second +2"`, fitted to
+    /// `budget` columns. Members that do not fit are counted rather than cut, and the
+    /// preview is left out when not even one member fits.
+    fn group_preview(
+        &mut self,
+        transcript: &Transcript,
+        kind: &CardGroupKey,
+        members: &[TranscriptEntryId],
+        budget: usize,
+    ) -> String {
+        let items = group_preview_items(transcript, kind, members);
+        // Members whose arguments are unknown are still counted in `+N`, so the
+        // preview always agrees with the header's count.
+        let total = members.len();
+        let mut preview = String::new();
+        let mut shown = 0;
+        for (index, item) in items.iter().enumerate() {
+            let separator = if index == 0 { " · " } else { ", " };
+            let item = self.clip_to_columns(item, GROUP_PREVIEW_ITEM_COLUMNS);
+            let candidate = format!("{preview}{separator}{item}");
+            let hidden = total - index - 1;
+            let more = if hidden == 0 {
+                String::new()
+            } else {
+                format!(" +{hidden}")
+            };
+            if self.action_columns(&candidate) + self.action_columns(&more) > budget {
+                break;
+            }
+            preview = candidate;
+            shown += 1;
+        }
+        if shown > 0 && shown < total {
+            preview.push_str(&format!(" +{}", total - shown));
+        }
+        preview
+    }
+
+    /// Shorten `text` to at most `columns` display columns, ending in `…` when cut.
+    fn clip_to_columns(&mut self, text: &str, columns: usize) -> String {
+        if self.action_columns(text) <= columns {
+            return text.to_owned();
+        }
+        let mut clipped = String::new();
+        let mut used = 0;
+        for grapheme in text.graphemes(true) {
+            let width = UnicodeWidthStr::width(sanitize_grapheme(grapheme, used).as_str());
+            if used + width + 1 > columns {
+                break;
+            }
+            clipped.push_str(grapheme);
+            used += width;
+        }
+        clipped.push('…');
+        clipped
     }
 
     /// Style an action line as one row of at most `width` columns. A line that does not
@@ -2085,6 +2150,7 @@ impl TranscriptRowCache {
         let mut cursor = start;
         let mut word_break = None::<(usize, usize, usize)>;
         let mut previous_space = false;
+        let mut row_full_width = false;
         while cursor < snapshot.output_len {
             let block_index = snapshot
                 .block_starts
@@ -2111,13 +2177,17 @@ impl TranscriptRowCache {
             let local = cursor.saturating_sub(block_start);
             let mut span_start = 0_usize;
             let mut advanced = false;
-            for span in &block.spans {
+            for (span_index, span) in block.spans.iter().enumerate() {
                 let span_end = span_start + span.text.len();
                 if local >= span_end {
                     span_start = span_end;
                     continue;
                 }
                 let relative_start = local.saturating_sub(span_start);
+                // Code and tables keep the full width from where they start in a row,
+                // even after a list or quote marker; prose wraps at the measure. The
+                // span decides this once, not per grapheme.
+                let span_full_width = keeps_full_width(block, span_index, span);
                 for (relative_offset, grapheme) in
                     span.text[relative_start..].grapheme_indices(true)
                 {
@@ -2166,7 +2236,13 @@ impl TranscriptRowCache {
                         }
                     }
                     previous_space = space;
-                    if !spans.is_empty() && column.saturating_add(grapheme_width) > width {
+                    row_full_width |= span_full_width;
+                    let wrap_width = if row_full_width {
+                        width
+                    } else {
+                        width.min(PROSE_COLUMNS)
+                    };
+                    if !spans.is_empty() && column.saturating_add(grapheme_width) > wrap_width {
                         if let Some((offset, count, last_len)) = word_break {
                             spans.truncate(count);
                             if let Some(last) = spans.last_mut() {
@@ -3122,6 +3198,29 @@ impl McpGroupHeader {
     }
 }
 
+/// Widest a single member may appear in a closed group's preview.
+const GROUP_PREVIEW_ITEM_COLUMNS: usize = 40;
+
+/// Each member's arguments for a closed group's preview, in order. Exploration mixes
+/// tools, so each item there also names its tool.
+fn group_preview_items(
+    transcript: &Transcript,
+    kind: &CardGroupKey,
+    members: &[TranscriptEntryId],
+) -> Vec<String> {
+    members
+        .iter()
+        .filter_map(|id| transcript.entry(*id)?.tool_card())
+        .filter_map(|card| {
+            let arguments = shown_arguments(card)?;
+            Some(match kind {
+                CardGroupKey::Explore => format!("{} {arguments}", card.name),
+                _ => arguments.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// A card's arguments as its action line shows them, if it shows any.
 fn shown_arguments(card: &crate::tool_cards::ToolCardSnapshot) -> Option<&str> {
     card.arguments_available
@@ -3136,7 +3235,15 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
         return None;
     }
     match card_group_key(entry)? {
-        CardGroupKey::Explore | CardGroupKey::Tool(_) => Some(members.len() as u64),
+        CardGroupKey::Explore | CardGroupKey::Tool(_) => {
+            // A closed group previews its members, so their arguments key the row too.
+            use std::hash::{Hash, Hasher};
+            let key = card_group_key(entry)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            members.len().hash(&mut hasher);
+            group_preview_items(transcript, &key, &members).hash(&mut hasher);
+            Some(hasher.finish())
+        }
         CardGroupKey::Mcp(_) => {
             McpGroupHeader::new(transcript, &members, false).map(|header| header.signature())
         }
@@ -4082,6 +4189,22 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
     }
 }
 
+/// Assistant prose wraps at a readable measure even on wide terminals.
+const PROSE_COLUMNS: usize = 100;
+
+/// Whether a span keeps the full width: code, raw HTML and tables stay aligned, while
+/// paragraphs, headings and lists wrap at [`PROSE_COLUMNS`].
+fn keeps_full_width(
+    block: &crate::markdown::MarkdownBlock,
+    index: usize,
+    span: &TranscriptSpan,
+) -> bool {
+    matches!(
+        span.style.block,
+        crate::markdown::BlockStyle::Code | crate::markdown::BlockStyle::RawHtml
+    ) || block.span_in_table(index)
+}
+
 /// Large messages stay fully readable as plain text without building an oversized Markdown tree.
 fn uses_markdown(entry: &TranscriptEntry) -> bool {
     entry.role == TranscriptRole::Assistant
@@ -4295,6 +4418,53 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(content, ["alpha beta", "gamma delta", "abcdefghijkl", "mn"]);
+    }
+
+    #[test]
+    fn prose_caps_but_code_stays_wide() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explain".into());
+        let prose = "word ".repeat(40);
+        let code = format!("let value = {};", "x".repeat(130));
+        let item = format!("- item {prose}\n\n  ```rust\n  {code}\n  ```");
+        let quote = format!("> quoted {prose}\n>\n> ```\n> {code}\n> ```");
+        let cell = "y".repeat(120);
+        let table =
+            format!("- table {prose}\n\n  | a | b |\n  |---|---|\n  | {cell} | z |\n\n  {prose}");
+        let answer = transcript
+            .complete_message(
+                1,
+                format!("{prose}\n\n```rust\n{code}\n```\n\n{item}\n\n{quote}\n\n{table}"),
+            )
+            .unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 160, 120);
+
+        let rows = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| row.anchor.entry_id == answer)
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+
+        // Lists and quotes holding code or a table still cap their prose, while the
+        // code and table rows inside them keep the full width.
+        let prose_rows = rows.iter().filter(|row| {
+            row.contains("word") && !row.contains("let value") && !row.contains(&cell)
+        });
+        assert!(prose_rows.clone().count() >= 10, "{rows:#?}");
+        assert!(
+            prose_rows.clone().all(|row| row.trim_end().width() <= 100),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row.contains(&code)), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("│ ") && row.contains(&code)),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
     }
 
     #[test]
