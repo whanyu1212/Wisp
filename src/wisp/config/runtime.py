@@ -50,6 +50,7 @@ class WispConfig(BaseModel):
     auth_path: Path = Field(default_factory=lambda: default_auth_path())
     protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS
     retry_policy: RetryPolicy = Field(default_factory=RetryPolicy)
+    codex_read_timeout_seconds: float = Field(default=300.0, gt=0, allow_inf_nan=False)
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
@@ -121,6 +122,7 @@ class WispConfig(BaseModel):
         session_dir: Path | None = None,
         auth_path: Path | None = None,
         retry_policy: RetryPolicy | None = None,
+        codex_read_timeout_seconds: float | None = None,
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
         web_search: bool | None = None,
@@ -154,6 +156,9 @@ class WispConfig(BaseModel):
         provider/model defaults are coupled: a higher-precedence provider override
         without a model drops the saved user model and effort rather than sending
         them to another provider.
+
+        ``codex_read_timeout_seconds`` is user-only too: project settings cannot
+        prolong provider waits. It bounds read inactivity, not total response time.
 
         ``web_search`` is user-only too, because each search is billed to the user's
         provider account. It is off unless enabled.
@@ -203,6 +208,20 @@ class WispConfig(BaseModel):
             auth_path=auth_path or default_auth_path(settings=settings),
             protected_paths=_resolve_protected_paths(settings),
             retry_policy=retry_policy or _resolve_retry_policy(settings),
+            codex_read_timeout_seconds=(
+                codex_read_timeout_seconds
+                if codex_read_timeout_seconds is not None
+                else float(
+                    _first_non_empty(
+                        os.environ.get("WISP_CODEX_READ_TIMEOUT_SECONDS"),
+                        str(settings.codex_read_timeout_seconds)
+                        if settings.codex_read_timeout_seconds is not None
+                        else None,
+                        default="300",
+                    )
+                    or "300"
+                )
+            ),
             context_reserve_tokens=(
                 context_reserve_tokens
                 if context_reserve_tokens is not None

@@ -22,18 +22,25 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
   "web_search": false,
+  "codex_read_timeout_seconds": 300,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
 ```
 
 Malformed settings files are skipped with a warning, never fatal.
 
+`codex_read_timeout_seconds` bounds read inactivity on Wisp-owned `openai-codex` connections,
+not the total response duration. It defaults to `300`; use `600` for longer waits. Values must be
+positive and finite. `WISP_CODEX_READ_TIMEOUT_SECONDS` overrides the user setting; an explicit SDK
+`WispConfig.from_env(codex_read_timeout_seconds=...)` argument overrides both. There is no dedicated
+CLI flag. See [Provider retry behavior](../guide/providers#retry-behavior) for recovery details.
+
 ## User-only fields
 
 Some fields are **user-only** and a project file can never set them:
 
-`protected_paths` · `retry` · `effort` · `context_reserve_tokens` · `auto_compaction_enabled` ·
-`web_search` · `mcp_servers` · `openai_compatible`
+`protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
+`auto_compaction_enabled` · `web_search` · `mcp_servers` · `openai_compatible`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.

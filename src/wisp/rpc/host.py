@@ -948,7 +948,7 @@ async def build_runtime_for_config(
     *,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
 ) -> WispRuntime:
-    """Build a runtime from the configuration's auth, retry, MCP, and endpoint settings.
+    """Build a runtime from the configuration's auth, retry, timeout, MCP, and endpoint settings.
 
     Args:
         config (WispConfig): Runtime configuration.
@@ -963,6 +963,7 @@ async def build_runtime_for_config(
     return await build_runtime(
         auth_path=config.auth_path,
         retry_policy=config.retry_policy,
+        codex_read_timeout_seconds=config.codex_read_timeout_seconds,
         mcp_servers=config.mcp_servers,
         openai_compatible=config.openai_compatible,
         anthropic_cache_ttl=anthropic_cache_ttl,

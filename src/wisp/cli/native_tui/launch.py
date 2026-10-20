@@ -67,6 +67,7 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
     runtime = await build_runtime(
         auth_path=options.config.auth_path,
         retry_policy=options.config.retry_policy,
+        codex_read_timeout_seconds=options.config.codex_read_timeout_seconds,
         openai_compatible=options.config.openai_compatible,
     )
     try:
@@ -144,6 +145,7 @@ def _rpc_env(options: TuiOptions | None = None) -> dict[str, str]:
                 separators=(",", ":"),
                 sort_keys=True,
             )
+        env["WISP_CODEX_READ_TIMEOUT_SECONDS"] = str(options.config.codex_read_timeout_seconds)
         env["WISP_CONTEXT_RESERVE_TOKENS"] = str(options.config.context_reserve_tokens)
         env["WISP_AUTO_COMPACTION"] = "1" if options.config.auto_compaction_enabled else "0"
         env["WISP_WEB_SEARCH"] = "1" if options.config.web_search else "0"

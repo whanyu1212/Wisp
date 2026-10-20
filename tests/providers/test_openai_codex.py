@@ -219,7 +219,12 @@ def test_openai_codex_provider_normalizes_post_start_sse_failure(tmp_path: Path)
     assert events == [
         ProviderResponseStarted(model="gpt-5.6-sol"),
         ProviderResponseFailed(
-            message="Invalid OpenAI Codex SSE event: Expecting value",
+            message=(
+                "OpenAI Codex ProviderError: Invalid OpenAI Codex SSE event: Expecting value "
+                "(attempt 1). The response stream had started; it was not automatically retried. "
+                "Resume the session to continue; "
+                "inspect completed tool results before rerunning work."
+            ),
             response_id="previous-response",
         ),
     ]

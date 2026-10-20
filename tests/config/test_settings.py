@@ -31,6 +31,28 @@ def _write_settings(directory: Path, **values: object) -> None:
     (wisp_dir / "settings.json").write_text(json.dumps(values), encoding="utf-8")
 
 
+def test_codex_read_timeout_is_user_only_and_respects_precedence(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    _write_settings(Path.home(), codex_read_timeout_seconds=600)
+    # Even malformed user-only fields in a trusted project are ignored.
+    _write_settings(project, codex_read_timeout_seconds="invalid", model="project-model")
+    config = WispConfig.from_env(project_dir=project, trusted=True)
+    assert config.codex_read_timeout_seconds == 600
+    assert config.model == "project-model"
+    monkeypatch.setenv("WISP_CODEX_READ_TIMEOUT_SECONDS", "900")
+    assert WispConfig.from_env(project_dir=project, trusted=True).codex_read_timeout_seconds == 900
+    config = WispConfig.from_env(project_dir=project, trusted=True, codex_read_timeout_seconds=42)
+    assert config.codex_read_timeout_seconds == 42
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), -float("inf")])
+def test_codex_read_timeout_rejects_invalid_settings(value: float) -> None:
+    with pytest.raises(ValidationError):
+        WispSettings(codex_read_timeout_seconds=value)
+
+
 def test_resolve_settings_empty_when_no_files(tmp_path: Path) -> None:
     settings = resolve_settings(project_dir=tmp_path / "proj", home_dir=tmp_path / "home")
 
