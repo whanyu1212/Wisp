@@ -181,8 +181,20 @@ in JSON/RPC and the TUI, and never replays an already-started response.
 OpenAI-family streams succeed only after the provider's native completion event. If a connection
 ends first, Wisp reports a failed turn with any partial text and never executes buffered tool calls.
 For Wisp-owned `openai-codex` connections, connect and pool waits are limited to 10 seconds, request
-writes to 30 seconds, and response-header or between-chunk read inactivity to 300 seconds.
-Caller-injected HTTP clients retain their caller-selected timeout policy.
+writes to 30 seconds, and response-header or between-chunk read inactivity to 300 seconds by default.
+This is an **idle timeout**, not a total response deadline: a response can run longer while data
+continues arriving. For long-reasoning workloads, opt into 600 seconds with
+`WISP_CODEX_READ_TIMEOUT_SECONDS=600` or `"codex_read_timeout_seconds": 600` in your user settings.
+The value must be positive and finite; project settings cannot override it. SDK callers can pass
+`read_timeout_seconds=600` to `OpenAICodexProvider`. Caller-injected HTTP clients retain their
+caller-selected timeout policy, which is also used in timeout diagnostics.
+
+Transport failures report the exception type, timeout phase and configured limit (for timeouts),
+attempt number, and current response ID when available. These diagnostics are retained in session
+history without including transport exception text, request URLs, or headers. Once a stream starts,
+Wisp stops rather than automatically replaying it. Resume the same session to continue; completed
+tool results and partial replies are retained. Inspect those results before asking the agent to
+repeat work—resuming is not a guarantee that the model will never request the same action again.
 
 Tune with `WISP_RETRY_MAX_RETRIES`, `WISP_RETRY_BASE_DELAY_SECONDS`, and
 `WISP_RETRY_MAX_DELAY_SECONDS` — see [Environment variables](../reference/environment).

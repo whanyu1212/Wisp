@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping, Sequence
@@ -47,7 +48,7 @@ from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_de
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"
-_CODEX_TIMEOUT = httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0)
+DEFAULT_CODEX_READ_TIMEOUT_SECONDS = 300.0
 # How long a stream that ended at its terminal event is read on to its end. The
 # pooled connection is kept for the next request only if the response is read
 # to EOF; otherwise httpcore closes it and the next turn opens TCP and TLS again.
@@ -97,7 +98,13 @@ class OpenAICodexProvider:
         base_url: str = DEFAULT_CODEX_BASE_URL,
         client: httpx.AsyncClient | None = None,
         retry_policy: RetryPolicy | None = None,
+        read_timeout_seconds: float = DEFAULT_CODEX_READ_TIMEOUT_SECONDS,
     ) -> None:
+        if not math.isfinite(read_timeout_seconds) or read_timeout_seconds <= 0:
+            raise ValueError("Codex read_timeout_seconds must be positive and finite")
+        self._timeout = httpx.Timeout(
+            connect=10.0, read=read_timeout_seconds, write=30.0, pool=10.0
+        )
         self.default_model: str | None = default_model
         self._auth_resolver = auth_resolver or StoredProviderAuthResolver(
             JsonAuthStore(default_auth_path())
@@ -292,9 +299,16 @@ class OpenAICodexProvider:
                             )
                             break
             except (ProviderError, httpx.HTTPError) as exc:
+                error_message = _codex_exception_message(
+                    exc,
+                    timeout=self._client.timeout if self._client is not None else self._timeout,
+                    response_started=response_started,
+                    response_id=response_id,
+                    attempt=retry_number + 1,
+                )
                 if response_started:
                     failure = failure or ProviderResponseFailed(
-                        message=str(exc),
+                        message=error_message,
                         partial_content="".join(chunks),
                         response_id=response_id or previous_response_id,
                     )
@@ -302,7 +316,7 @@ class OpenAICodexProvider:
                 decision = _codex_retry_decision(exc)
                 if decision is None or retry_number >= self._retry_policy.max_retries:
                     yield ProviderResponseFailed(
-                        message=str(exc),
+                        message=error_message,
                         failure_kind=(
                             "context_overflow" if is_context_overflow_message(str(exc)) else "error"
                         ),
@@ -314,7 +328,7 @@ class OpenAICodexProvider:
                     retry_after_seconds=decision.retry_after_seconds,
                 )
                 if delay is None:
-                    yield ProviderResponseFailed(message=str(exc))
+                    yield ProviderResponseFailed(message=error_message)
                     return
                 yield ProviderRetrying(
                     attempt=retry_number + 2,
@@ -494,7 +508,7 @@ class OpenAICodexProvider:
 
     def _http_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=_CODEX_TIMEOUT)
+            self._client = httpx.AsyncClient(timeout=self._timeout)
         return self._client
 
     async def aclose(self) -> None:
@@ -522,6 +536,57 @@ async def _drain_lines(lines: AsyncIterator[str]) -> None:
             # The response already completed; a failed drain only loses the
             # connection, which httpcore then closes.
             pass
+
+
+def _codex_exception_message(
+    exc: ProviderError | httpx.HTTPError,
+    *,
+    timeout: httpx.Timeout,
+    response_started: bool,
+    response_id: str | None,
+    attempt: int,
+) -> str:
+    """Describe a terminal failure without exposing transport URLs or headers.
+
+    Args:
+        exc (ProviderError | httpx.HTTPError): Failure from opening or reading a response.
+        timeout (httpx.Timeout): Active client's timeout policy, including injected clients.
+        response_started (bool): Whether HTTP success already opened the response stream.
+        response_id (str | None): Current upstream response ID, never the prior cursor.
+        attempt (int): One-based request attempt that failed.
+
+    Returns:
+        str: Nonempty diagnostic retained by the existing error event and session log.
+    """
+
+    if isinstance(exc, httpx.TimeoutException):
+        phase, seconds = "request", None
+        for error_type, name, limit in (
+            (httpx.ReadTimeout, "read-idle", timeout.read),
+            (httpx.ConnectTimeout, "connect", timeout.connect),
+            (httpx.WriteTimeout, "write", timeout.write),
+            (httpx.PoolTimeout, "pool", timeout.pool),
+        ):
+            if isinstance(exc, error_type):
+                phase, seconds = name, limit
+                break
+        configured = f"; configured limit {seconds:g}s" if seconds is not None else ""
+        detail = f"{phase} timeout{configured}"
+    elif isinstance(exc, httpx.HTTPError):
+        # Transport exception text can contain credential-bearing request URLs.
+        detail = "network/transport failure"
+    else:
+        detail = str(exc).strip() or "provider failure without a description"
+    diagnostic = f"OpenAI Codex {type(exc).__name__}: {detail} (attempt {attempt}"
+    if response_id is not None:
+        diagnostic += f"; response_id={response_id}"
+    diagnostic += "). "
+    if response_started:
+        return diagnostic + (
+            "The response stream had started; it was not automatically retried. "
+            "Resume the session to continue; inspect completed tool results before rerunning work."
+        )
+    return diagnostic + "No response stream started; no further automatic retries will be made."
 
 
 def _codex_retry_decision(exc: ProviderError | httpx.HTTPError) -> RetryDecision | None:

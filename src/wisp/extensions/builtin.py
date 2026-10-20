@@ -62,6 +62,7 @@ def activate(
     *,
     auth_store: JsonAuthStore | None = None,
     retry_policy: RetryPolicy | None = None,
+    codex_read_timeout_seconds: float | None = None,
     process_supervisor: ProcessSupervisor | None = None,
     openai_compatible: OpenAICompatibleSettings | None = None,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
@@ -74,6 +75,8 @@ def activate(
             authentication. Defaults to None.
         retry_policy (RetryPolicy | None, optional): Retry policy for provider
             requests. Defaults to None.
+        codex_read_timeout_seconds (float | None, optional): Codex read-idle timeout.
+            Defaults to the provider's 300-second limit.
         process_supervisor (ProcessSupervisor | None, optional): Supervisor for
             shell tools. Defaults to None.
         openai_compatible (OpenAICompatibleSettings | None, optional): Settings
@@ -106,9 +109,20 @@ def activate(
         return DeepSeekProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
 
     def _openai_codex() -> Provider:
-        from wisp.providers.openai_codex import OpenAICodexProvider
+        from wisp.providers.openai_codex import (
+            DEFAULT_CODEX_READ_TIMEOUT_SECONDS,
+            OpenAICodexProvider,
+        )
 
-        return OpenAICodexProvider(auth_resolver=auth_resolver, retry_policy=retry_policy)
+        return OpenAICodexProvider(
+            auth_resolver=auth_resolver,
+            retry_policy=retry_policy,
+            read_timeout_seconds=(
+                codex_read_timeout_seconds
+                if codex_read_timeout_seconds is not None
+                else DEFAULT_CODEX_READ_TIMEOUT_SECONDS
+            ),
+        )
 
     def _anthropic() -> Provider:
         from wisp.providers.anthropic import AnthropicProvider

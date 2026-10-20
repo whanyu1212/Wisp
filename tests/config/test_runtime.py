@@ -27,6 +27,28 @@ def test_config_defaults_to_default_provider(tmp_path: Path, monkeypatch: Monkey
     assert config.auth_path == default_auth_path()
 
 
+def test_codex_read_timeout_defaults_and_environment(monkeypatch: MonkeyPatch) -> None:
+    assert WispConfig.from_env().codex_read_timeout_seconds == 300
+    monkeypatch.setenv("WISP_CODEX_READ_TIMEOUT_SECONDS", "600")
+    assert WispConfig.from_env().codex_read_timeout_seconds == 600
+    assert WispConfig.from_env(codex_read_timeout_seconds=42).codex_read_timeout_seconds == 42
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "not-a-number"])
+def test_codex_read_timeout_rejects_invalid_environment(
+    monkeypatch: MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WISP_CODEX_READ_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError):
+        WispConfig.from_env()
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), -float("inf")])
+def test_codex_read_timeout_rejects_invalid_config(value: float) -> None:
+    with pytest.raises(ValueError):
+        WispConfig(codex_read_timeout_seconds=value)
+
+
 def test_config_defaults_session_dir_to_durable_home_path(monkeypatch: MonkeyPatch) -> None:
     # Sessions persist to ~/.wisp/sessions by default so transcripts survive runs
     # and can be resumed (no env override in effect).

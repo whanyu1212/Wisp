@@ -55,6 +55,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
     {
         "protected_paths",
         "retry",
+        "codex_read_timeout_seconds",
         "effort",
         "context_reserve_tokens",
         "auto_compaction_enabled",
@@ -127,6 +128,7 @@ class WispSettings(BaseModel):
     auth_path: str | None = None
     protected_paths: list[str] | None = None
     retry: RetrySettings | None = None
+    codex_read_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
@@ -223,6 +225,7 @@ class ResolvedSettings(BaseModel):
     auth_path: str | None = None
     protected_paths: tuple[str, ...] | None = None
     retry: RetrySettings | None = None
+    codex_read_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     effort: str | None = None
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
@@ -313,6 +316,7 @@ def resolve_settings(
         auth_path=_coalesce(project_settings.auth_path, user_settings.auth_path),
         protected_paths=_coalesce_paths(user_settings.protected_paths),
         retry=user_settings.retry,
+        codex_read_timeout_seconds=user_settings.codex_read_timeout_seconds,
         effort=user_settings.effort,
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
