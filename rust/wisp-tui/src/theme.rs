@@ -75,25 +75,55 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// A tinted label chip, such as a tool card's `Read`: accent text on a faint wash
-    /// of the accent. The wash is a colour of its own, so it stays visible over a glass
+    /// A tool-specific label on a tinted surface. The wash stays visible over a glass
     /// theme's terminal background. Where the accent is too faint on its wash, the text
     /// moves toward the foreground until it reads; monochrome palettes reverse the
     /// row's colours instead.
-    pub fn chip(self) -> Style {
-        const TINT: f64 = 0.1;
+    pub fn chip(self, label: &str) -> Style {
+        const TINT: f64 = 0.18;
         if self.monochrome {
             return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         }
-        let fill = mix(self.accent, self.background, TINT);
+        // Stable hue families keep tools distinguishable even in a theme whose accents
+        // are close together. Blend them into the theme, then enforce text contrast.
+        // Status remains on the marker, so a failed Read does not change identity.
+        let accent = match label.trim() {
+            "Read" => Color::Rgb(132, 178, 224),
+            "Search" => Color::Rgb(103, 194, 168),
+            "List" => Color::Rgb(166, 191, 122),
+            "Explored" => Color::Rgb(115, 196, 213),
+            "Bash" => Color::Rgb(225, 163, 112),
+            "Edit" => Color::Rgb(190, 151, 223),
+            "Write" => Color::Rgb(218, 146, 172),
+            "MCP" => Color::Rgb(148, 157, 225),
+            "Process" => Color::Rgb(215, 191, 109),
+            _ => self.muted,
+        };
+        let accent = mix(accent, self.secondary, 0.85);
+        let fill = mix(accent, self.background, TINT);
         let text = (0..=20)
-            .map(|step| mix(self.foreground, self.accent, f64::from(step) / 20.0))
+            .map(|step| mix(self.foreground, accent, f64::from(step) / 20.0))
             .find(|text| contrast_ratio(*text, fill) >= 4.5)
             .unwrap_or(self.foreground);
         Style::default()
             .fg(text)
             .bg(fill)
             .add_modifier(Modifier::BOLD)
+    }
+
+    /// Shade the existing padding cells to give a compact chip a shallow edge.
+    pub fn chip_edge(self, chip: Style, leading: bool) -> Style {
+        let (Some(text), Some(fill)) = (chip.fg, chip.bg) else {
+            return chip;
+        };
+        if self.monochrome {
+            return chip;
+        }
+        chip.bg(if leading {
+            mix(text, fill, 0.16)
+        } else {
+            mix(fill, self.background, 0.35)
+        })
     }
 
     pub fn tool_argument(self) -> Style {

@@ -1043,7 +1043,9 @@ async fn clicking_unchanged_empty_composer_returns_focus_from_card_browse() {
         .area;
     // Use any retained entry identity: the click must clear browse focus even
     // when placing the empty editor's cursor does not mutate it.
-    ui.browse_selected = Some(ui.state.transcript.append_prompt("card".into()));
+    ui.browse_selected = Some(BrowseTarget::Entry(
+        ui.state.transcript.append_prompt("card".into()),
+    ));
     let (writer, _) = mpsc::channel(8);
     ui.handle_input(click(area.x, area.y), &writer, MAX_APPLICATION_FRAME_BYTES)
         .await
@@ -1595,6 +1597,11 @@ async fn a_release_keeps_the_recovery_notice_of_an_unsendable_response() {
 }
 
 fn finish_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value, output: &str) {
+    start_tool(ui, call_id, name, arguments);
+    complete_tool(ui, call_id, name, output);
+}
+
+fn start_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value) {
     ui.state
         .transcript
         .observe_tool_call(crate::tool_cards::ToolCallInput {
@@ -1603,6 +1610,9 @@ fn finish_tool(ui: &mut LiveUi, call_id: &str, name: &str, arguments: Value, out
             arguments,
             detail_source: crate::tool_detail::ToolDetailSource::None,
         });
+}
+
+fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
     ui.state
         .transcript
         .observe_tool_result(crate::tool_cards::ToolResultInput {
@@ -1677,12 +1687,12 @@ async fn click_toggles_a_card() {
     assert!(ui.transcript_row_cache.fold().is_expanded(card));
 
     // While browsing, the selection follows the click and the hint names it.
-    ui.browse_selected = Some(card);
+    ui.browse_selected = Some(BrowseTarget::Entry(card));
     let selected = draw(&mut ui, 80, 24);
     assert!(row_text(&selected, y).contains("(click to collapse)"));
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_expanded(card));
-    assert_eq!(ui.browse_selected, Some(card));
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Entry(card)));
     let collapsed = draw(&mut ui, 80, 24);
     assert!(row_text(&collapsed, y).contains("(click to expand)"));
 }
@@ -1708,7 +1718,7 @@ async fn click_opens_a_thought() {
 }
 
 #[tokio::test]
-async fn click_opens_explored_group() {
+async fn click_toggles_explored_group() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = ui("");
     ui.state.transcript.append_prompt("look".into());
@@ -1722,12 +1732,248 @@ async fn click_opens_explored_group() {
         );
     }
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "explored 2 files");
+    let (x, y) = cell_of(&buffer, "Explored  ▸ 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let opened = draw(&mut ui, 80, 24);
     assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
+    let (x, y) = cell_of(&opened, "Explored  ▾ 2 actions");
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
+    cell_of(&draw(&mut ui, 80, 24), "Explored  ▸ 2 actions");
+}
+
+#[tokio::test]
+async fn click_toggles_consecutive_bash_group_and_member_details() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    ui.state.transcript.append_prompt("check".into());
+    finish_tool(
+        &mut ui,
+        "first-shell",
+        "bash",
+        serde_json::json!({"command": "git diff --stat"}),
+        "text",
+    );
+    finish_tool(
+        &mut ui,
+        "shell",
+        "bash",
+        serde_json::json!({"command": "git status"}),
+        "clean",
+    );
+    let buffer = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&buffer, "Bash     ▸ 2 commands");
+    plain_click(&mut ui, &writer, x, y).await;
+    let start = ui.state.transcript.entries()[1].id;
+    assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
+    let opened = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&opened, "git diff --stat");
+    cell_of(&opened, "git status");
+    // The first command and the persistent group header have separate click targets.
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(ui.transcript_row_cache.fold().is_expanded(start));
+    assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
+    let detailed = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&detailed, "Bash     ▾ 2 commands");
+    plain_click(&mut ui, &writer, x, y).await;
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
+    let collapsed = draw(&mut ui, 80, 24);
+    let (x, y) = cell_of(&collapsed, "Bash     ▸ 2 commands");
+    assert!(!(0..collapsed.area.height).any(|y| row_text(&collapsed, y).contains("git status")));
+    plain_click(&mut ui, &writer, x, y).await;
+    let reopened = draw(&mut ui, 80, 24);
+    cell_of(&reopened, "git diff --stat");
+    cell_of(&reopened, "git status");
+    assert!(ui.transcript_row_cache.fold().is_expanded(start));
+}
+
+#[tokio::test]
+async fn keyboard_browse_distinguishes_group_header_from_first_member() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    let start = ui.state.transcript.entries()[0].id;
+    draw(&mut ui, 80, 24);
+    for (key, selected, group_open, member_open) in [
+        (KeyCode::F(6), BrowseTarget::Group(start), false, false),
+        (KeyCode::Right, BrowseTarget::Group(start), true, false),
+        (KeyCode::Right, BrowseTarget::Group(start), true, false),
+        (KeyCode::Tab, BrowseTarget::Entry(start), true, false),
+        (KeyCode::Right, BrowseTarget::Entry(start), true, true),
+        (KeyCode::Left, BrowseTarget::Entry(start), true, false),
+        (KeyCode::Right, BrowseTarget::Entry(start), true, true),
+        (KeyCode::BackTab, BrowseTarget::Group(start), true, true),
+        (KeyCode::Left, BrowseTarget::Group(start), false, true),
+        (KeyCode::Enter, BrowseTarget::Group(start), true, true),
+        (KeyCode::Enter, BrowseTarget::Group(start), false, true),
+    ] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        let buffer = draw(&mut ui, 80, 24);
+        assert_eq!(ui.browse_selected, Some(selected), "{key:?}");
+        assert_eq!(
+            ui.transcript_row_cache.fold().is_group_expanded(start),
+            group_open
+        );
+        assert_eq!(
+            ui.transcript_row_cache.fold().is_expanded(start),
+            member_open
+        );
+        let text = match selected {
+            BrowseTarget::Group(_) => {
+                if group_open {
+                    "▾ 2 commands"
+                } else {
+                    "▸ 2 commands"
+                }
+            }
+            BrowseTarget::Entry(_) => "echo one",
+        };
+        let selected_line = row_text(&buffer, cell_of(&buffer, text).1);
+        assert!(selected_line.contains("(click to"), "{selected_line}");
+    }
+}
+
+#[tokio::test]
+async fn group_selection_follows_new_start() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    start_tool(
+        &mut ui,
+        "zero",
+        "bash",
+        serde_json::json!({"command": "echo zero"}),
+    );
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    let entries = ui.state.transcript.entries();
+    let (late, first) = (entries[0].id, entries[1].id);
+    draw(&mut ui, 80, 24);
+    for key in [KeyCode::F(6), KeyCode::Right] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(first)));
+
+    complete_tool(&mut ui, "zero", "bash", "result");
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    let buffer = draw(&mut ui, 80, 24);
+    let header = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    assert!(header.contains("(click to"), "{header}");
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 80, 24);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    assert!(!ui.transcript_row_cache.fold().is_group_expanded(late));
+    assert!(!ui.transcript_row_cache.fold().is_expanded(late));
+}
+
+#[tokio::test]
+async fn scrolled_group_header_stays_on_top() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("");
+    start_tool(
+        &mut ui,
+        "zero",
+        "bash",
+        serde_json::json!({"command": "echo zero"}),
+    );
+    for (call_id, command) in [("one", "echo one"), ("two", "echo two")] {
+        finish_tool(
+            &mut ui,
+            call_id,
+            "bash",
+            serde_json::json!({"command": command}),
+            "result",
+        );
+    }
+    ui.state.transcript.append_prompt("next".into());
+    ui.state.transcript.complete_message(1, "line\n".repeat(40));
+    let entries = ui.state.transcript.entries();
+    let (late, first) = (entries[0].id, entries[1].id);
+    let header = |entry_id| crate::transcript_view::RowAnchor {
+        entry_id,
+        position: crate::transcript_view::RowPosition::Header,
+    };
+    draw(&mut ui, 80, 12);
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::Home,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    while ui.transcript_viewport.scrolled_top() != Some(header(first)) {
+        assert_eq!(
+            ui.transcript_viewport
+                .reduce(
+                    TranscriptViewAction::ScrollLines(1),
+                    &ui.state.transcript,
+                    &mut ui.transcript_row_cache,
+                )
+                .consumed_rows,
+            1
+        );
+    }
+    draw(&mut ui, 80, 12);
+    for key in [KeyCode::F(6), KeyCode::Right] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    draw(&mut ui, 80, 12);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(first)));
+    assert_eq!(ui.transcript_viewport.scrolled_top(), Some(header(first)));
+
+    complete_tool(&mut ui, "zero", "bash", "result");
+    ui.transcript_viewport.reduce(
+        TranscriptViewAction::OutputChanged,
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    draw(&mut ui, 80, 12);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
+    assert_eq!(ui.transcript_viewport.scrolled_top(), Some(header(late)));
+    let buffer = draw(&mut ui, 80, 12);
+    let selected = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    assert!(selected.contains("(click to"), "{selected}");
 }
 
 #[tokio::test]
