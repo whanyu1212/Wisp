@@ -2184,6 +2184,10 @@ impl TranscriptRowCache {
                     continue;
                 }
                 let relative_start = local.saturating_sub(span_start);
+                // Code and tables keep the full width from where they start in a row,
+                // even after a list or quote marker; prose wraps at the measure. The
+                // span decides this once, not per grapheme.
+                let span_full_width = keeps_full_width(block, span_index, span);
                 for (relative_offset, grapheme) in
                     span.text[relative_start..].grapheme_indices(true)
                 {
@@ -2232,10 +2236,7 @@ impl TranscriptRowCache {
                         }
                     }
                     previous_space = space;
-                    // Code and tables keep the full width from where they start in a
-                    // row, even after a list or quote marker; prose wraps at the measure.
-                    let full_width = keeps_full_width(block, span_index, span);
-                    row_full_width |= full_width;
+                    row_full_width |= span_full_width;
                     let wrap_width = if row_full_width {
                         width
                     } else {
