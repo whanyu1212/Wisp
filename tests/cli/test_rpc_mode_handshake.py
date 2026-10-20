@@ -65,6 +65,7 @@ def test_rpc_mode_accepts_handshake_before_any_runtime_event(tmp_path: Path) -> 
     records = _base_jsonl_records(result.stdout)
     assert records[0]["type"] == "rpc.handshake.accepted"
     assert [record["type"] for record in records[1:]] == [
+        "rpc.workspace",
         "rpc.command.started",
         "rpc.command.finished",
     ]
@@ -88,6 +89,7 @@ def test_rpc_mode_selected_from_environment_skips_plaintext_help(tmp_path: Path)
     records = _base_jsonl_records(result.stdout)
     assert [record["type"] for record in records] == [
         "rpc.handshake.accepted",
+        "rpc.workspace",
         "rpc.command.started",
         "rpc.command.finished",
     ]
@@ -130,6 +132,7 @@ def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) ->
     records = anyio.run(scenario)
     assert [record["type"] for record in records] == [
         "rpc.handshake.accepted",
+        "rpc.workspace",
         "rpc.command.started",
         "rpc.command.finished",
     ]
@@ -226,6 +229,7 @@ def test_rpc_mode_writes_utf8_frames_with_non_utf8_stdio_encoding(tmp_path: Path
     records = _base_jsonl_records(output.decode("utf-8"))
     assert [record["type"] for record in records] == [
         "rpc.handshake.accepted",
+        "rpc.workspace",
         "rpc.command.started",
         "rpc.command.finished",
     ]

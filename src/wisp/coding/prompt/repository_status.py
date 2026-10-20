@@ -14,6 +14,25 @@ MAX_GIT_STATUS_LINES = 12
 _GIT_SNAPSHOT_LABEL = "git (snapshot; run `git status` for the current state):"
 
 
+def read_current_branch(cwd: Path) -> str | None:
+    """Read the branch checked out in ``cwd`` now, unlike the session's snapshot.
+
+    Args:
+        cwd (Path): Working directory whose repository is read.
+
+    Returns:
+        str | None: The branch name, the short commit for a detached HEAD, or None
+            outside a work tree or when Git does not answer in time.
+    """
+
+    resolved_cwd = cwd.resolve(strict=False)
+    with git_deadline():
+        branch = run_git(resolved_cwd, "branch", "--show-current")
+        if branch is None:
+            return None
+        return branch or run_git(resolved_cwd, "rev-parse", "--short", "HEAD") or None
+
+
 def read_repository_status(cwd: Path) -> str:
     """Read the Git status section of the project context once.
 

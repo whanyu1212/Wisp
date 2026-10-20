@@ -470,3 +470,17 @@ def test_executor_commands_reports_registry_failures(
         ]
 
     anyio.run(scenario)
+
+
+def test_workspace_report_survives_git_failure(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    import wisp.rpc.handlers.inspection as inspection_module
+
+    def broken(cwd: Path) -> str | None:
+        raise OSError("git exploded")
+
+    monkeypatch.setattr(inspection_module, "read_current_branch", broken)
+
+    report = anyio.run(inspection_module.rpc_workspace_report, tmp_path)
+
+    assert report.cwd == tmp_path
+    assert report.git_branch is None

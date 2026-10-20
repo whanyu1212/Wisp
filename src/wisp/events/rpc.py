@@ -381,6 +381,21 @@ class RpcPermissionsReported(WispEvent):
     permissions: PermissionState
 
 
+class RpcWorkspaceReported(WispEvent):
+    """Where the session's commands run and the Git branch checked out there.
+
+    The host sends it at startup and after each prompt run, so a frontend can show
+    the folder and keep the branch current after a run switches it. A branch
+    switched outside Wisp while idle shows after the next run.
+    """
+
+    type: Literal["rpc.workspace"] = "rpc.workspace"
+    cwd: Path
+    # The current branch, or the short commit for a detached HEAD; None outside a
+    # Git work tree or when Git does not answer in time.
+    git_branch: str | None = None
+
+
 class RpcStateReported(WispEvent):
     """Immediate, non-persisted in-memory state returned over RPC."""
 

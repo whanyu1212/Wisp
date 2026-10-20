@@ -41,6 +41,7 @@ from wisp.rpc.coordinator import (
 )
 from wisp.rpc.errors import RpcOutputAlreadyReportedError
 from wisp.rpc.handlers.control import RpcTrustResolver
+from wisp.rpc.handlers.inspection import rpc_workspace_report
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.rpc.session.state import updated_rpc_session_state
 from wisp.sessions.entries import MessageSessionEntry
@@ -573,10 +574,14 @@ async def run_rpc_prompt_command(
         updated_history = committed_history
         if error is None:
             error = str(exc)
+    # A run may have switched branches; report the current one before it finishes.
+    with anyio.CancelScope(shield=True):
+        workspace = await rpc_workspace_report(agent.tool_context.cwd)
     async with send:
         if cancelled:
             assert error is not None
             write_event(ErrorEvent(message=error))
+        write_event(workspace)
         write_event(
             RpcCommandFinished(
                 command_id=command_id,

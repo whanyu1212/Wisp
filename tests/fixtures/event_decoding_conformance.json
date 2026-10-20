@@ -3162,6 +3162,36 @@
    "accepted": false
   },
   {
+   "event": "rpc.workspace",
+   "operation": "remove",
+   "path": [
+    "cwd"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.workspace",
+   "operation": "remove",
+   "path": [
+    "git_branch"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.workspace",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.workspace",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "session.saved",
    "operation": "remove",
    "path": [

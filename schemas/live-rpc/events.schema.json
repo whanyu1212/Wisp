@@ -5081,6 +5081,48 @@
       "title": "RpcStateSnapshot",
       "type": "object"
     },
+    "RpcWorkspaceReported": {
+      "additionalProperties": false,
+      "description": "Where the session's commands run and the Git branch checked out there.\n\nThe host sends it at startup and after each prompt run, so a frontend can show\nthe folder and keep the branch current after a run switches it. A branch\nswitched outside Wisp while idle shows after the next run.",
+      "properties": {
+        "cwd": {
+          "format": "path",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "git_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Branch"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.workspace",
+          "default": "rpc.workspace",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "cwd",
+        "git_branch"
+      ],
+      "title": "RpcWorkspaceReported",
+      "type": "object"
+    },
     "SessionCostSummary": {
       "additionalProperties": false,
       "description": "Cumulative persisted list-price accounting for a session.",
@@ -6890,6 +6932,7 @@
       "rpc.sessions": "#/$defs/RpcSessionsReported",
       "rpc.skills": "#/$defs/RpcSkillsReported",
       "rpc.state": "#/$defs/RpcStateReported",
+      "rpc.workspace": "#/$defs/RpcWorkspaceReported",
       "session.saved": "#/$defs/SessionSaved",
       "session.stats": "#/$defs/SessionStatsReported",
       "skill.catalog.updated": "#/$defs/SkillCatalogUpdated",
@@ -6992,6 +7035,9 @@
     },
     {
       "$ref": "#/$defs/RpcStateReported"
+    },
+    {
+      "$ref": "#/$defs/RpcWorkspaceReported"
     },
     {
       "$ref": "#/$defs/RpcPermissionsReported"
@@ -7567,6 +7613,12 @@
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.state"
+    },
+    "rpc.workspace": {
+      "cwd": "/workspace",
+      "git_branch": "main",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.workspace"
     },
     "session.saved": {
       "path": "fixture.jsonl",

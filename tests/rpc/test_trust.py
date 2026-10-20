@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from contextlib import redirect_stdout
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -678,6 +679,8 @@ def test_rpc_prompt_command_reports_rebuild_provider_error(
 
     class _Agent:
         trusted = False
+        # The finished prompt reports the workspace its commands run in.
+        tool_context = SimpleNamespace(cwd=tmp_path)
 
         def run(self, *a: object, **k: object) -> object:  # pragma: no cover - never reached
             raise AssertionError("agent.run must not be reached when the rebuild fails")

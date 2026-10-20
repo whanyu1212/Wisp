@@ -28,6 +28,31 @@ def test_rpc_mode_accepts_zero_tool_iteration_cap(tmp_path: Path) -> None:
     assert records[1]["ok"] is True
 
 
+def test_rpc_mode_reports_workspace(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path / "sessions")],
+        input='{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    types = [record["type"] for record in records]
+    workspace = [record for record in records if record["type"] == "rpc.workspace"]
+    # Once at startup, then once as the prompt finishes.
+    assert len(workspace) == 2
+    assert types[:2] == ["rpc.handshake.accepted", "rpc.workspace"]
+    assert types.index("rpc.workspace", 2) == types.index("rpc.command.finished") - 1
+    assert all(Path(str(record["cwd"])) == cwd.resolve() for record in workspace)
+    # The isolated folder is not a Git work tree.
+    assert all(record["git_branch"] is None for record in workspace)
+
+
 def test_rpc_mode_runs_prompt_commands_with_explicit_id(tmp_path: Path) -> None:
     runner = CliRunner()
 

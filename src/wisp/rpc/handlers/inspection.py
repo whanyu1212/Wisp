@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import anyio
+
 from wisp.auth.connections import connection_catalog
 from wisp.auth.storage import AuthStorageError
+from wisp.coding.prompt import read_current_branch
 from wisp.coding.session import CodingSession
 from wisp.events import (
     CodingSessionState,
@@ -26,6 +31,7 @@ from wisp.events import (
     RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    RpcWorkspaceReported,
 )
 from wisp.providers.base import Provider
 from wisp.rpc.commands import (
@@ -212,6 +218,25 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
             for family in catalog
         )
     )
+
+
+async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
+    """Report the folder commands run in and the Git branch checked out there.
+
+    Git runs in a worker thread under the shared Git deadline. Any failure leaves the
+    branch unset, so reporting never fails the startup or command that sends it.
+
+    Args:
+        cwd (Path): Working directory the session's commands run in.
+
+    Returns:
+        RpcWorkspaceReported: The folder and its current branch, if any.
+    """
+    try:
+        branch = await anyio.to_thread.run_sync(read_current_branch, cwd, abandon_on_cancel=True)
+    except Exception:  # noqa: BLE001 - a missing branch must not fail the caller
+        branch = None
+    return RpcWorkspaceReported(cwd=cwd, git_branch=branch)
 
 
 def rpc_skill_catalog_snapshot(agent: CodingSession) -> RpcSkillCatalogSnapshot:
