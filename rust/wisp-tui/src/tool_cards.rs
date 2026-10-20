@@ -570,6 +570,8 @@ pub struct ProcessCardSnapshot {
     pub retained_output: BoundedText,
     pub backend_truncated: bool,
     pub backend_dropped_bytes: u64,
+    /// The finished process's exit code; background output carries no exit line.
+    pub exit_code: Option<i32>,
     last_stream_label: Option<&'static str>,
     last_sequence: Option<u64>,
     approval_sequence: Option<u64>,
@@ -587,6 +589,7 @@ impl ProcessCardSnapshot {
             retained_output: BoundedText::default(),
             backend_truncated: false,
             backend_dropped_bytes: 0,
+            exit_code: None,
             last_stream_label: None,
             last_sequence: None,
             approval_sequence: None,
@@ -745,6 +748,15 @@ impl ProcessCardSnapshot {
             );
         if update_display_state {
             self.display_state = process_result_state(operation, result);
+            self.exit_code = result
+                .exit_code
+                .and_then(|code| i32::try_from(code).ok())
+                .filter(|_| {
+                    matches!(
+                        self.display_state,
+                        ProcessDisplayState::Completed | ProcessDisplayState::Failed
+                    )
+                });
         }
         true
     }
@@ -807,6 +819,7 @@ impl ProcessCardSnapshot {
 
         self.task_label = newer.task_label.clone().or_else(|| self.task_label.clone());
         self.display_state = newer.display_state;
+        self.exit_code = newer.exit_code;
         self.poll_count = self.poll_count.saturating_add(newer.poll_count);
         self.call_count = self.call_count.saturating_add(newer.call_count);
         self.retained_output = retained;
@@ -2100,6 +2113,21 @@ mod tests {
         assert!(card.observe(ProcessOperation::Poll, &failed, 0));
         assert_eq!(card.display_state, ProcessDisplayState::Failed);
         assert!(card.display_state.terminal());
+        assert_eq!(card.exit_code, Some(2));
+    }
+
+    #[test]
+    fn running_process_has_no_exit() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut running = result("partial");
+        running.name = "bash".into();
+        running.exit_code = Some(0);
+        running.process_id = Some("process-1".into());
+        running.process_state = Some("running".into());
+
+        assert!(card.observe(ProcessOperation::Poll, &running, 0));
+        assert_eq!(card.exit_code, None);
     }
 
     #[test]

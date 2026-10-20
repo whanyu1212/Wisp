@@ -2898,6 +2898,9 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 card.task_label.as_deref().unwrap_or("Background command")
             );
             let note_start = push_status_note(&mut action, card.status_note());
+            // Background output has no completion line, so the row names the exit code.
+            let exit = card.exit_code.map(|code| format!("exit {code}"));
+            let exit_start = push_status_note(&mut action, exit.as_deref());
             Some(CardProjection {
                 action,
                 action_marker_end: process_marker(card).len(),
@@ -2911,7 +2914,7 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
-                action_suffix_start: note_start,
+                action_suffix_start: note_start.min(exit_start),
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
