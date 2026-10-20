@@ -389,6 +389,11 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 text: crate::web_search::search(value),
             },
+            "agent.completed" => Self::RunCompleted {
+                duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
+                tool_calls: u64_field_or(value, &event_type, "tool_calls", 0)?,
+                output_tokens: optional_u64_field(value, &event_type, "output_tokens")?,
+            },
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,

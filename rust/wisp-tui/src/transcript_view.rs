@@ -1959,7 +1959,7 @@ impl TranscriptRowCache {
             let old_bytes = cached.retained_bytes;
             let build = (cached.entry_revision != Some(entry.revision())).then(|| {
                 cached.state.build(
-                    &entry.content[start..],
+                    &entry.markdown_source()[start..],
                     start,
                     entry.layout_epoch(),
                     entry.state == TranscriptEntryState::Complete,

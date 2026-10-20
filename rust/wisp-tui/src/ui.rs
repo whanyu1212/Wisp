@@ -5145,6 +5145,36 @@ mod tests {
     }
 
     #[test]
+    fn run_summary_renders_italic() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("hello".into());
+        state.transcript.complete_message(1, "Done.".into());
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("*╰ Build · gpt\\_x · 4m 12s*".into())
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let screen = terminal.backend().to_string();
+        let summary = style_at_text(terminal.backend(), "╰ Build · gpt_x · 4m 12s");
+        assert!(summary.is_some(), "{screen}");
+        assert!(summary.unwrap().2.contains(Modifier::ITALIC));
+    }
+
+    #[test]
     fn denied_group_names_state() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("plan".into());

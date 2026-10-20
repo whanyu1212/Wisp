@@ -104,6 +104,8 @@ pub struct TranscriptEntry {
     thinking: String,
     searches: Vec<String>,
     cost: Option<String>,
+    /// Display-only summary closing the last reply of a finished run.
+    run_summary: Option<String>,
     decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
@@ -125,9 +127,10 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Compose display-only search evidence and cost without changing model text.
+    /// Compose display-only search evidence, cost, and the run summary without
+    /// changing model text.
     fn decorate(&mut self) {
-        if self.searches.is_empty() && self.cost.is_none() {
+        if self.searches.is_empty() && self.cost.is_none() && self.run_summary.is_none() {
             return;
         }
         let mut text = self.searches.join("\n\n");
@@ -138,6 +141,13 @@ impl TranscriptEntry {
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
             text.push_str(&format!("\n\n{cost}"));
+        }
+        if let Some(summary) = self
+            .run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())
+        {
+            text.push_str(&format!("\n\n{summary}"));
         }
         self.decorated_content = Some(text);
     }
@@ -160,6 +170,20 @@ impl TranscriptEntry {
             .as_deref()
             .or(self.decorated_content.as_deref())
             .unwrap_or(&self.content)
+    }
+
+    /// The Markdown a reply renders: its text, closed by the run summary once the
+    /// whole reply is shown. The summary only follows the text, so offsets into
+    /// [`Self::content`] stay valid in the rendered source.
+    pub(crate) fn markdown_source(&self) -> std::borrow::Cow<'_, str> {
+        match self
+            .run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())
+        {
+            Some(summary) => format!("{}\n\n{summary}", self.content).into(),
+            None => self.content.as_str().into(),
+        }
     }
 
     pub fn thinking(&self) -> &str {
@@ -460,6 +484,31 @@ impl Transcript {
             Self::bump_revision(entry);
             self.bump_generation();
         }
+    }
+
+    /// Close the run's last reply with its summary line. A run that ended without a
+    /// reply after its prompt keeps none.
+    pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
+        let prompt = self.latest_user_entry();
+        let Some(id) = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|entry| Some(entry.id) != prompt)
+            .find(|entry| {
+                entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && !(entry.content.is_empty() && entry.unrevealed.is_empty())
+            })
+            .map(|entry| entry.id)
+        else {
+            return false;
+        };
+        let entry = self.entry_mut(id);
+        entry.run_summary = Some(summary);
+        entry.decorate();
+        Self::bump_revision(entry);
+        true
     }
 
     pub(crate) fn complete_message_with_cost(
@@ -1535,6 +1584,7 @@ impl Transcript {
                 thinking: String::new(),
                 searches: Vec::new(),
                 cost: None,
+                run_summary: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
@@ -2224,6 +2274,7 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
             decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
@@ -2313,6 +2364,7 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
             decorated_content: None,
             state,
             kind,

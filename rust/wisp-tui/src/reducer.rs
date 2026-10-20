@@ -1130,6 +1130,12 @@ pub enum BackendEvent {
         content: String,
         cost: Option<String>,
     },
+    /// A run finished; its totals close the run's last reply.
+    RunCompleted {
+        duration_ms: Option<u64>,
+        tool_calls: u64,
+        output_tokens: Option<u64>,
+    },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
     ToolApprovalResolved {
@@ -4553,6 +4559,18 @@ fn handle_backend_event(
                 .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::RunCompleted {
+            duration_ms,
+            tool_calls,
+            output_tokens,
+        } => {
+            let summary = run_summary_line(state, duration_ms, tool_calls, output_tokens);
+            if state.transcript.attach_run_summary(summary) {
+                Ok(vec![UiEffect::RequestRender])
+            } else {
+                Ok(Vec::new())
+            }
+        }
         BackendEvent::ToolCall(input) => {
             let call_id = input.call_id.clone();
             let target = state.transcript.observe_tool_call(input);
@@ -4786,6 +4804,78 @@ fn handle_backend_event(
             Ok(effects)
         }
     }
+}
+
+/// The run's summary line, such as `╰ Build · gpt-6-astra · high · 6m 41s · 14 tools ·
+/// 31.2k tokens`, set in italics so it reads apart from the reply. Mode, model, and
+/// effort are the session's settings when the run ends; parts that are unknown are
+/// left out.
+fn run_summary_line(
+    state: &UiState,
+    duration_ms: Option<u64>,
+    tool_calls: u64,
+    output_tokens: Option<u64>,
+) -> String {
+    let mut parts = Vec::new();
+    if state.mode_confirmed {
+        parts.push(match state.mode {
+            AgentMode::Build => "Build".to_owned(),
+            AgentMode::Plan => "Plan".to_owned(),
+        });
+    }
+    if let Some(model) = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref())
+    {
+        parts.push(model.to_owned());
+    }
+    if let Some(effort) = state.effort.as_deref() {
+        parts.push(effort.to_owned());
+    }
+    if let Some(duration_ms) = duration_ms {
+        parts.push(crate::tool_cards::format_duration(duration_ms));
+    }
+    match tool_calls {
+        0 => {}
+        1 => parts.push("1 tool".to_owned()),
+        count => parts.push(format!("{count} tools")),
+    }
+    if let Some(tokens) = output_tokens.filter(|tokens| *tokens > 0) {
+        parts.push(format!("{} tokens", abbreviated_count(tokens)));
+    }
+    let line = format!("╰ {}", parts.join(" · "));
+    format!("*{}*", escape_markdown(&line))
+}
+
+/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit.
+fn abbreviated_count(count: u64) -> String {
+    let (value, unit) = match count {
+        0..1_000 => return count.to_string(),
+        1_000..1_000_000 => (count as f64 / 1_000.0, "k"),
+        _ => (count as f64 / 1_000_000.0, "m"),
+    };
+    if value < 10.0 {
+        format!("{value:.1}{unit}")
+    } else {
+        format!("{value:.0}{unit}")
+    }
+}
+
+/// Backslash-escape Markdown punctuation so names render literally.
+fn escape_markdown(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
+        ) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 #[cfg(test)]
@@ -6018,6 +6108,46 @@ mod tests {
         assert_eq!(result.stderr.as_deref(), Some("err"));
         assert_eq!(result.stdout_dropped_bytes, 11);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn run_summary_closes_last_reply() {
+        let mut state = UiState::new("fake".into(), Some("gpt_x".into()), None);
+        state.mode = AgentMode::Build;
+        state.mode_confirmed = true;
+        state.effort = Some("high".into());
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hello".into());
+        let value = serde_json::json!({
+            "type": "agent.completed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "session_id": "s",
+            "turns": 2,
+            "outcome": "completed",
+            "duration_ms": 252_000,
+            "tool_calls": 3,
+            "output_tokens": 1_234
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let completed = BackendEvent::from_live(&live).unwrap();
+
+        // No reply yet: the summary has nowhere to go.
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(completed.clone()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+
+        state.transcript.complete_message(1, "Done.".into());
+        reduce(&mut state, UiAction::BackendEvent(completed), &mut ids).unwrap();
+        let reply = state.transcript.entries().last().unwrap();
+        assert_eq!(
+            reply.display_content(),
+            "Done.\n\n*╰ Build · gpt\\_x · high · 4m 12s · 3 tools · 1.2k tokens*"
+        );
+        assert_eq!(reply.content, "Done.");
     }
 
     #[test]
