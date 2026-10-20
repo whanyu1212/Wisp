@@ -10,6 +10,28 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.2.3 — 2026-10-20
+
+0.2.3 is a patch release on 0.2.2 with two terminal UI changes. It changes no command, event, or
+handshake model and no session format, so 0.2.2 and 0.2.3 read each other's sessions; the backend
+and frontend must still come from the same release, which the handshake enforces.
+
+### Terminal UI
+
+- Consecutive calls to the same MCP tool collapse into one row with a count, such as
+  `linear/get_issue ×8  id=HY-270 … id=HY-278`, showing the first and last call's arguments. While a
+  call in the run is open, the row shows that call with `· 7 of 8 done`, and a call awaiting
+  approval keeps the `?` marker with `· awaiting approval`. Click, `Right`, or `Enter` expands the
+  row as for `explored N files`. Bash, edit, and write cards never group. A blank column now
+  separates every card's status marker from its tool chip. (#763)
+- Streamed replies appear at an even pace, a word at a time and about a tenth of a second behind the
+  stream, instead of in the provider's bursts. An unfinished `**bold**`, `` `code` ``, or
+  `~~strike~~` span, table row, or code fence line waits until it is complete, so raw markers do not
+  flash. A pause in the stream, the end of the run, or a tool card or prompt that follows shows any
+  waiting text, and more than 16 KiB waiting is shown at once. Set `WISP_TUI_STREAM_PACING=0` to show
+  text as it arrives, or `WISP_TUI_STREAM_TRACE=<path>` to record when each text delta arrives.
+  (#764)
+
 ## 0.2.2 — 2026-10-19
 
 0.2.2 is a patch release on 0.2.1 with one terminal UI change. It changes no command, event, or
