@@ -86,6 +86,9 @@ impl KeyHelp {
                 "Browse: Tab/Shift+Tab select, Right expand, Left collapse.",
                 "Enter expands or opens retained detail. Esc returns to the prompt.",
             ],
+            Owner::Overlay(OverlayKind::GitDiff) => &[
+                "Diff: Tab switches focus, Enter expands/opens, [] hunks, s split, c context, r refresh, Esc closes.",
+            ],
             Owner::Overlay(OverlayKind::Connection) => &[
                 "Connections: Up/Down select, Enter starts/submits, d disconnects, r refreshes.",
                 "API-key input is masked. Escape closes/cancels the connection workflow.",

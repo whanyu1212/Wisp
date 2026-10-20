@@ -136,6 +136,7 @@ request. Completion and results arrive through `events()`.
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
+| `get_git_diff` | `(*, command_id: str \| None = None)` | `RpcGitDiffReported` |
 | `get_project_files` | `(*, command_id: str \| None = None)` | `RpcProjectFilesReported` |
 | `get_skills` | `(*, command_id: str \| None = None)` | `RpcSkillsReported` |
 | `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
@@ -338,7 +339,7 @@ idempotent and re-raises a retained close failure.
 - work/configuration: `PromptCommand`, `InitCommand`, `CompactCommand`, `ConfigureCommand`,
   `ShutdownCommand`
 - snapshots: `GetSessionStatsCommand`, `GetStateCommand`, `GetCommandsCommand`, `GetSkillsCommand`,
-  `GetMcpStatusCommand`, `GetProjectFilesCommand`
+  `GetMcpStatusCommand`, `GetProjectFilesCommand`, `GetGitDiffCommand`
 - queue/control: `SteerCommand`, `FollowUpCommand`, `GetQueueStateCommand`, `SetQueueModeCommand`,
   `PopQueueCommand`, `ClearQueueCommand`, `CancelCommand`
 - safety: `ApprovalCommand`, `TrustCommand`

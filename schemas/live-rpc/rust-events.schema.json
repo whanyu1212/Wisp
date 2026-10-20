@@ -2031,6 +2031,119 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcGitDiffFile": {
+      "additionalProperties": false,
+      "description": "One authorized file pair, or an explicit unavailable-content notice.",
+      "properties": {
+        "after": {
+          "maxLength": 50000,
+          "title": "RpcGitDiffFileAfter",
+          "type": "string"
+        },
+        "before": {
+          "maxLength": 50000,
+          "title": "RpcGitDiffFileBefore",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory"
+          ],
+          "title": "RpcGitDiffFileKind",
+          "type": "string"
+        },
+        "notice": {
+          "maxLength": 256,
+          "title": "RpcGitDiffFileNotice",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?!(?:.*\\/)?\\.\\.?(?:\\/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+)*(?![\\s\\S])",
+          "title": "RpcGitDiffFilePath",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "modified",
+            "added",
+            "deleted",
+            "untracked"
+          ],
+          "title": "RpcGitDiffFileStatus",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "status",
+        "before",
+        "after",
+        "notice"
+      ],
+      "title": "RpcGitDiffFile",
+      "type": "object"
+    },
+    "RpcGitDiffReported": {
+      "additionalProperties": false,
+      "description": "Bounded read-only Git snapshot; untracked content is never included.",
+      "properties": {
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "RpcGitDiffReportedCommandId",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/RpcGitDiffFile"
+          },
+          "maxItems": 256,
+          "title": "RpcGitDiffReportedFiles",
+          "type": "array"
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "RpcGitDiffReportedGeneration",
+          "type": "integer"
+        },
+        "head": {
+          "maxLength": 64,
+          "title": "RpcGitDiffReportedHead",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "RpcGitDiffReportedTimestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "title": "RpcGitDiffReportedTruncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.git_diff",
+          "default": "rpc.git_diff",
+          "title": "RpcGitDiffReportedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "generation",
+        "head",
+        "files",
+        "truncated"
+      ],
+      "title": "RpcGitDiffReported",
+      "type": "object"
+    },
     "RpcMcpHeaderFrom": {
       "additionalProperties": false,
       "description": "One HTTP header whose value Wisp builds from an environment variable.\n\nThe header is sent as ``\"{scheme} {value}\"``, or the bare value when\n``scheme`` is None. Showing it tells the user which variable's value goes to\nthe server.",
@@ -6154,6 +6267,7 @@
       "rpc.connection_catalog": "#/$defs/RpcConnectionCatalogReported",
       "rpc.device_code": "#/$defs/RpcDeviceCodeReported",
       "rpc.device_code.progress": "#/$defs/RpcDeviceCodeProgressReported",
+      "rpc.git_diff": "#/$defs/RpcGitDiffReported",
       "rpc.mcp": "#/$defs/RpcMcpStatusReported",
       "rpc.mcp.login": "#/$defs/RpcMcpLoginStarted",
       "rpc.mcp.preview": "#/$defs/RpcMcpSnippetPreviewed",
@@ -6294,6 +6408,9 @@
     },
     {
       "$ref": "#/$defs/RpcSkillsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcGitDiffReported"
     },
     {
       "$ref": "#/$defs/RpcProjectFilesReported"

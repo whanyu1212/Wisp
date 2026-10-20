@@ -96,6 +96,18 @@ impl BackendEvent {
                     permissions,
                 });
             }
+            "rpc.git_diff" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let snapshot =
+                    discovery_report(&value, || serde_json::from_value(value.clone()).ok())
+                        .map_err(|_| {
+                            "Git diff exceeds the display limit or could not be decoded.".into()
+                        });
+                return Ok(Self::GitDiffReported {
+                    command_id,
+                    snapshot,
+                });
+            }
             "rpc.project_files" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let snapshot = discovery_report(&value, || event.project_files(&command_id))

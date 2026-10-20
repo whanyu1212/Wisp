@@ -469,6 +469,30 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
     ))
 }
 
+/// Build a review from an authorized, bounded Git snapshot with real line numbers.
+pub(crate) fn git_presentation(path: &str, before: &str, after: &str) -> ToolDetailPresentation {
+    let mut rows = Vec::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+    append_diff_rows(
+        &mut rows,
+        before,
+        after,
+        true,
+        &mut additions,
+        &mut deletions,
+    );
+    finalize_presentation(
+        DetailPresentationKind::DiffModify,
+        path.into(),
+        format!("+{additions} -{deletions}"),
+        additions,
+        deletions,
+        rows,
+        false,
+    )
+}
+
 fn build_write_presentation(
     source: &WriteDetailSource,
     result: DetailResult<'_>,

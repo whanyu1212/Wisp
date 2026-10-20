@@ -461,6 +461,26 @@ class RpcProjectFilesReported(WispEvent):
     truncated: bool
 
 
+class RpcGitDiffFile(RpcProjectFile):
+    """One authorized file pair, or an explicit unavailable-content notice."""
+
+    status: Literal["modified", "added", "deleted", "untracked"]
+    before: str = Field(max_length=50_000)
+    after: str = Field(max_length=50_000)
+    notice: str = Field(max_length=256)
+
+
+class RpcGitDiffReported(WispEvent):
+    """Bounded read-only Git snapshot; untracked content is never included."""
+
+    type: Literal["rpc.git_diff"] = "rpc.git_diff"
+    command_id: str = Field(min_length=1, max_length=256)
+    generation: int = Field(ge=1, le=2**53 - 1, strict=True)
+    head: str = Field(max_length=64)
+    files: tuple[RpcGitDiffFile, ...] = Field(max_length=256)
+    truncated: bool
+
+
 class ProjectFilesInvalidated(WispEvent):
     """Previously returned file metadata is obsolete after a policy transition."""
 

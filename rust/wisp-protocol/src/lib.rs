@@ -633,6 +633,10 @@ pub mod commands {
         }
 
         /// Request a bounded snapshot using backend-owned traversal and policy.
+        pub fn get_git_diff(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_git_diff", "id": id}))
+        }
+
         pub fn get_project_files(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_project_files", "id": id}))
         }

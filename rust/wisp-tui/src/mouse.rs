@@ -630,7 +630,10 @@ impl LiveUi {
                 .queue_view
                 .as_mut()
                 .is_some_and(|view| view.select_mouse(index, &self.state)),
-            OverlayKind::Context | OverlayKind::Help | OverlayKind::Detail => false,
+            OverlayKind::GitDiff
+            | OverlayKind::Context
+            | OverlayKind::Help
+            | OverlayKind::Detail => false,
         }
     }
 }
