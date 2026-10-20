@@ -217,7 +217,8 @@ impl Palette {
     }
 
     pub fn semantic_inline_code(self) -> Style {
-        Style::default().fg(self.warning).bg(self.panel)
+        // A neutral surface keeps the accent colours for labels and status.
+        Style::default().fg(self.foreground).bg(self.panel)
     }
 
     pub fn semantic_code_delimiter(self) -> Style {
@@ -259,6 +260,14 @@ impl Palette {
         } else {
             self.background
         })
+    }
+
+    /// The key of a shortcut hint, on a raised surface so it reads apart from its action.
+    pub fn keycap(self) -> Style {
+        if self.monochrome {
+            return Style::default().add_modifier(Modifier::BOLD);
+        }
+        Style::default().fg(self.foreground).bg(self.panel)
     }
 
     pub fn border(self) -> Style {

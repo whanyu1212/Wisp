@@ -152,6 +152,12 @@ pub struct MarkdownDocument {
     pub blocks: Vec<Arc<MarkdownBlock>>,
 }
 
+impl MarkdownBlock {
+    pub(crate) fn has_table(&self) -> bool {
+        self.has_table
+    }
+}
+
 impl MarkdownDocument {
     pub(crate) fn has_tables(&self) -> bool {
         self.blocks.iter().any(|block| block.has_table)
