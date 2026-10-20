@@ -146,6 +146,11 @@ impl MarkdownBlock {
                     })
                     .sum::<usize>(),
             )
+            .saturating_add(
+                self.table_spans
+                    .len()
+                    .saturating_mul(std::mem::size_of::<Range<usize>>()),
+            )
     }
 }
 
@@ -1627,6 +1632,21 @@ mod tests {
                 .iter()
                 .flat_map(|block| &block.spans)
                 .any(|span| span.style.inline == InlineStyle::Code)
+        );
+    }
+
+    #[test]
+    fn laid_out_tables_count_bytes() {
+        let source = "| a | b |\n|---|---|\n| 1 | 2 |";
+        let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
+        let parsed = &build.document.blocks[0];
+        let mut laid_out = (**parsed).clone();
+        laid_out.tables.clear();
+        let without_ranges = laid_out.retained_bytes();
+        laid_out.table_spans = vec![0..1, 1..2];
+        assert_eq!(
+            laid_out.retained_bytes(),
+            without_ranges + 2 * std::mem::size_of::<Range<usize>>()
         );
     }
 
