@@ -246,7 +246,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x1b")
                 phase = "closing help"
                 output.clear()
-            elif phase == "closing help" and frame_cursor(output) == (21, 6):
+            elif phase == "closing help" and frame_cursor(output) == (20, 6):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))

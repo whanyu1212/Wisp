@@ -26,8 +26,12 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-/// The framed composer's ceiling; one more than an unframed one, for its identity row.
-const MAX_COMPOSER_HEIGHT: u16 = 9;
+/// The framed composer's ceiling; two more than an unframed one, for its identity row
+/// and the blank row above it.
+const MAX_COMPOSER_HEIGHT: u16 = 10;
+/// From this conversation height the framed composer leaves a blank row between the
+/// draft and its identity; a shorter screen keeps that row for the transcript.
+const COMPOSER_GAP_MIN_HEIGHT: u16 = 24;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
@@ -57,23 +61,30 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
+    let gap = composer_gap(area);
     // The footer, the transcript's two rows, and the status line while running.
     let ceiling = area
         .height
         .saturating_sub(3 + status_line_height(state))
-        .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
+        .clamp(2, MAX_COMPOSER_HEIGHT - 2 * u16::from(!framed));
     if editable(state) {
         u16::try_from(
             layout
                 .map_or(1, |layout| layout.rows.len())
-                // A framed composer adds its borders and the identity row.
-                .saturating_add(if framed { 3 } else { 0 }),
+                // A framed composer adds its borders and the identity row, and on a
+                // tall screen a blank row between the draft and the identity.
+                .saturating_add(if framed { 3 + usize::from(gap) } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
     } else {
         2
     }
+}
+
+/// Whether a conversation this tall gives the framed composer its blank row.
+fn composer_gap(area: Rect) -> bool {
+    area.height >= COMPOSER_GAP_MIN_HEIGHT
 }
 
 fn conversation_surface(area: Rect) -> Rect {
@@ -372,6 +383,7 @@ pub fn render_interactive(
         composer_layout,
         composer_focused,
         padded,
+        composer_gap(area),
         palette,
         bindings,
     );
@@ -1903,6 +1915,7 @@ fn render_composer(
     layout: Option<&ComposerLayout>,
     focused: bool,
     padded: bool,
+    gap: bool,
     palette: Palette,
     bindings: &Bindings,
 ) -> Option<mouse::Editor> {
@@ -1935,14 +1948,17 @@ fn render_composer(
                 palette.accent
             };
             paint_composer_accent(frame, area, accent);
-            inner.height = inner.height.saturating_sub(1);
+            // On a tall screen a blank row separates the draft from the identity,
+            // when the composer has room for both and one draft row.
+            let gap = u16::from(gap && inner.height >= 3);
+            inner.height = inner.height.saturating_sub(1 + gap);
             // Indented past the prompt prefix so it lines up with the draft.
             let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
             render_composer_identity_row(
                 frame,
                 Rect {
                     x: inner.x.saturating_add(prefix_width).min(inner.right()),
-                    y: inner.bottom(),
+                    y: inner.bottom() + gap,
                     width: inner.width.saturating_sub(prefix_width),
                     height: 1,
                 },
@@ -5237,6 +5253,58 @@ mod tests {
     }
 
     #[test]
+    fn tall_composer_spaces_identity() {
+        let rows = |height: u16| {
+            let mut state =
+                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+            state.mode_confirmed = true;
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        // From 24 rows a blank row sits between the draft and the identity.
+        let tall = rows(30);
+        assert!(tall[25].contains("› Ask Wisp anything"), "{}", tall[25]);
+        let gap = tall[26].trim();
+        assert!(
+            gap.starts_with('│') && gap.trim_matches('│').trim().is_empty(),
+            "{gap}"
+        );
+        assert!(
+            tall[27].contains("Build · model-x fake · high"),
+            "{}",
+            tall[27]
+        );
+        // A shorter screen keeps that row for the transcript.
+        let short = rows(20);
+        assert!(short[16].contains("› Ask Wisp anything"), "{}", short[16]);
+        assert!(
+            short[17].contains("Build · model-x fake · high"),
+            "{}",
+            short[17]
+        );
+    }
+
+    #[test]
     fn framed_composer_moves_identity() {
         let draw = |height: u16| {
             let mut state =
@@ -6646,7 +6714,8 @@ mod tests {
         completed.before_text = before_text.map(str::to_owned);
         completed.created = created;
         state.transcript.observe_tool_result(completed);
-        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        // 25 rows: a 24-row screen's transcript plus the composer's blank row.
+        let mut terminal = Terminal::new(TestBackend::new(width, 25)).unwrap();
         terminal
             .draw(|frame| {
                 render_interactive(
