@@ -1118,7 +1118,8 @@ fn finished_turn_line(
     let (turn, growth) = split.finished_turn()?;
     let dim = Style::default().fg(palette.rail());
     let mut spans = turn_growth(turn, growth, palette);
-    if let Some(largest) = breakdown.largest.first() {
+    // Until a finished run's statistics arrive, the largest items predate it.
+    if let Some(largest) = breakdown.largest.first().filter(|_| split.growth == 0) {
         let size = format!(" {}", abbreviated(largest.tokens));
         let used: usize = spans.iter().map(|span| span.content.width()).sum();
         let label = format!(" · largest: {}", sanitize_for_terminal(&largest.label));
@@ -1968,6 +1969,25 @@ mod tests {
         assert!(!panel.contains("■ Messages"), "{panel}");
         assert!(panel.contains("turn 6 +38.2k"), "{panel}");
         assert!(panel.contains("M src/lib.rs"), "{panel}");
+    }
+
+    #[test]
+    fn compaction_drops_stale_split() {
+        let mut state = with_split(running());
+        // A compaction during the run: the next request is far smaller.
+        state.context.budget.as_mut().unwrap().observed_tokens = Some(60_000);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("60.0k / 272.0k 22%"), "{panel}");
+        assert!(!panel.contains("so far"), "{panel}");
+    }
+
+    #[test]
+    fn finished_run_awaits_stats() {
+        let mut state = with_split(session());
+        state.context.budget.as_mut().unwrap().observed_tokens = Some(210_000);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("turn 7 +11.2k"), "{panel}");
+        assert!(!panel.contains("largest"), "{panel}");
     }
 
     #[test]

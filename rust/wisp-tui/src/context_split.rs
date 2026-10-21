@@ -73,10 +73,17 @@ impl<'a> Split<'a> {
         let budget = state.context.budget.as_ref()?;
         let total = budget_tokens(budget);
         let stats = state.context.stats.as_deref();
-        let breakdown = stats.and_then(|stats| stats.context_breakdown.as_ref());
-        let growth = stats.map_or(0, |stats| {
+        let mut breakdown = stats.and_then(|stats| stats.context_breakdown.as_ref());
+        let mut growth = stats.map_or(0, |stats| {
             i128::from(total) - i128::from(budget_tokens(&stats.context))
         });
+        if growth < 0 {
+            // The context shrank since the split was reported, as a compaction
+            // during a run does: the split describes what was replaced, so it is
+            // dropped until the next refresh.
+            breakdown = None;
+            growth = 0;
+        }
         Some(Self {
             total,
             window: budget.context_window.filter(|window| *window > 0),
@@ -124,8 +131,12 @@ impl<'a> Split<'a> {
     }
 
     /// The newest finished turn's number and the tokens it added; none before the
-    /// first run.
+    /// first run. A run that finished before its statistics arrived is that turn,
+    /// with what it added since the split.
     pub(crate) fn finished_turn(&self) -> Option<(u64, u64)> {
+        if self.growth > 0 {
+            return self.running_turn();
+        }
         let last = self.breakdown?.turns.last()?;
         Some((last.turn, last.tokens))
     }
@@ -348,8 +359,11 @@ mod tests {
             breakdown: Some(&breakdown),
             growth: 500,
         };
-        assert_eq!(split.finished_turn(), None);
         assert_eq!(split.running_turn(), Some((1, 500)));
+        // Finished, but its statistics have not arrived.
+        assert_eq!(split.finished_turn(), Some((1, 500)));
+        let split = Split { growth: 0, ..split };
+        assert_eq!(split.finished_turn(), None);
     }
 
     #[test]
