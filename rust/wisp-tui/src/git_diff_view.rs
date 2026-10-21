@@ -114,7 +114,24 @@ impl GitDiffView {
     }
 
     pub fn key(&mut self, key: KeyCode) {
-        self.opened_at = None;
+        // Only moving in the tree gives up the file `/diff` was opened at; switching
+        // focus or changing how the diff reads keeps it for the snapshot on its way.
+        if self.tree_focus
+            && matches!(
+                key,
+                KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Enter
+                    | KeyCode::Left
+                    | KeyCode::Right
+            )
+        {
+            self.opened_at = None;
+        }
         match key {
             KeyCode::Tab | KeyCode::BackTab => self.tree_focus = !self.tree_focus,
             KeyCode::Char('s') => self.review.split = !self.review.split,
@@ -401,9 +418,21 @@ mod tests {
         state.snapshot = snapshot(2);
         view.sync(&state);
         assert_eq!(view.rows[view.selected].0, "b.rs");
-        // Once the user moves, a later snapshot no longer pulls the selection back.
+        // Changing how the diff reads, or scrolling it, while a snapshot loads keeps
+        // the file.
+        let mut view = GitDiffView::opened_at(Some("b.rs".into()));
+        state.snapshot = None;
+        view.sync(&state);
+        for key in [KeyCode::Char('s'), KeyCode::Char('c'), KeyCode::Down] {
+            view.key(key);
+        }
+        state.snapshot = snapshot(4);
+        view.sync(&state);
+        assert_eq!(view.rows[view.selected].0, "b.rs");
+        // Once the user moves in the tree, a later snapshot no longer pulls the
+        // selection back.
         view.key(KeyCode::Down);
-        state.snapshot = snapshot(3);
+        state.snapshot = snapshot(5);
         view.sync(&state);
         assert_eq!(view.selected, 0);
     }
