@@ -105,10 +105,13 @@ impl KeyboardProtocol {
         }
     }
 
+    /// Unlike mouse capture, ownership is taken only once the push is written: a pop
+    /// without its push would remove a setting the program around Wisp pushed.
     fn enable(&self, output: &mut impl Write) -> io::Result<()> {
-        self.requested.store(true, Ordering::SeqCst);
         output.write_all(b"\x1b[>1u")?;
-        output.flush()
+        output.flush()?;
+        self.requested.store(true, Ordering::SeqCst);
+        Ok(())
     }
 
     fn restore(&self, output: &mut impl Write) -> io::Result<()> {
@@ -265,6 +268,11 @@ mod tests {
         assert_eq!(output, b"\x1b[<1u");
         output.clear();
         protocol.restore(&mut output).unwrap();
+        assert!(output.is_empty());
+        // A push that never reached the terminal leaves nothing to pop.
+        let failed = KeyboardProtocol::new();
+        assert!(failed.enable(&mut Broken).is_err());
+        failed.restore(&mut output).unwrap();
         assert!(output.is_empty());
     }
 
