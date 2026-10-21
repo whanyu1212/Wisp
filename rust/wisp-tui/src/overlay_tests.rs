@@ -258,12 +258,27 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
                 )
             })
             .unwrap();
-        assert_eq!(
+        assert_same_visible_cells(
             terminal.backend().buffer(),
             baseline.backend().buffer(),
-            "{kind:?}"
+            kind,
         );
         assert!(receiver.try_recv().is_err());
+    }
+}
+
+/// Every cell matches, except the hidden half of a wide glyph: a terminal draws the
+/// glyph over both cells, and an incremental redraw never rewrites the hidden one,
+/// so it can keep an overlay's style after the overlay closes.
+fn assert_same_visible_cells(live: &Buffer, baseline: &Buffer, kind: OverlayKind) {
+    assert_eq!(live.area, baseline.area, "{kind:?}");
+    for y in 0..live.area.height {
+        for x in 0..live.area.width {
+            let hidden = x > 0 && baseline[(x - 1, y)].symbol().width() > 1;
+            if !hidden {
+                assert_eq!(live[(x, y)], baseline[(x, y)], "{kind:?} at {x},{y}");
+            }
+        }
     }
 }
 
