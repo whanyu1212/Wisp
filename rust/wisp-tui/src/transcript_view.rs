@@ -1008,13 +1008,20 @@ impl TranscriptRowCache {
                     width,
                 )?,
             RowPosition::RunSummary => {
-                let summary = entry.run_summary()?;
+                // Model and effort names come from providers: keep terminal controls
+                // inert and the row to one line.
+                let summary = entry
+                    .run_summary()?
+                    .graphemes(true)
+                    .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                    .collect::<String>();
+                let summary = self.clip_to_columns(&summary, width);
                 ProjectedRow {
                     row: TranscriptRow::plain(
                         anchor,
                         entry.role,
                         TranscriptRowKind::RunSummary,
-                        summary.to_owned(),
+                        summary,
                         entry.display_content().len(),
                     ),
                     next: spacer_after(transcript, entry),
@@ -1554,10 +1561,25 @@ impl TranscriptRowCache {
                             let reserved = duration.width() + TRAILING_GAP;
                             (duration, reserved)
                         });
-                    let text_width = duration
-                        .as_ref()
-                        .filter(|(_, reserved)| width >= ACTION_COLUMNS_BESIDE_HINT + reserved)
-                        .map_or(width, |(_, reserved)| width - reserved);
+                    // A call still running keeps the same columns for its live timer.
+                    let in_progress = duration.is_none()
+                        && entry.tool_card().is_some_and(|card| {
+                            matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
+                        });
+                    let reserved = duration.as_ref().map_or(
+                        if in_progress {
+                            LIVE_TIMER_COLUMNS + TRAILING_GAP
+                        } else {
+                            0
+                        },
+                        |(_, reserved)| *reserved,
+                    );
+                    let text_width =
+                        if reserved > 0 && width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
+                            width - reserved
+                        } else {
+                            width
+                        };
                     let hint = if expanded {
                         self.fold.collapse_hint()
                     } else if (!projection.inline_detail
@@ -1584,10 +1606,9 @@ impl TranscriptRowCache {
                             row_width -= reserved;
                             trailing = Some(duration);
                         }
-                    } else if entry.tool_card().is_some_and(|card| {
-                        matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
-                    }) && row_width
-                        >= ACTION_COLUMNS_BESIDE_HINT + LIVE_TIMER_COLUMNS + TRAILING_GAP
+                    } else if in_progress
+                        && row_width
+                            >= ACTION_COLUMNS_BESIDE_HINT + LIVE_TIMER_COLUMNS + TRAILING_GAP
                     {
                         row_width -= LIVE_TIMER_COLUMNS + TRAILING_GAP;
                         live_timer = true;
@@ -4838,6 +4859,55 @@ mod tests {
             cache.row_at(&transcript, before, 60).unwrap().next,
             Some(summary)
         );
+    }
+
+    #[test]
+    fn summary_row_is_inert() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        transcript.complete_message(1, "done".into());
+        assert!(transcript.attach_run_summary(format!("evil\u{1b}[2J{}", "x".repeat(200))));
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let summary = rows.last().unwrap().plain_text();
+        // Provider-named text cannot reach the terminal as a control sequence, and the
+        // row stays one line.
+        assert!(!summary.contains('\u{1b}'), "{summary:?}");
+        assert!(
+            summary.width() <= 40 && summary.ends_with('…'),
+            "{summary:?}"
+        );
+    }
+
+    #[test]
+    fn running_rows_keep_their_arrow() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "r1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "/zz/src/some/deeply/nested/module.rs"}),
+        });
+        // While the call runs, its live timer takes the right columns; an action cut
+        // short to make room can still be expanded.
+        for width in 40..80 {
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let action = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap();
+            if action.plain_text().contains('…') {
+                assert!(action.fold_arrow.is_some(), "width {width}: {action:?}");
+            }
+        }
     }
 
     #[test]

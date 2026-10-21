@@ -56,9 +56,10 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
+    // The footer, the transcript's two rows, and the status line while running.
     let ceiling = area
         .height
-        .saturating_sub(3)
+        .saturating_sub(3 + status_line_height(state))
         .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
     if editable(state) {
         u16::try_from(
@@ -781,14 +782,13 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
-        let entries = state.transcript.entries();
         let prompts = TurnBounds {
-            first: entries
+            first: state
+                .transcript
+                .entries()
                 .iter()
                 .position(|entry| entry.role == TranscriptRole::User),
-            latest: entries
-                .iter()
-                .rposition(|entry| entry.role == TranscriptRole::User),
+            latest: run_prompt_index(state),
         };
         for (offset, row) in rows.iter().enumerate() {
             let area = Rect::new(
@@ -1023,7 +1023,16 @@ fn render_status_line(
     )];
     let mut detail = String::new();
     let mut timer = None;
-    match turn.iter().rev().find_map(|entry| running_item(entry)) {
+    // Only calls after the latest reply name the run: once the model answers again, a
+    // background process started earlier no longer says what is happening. Cancelling
+    // outranks everything, since that is what the user is waiting on.
+    let item = turn
+        .iter()
+        .rev()
+        .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
+        .find_map(running_item)
+        .filter(|_| !state.cancel_requested);
+    match item {
         Some(item) => {
             lead.push(Span::styled(
                 format!(" {} ", item.label),
@@ -1039,12 +1048,7 @@ fn render_status_line(
         }
         None => lead.push(Span::styled(activity_phase(state), running)),
     }
-    let turn_number = state
-        .transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.role == TranscriptRole::User)
-        .count();
+    let turn_number = state.run_progress.map_or(0, |run| run.turn);
     let tools = turn
         .iter()
         .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
@@ -1056,11 +1060,11 @@ fn render_status_line(
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         ));
     }
-    let tail = vec![
-        Span::styled(" · ", dim),
-        Span::styled(format!("turn {turn_number} "), muted),
-        Span::styled(totals, dim),
-    ];
+    let mut tail = vec![Span::styled(" · ", dim)];
+    if turn_number > 0 {
+        tail.push(Span::styled(format!("turn {turn_number} "), muted));
+    }
+    tail.push(Span::styled(totals, dim));
 
     // Fit the left side beside the right one, keeping at least a little of the
     // running item's text before the turn details are shown.
@@ -1114,17 +1118,28 @@ fn render_status_line(
     }
 }
 
-/// The entries after the latest prompt: the run in progress.
-fn current_turn(state: &UiState) -> Vec<&TranscriptEntry> {
-    let mut turn = state
-        .transcript
-        .entries()
-        .iter()
-        .rev()
-        .take_while(|entry| entry.role != TranscriptRole::User)
-        .collect::<Vec<_>>();
-    turn.reverse();
-    turn
+/// The entries of the run in progress: everything after the prompt that started it,
+/// including steers and follow-ups it took in, or after the latest prompt otherwise.
+fn current_turn(state: &UiState) -> &[TranscriptEntry] {
+    let entries = state.transcript.entries();
+    let start = run_prompt_index(state)
+        .map_or(0, |index| index + 1)
+        .min(entries.len());
+    &entries[start..]
+}
+
+/// Where the prompt that started the run in progress sits, or the latest prompt.
+fn run_prompt_index(state: &UiState) -> Option<usize> {
+    state
+        .run_progress
+        .and_then(|run| state.transcript.entry_index(run.prompt))
+        .or_else(|| {
+            state
+                .transcript
+                .entries()
+                .iter()
+                .rposition(|entry| entry.role == TranscriptRole::User)
+        })
 }
 
 /// A call still in progress, as the status line names it.
@@ -1178,7 +1193,8 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
         .collect()
 }
 
-/// What the agent is waiting on while no reply text or tool card shows progress.
+/// What the run is doing when no call names it: compacting, cancelling, thinking, or
+/// otherwise working.
 fn activity_phase(state: &UiState) -> String {
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
         return "Compacting context".into();
@@ -1197,28 +1213,7 @@ fn activity_phase(state: &UiState) -> String {
                 && entry.state == crate::transcript::TranscriptEntryState::Streaming
                 && !entry.thinking().is_empty()
         });
-    if !thinking {
-        if let Some(card) = state
-            .transcript
-            .entries()
-            .iter()
-            .rev()
-            .take_while(|entry| entry.role != TranscriptRole::User)
-            .find_map(|entry| {
-                let card = entry.process_card()?;
-                matches!(
-                    card.display_state,
-                    ProcessDisplayState::Running | ProcessDisplayState::Polling
-                )
-                .then_some(card)
-            })
-        {
-            return format!(
-                "Running {}",
-                card.task_label.as_deref().unwrap_or("background command")
-            );
-        }
-    }
+    // A call or background process still running is named by the status line itself.
     if thinking {
         "Thinking".into()
     } else {
@@ -1273,7 +1268,8 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
     }
 }
 
-/// Where the transcript's first and latest prompts sit, found once per frame.
+/// Where the transcript's first prompt and the running turn's prompt sit, found once
+/// per frame.
 #[derive(Clone, Copy)]
 struct TurnBounds {
     first: Option<usize>,
@@ -4244,7 +4240,8 @@ mod tests {
         });
         state.transcript.append_prompt("first".into());
         state.transcript.complete_message(1, "done".into());
-        state.transcript.append_prompt("check ci".into());
+        let prompt = state.transcript.append_prompt("check ci".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
         state
     }
 
@@ -4254,7 +4251,7 @@ mod tests {
         // Between steps the phase stands in for a running call.
         let (idle_step, _) = status_row(&state, 100, Some(151));
         assert!(
-            idle_step.starts_with("◐ Working · turn 2 0 tools · 2m 31s"),
+            idle_step.starts_with("◐ Working · turn 6 0 tools · 2m 31s"),
             "{idle_step}"
         );
 
@@ -4271,7 +4268,7 @@ mod tests {
             text.starts_with("◐  Bash  gh pr checks 766 --watch "),
             "{text}"
         );
-        assert!(text.contains(" · turn 2 1 tool · 2m 31s"), "{text}");
+        assert!(text.contains(" · turn 6 1 tool · 2m 31s"), "{text}");
         assert!(text.trim_end().ends_with("ctx ~?"), "{text}");
         let palette = Palette::default();
         assert_eq!(style_at_text(&backend, "◐").unwrap().0, palette.secondary);
@@ -4284,20 +4281,27 @@ mod tests {
         // the context on the right.
         let (narrow, _) = status_row(&state, 40, Some(151));
         assert!(narrow.contains('…'), "{narrow}");
-        assert!(!narrow.contains("turn 2"), "{narrow}");
+        assert!(!narrow.contains("turn 6"), "{narrow}");
         assert!(narrow.trim_end().ends_with("ctx ~?"), "{narrow}");
 
+        // Cancelling outranks the call still running.
         state.cancel_requested = true;
+        let (cancelling, _) = status_row(&state, 100, None);
+        assert!(
+            cancelling.starts_with("◐ Cancelling · turn 6 1 tool"),
+            "{cancelling}"
+        );
+        state.cancel_requested = false;
+
+        // A follow-up the run takes in joins it, so the tool count carries on.
         state.transcript.observe_tool_result({
             let mut result = tool_result("b1", "ok");
             result.name = "bash".into();
             result
         });
-        let (cancelling, _) = status_row(&state, 100, None);
-        assert!(
-            cancelling.starts_with("◐ Cancelling · turn 2 1 tool"),
-            "{cancelling}"
-        );
+        state.transcript.append_prompt("follow-up".into());
+        let (joined, _) = status_row(&state, 100, None);
+        assert!(joined.contains("turn 6 1 tool"), "{joined}");
     }
 
     #[test]
@@ -4362,6 +4366,24 @@ mod tests {
             Palette::default().secondary,
             "{text}"
         );
+    }
+
+    #[test]
+    fn status_line_fits_short_screens() {
+        let state = running_state();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"line\n".repeat(20));
+        let mut cache = ComposerLayoutCache::default();
+        for height in 8..20 {
+            let area = Rect::new(0, 0, 60, height);
+            let layout = cache.layout(&editor, composer_editor_width(area.width));
+            // The transcript keeps two rows beside the status line and the footer.
+            assert!(
+                composer_height(area, &state, Some(layout)) + status_line_height(&state) + 3
+                    <= height,
+                "height {height}"
+            );
+        }
     }
 
     #[test]
@@ -4512,7 +4534,7 @@ mod tests {
         let tiny = render_to_string(30, 8, &state, &editor);
         assert!(!tiny.contains("terminal too"), "{tiny}");
         assert!(tiny.contains("◐ Working"), "{tiny}");
-        assert!(!tiny.contains("turn 2"), "{tiny}");
+        assert!(!tiny.contains("turn 6"), "{tiny}");
     }
 
     #[test]
@@ -7505,20 +7527,30 @@ mod tests {
                 .unwrap();
             terminal.backend().buffer().clone()
         };
-        // Cells that differ between two ticks: only spinners may change.
+        // Spinner cells that turn between two ticks. Live timers read the wall clock and
+        // may also tick, but nothing else may change.
         let spinning = |first: &ratatui::buffer::Buffer, later: &ratatui::buffer::Buffer| {
+            let spinner = |cell: &ratatui::buffer::Cell| SPINNER_FRAMES.contains(&cell.symbol());
+            let timer = |cell: &ratatui::buffer::Cell| {
+                cell.symbol()
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || "<.ms ".contains(character))
+            };
             let changed = first
                 .content
                 .iter()
                 .zip(&later.content)
                 .filter(|(a, b)| a != b)
                 .collect::<Vec<_>>();
-            assert!(changed.iter().all(|(a, b)| {
-                SPINNER_FRAMES.contains(&a.symbol())
-                    && SPINNER_FRAMES.contains(&b.symbol())
-                    && a.symbol() != b.symbol()
-            }));
-            changed.len()
+            assert!(
+                changed
+                    .iter()
+                    .all(|(a, b)| (spinner(a) && spinner(b)) || (timer(a) && timer(b)))
+            );
+            changed
+                .iter()
+                .filter(|(a, b)| spinner(a) && spinner(b))
+                .count()
         };
         for palette in [Palette::default(), crate::theme::themes()[0].palette(true)] {
             for tool in ["bash", "read"] {
@@ -7694,6 +7726,10 @@ mod tests {
             status(&process).contains(" Process  Background command"),
             "{process}"
         );
+        // Once the model answers again, the background process no longer names the run.
+        state.transcript.append_message_delta(3, "Checking again.");
+        let answering = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(status(&answering).contains("◒ Working"), "{answering}");
 
         for status in [
             ViewStatus::Idle,

@@ -702,6 +702,15 @@ impl QueueSubmissionPreflightError {
     }
 }
 
+/// The run in progress, as the status line counts it: the prompt that started it and
+/// the agent turn it has reached. Steers and follow-ups injected mid-run join the run
+/// rather than starting a new one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunProgress {
+    pub prompt: crate::transcript::TranscriptEntryId,
+    pub turn: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -743,6 +752,7 @@ pub struct UiState {
     /// Queue streamed reply text for the live terminal to reveal at an even pace instead
     /// of showing each delta as it arrives. Off by default, so reductions stay immediate.
     pub(crate) stream_pacing: bool,
+    pub(crate) run_progress: Option<RunProgress>,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
@@ -820,6 +830,7 @@ impl UiState {
             exit_requested: false,
             transcript: SharedTranscript::default(),
             stream_pacing: false,
+            run_progress: None,
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
@@ -1670,9 +1681,10 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state
+    let prompt = state
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
@@ -1704,7 +1716,8 @@ fn init_project(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state.transcript.append_prompt("/init".into());
+    let prompt = state.transcript.append_prompt("/init".into());
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -4533,6 +4546,9 @@ fn handle_backend_event(
             Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
         }
         BackendEvent::MessageStarted { turn } => {
+            if let Some(run) = state.run_progress.as_mut() {
+                run.turn = run.turn.max(turn);
+            }
             state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
         }
@@ -4594,7 +4610,8 @@ fn handle_backend_event(
                 output_tokens,
                 model_ms,
             );
-            if state.transcript.attach_run_summary(summary) {
+            // A run that reported nothing to total keeps no summary row.
+            if !summary.is_empty() && state.transcript.attach_run_summary(summary) {
                 Ok(vec![UiEffect::RequestRender])
             } else {
                 Ok(Vec::new())
@@ -6198,6 +6215,31 @@ mod tests {
         assert_eq!(reply.run_summary(), None);
         let card = state.transcript.entries().last().unwrap();
         assert_eq!(card.run_summary(), Some("4.0s · 1 tool · cancelled"));
+    }
+
+    #[test]
+    fn empty_run_keeps_no_summary() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hi".into());
+        state.transcript.complete_message(1, "hello".into());
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "completed".into(),
+                duration_ms: None,
+                tool_calls: 0,
+                output_tokens: None,
+                model_ms: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(
+            state.transcript.entries().last().unwrap().run_summary(),
+            None
+        );
     }
 
     #[test]

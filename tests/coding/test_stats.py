@@ -774,16 +774,20 @@ def test_run_stats_totals() -> None:
 
 
 def test_run_stats_times_responses(monkeypatch: pytest.MonkeyPatch) -> None:
-    clock = iter([10.0, 12.5, 20.0, 21.0, 30.0])
+    clock = iter([10.0, 12.5, 20.0, 21.0, 22.0, 30.0])
     monkeypatch.setattr("wisp.coding.stats.time.monotonic", lambda: next(clock))
+    usage = TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)
     stats = RunStats(started=0.0)
     stats.observe(MessageStarted(turn=1))
-    stats.observe(MessageCompleted(turn=1, content="a", finish_reason="tool_calls"))
+    stats.observe(MessageCompleted(turn=1, content="a", finish_reason="tool_calls", usage=usage))
     # Tool time between responses is left out.
     stats.observe(MessageStarted(turn=2))
-    stats.observe(MessageCompleted(turn=2, content="b", finish_reason="stop"))
+    stats.observe(MessageCompleted(turn=2, content="b", finish_reason="stop", usage=usage))
+    # A failed response reports no usage, so its time is left out too.
+    stats.observe(MessageStarted(turn=3))
+    stats.observe(MessageCompleted(turn=3, content="", finish_reason="error"))
 
-    completed = stats.completed(session_id="s", turns=2, outcome="completed")
+    completed = stats.completed(session_id="s", turns=3, outcome="completed")
 
     assert (completed.model_ms, completed.duration_ms) == (3500, 30000)
 

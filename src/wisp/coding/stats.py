@@ -58,8 +58,9 @@ class RunStats:
     def observe(self, event: WispEvent) -> None:
         """Count a published tool result, a response's output tokens, and its time.
 
-        A response is timed from its `MessageStarted` to its `MessageCompleted`; a
-        retried response restarts the clock, and one that never completes adds nothing.
+        A response is timed from its `MessageStarted` to its `MessageCompleted`. Only
+        responses that report usage count, so time spent on a failed or partial response
+        does not dilute throughput; one that never completes adds nothing.
 
         Args:
             event (WispEvent): Event the run just published.
@@ -69,12 +70,12 @@ class RunStats:
         elif isinstance(event, MessageStarted):
             self._response_started = time.monotonic()
         elif isinstance(event, MessageCompleted):
+            started, self._response_started = self._response_started, None
             if event.usage is not None:
                 self.output_tokens = (self.output_tokens or 0) + event.usage.output_tokens
-            if self._response_started is not None:
-                elapsed = time.monotonic() - self._response_started
-                self.model_seconds = (self.model_seconds or 0.0) + elapsed
-                self._response_started = None
+                if started is not None:
+                    elapsed = time.monotonic() - started
+                    self.model_seconds = (self.model_seconds or 0.0) + elapsed
 
     def completed(self, *, session_id: str, turns: int, outcome: RunOutcome) -> AgentCompleted:
         """Build the run's terminal event with its totals.
