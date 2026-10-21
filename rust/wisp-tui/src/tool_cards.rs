@@ -240,6 +240,8 @@ pub struct ToolCardSnapshot {
     pub duration_ms: Option<u32>,
     /// The folder this call's run used, which its paths are shown relative to.
     pub display_base: Option<std::sync::Arc<str>>,
+    /// A shell's exit status, when its output opens with Wisp's completion envelope.
+    pub exit_code: Option<i32>,
 }
 
 impl ToolCardSnapshot {
@@ -261,6 +263,7 @@ impl ToolCardSnapshot {
             structured_detail: DetailAvailability::None,
             duration_ms: None,
             display_base: None,
+            exit_code: None,
         }
     }
 
@@ -340,6 +343,10 @@ impl ToolCardSnapshot {
         self.duration_ms = input
             .duration_ms
             .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
+        self.exit_code = input
+            .exit_code
+            .filter(|_| input.output_has_exit_status)
+            .and_then(|code| i32::try_from(code).ok());
         self.process_id = input
             .process_id
             .as_ref()

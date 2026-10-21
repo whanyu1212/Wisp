@@ -1124,6 +1124,8 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
         TranscriptRowTone::DiffDeletion => Style::default()
             .fg(palette.deletion)
             .bg(palette.deletion_background),
+        TranscriptRowTone::Surface => Style::default().fg(palette.foreground).bg(palette.surface),
+        TranscriptRowTone::SurfaceNote => Style::default().fg(palette.muted).bg(palette.surface),
         _ => Style::default().fg(palette.muted),
     }
 }
@@ -1188,7 +1190,10 @@ fn render_transcript_row(
         frame.render_widget(Block::default().style(palette.composer()), content);
     } else if matches!(
         row.tone,
-        TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion
+        TranscriptRowTone::DiffAddition
+            | TranscriptRowTone::DiffDeletion
+            | TranscriptRowTone::Surface
+            | TranscriptRowTone::SurfaceNote
     ) {
         frame.render_widget(
             Block::default().style(base.patch(tone_style(row.tone, palette))),
@@ -1213,6 +1218,8 @@ fn render_transcript_row(
                 | TranscriptRowTone::Error
                 | TranscriptRowTone::DiffAddition
                 | TranscriptRowTone::DiffDeletion
+                | TranscriptRowTone::Surface
+                | TranscriptRowTone::SurfaceNote
         ) =>
         {
             base.patch(tone_style(row.tone, palette))
@@ -5537,6 +5544,112 @@ mod tests {
             screen.contains("▸ 2 actions · read src/a.rs +1"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn diff_preview_rows_share_a_surface() {
+        use std::fmt::Write as _;
+        let old_text = format!(
+            "keep\n{}",
+            (0..9).fold(String::new(), |mut lines, line| {
+                let _ = writeln!(lines, "old {line}");
+                lines
+            })
+        );
+        let new_text = format!(
+            "keep\n{}",
+            (0..9).fold(String::new(), |mut lines, line| {
+                let _ = writeln!(lines, "new {line}");
+                lines
+            })
+        );
+        let (screen, backend) = render_file_card(
+            "edit",
+            json!({
+                "path": "notes.txt",
+                "edits": [{"oldText": old_text, "newText": new_text}]
+            }),
+            None,
+            false,
+            80,
+        );
+        let palette = Palette::default();
+        // Unchanged lines and the "more changed lines" row sit on the same surface
+        // as the tinted changes, so the preview reads as one block.
+        assert_eq!(
+            style_at_text(&backend, "keep").map(|style| style.1),
+            Some(palette.surface),
+            "{screen}"
+        );
+        assert_eq!(
+            style_at_text(&backend, "more changed lines").map(|style| style.1),
+            Some(palette.surface),
+            "{screen}"
+        );
+        assert_eq!(
+            style_at_text(&backend, "- old 0").map(|style| style.1),
+            Some(palette.deletion_background),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn shell_output_is_framed() {
+        let draw = |lines: usize| {
+            let mut state = UiState::unconfigured();
+            state.transcript.append_prompt("run".into());
+            let card = state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: "b1".into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": "cargo test"}),
+                });
+            let body = (0..lines)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = tool_result("b1", &format!("Command exited with code 3: {body}"));
+            result.name = "bash".into();
+            result.exit_code = Some(3);
+            result.output_has_exit_status = true;
+            state.transcript.observe_tool_result(result);
+            let mut cache = TranscriptRowCache::default();
+            cache.fold_mut().expand(card);
+            let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let palette = Palette::default();
+
+        // Short output loses the completion envelope and closes with the exit status.
+        let short = draw(3);
+        let text = short.to_string();
+        assert!(!text.contains("Command exited"), "{text}");
+        assert!(text.contains("│  line 0"), "{text}");
+        assert_eq!(style_at_text(&short, "line 0").unwrap().1, palette.surface);
+        assert_eq!(style_at_text(&short, "exit 3").unwrap().1, palette.surface);
+
+        // A long tail counts the lines above it instead of the bytes.
+        let long = draw(40);
+        let text = long.to_string();
+        assert!(text.contains("(32 earlier lines)"), "{text}");
+        assert!(!text.contains("bytes omitted"), "{text}");
+        assert!(text.contains("line 39"), "{text}");
+        assert!(text.contains("exit 3"), "{text}");
     }
 
     #[test]

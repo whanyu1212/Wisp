@@ -67,6 +67,8 @@ pub enum CardSection {
     Metadata,
     Detail,
     Omission,
+    /// A closing note after the detail, such as a shell's exit status.
+    Footer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -138,6 +140,12 @@ pub enum TranscriptRowTone {
     Error,
     DiffAddition,
     DiffDeletion,
+    /// A row of a framed block, such as a diff preview's unchanged line or shell
+    /// output, on the block's surface.
+    Surface,
+    /// A framed block's muted note, such as a diff's "more changed lines" row or a
+    /// shell's `exit 0`, on the same surface.
+    SurfaceNote,
 }
 
 /// The result connector that opens the first row under a card's action line.
@@ -529,6 +537,10 @@ struct CardProjection {
     inline_detail: bool,
     omission: Option<String>,
     omission_before_detail: bool,
+    /// Closes the detail, such as `exit 0` under shell output.
+    footer: Option<String>,
+    /// The omission, detail, and footer rows share a surface, like shell output.
+    framed: bool,
     action_tone: TranscriptRowTone,
 }
 
@@ -537,6 +549,7 @@ impl CardProjection {
         self.action
             .len()
             .saturating_add(self.detail.len())
+            .saturating_add(self.footer.as_ref().map_or(0, String::len))
             .saturating_add(self.metadata.len())
             .saturating_add(
                 self.detail_tones
@@ -1586,7 +1599,8 @@ impl TranscriptRowCache {
             }
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
-                    separator_after(transcript, entry)
+                    card_footer_position(entry, &projection)
+                        .or_else(|| separator_after(transcript, entry))
                 } else {
                     projection
                         .omission
@@ -1598,6 +1612,7 @@ impl TranscriptRowCache {
                                 absolute_byte_offset: 0,
                             }),
                         })
+                        .or_else(|| card_footer_position(entry, &projection))
                         .or_else(|| separator_after(transcript, entry))
                 };
                 let tone = projection.detail_tone(absolute_offset);
@@ -1633,7 +1648,8 @@ impl TranscriptRowCache {
                         }),
                     })
                 } else {
-                    separator_after(transcript, entry)
+                    card_footer_position(entry, &projection)
+                        .or_else(|| separator_after(transcript, entry))
                 };
                 let mut projected = self.build_card_text_row(
                     entry,
@@ -1644,9 +1660,31 @@ impl TranscriptRowCache {
                     absolute_offset,
                     result_width(width),
                     TranscriptRowKind::CardOmission,
-                    TranscriptRowTone::Warning,
+                    if projection.framed {
+                        TranscriptRowTone::SurfaceNote
+                    } else {
+                        TranscriptRowTone::Warning
+                    },
                     CardRowStyle::PLAIN,
                     next,
+                );
+                projected.row.gutter = result_gutter(entry, &projection, anchor);
+                Some(projected)
+            }
+            CardSection::Footer => {
+                let footer = projection.footer.as_deref()?;
+                let mut projected = self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    footer,
+                    0,
+                    absolute_offset,
+                    result_width(width),
+                    TranscriptRowKind::CardOmission,
+                    TranscriptRowTone::SurfaceNote,
+                    CardRowStyle::PLAIN,
+                    separator_after(transcript, entry),
                 );
                 projected.row.gutter = result_gutter(entry, &projection, anchor);
                 Some(projected)
@@ -2907,6 +2945,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     inline_detail: diff,
                     omission: None,
                     omission_before_detail: false,
+                    footer: None,
+                    framed: false,
                     action_tone: tool_status_tone(card.status),
                 });
             }
@@ -2929,13 +2969,58 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     format!("{}\n{metadata}", card.action_arguments)
                 };
             }
-            let detail = retained_preview.text.clone();
             let shown_output_bytes = retained_preview.text.len() as u64;
             let omitted = card
                 .retained_output
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
-            let omission = card_omission(omitted, card.backend_truncated, tail_preview);
+            // Finished shell output reads as a framed block: what scrolled away above,
+            // the tail, and the exit status below.
+            let framed = tail_preview && card.name == "bash";
+            let omission = match retained_preview.dropped_lines {
+                lines if framed && lines > 0 => Some(format!(
+                    "({lines} earlier line{}{})",
+                    if lines == 1 { "" } else { "s" },
+                    if card.backend_truncated {
+                        "; tool reported truncation"
+                    } else {
+                        ""
+                    }
+                )),
+                _ => card_omission(omitted, card.backend_truncated, tail_preview),
+            };
+            let mut detail = retained_preview.text.clone();
+            let mut detail_base = if tail_preview {
+                usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
+            let footer = card
+                .exit_code
+                .filter(|_| framed)
+                .map(|code| format!("exit {code}"));
+            if let Some(code) = card
+                .exit_code
+                .filter(|_| framed && retained_preview.base_offset == 0)
+            {
+                // The footer names the exit status, so the envelope opening the
+                // output is dropped; offsets stay those of the retained output.
+                let status = format!("Command exited with code {code}");
+                if let Some(rest) = detail.strip_prefix(&status) {
+                    let stripped = status.len() + if rest.starts_with(": ") { 2 } else { 0 };
+                    detail = detail[stripped..].to_owned();
+                    detail_base += stripped;
+                }
+            }
+            let detail_tones = if framed && !detail.is_empty() {
+                vec![CardDetailTone {
+                    start: 0,
+                    end: detail.len(),
+                    tone: TranscriptRowTone::Surface,
+                }]
+            } else {
+                Vec::new()
+            };
             Some(CardProjection {
                 action,
                 action_marker_end,
@@ -2944,12 +3029,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 action_argument_style,
                 metadata,
                 detail,
-                detail_base: if tail_preview {
-                    usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
-                } else {
-                    0
-                },
-                detail_tones: Vec::new(),
+                detail_base,
+                detail_tones,
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
@@ -2957,6 +3038,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
+                footer,
+                framed,
                 action_tone: tool_status_tone(card.status),
             })
         }
@@ -2993,6 +3076,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
+                footer: None,
+                framed: false,
                 action_tone: process_state_tone(card.display_state),
             })
         }
@@ -3165,10 +3250,24 @@ fn card_position_after_metadata(
             }),
         });
     }
-    projection.omission.as_ref().map(|_| RowAnchor {
+    projection
+        .omission
+        .as_ref()
+        .map(|_| RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Omission,
+                absolute_byte_offset: 0,
+            }),
+        })
+        .or_else(|| card_footer_position(entry, projection))
+}
+
+fn card_footer_position(entry: &TranscriptEntry, projection: &CardProjection) -> Option<RowAnchor> {
+    projection.footer.as_ref().map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Card(CardPosition {
-            section: CardSection::Omission,
+            section: CardSection::Footer,
             absolute_byte_offset: 0,
         }),
     })
@@ -3984,7 +4083,7 @@ fn scroll_anchor_rank(
                             .absolute_byte_offset
                             .saturating_sub(card.detail_base),
                     ),
-                CardSection::Omission => total,
+                CardSection::Omission | CardSection::Footer => total,
             };
             0.05 + 0.9 * (offset as f64 / total as f64).min(1.0)
         }
@@ -4227,6 +4326,15 @@ fn normalize_anchor(
                         absolute_byte_offset: position
                             .absolute_byte_offset
                             .min(projection.omission.as_ref().map_or(0, String::len)),
+                    }),
+                },
+                CardSection::Footer if projection.footer.is_some() => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Card(CardPosition {
+                        section: CardSection::Footer,
+                        absolute_byte_offset: position
+                            .absolute_byte_offset
+                            .min(projection.footer.as_ref().map_or(0, String::len)),
                     }),
                 },
                 _ => RowAnchor {
@@ -5419,7 +5527,8 @@ mod tests {
                 .omission
                 .as_deref()
                 .unwrap()
-                .contains("omitted before this preview")
+                .ends_with("earlier lines)"),
+            "shell tails count the lines above them"
         );
     }
 
@@ -5459,7 +5568,8 @@ mod tests {
                 .omission
                 .as_deref()
                 .unwrap()
-                .contains("omitted before this preview")
+                .ends_with("earlier lines)"),
+            "shell tails count the lines above them"
         );
     }
 
