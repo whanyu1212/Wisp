@@ -297,8 +297,8 @@ for line in sys.stdin:
                 phase = "history restored frame"
             elif phase == "history restored frame" and all(
                 marker in output[phase_output_offset:]
-                # The footer draws "Enter" as a keycap, so its action follows a style change.
-                for marker in (b"history", b"exact", b"first", b"needle", b"second", b" send")
+                # The footer draws "Ctrl+G" as a keycap, so its action follows a style change.
+                for marker in (b"history", b"exact", b"first", b"needle", b"second", b" help")
             ):
                 assert command_types.count("prompt") == 1, "history must not submit"
                 phase_output_offset = len(output)

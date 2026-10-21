@@ -216,7 +216,8 @@ fn is_note(row: &DetailRow, side: &str) -> bool {
 fn format_row(row: &DetailRow, gutter: bool) -> (String, usize) {
     let (sign, _number) = match row.kind {
         DetailRowKind::Addition => ("+", row.new_line),
-        DetailRowKind::Deletion => ("-", row.old_line),
+        // A card-only sign; the details view keeps the unified-diff `-`.
+        DetailRowKind::Deletion => ("−", row.old_line),
         DetailRowKind::Context => (" ", row.new_line.or(row.old_line)),
         _ => return (crate::transcript_view::format_structured_detail_row(row), 0),
     };
@@ -540,5 +541,7 @@ mod tests {
             format_row(&addition, true),
             ("      118 + value".into(), "      118 + ".len())
         );
+        let deletion = row(DetailRowKind::Deletion, "value");
+        assert_eq!(format_row(&deletion, false), ("− value".into(), "− ".len()));
     }
 }
