@@ -220,6 +220,40 @@ def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_p
 
 
 @pytest.mark.process
+def test_shift_enter_inserts_newline(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    tui, session_dir = _launch(tmp_path, home=home)
+    try:
+        tui.wait_ready()
+        # The TUI asks for the kitty keyboard protocol, so a terminal that speaks it
+        # reports Shift+Enter apart from Enter.
+        assert b"\x1b[>1u" in tui.output
+        offset = len(tui.output)
+        tui.send(b"first\x1b[13;2usecond")
+        tui.wait_until(
+            lambda output: screen_shows(output, "second"),
+            failure="Shift+Enter did not keep the draft open for a second line",
+        )
+        offset = len(tui.output)
+        tui.send(b"\r")
+        tui.wait_until(
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
+            failure="two-line prompt did not complete",
+        )
+        tui.quit()
+        # Leaving the TUI hands the terminal back with the protocol popped.
+        assert b"\x1b[<1u" in tui.output
+    finally:
+        tui.close()
+
+    assert _conversation_messages(session_dir) == [
+        ("user", "first\nsecond"),
+        ("assistant", "fake response to: first\nsecond"),
+    ]
+
+
+@pytest.mark.process
 def test_composer_selection_and_word_deletion_submit_exact_unicode_text(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_user_settings(home, provider="fake")

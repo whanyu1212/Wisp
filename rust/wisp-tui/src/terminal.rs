@@ -57,6 +57,7 @@ pub(crate) fn draw_frame<B: FrameBackend>(
 // A panic may occur between requesting capture and constructing the terminal guard.
 // Both restoration paths must observe ownership of that partially applied request.
 static MOUSE_CAPTURE: MouseCapture = MouseCapture::new();
+static KEYBOARD_PROTOCOL: KeyboardProtocol = KeyboardProtocol::new();
 
 struct MouseCapture {
     requested: AtomicBool,
@@ -88,6 +89,39 @@ impl MouseCapture {
     }
 }
 
+/// The kitty keyboard protocol's first level, which reports keys a legacy terminal
+/// sends alike apart (Shift+Enter from Enter, Esc from an Alt chord) while printable
+/// keys still arrive as text. Terminals without the protocol ignore the request.
+/// Kitty keeps one setting per screen, so it is pushed on the alternate screen and
+/// popped before leaving it.
+struct KeyboardProtocol {
+    requested: AtomicBool,
+}
+
+impl KeyboardProtocol {
+    const fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+        }
+    }
+
+    fn enable(&self, output: &mut impl Write) -> io::Result<()> {
+        self.requested.store(true, Ordering::SeqCst);
+        output.write_all(b"\x1b[>1u")?;
+        output.flush()
+    }
+
+    fn restore(&self, output: &mut impl Write) -> io::Result<()> {
+        if self.requested.load(Ordering::SeqCst) {
+            output.write_all(b"\x1b[<1u")?;
+            output.flush()?;
+            // Keep ownership after an I/O failure so another cleanup path can retry.
+            self.requested.store(false, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
 pub struct TerminalGuard {
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
@@ -100,6 +134,10 @@ impl TerminalGuard {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+            restore_terminal();
+            return Err(Error::Io(error));
+        }
+        if let Err(error) = KEYBOARD_PROTOCOL.enable(&mut stdout) {
             restore_terminal();
             return Err(Error::Io(error));
         }
@@ -156,6 +194,7 @@ impl Drop for PanicHookGuard {
 fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
+    let _ = KEYBOARD_PROTOCOL.restore(&mut io::stdout());
     let _ = execute!(
         io::stdout(),
         EndSynchronizedUpdate,
@@ -208,6 +247,24 @@ mod tests {
         assert_eq!(output, b"\x1b[?1000l\x1b[?1002l\x1b[?1006l");
         output.clear();
         capture.restore(&mut output).unwrap();
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn keyboard_protocol_pops_once() {
+        let protocol = KeyboardProtocol::new();
+        let mut output = Vec::new();
+        protocol.restore(&mut output).unwrap();
+        assert!(output.is_empty(), "nothing to pop before a push");
+        protocol.enable(&mut output).unwrap();
+        assert_eq!(output, b"\x1b[>1u");
+        // A failed pop stays owned so the other cleanup path retries it.
+        assert!(protocol.restore(&mut Broken).is_err());
+        output.clear();
+        protocol.restore(&mut output).unwrap();
+        assert_eq!(output, b"\x1b[<1u");
+        output.clear();
+        protocol.restore(&mut output).unwrap();
         assert!(output.is_empty());
     }
 
