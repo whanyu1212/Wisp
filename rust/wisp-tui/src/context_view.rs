@@ -71,6 +71,51 @@ pub(crate) fn session_cost(state: &UiState) -> Option<String> {
     Some(format!("{}{amount}", if cost.complete { "" } else { "≥" }))
 }
 
+/// What the latest run's replies cost so far, from the estimate each reply carries.
+/// `None` until a reply in it is priced. A reply that searched the web, or one with
+/// text that could not be priced, makes the total a floor (`≥$0.31`); an unpriced
+/// reply that only called tools carries no cost and is not counted.
+pub(crate) fn turn_cost(state: &UiState) -> Option<String> {
+    // A run in progress spans its steers and follow-ups. Once it ends, the turn is
+    // what follows the latest prompt: a history sync or a session switch replaces
+    // the transcript, so the finished run's prompt id no longer names an entry in it.
+    // `/compact` runs no turn of its own, so it leaves the finished run's id in place.
+    let running = state
+        .current_command
+        .as_ref()
+        .is_some_and(|command| command.command_type != crate::reducer::ActiveCommandType::Compact);
+    let turn = if running {
+        crate::ui::current_turn(state)
+    } else {
+        let entries = state.transcript.entries();
+        let start = entries
+            .iter()
+            .rposition(|entry| entry.role == crate::transcript::TranscriptRole::User)
+            .map_or(0, |index| index + 1);
+        &entries[start..]
+    };
+    let mut nano_usd = 0u64;
+    let mut priced = false;
+    let mut floor = false;
+    for cost in turn.iter().filter_map(|entry| entry.cost()) {
+        match cost.nano_usd {
+            Some(amount) => {
+                nano_usd = nano_usd.saturating_add(amount);
+                priced = true;
+            }
+            None => floor = true,
+        }
+        floor |= cost.lower_bound;
+    }
+    priced.then(|| {
+        format!(
+            "{}{}",
+            if floor { "≥" } else { "" },
+            format_usd(nano_usd as f64 / 1e9)
+        )
+    })
+}
+
 /// Round a cost for display like the backend's `format_usd`, keeping more places
 /// for small amounts so a short session never reads as `$0.00`.
 fn format_usd(usd: f64) -> String {

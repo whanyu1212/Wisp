@@ -139,7 +139,7 @@ pub struct TranscriptEntry {
     /// timer of a call still in progress.
     running_since: Option<Instant>,
     searches: Vec<String>,
-    cost: Option<String>,
+    cost: Option<crate::web_search::MessageCost>,
     /// Display-only summary closing the last reply of a finished run.
     run_summary: Option<String>,
     /// How the run this prompt started ended, for the side panel's turn list.
@@ -177,7 +177,7 @@ impl TranscriptEntry {
         text.push_str(&self.content);
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
-            text.push_str(&format!("\n\n{cost}"));
+            text.push_str(&format!("\n\n{}", cost.label));
         }
         self.decorated_content = Some(text);
     }
@@ -212,6 +212,11 @@ impl TranscriptEntry {
 
     pub(crate) fn run_result(&self) -> Option<RunResult> {
         self.run_result
+    }
+
+    /// The cost the backend reported for this reply, if any.
+    pub(crate) fn cost(&self) -> Option<&crate::web_search::MessageCost> {
+        self.cost.as_ref()
     }
 
     pub fn thinking(&self) -> &str {
@@ -278,7 +283,7 @@ impl TranscriptEntry {
             .saturating_add(self.local_display.as_ref().map_or(0, String::len))
             .saturating_add(self.thinking.len())
             .saturating_add(self.searches.iter().map(String::len).sum::<usize>())
-            .saturating_add(self.cost.as_ref().map_or(0, String::len))
+            .saturating_add(self.cost.as_ref().map_or(0, |cost| cost.label.len()))
             .saturating_add(self.decorated_content.as_ref().map_or(0, String::len))
             .saturating_add(kind_bytes)
             .saturating_add(
@@ -608,7 +613,7 @@ impl Transcript {
         &mut self,
         turn: u64,
         content: String,
-        cost: Option<String>,
+        cost: Option<crate::web_search::MessageCost>,
     ) -> Option<TranscriptEntryId> {
         if cost.is_some() {
             let id = self.response_for_turn(turn);
@@ -723,6 +728,11 @@ impl Transcript {
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id =
             self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval, ToolCallSource::Live);
+        // The wait for the user is timed from here, or from the call if it came first;
+        // granting the approval restarts the clock for the run itself.
+        self.entry_mut(entry_id)
+            .running_since
+            .get_or_insert_with(Instant::now);
         self.update_pending_detail_tracking(entry_id);
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             return entry_id;

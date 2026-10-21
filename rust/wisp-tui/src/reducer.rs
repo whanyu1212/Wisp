@@ -1149,7 +1149,7 @@ pub enum BackendEvent {
     MessageCompleted {
         turn: u64,
         content: String,
-        cost: Option<String>,
+        cost: Option<crate::web_search::MessageCost>,
     },
     /// Where the session's commands run and the branch checked out there.
     WorkspaceReported {

@@ -59,7 +59,7 @@ pub(crate) fn search(value: &Value) -> String {
 /// Do not create a cost-only placeholder before tools when no estimate is available.
 /// Live completions and restored messages use the same display policy; the underlying
 /// usage and unavailable reason remain untouched.
-pub(crate) fn message_cost(message: &Value) -> Option<String> {
+pub(crate) fn message_cost(message: &Value) -> Option<MessageCost> {
     let tool_only = message["content"].as_str() == Some("")
         && message["tool_calls"]
             .as_array()
@@ -67,16 +67,33 @@ pub(crate) fn message_cost(message: &Value) -> Option<String> {
     cost(&message["cost"], !tool_only)
 }
 
-fn cost(value: &Value, show_unknown: bool) -> Option<String> {
+/// A reply's cost: the label closing it, and the estimate a run's total adds up.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MessageCost {
+    pub label: String,
+    /// The estimate in billionths of a dollar, so totals add exactly; `None` when the
+    /// provider's usage could not be priced.
+    pub nano_usd: Option<u64>,
+    /// Web searches are billed apart from tokens, so the estimate is a floor.
+    pub lower_bound: bool,
+}
+
+fn cost(value: &Value, show_unknown: bool) -> Option<MessageCost> {
     if value.is_null() {
         return None;
     }
-    let amount = value["estimated_usd"]
+    let lower_bound = value["web_searches"].as_u64().unwrap_or(0) > 0;
+    let usd = value["estimated_usd"]
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
-        .or_else(|| value["estimated_usd"].as_f64());
-    let Some(amount) = amount.filter(|a| a.is_finite() && *a >= 0.0) else {
-        return show_unknown.then(|| "cost unknown".into());
+        .or_else(|| value["estimated_usd"].as_f64())
+        .filter(|a| a.is_finite() && *a >= 0.0);
+    let Some(amount) = usd else {
+        return show_unknown.then(|| MessageCost {
+            label: "cost unknown".into(),
+            nano_usd: None,
+            lower_bound,
+        });
     };
     let amount = if amount == 0.0 {
         "$0.00".into()
@@ -89,14 +106,11 @@ fn cost(value: &Value, show_unknown: bool) -> Option<String> {
     } else {
         format!("${amount:.2}")
     };
-    Some(format!(
-        "cost {}{amount}",
-        if value["web_searches"].as_u64().unwrap_or(0) > 0 {
-            "≥"
-        } else {
-            ""
-        }
-    ))
+    Some(MessageCost {
+        label: format!("cost {}{amount}", if lower_bound { "≥" } else { "" }),
+        nano_usd: usd.map(|usd| (usd * 1e9).round() as u64),
+        lower_bound,
+    })
 }
 
 #[cfg(test)]
@@ -120,6 +134,7 @@ mod tests {
 
     #[test]
     fn costs_distinguish_lower_bounds_and_unknown_estimates() {
+        let cost = |value: &Value, show_unknown| cost(value, show_unknown).map(|cost| cost.label);
         assert_eq!(
             cost(&json!({"estimated_usd":"0.001", "web_searches":2}), true).as_deref(),
             Some("cost ≥$0.0010")

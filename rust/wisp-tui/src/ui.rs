@@ -250,8 +250,16 @@ pub fn render_interactive(
     let column = match side_panel.filter(|panel| panel.docked()) {
         Some(panel) => {
             let (column, panel_area) = side_panel::split(area);
-            let toggle = primary_label(bindings, KeyAction::TogglePanel);
-            side_panel::render(frame, panel_area, state, panel, &toggle, palette);
+            side_panel::render(
+                frame,
+                panel_area,
+                state,
+                panel,
+                bindings,
+                activity_frame,
+                activity_elapsed,
+                palette,
+            );
             column
         }
         None => area,
@@ -505,7 +513,7 @@ fn workspace_label(cwd: &str, home: Option<&str>) -> String {
 
 /// Whether a run is going, so the status line above the composer replaces the
 /// footer's status and the transcript's working row.
-fn run_in_status_line(state: &UiState) -> bool {
+pub(crate) fn run_in_status_line(state: &UiState) -> bool {
     !state.configuration_active()
         && (state.view_status == ViewStatus::Running
             || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
@@ -1043,23 +1051,14 @@ fn render_status_line(
     ));
     let right = Line::from(right);
 
-    let turn = current_turn(state);
+    let activity = run_activity(state);
     let mut lead = vec![Span::styled(
         format!("{} ", spinner_frame(activity_frame)),
         running,
     )];
     let mut detail = String::new();
     let mut timer = None;
-    // Only calls after the latest reply name the run: once the model answers again, a
-    // background process started earlier no longer says what is happening. Cancelling
-    // outranks everything, since that is what the user is waiting on.
-    let item = turn
-        .iter()
-        .rev()
-        .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
-        .find_map(running_item)
-        .filter(|_| !state.cancel_requested);
-    match item {
+    match activity.item {
         Some(item) => {
             lead.push(Span::styled(
                 format!(" {} ", item.label),
@@ -1075,11 +1074,8 @@ fn render_status_line(
         }
         None => lead.push(Span::styled(activity_phase(state), running)),
     }
-    let turn_number = state.run_progress.map_or(0, |run| run.turn);
-    let tools = turn
-        .iter()
-        .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
-        .count();
+    let turn_number = activity.turn;
+    let tools = activity.tools;
     let mut totals = format!("{tools} tool{}", if tools == 1 { "" } else { "s" });
     if let Some(elapsed) = run_elapsed {
         totals.push_str(" · ");
@@ -1145,9 +1141,40 @@ fn render_status_line(
     }
 }
 
+/// What the run in progress is doing, as the status line and the side panel show it.
+pub(crate) struct RunActivity {
+    /// The call or background process that names the run, if one is going.
+    pub(crate) item: Option<RunningItem>,
+    /// The session turn the run has reached, or 0 before the model answers.
+    pub(crate) turn: u64,
+    /// Calls and background processes the run has started.
+    pub(crate) tools: usize,
+}
+
+pub(crate) fn run_activity(state: &UiState) -> RunActivity {
+    let turn = current_turn(state);
+    // Only calls after the latest reply name the run: once the model answers again, a
+    // background process started earlier no longer says what is happening. Cancelling
+    // outranks everything, since that is what the user is waiting on.
+    let item = turn
+        .iter()
+        .rev()
+        .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
+        .find_map(running_item)
+        .filter(|_| !state.cancel_requested);
+    RunActivity {
+        item,
+        turn: state.run_progress.map_or(0, |run| run.turn),
+        tools: turn
+            .iter()
+            .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
+            .count(),
+    }
+}
+
 /// The entries of the run in progress: everything after the prompt that started it,
 /// including steers and follow-ups it took in, or after the latest prompt otherwise.
-fn current_turn(state: &UiState) -> &[TranscriptEntry] {
+pub(crate) fn current_turn(state: &UiState) -> &[TranscriptEntry] {
     let entries = state.transcript.entries();
     let start = run_prompt_index(state)
         .map_or(0, |index| index + 1)
@@ -1170,10 +1197,10 @@ fn run_prompt_index(state: &UiState) -> Option<usize> {
 }
 
 /// A call still in progress, as the status line names it.
-struct RunningItem {
-    label: String,
-    detail: String,
-    elapsed: Option<std::time::Duration>,
+pub(crate) struct RunningItem {
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) elapsed: Option<std::time::Duration>,
 }
 
 fn running_item(entry: &TranscriptEntry) -> Option<RunningItem> {
@@ -1222,7 +1249,7 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
 
 /// What the run is doing when no call names it: compacting, cancelling, thinking, or
 /// otherwise working.
-fn activity_phase(state: &UiState) -> String {
+pub(crate) fn activity_phase(state: &UiState) -> String {
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
         return "Compacting context".into();
     }
