@@ -17,8 +17,8 @@ Back up `~/.wisp/sessions` (or your configured session directory), then install 
 
 ```bash
 uv tool install --force --python 3.12 wisp-ai
-wisp --version       # wisp 0.2.3
-wisp-tui --version   # wisp-tui 0.2.3, on platforms with a native wheel
+wisp --version       # wisp 0.2.4
+wisp-tui --version   # wisp-tui 0.2.4, on platforms with a native wheel
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter

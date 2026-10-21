@@ -10,7 +10,7 @@ import anyio
 import pytest
 
 import wisp.coding.session as session_module
-from wisp.coding.prompt import PROJECT_CONTEXT_HEADER
+from wisp.coding.prompt import PROJECT_CONTEXT_HEADER, read_current_branch
 from wisp.coding.session import CodingSession, _prompt_cache_key
 from wisp.providers.events import (
     ProviderEvent,
@@ -510,3 +510,33 @@ def test_abandoned_git_read_cannot_replace_stored_snapshot(
 
     assert agent._repository_status_snapshot("session-1", tmp_path) == "new"
     assert abandoned_result == ["new"]
+
+
+def test_current_branch_reads_live(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_git_repo(repo)
+    assert read_current_branch(repo) == "main"
+
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-q", "-b", "feature/x"],
+        check=True,
+        capture_output=True,
+    )
+    assert read_current_branch(repo) == "feature/x"
+
+    subprocess.run(
+        ["git", "-C", str(repo), "checkout", "-q", "--detach"],
+        check=True,
+        capture_output=True,
+    )
+    short_head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--short", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert read_current_branch(repo) == short_head
+
+
+def test_current_branch_outside_repo(tmp_path: Path) -> None:
+    assert read_current_branch(tmp_path) is None

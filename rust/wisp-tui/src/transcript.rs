@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
+use std::time::Instant;
 
 mod recovery;
 pub(crate) use recovery::LiveHistoryGap;
@@ -88,8 +89,34 @@ pub enum TranscriptEntryState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TranscriptEntryKind {
     Message,
-    Tool(ToolCardSnapshot),
+    /// Boxed so message entries, most of a transcript, don't reserve a tool card's size.
+    Tool(Box<ToolCardSnapshot>),
     Process(ProcessCardSnapshot),
+}
+
+/// How a finished run ended and how long it took, kept on the prompt that started it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunResult {
+    pub duration_ms: Option<u64>,
+    pub outcome: RunOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RunOutcome {
+    /// Read the backend's outcome word; anything unrecognised counts as a failure.
+    pub(crate) fn parse(outcome: &str) -> Self {
+        match outcome {
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,8 +129,21 @@ pub struct TranscriptEntry {
     local_display: Option<String>,
     /// Display-only reasoning streamed for this assistant turn.
     thinking: String,
+    /// When this reply's first reasoning arrived, until its first answer text.
+    thinking_started: Option<Instant>,
+    /// How long the reply reasoned before answering. Live replies only: reasoning is
+    /// not kept in session history.
+    thinking_ms: Option<u32>,
+    /// When this live call started running: when it was called, or when its approval
+    /// was granted, so time spent waiting for the user is left out. Drives the live
+    /// timer of a call still in progress.
+    running_since: Option<Instant>,
     searches: Vec<String>,
-    cost: Option<String>,
+    cost: Option<crate::web_search::MessageCost>,
+    /// Display-only summary closing the last reply of a finished run.
+    run_summary: Option<String>,
+    /// How the run this prompt started ended, for the side panel's turn list.
+    run_result: Option<RunResult>,
     decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
@@ -137,7 +177,7 @@ impl TranscriptEntry {
         text.push_str(&self.content);
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
-            text.push_str(&format!("\n\n{cost}"));
+            text.push_str(&format!("\n\n{}", cost.label));
         }
         self.decorated_content = Some(text);
     }
@@ -162,8 +202,46 @@ impl TranscriptEntry {
             .unwrap_or(&self.content)
     }
 
+    /// The totals that close this entry's turn, once the entry is fully shown. The
+    /// transcript view draws them as the row that ends the turn's rail.
+    pub(crate) fn run_summary(&self) -> Option<&str> {
+        self.run_summary
+            .as_deref()
+            .filter(|_| self.unrevealed.is_empty())
+    }
+
+    pub(crate) fn run_result(&self) -> Option<RunResult> {
+        self.run_result
+    }
+
+    /// The cost the backend reported for this reply, if any.
+    pub(crate) fn cost(&self) -> Option<&crate::web_search::MessageCost> {
+        self.cost.as_ref()
+    }
+
     pub fn thinking(&self) -> &str {
         &self.thinking
+    }
+
+    pub(crate) fn thinking_ms(&self) -> Option<u32> {
+        self.thinking_ms
+    }
+
+    /// How long this live call has run so far, or `None` for history and calls that
+    /// never started.
+    pub(crate) fn running_elapsed(&self) -> Option<std::time::Duration> {
+        self.running_since.map(|started| started.elapsed())
+    }
+
+    /// Stop the reasoning clock once answer text arrives or the reply completes.
+    /// Returns whether the entry changed.
+    fn finish_thinking(&mut self) -> bool {
+        let Some(started) = self.thinking_started.take() else {
+            return false;
+        };
+        let elapsed = started.elapsed().as_millis();
+        self.thinking_ms = Some(u32::try_from(elapsed).unwrap_or(u32::MAX));
+        true
     }
 
     pub fn tool_card(&self) -> Option<&ToolCardSnapshot> {
@@ -189,6 +267,7 @@ impl TranscriptEntry {
                 .len()
                 .saturating_add(card.name.len())
                 .saturating_add(card.action_arguments.len())
+                .saturating_add(card.process_id.as_ref().map_or(0, String::len))
                 .saturating_add(card.detail.len())
                 .saturating_add(card.retained_output.text.len())
                 .saturating_add(card.detail_source.retained_bytes())
@@ -196,6 +275,7 @@ impl TranscriptEntry {
             TranscriptEntryKind::Process(card) => card
                 .process_id
                 .len()
+                .saturating_add(card.task_label.as_ref().map_or(0, String::len))
                 .saturating_add(card.retained_output.text.len()),
         };
         self.content
@@ -203,7 +283,7 @@ impl TranscriptEntry {
             .saturating_add(self.local_display.as_ref().map_or(0, String::len))
             .saturating_add(self.thinking.len())
             .saturating_add(self.searches.iter().map(String::len).sum::<usize>())
-            .saturating_add(self.cost.as_ref().map_or(0, String::len))
+            .saturating_add(self.cost.as_ref().map_or(0, |cost| cost.label.len()))
             .saturating_add(self.decorated_content.as_ref().map_or(0, String::len))
             .saturating_add(kind_bytes)
             .saturating_add(
@@ -252,6 +332,9 @@ struct HistoricalCall {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Transcript {
     entries: Vec<TranscriptEntry>,
+    /// The folder the backend last said tools run in; each new tool card keeps it so
+    /// its paths read against the folder its own run used.
+    tool_cwd: Option<Arc<str>>,
     entry_indexes: HashMap<TranscriptEntryId, usize>,
     next_entry_id: u64,
     next_history_group: u64,
@@ -351,6 +434,7 @@ impl Transcript {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
             let entry = self.entry_mut(entry_id);
+            entry.finish_thinking();
             entry.content.push_str(delta);
             entry.decorate();
             Self::bump_revision(entry);
@@ -368,7 +452,11 @@ impl Transcript {
     ) -> TranscriptEntryId {
         let entry_id = self.response_for_turn(turn);
         if !delta.is_empty() {
-            self.entry_mut(entry_id).unrevealed.push_str(delta);
+            let entry = self.entry_mut(entry_id);
+            if entry.finish_thinking() {
+                Self::bump_revision(entry);
+            }
+            entry.unrevealed.push_str(delta);
             self.revealing = Some(entry_id);
         }
         entry_id
@@ -439,6 +527,9 @@ impl Transcript {
                     take -= 1;
                 }
                 if take > 0 {
+                    if entry.thinking.is_empty() && entry.thinking_ms.is_none() {
+                        entry.thinking_started = Some(Instant::now());
+                    }
                     entry.thinking.push_str(&delta[..take]);
                     Self::bump_revision(entry);
                     self.bump_generation();
@@ -460,11 +551,69 @@ impl Transcript {
         }
     }
 
+    /// Record where tools run from now on, as the backend reported it.
+    pub(crate) fn set_tool_cwd(&mut self, cwd: &str) {
+        self.tool_cwd = Some(Arc::from(cwd));
+    }
+
+    /// Close the run with its summary on the turn's last entry, whether a reply or a
+    /// card, as after a cancelled call. Returns false when the turn shows nothing to
+    /// close.
+    pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
+        let prompt = self.latest_user_entry();
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .take_while(|entry| Some(entry.id) != prompt)
+            .find(|entry| {
+                !(entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && entry.content.is_empty()
+                    && entry.unrevealed.is_empty())
+            })
+            .filter(|entry| entry.role != TranscriptRole::User)
+            .map(|entry| entry.id);
+        let Some(id) = last else {
+            return false;
+        };
+        let entry = self.entry_mut(id);
+        entry.run_summary = Some(summary);
+        // The entry's last row now leads to the summary row, so cached rows rebuild.
+        Self::bump_revision(entry);
+        true
+    }
+
+    /// Record how the run that `prompt` started ended. Steers and follow-ups the run
+    /// took in share its outcome but not its time, which belongs to the prompt. Only
+    /// the side panel reads it, so the entries' own rows stay cached.
+    pub(crate) fn attach_run_result(
+        &mut self,
+        prompt: TranscriptEntryId,
+        result: RunResult,
+    ) -> bool {
+        let Some(start) = self
+            .entry_index(prompt)
+            .filter(|index| self.entries[*index].role == TranscriptRole::User)
+        else {
+            return false;
+        };
+        for (offset, entry) in self.entries[start..].iter_mut().enumerate() {
+            if entry.role == TranscriptRole::User {
+                entry.run_result = Some(RunResult {
+                    duration_ms: result.duration_ms.filter(|_| offset == 0),
+                    ..result
+                });
+            }
+        }
+        true
+    }
+
     pub(crate) fn complete_message_with_cost(
         &mut self,
         turn: u64,
         content: String,
-        cost: Option<String>,
+        cost: Option<crate::web_search::MessageCost>,
     ) -> Option<TranscriptEntryId> {
         if cost.is_some() {
             let id = self.response_for_turn(turn);
@@ -490,6 +639,9 @@ impl Transcript {
         }
         let entry_id = self.response_for_turn(turn);
         let entry = self.entry_mut(entry_id);
+        if entry.finish_thinking() {
+            Self::bump_revision(entry);
+        }
         // A paced reply keeps revealing the final text after its shown prefix, and becomes
         // `Complete` once it is all shown. A final text that rewrites the shown prefix is
         // shown whole at once instead.
@@ -537,6 +689,7 @@ impl Transcript {
             .is_some_and(|binding| !binding.resolved)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_unresolved_tool_calls(&self) -> bool {
         self.call_entries.values().any(|binding| !binding.resolved)
     }
@@ -564,6 +717,10 @@ impl Transcript {
         source: ToolCallSource,
     ) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested, source);
+        if source == ToolCallSource::Live {
+            let entry = self.entry_mut(entry_id);
+            entry.running_since.get_or_insert_with(Instant::now);
+        }
         self.update_pending_detail_tracking(entry_id);
         entry_id
     }
@@ -571,6 +728,11 @@ impl Transcript {
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id =
             self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval, ToolCallSource::Live);
+        // The wait for the user is timed from here, or from the call if it came first;
+        // granting the approval restarts the clock for the run itself.
+        self.entry_mut(entry_id)
+            .running_since
+            .get_or_insert_with(Instant::now);
         self.update_pending_detail_tracking(entry_id);
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             return entry_id;
@@ -627,6 +789,9 @@ impl Transcript {
             }
         };
         if changed {
+            if approved {
+                self.entry_mut(binding.entry_id).running_since = Some(Instant::now());
+            }
             self.bump_card(binding.entry_id);
         }
         self.update_pending_detail_tracking(binding.entry_id);
@@ -640,7 +805,7 @@ impl Transcript {
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             self.prepare_non_message_entry();
             let card = ToolCardSnapshot::result_without_request(&input);
-            let entry_id = self.push_card(TranscriptEntryKind::Tool(card));
+            let entry_id = self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
             let binding = self.new_tool_binding(entry_id, ToolBindingKind::Tool, true);
             self.insert_tool_binding(input.call_id.clone(), binding);
             return entry_id;
@@ -693,6 +858,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -756,6 +922,7 @@ impl Transcript {
                             stderr_truncated: false,
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
+                            duration_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -824,14 +991,6 @@ impl Transcript {
         }
     }
 
-    pub(crate) fn has_visible_response(&self) -> bool {
-        self.active_response
-            .map(|(_, entry_id)| entry_id)
-            .or(self.completed_response)
-            .and_then(|entry_id| self.entry(entry_id))
-            .is_some_and(|entry| !entry.content.is_empty())
-    }
-
     pub fn is_streaming_text(&self) -> bool {
         self.active_response.is_some_and(|(_, entry_id)| {
             self.entry(entry_id)
@@ -874,7 +1033,7 @@ impl Transcript {
                 self.prepare_non_message_entry();
                 let mut card = ToolCardSnapshot::requested(input, initial_status);
                 card.cancel("call ID was reused; result correlation is ambiguous");
-                return self.push_card(TranscriptEntryKind::Tool(card));
+                return self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
             } else {
                 if binding.kind == ToolBindingKind::Tool {
                     let changed = {
@@ -919,7 +1078,7 @@ impl Transcript {
         if !self.prepare_unresolved_tool_binding(&input.call_id) {
             let mut card = ToolCardSnapshot::requested(input, initial_status);
             card.cancel("too many concurrent tool calls to track");
-            return self.push_card(TranscriptEntryKind::Tool(card));
+            return self.push_card(TranscriptEntryKind::Tool(Box::new(card)));
         }
         if let Some(ProcessCallIdentity {
             process_id,
@@ -968,9 +1127,8 @@ impl Transcript {
             }
         }
 
-        let entry_id = self.push_card(TranscriptEntryKind::Tool(ToolCardSnapshot::requested(
-            input,
-            initial_status,
+        let entry_id = self.push_card(TranscriptEntryKind::Tool(Box::new(
+            ToolCardSnapshot::requested(input, initial_status),
         )));
         let binding = self.new_tool_binding(entry_id, ToolBindingKind::Tool, false);
         self.insert_tool_binding(input.call_id.clone(), binding);
@@ -1129,6 +1287,13 @@ impl Transcript {
             .retain(|candidate| candidate != call_id);
     }
 
+    fn process_task_label(&self, process_id: &str) -> Option<String> {
+        self.entries.iter().rev().find_map(|entry| {
+            let card = entry.tool_card()?;
+            (card.process_id.as_deref() == Some(process_id)).then(|| card.display_arguments())
+        })
+    }
+
     fn process_entry_for(&mut self, process_id: &str) -> Option<TranscriptEntryId> {
         if let Some(processes) = &self.history_projection_processes {
             let entry_id = if let Some(entry_id) = processes.get(process_id) {
@@ -1137,9 +1302,11 @@ impl Transcript {
                 if identity_for_display(process_id).len() > MAX_TRACKED_PROCESS_ID_BYTES {
                     return None;
                 }
-                let entry_id = self.push_card(TranscriptEntryKind::Process(
-                    ProcessCardSnapshot::new(process_id.to_owned()),
-                ));
+                let entry_id = self.push_card(TranscriptEntryKind::Process({
+                    let mut card = ProcessCardSnapshot::new(process_id.to_owned());
+                    card.task_label = self.process_task_label(process_id);
+                    card
+                }));
                 self.history_projection_processes
                     .as_mut()
                     .expect("history projection is active")
@@ -1173,9 +1340,9 @@ impl Transcript {
                 return None;
             }
         }
-        let entry_id = self.push_card(TranscriptEntryKind::Process(ProcessCardSnapshot::new(
-            process_id.to_owned(),
-        )));
+        let mut card = ProcessCardSnapshot::new(process_id.to_owned());
+        card.task_label = self.process_task_label(process_id);
+        let entry_id = self.push_card(TranscriptEntryKind::Process(card));
         self.process_entries.insert(process_id.to_owned(), entry_id);
         self.process_order.push_back(process_id.to_owned());
         self.process_index_bytes = self.process_index_bytes.saturating_add(process_id.len());
@@ -1522,6 +1689,11 @@ impl Transcript {
                 thinking: String::new(),
                 searches: Vec::new(),
                 cost: None,
+                run_summary: None,
+                run_result: None,
+                thinking_started: None,
+                running_since: None,
+                thinking_ms: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
@@ -2211,6 +2383,11 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
+            run_result: None,
+            thinking_started: None,
+            running_since: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
@@ -2279,7 +2456,10 @@ impl Transcript {
         }
     }
 
-    fn push_card(&mut self, kind: TranscriptEntryKind) -> TranscriptEntryId {
+    fn push_card(&mut self, mut kind: TranscriptEntryKind) -> TranscriptEntryId {
+        if let TranscriptEntryKind::Tool(card) = &mut kind {
+            card.display_base = self.tool_cwd.clone();
+        }
         let state = match &kind {
             TranscriptEntryKind::Tool(card) if card.status.terminal() => {
                 TranscriptEntryState::Complete
@@ -2300,6 +2480,11 @@ impl Transcript {
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
+            run_summary: None,
+            run_result: None,
+            thinking_started: None,
+            running_since: None,
+            thinking_ms: None,
             decorated_content: None,
             state,
             kind,
@@ -2415,6 +2600,41 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cards_keep_their_run_folder() {
+        let bash = |transcript: &mut Transcript, call_id: &str, command: &str| {
+            let id = transcript.observe_tool_call(ToolCallInput {
+                call_id: call_id.into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                detail_source: ToolDetailSource::None,
+            });
+            transcript
+                .entry(id)
+                .unwrap()
+                .tool_card()
+                .unwrap()
+                .display_arguments()
+        };
+        let mut transcript = Transcript::default();
+        // /init's tools run from the project root, not the launch folder.
+        transcript.set_tool_cwd("/repo");
+        assert_eq!(
+            bash(&mut transcript, "a", "cd /repo && ls /repo/src"),
+            "ls src"
+        );
+        assert_eq!(
+            bash(&mut transcript, "b", "cd /repo/app && ls"),
+            "cd /repo/app && ls"
+        );
+        let first = transcript.entries()[0].id;
+        transcript.set_tool_cwd("/repo/app");
+        assert_eq!(bash(&mut transcript, "c", "cd /repo/app && ls"), "ls");
+        // An earlier card keeps the folder its own run used.
+        let card = transcript.entry(first).unwrap().tool_card().unwrap();
+        assert_eq!(card.display_arguments(), "ls src");
+    }
     use crate::tool_cards::ProcessDisplayState;
     use serde_json::Value;
 
@@ -2469,7 +2689,46 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
+    }
+
+    #[test]
+    fn process_label_comes_from_the_matching_start_and_keeps_diagnostics() {
+        let mut transcript = Transcript::default();
+        transcript.observe_tool_call(call(
+            "start",
+            "bash",
+            serde_json::json!({"operation": "start", "command": "uv run pytest -q"}),
+        ));
+        let mut started = result("start", "");
+        started.name = "bash".into();
+        started.process_id = Some("process-test".into());
+        started.process_state = Some("running".into());
+        transcript.observe_tool_result(started);
+        let poll = transcript.observe_tool_call(call(
+            "poll",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-test"}),
+        ));
+        let card = transcript.entry(poll).unwrap().process_card().unwrap();
+        assert_eq!(card.task_label.as_deref(), Some("Python tests"));
+        assert!(card.action().contains("process-test"));
+        assert_eq!(card.poll_count, 1);
+        let other = transcript.observe_tool_call(call(
+            "other",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "unrelated"}),
+        ));
+        assert!(
+            transcript
+                .entry(other)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .task_label
+                .is_none()
+        );
     }
 
     #[test]

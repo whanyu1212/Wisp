@@ -78,8 +78,8 @@ wisp -p "hello" --provider fake
 ## Working with Wisp
 
 - **Steering.** A correction sent during a run is applied at the next safe point between model
-  requests, and the tool work already done is kept. In the TUI, `Enter` steers the active run and
-  `Alt+Enter` queues a follow-up for when it finishes; RPC and SDK clients have the same controls.
+  requests, and the tool work already done is kept. In the TUI, `Alt+Enter` steers the active run and
+  `Enter` queues a follow-up for when it finishes; RPC and SDK clients have the same controls.
 - **Approvals.** Reads run directly. Writes, edits and shell commands stop and ask, and the model
   cannot change that policy. Print mode refuses them unless you pass `--yes`.
 - **Cancellation.** Cancelling unwinds in-flight tool work and leaves the session valid, so

@@ -230,6 +230,12 @@ class BeginDeviceCodeCommand(RpcCommandModel):
     provider: str = Field(min_length=1, max_length=MAX_RPC_PROVIDER_ID_CHARS)
 
 
+class GetGitDiffCommand(RpcCommandModel):
+    """Read a bounded HEAD-to-working-tree snapshot under active file policy."""
+
+    type: Literal["get_git_diff"] = "get_git_diff"
+
+
 class GetProjectFilesCommand(RpcCommandModel):
     """Discover bounded metadata using only backend-owned root and policy."""
 
@@ -637,6 +643,7 @@ type RpcCommand = Annotated[
     | DisconnectProviderCommand
     | BeginDeviceCodeCommand
     | GetSkillsCommand
+    | GetGitDiffCommand
     | GetProjectFilesCommand
     | GetMcpStatusCommand
     | AddMcpServerCommand

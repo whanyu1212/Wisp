@@ -110,6 +110,17 @@ class AgentCompleted(WispEvent):
     session_id: str
     turns: int
     outcome: RunOutcome
+    # Wall time of the whole run in milliseconds, from the prompt to this event.
+    duration_ms: int | None = Field(default=None, ge=0)
+    # Tool results the run published, including failed and interrupted calls.
+    tool_calls: int = Field(default=0, ge=0)
+    # Output tokens across the run's model responses; None when no response
+    # reported usage.
+    output_tokens: int | None = Field(default=None, ge=0)
+    # Milliseconds the run's model responses spent streaming, from each response's
+    # start to its completion, so throughput leaves out tool time; None when no
+    # response completed.
+    model_ms: int | None = Field(default=None, ge=0)
 
 
 class ModelProviderAutoSwitched(WispEvent):

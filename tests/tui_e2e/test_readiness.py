@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing, run_settled
+from tests.tui_e2e.support import rendered_without_spacing, run_settled, screen_shows
 
 
 def _rust_binary() -> Path:
@@ -85,10 +85,13 @@ class _TuiProcess:
         self.wait_for(b"ctx", b"~", failure="Rust TUI context status did not render")
         self.resize(width=101)
         offset = len(self.output)
-        self.wait_for(
-            b"Type a prompt or / for commands.",
-            b"fake/fake",
-            since=offset,
+        # The identity line styles model and provider apart, so read it from the
+        # replayed screen rather than the raw bytes.
+        self.wait_until(
+            lambda output: (
+                b"Type a prompt or / for commands." in output[offset:]
+                and screen_shows(output, "fake fake")
+            ),
             failure="Rust TUI did not finish startup hydration",
         )
 
@@ -200,11 +203,10 @@ def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_p
             failure="Rust TUI did not settle the backend-owned initialization lifecycle",
         )
 
-        offset = len(tui.output)
         tui.send(b"after init")
-        tui.wait_for(
-            b"after init",
-            since=offset,
+        # Typed characters can reach the screen across several frames.
+        tui.wait_until(
+            lambda output: screen_shows(output, "after init"),
             failure="Rust TUI did not restore composer editing after initialization failed",
         )
         tui.quit()
@@ -397,7 +399,7 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         offset = len(tui.output)
         tui.send(b"\r")
         # Do not require a fresh "idle" after the submit: the fake reply can finish before
-        # "working" is painted, and an unchanged footer is never redrawn. With the reply
+        # the running footer is painted, and an unchanged footer is never redrawn. With the reply
         # painted, run_settled's last-idle-after-last-working check proves the run ended.
         tui.wait_until(
             lambda output: run_settled(output, offset, b"END", *marker_fragments),

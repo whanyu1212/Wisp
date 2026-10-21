@@ -1,4 +1,4 @@
-"""Host-owned project discovery policy, cancellation, and bounded publication."""
+"""Shared policy, scan admission, and publication for project files and Git review."""
 
 from __future__ import annotations
 
@@ -10,7 +10,12 @@ import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
-from wisp.events import ProjectFilesInvalidated, RpcProjectFile, RpcProjectFilesReported
+from wisp.events import (
+    ProjectFilesInvalidated,
+    RpcGitDiffReported,
+    RpcProjectFile,
+    RpcProjectFilesReported,
+)
 from wisp.project_files import (
     MAX_PROJECT_FILES_REPORT_BYTES,
     FileIndexConfig,
@@ -20,12 +25,15 @@ from wisp.project_files import (
     ProjectSnapshot,
     collect_project_snapshot,
 )
-from wisp.rpc.commands import GetProjectFilesCommand
+from wisp.rpc.commands import GetGitDiffCommand, GetProjectFilesCommand
 from wisp.rpc.coordinator import _RpcCommandCompleted, _RpcControlEvent, _RpcRunningCommand
+from wisp.rpc.handlers.git_diff import collect_git_diff
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.tools.context import ToolContext
 
-type ProjectFilesPublisher = Callable[[RpcProjectFilesReported, anyio.CancelScope], Awaitable[bool]]
+type ProjectFilesPublisher = Callable[
+    [RpcProjectFilesReported | RpcGitDiffReported, anyio.CancelScope], Awaitable[bool]
+]
 
 
 def project_files_report(
@@ -132,7 +140,7 @@ class RpcProjectFiles:
 
     def start(
         self,
-        command: GetProjectFilesCommand,
+        command: GetProjectFilesCommand | GetGitDiffCommand,
         *,
         task_group: TaskGroup,
         send: MemoryObjectSendStream[_RpcControlEvent],
@@ -142,7 +150,7 @@ class RpcProjectFiles:
         """Start one cancellable auxiliary request, or report bounded busy failure.
 
         Args:
-            command (GetProjectFilesCommand): Validated request and correlation ID.
+            command (GetProjectFilesCommand | GetGitDiffCommand): Request and correlation ID.
             task_group (TaskGroup): Host group gated on initial lifecycle publication.
             send (MemoryObjectSendStream): Coordinator completion channel.
             write_event (RpcEventWriter): Started and terminal lifecycle event sink.
@@ -158,14 +166,19 @@ class RpcProjectFiles:
             return None
         scope = anyio.CancelScope()
         self._request_scope = scope
-        task_group.start_soon(self._run, lifecycle, scope, send.clone(), publish)
+        task_group.start_soon(self._run, lifecycle, scope, send.clone(), publish, command)
         return _RpcRunningCommand(
-            command_id=lifecycle.command_id, command_type="get_project_files", cancel_scope=scope
+            command_id=lifecycle.command_id, command_type=command.type, cancel_scope=scope
         )
 
     def _collect(
-        self, config: FileIndexConfig, cancelled: Event, command_id: str, generation: int
-    ) -> RpcProjectFilesReported:
+        self,
+        config: FileIndexConfig,
+        cancelled: Event,
+        command_id: str,
+        generation: int,
+        command: GetProjectFilesCommand | GetGitDiffCommand,
+    ) -> RpcProjectFilesReported | RpcGitDiffReported:
         if cancelled.is_set():
             raise ProjectScanCancelled
         # A cancelled task can leave the thread pool before its callable starts.
@@ -173,6 +186,8 @@ class RpcProjectFiles:
         if not self._worker_lock.acquire(blocking=False):
             raise ProjectScanCancelled
         try:
+            if isinstance(command, GetGitDiffCommand):
+                return collect_git_diff(config.context, cancelled, command_id, generation)
             snapshot = collect_project_snapshot(config, cancelled=cancelled)
             report = project_files_report(snapshot, command_id=command_id, generation=generation)
             if cancelled.is_set():
@@ -187,6 +202,7 @@ class RpcProjectFiles:
         scope: anyio.CancelScope,
         send: MemoryObjectSendStream[_RpcControlEvent],
         publish: ProjectFilesPublisher,
+        command: GetProjectFilesCommand | GetGitDiffCommand,
     ) -> None:
         cancelled = Event()
         ok = False
@@ -198,13 +214,16 @@ class RpcProjectFiles:
                 await self._ready.wait()
                 generation = self.generation
                 config = FileIndexConfig(root=self._context.cwd, context=self._context)
-                with anyio.fail_after(config.timeout_seconds):
+                with anyio.fail_after(
+                    6 if isinstance(command, GetGitDiffCommand) else config.timeout_seconds
+                ):
                     report = await anyio.to_thread.run_sync(
                         self._collect,
                         config,
                         cancelled,
                         lifecycle.command_id,
                         generation,
+                        command,
                         abandon_on_cancel=True,
                     )
                 ok = await publish(report, scope)
@@ -217,7 +236,11 @@ class RpcProjectFiles:
         except Exception:
             # Neither protected names nor exceptions containing absolute paths
             # belong in the wire, terminal error text, or debug output.
-            error = "Project file discovery unavailable"
+            error = (
+                "Git diff unavailable: no HEAD commit, failed Git read, or metadata over budget"
+                if isinstance(command, GetGitDiffCommand)
+                else "Project file discovery unavailable"
+            )
         finally:
             cancelled.set()
             self._request_scope = None
@@ -229,7 +252,7 @@ class RpcProjectFiles:
                     await send.send(
                         _RpcCommandCompleted(
                             command_id=lifecycle.command_id,
-                            command_type="get_project_files",
+                            command_type=command.type,
                             ok=ok,
                             history=None,
                             entry_count=0,

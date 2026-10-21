@@ -86,6 +86,9 @@ impl KeyHelp {
                 "Browse: Tab/Shift+Tab select, Right expand, Left collapse.",
                 "Enter expands or opens retained detail. Esc returns to the prompt.",
             ],
+            Owner::Overlay(OverlayKind::GitDiff) => &[
+                "Diff: Tab switches focus, Enter expands/opens, [] hunks, s split, c context, r refresh, Esc closes.",
+            ],
             Owner::Overlay(OverlayKind::Connection) => &[
                 "Connections: Up/Down select, Enter starts/submits, d disconnects, r refreshes.",
                 "API-key input is masked. Escape closes/cancels the connection workflow.",
@@ -128,8 +131,17 @@ impl KeyHelp {
             Owner::Overlay(OverlayKind::Context | OverlayKind::Help) => {
                 &["Up/Down/Page/Home/End scroll; r refreshes; Esc/Ctrl+C closes."]
             }
+            Owner::Overlay(OverlayKind::SidePanel) => &[
+                "Side panel: the session, its context, cost, changed files, and turns.",
+                "Tab/Shift+Tab move between the queue, changed files, and MCP; Up/Down/Home/End select.",
+                "Enter opens the focused row: /queue, /diff at that file, or /mcp.",
+                "Ctrl+B or Esc closes it; on a wide terminal it stays docked beside the transcript.",
+            ],
             Owner::Overlay(OverlayKind::Detail) => &[
                 "Details: arrows/Page/Home/End scroll; Esc returns to card browse.",
+                "Diff review: [ / ] previous/next hunk; Tab / Shift+Tab next/previous retained edit.",
+                "s toggles side-by-side (wide terminals); c shows/hides retained context.",
+                "Review compares one tool edit's before/after, not the working tree against HEAD.",
                 "Ctrl+C retains normal cancellation/exit behavior.",
             ],
             Owner::Composer => &[

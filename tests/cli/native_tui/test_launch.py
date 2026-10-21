@@ -178,6 +178,15 @@ def test_tui_rpc_env_forwards_explicit_config_effort(
     assert "WISP_EFFORT" not in os.environ
 
 
+def test_tui_rpc_env_forwards_codex_read_timeout(tmp_path: Path) -> None:
+    options = TuiOptions(
+        config=WispConfig(provider="fake", session_dir=tmp_path, codex_read_timeout_seconds=600),
+    )
+    child_env = native_tui_launch._rpc_env(options)
+    assert child_env["WISP_CODEX_READ_TIMEOUT_SECONDS"] == "600.0"
+    assert "WISP_CODEX_READ_TIMEOUT_SECONDS" not in os.environ
+
+
 def test_tui_rpc_env_forwards_embedded_openai_compatible_config(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

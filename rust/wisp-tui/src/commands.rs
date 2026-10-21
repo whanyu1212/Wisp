@@ -29,6 +29,7 @@ pub(crate) enum Command {
     Logo(Option<LogoChoice>),
     Mode(AgentMode),
     Context,
+    Diff,
     Queue,
     Skills,
     Mcp,
@@ -54,6 +55,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
+        "diff" => "/diff",
         "search" => "/search [on|off]",
         "queue" => "/queue",
         "skills" => "/skills",
@@ -120,11 +122,13 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
     let tail = &trimmed[token.len()..];
     let normalized = format!("/{canonical}{tail}");
     Some(match canonical {
-        "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp" | "queue"
+        "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
+        | "queue"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
         }
+        "diff" => Command::Diff,
         "help" => Command::Help,
         "init" => Command::Init,
         "history" => Command::History,
@@ -224,6 +228,17 @@ pub(crate) struct CompletionView<'a> {
     pub selected: usize,
 }
 
+fn diff_command() -> &'static CommandDescriptor {
+    static COMMAND: OnceLock<CommandDescriptor> = OnceLock::new();
+    COMMAND.get_or_init(|| CommandDescriptor {
+        name: "diff".into(),
+        description: "Review working tree changes against HEAD".into(),
+        slash_command: "/diff".into(),
+        slash_aliases: Vec::new(),
+        order: 25,
+    })
+}
+
 fn logo_command() -> &'static CommandDescriptor {
     static COMMAND: OnceLock<CommandDescriptor> = OnceLock::new();
     COMMAND.get_or_init(|| CommandDescriptor {
@@ -254,6 +269,9 @@ fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDes
             .position(|command| command.order > logo_command().order)
             .unwrap_or(commands.len());
         commands.insert(position, logo_command());
+    }
+    if !commands.iter().any(|command| command.name == "diff") {
+        commands.push(diff_command());
     }
     commands
 }
@@ -861,7 +879,7 @@ pub(crate) mod tests {
                 .any(|item| item.spelling() == "/update")
         );
         let local = completion.view(None, None).unwrap();
-        assert_eq!(local.items.len(), 2);
+        assert_eq!(local.items.len(), 3);
         assert!(local.items.iter().any(|item| item.spelling() == "/theme"));
         assert!(local.items.iter().any(|item| item.spelling() == "/logo"));
 

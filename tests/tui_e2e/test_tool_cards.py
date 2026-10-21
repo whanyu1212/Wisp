@@ -17,6 +17,7 @@ from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     reap,
     rendered_without_spacing,
+    screen_shows,
     welcome_ready,
 )
 from wisp import __version__
@@ -200,7 +201,7 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if startup_redraw_offset is None and b"3.0k" in output:
+            if startup_redraw_offset is None and b"30%" in output:
                 startup_redraw_offset = len(output)
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
                 continue
@@ -246,8 +247,10 @@ for line in sys.stdin:
             if (
                 browse_sent
                 and not detail_seen
-                and b"live retained detail" in output
-                and b"Esc close" in output
+                and b"this tool edit" in output
+                # The hint row overlays the composer, so a differential write can
+                # skip cells it shares with the placeholder.
+                and screen_shows(output, "Esc close")
             ):
                 detail_seen = True
                 detail_resize_output_offset = len(output)
@@ -286,13 +289,16 @@ for line in sys.stdin:
     assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
-    # The resize repaints whole frames, where the completed marker sits beside the chip.
-    assert "✓Processprocess-1".encode() in rendered_without_spacing(output[cards_redraw_offset:])
+    # The resize repaints whole frames, where the completed marker sits beside the chip
+    # and the fold arrow before the task.
+    assert "✓Process▸Backgroundcommand".encode() in rendered_without_spacing(
+        output[cards_redraw_offset:]
+    )
     assert b"safe" in output
     assert b"safe\xef\xbf\xbd[2J" in output
     assert b"safe\x1b[2J" not in output
     assert b"old\xef\xbf\xbd[2J" in output
     assert b"old\x1b[2J" not in output
-    assert b"live retained detail" in output
+    assert b"this tool edit" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal

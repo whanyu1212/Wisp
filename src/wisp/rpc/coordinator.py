@@ -25,6 +25,7 @@ type _SequentialRpcCommandType = Literal[
     "get_session_stats",
     "get_messages",
     "get_project_files",
+    "get_git_diff",
     "get_sessions",
     "new_session",
     "select_session",
@@ -185,13 +186,13 @@ class RpcCoordinator:
 
     def _ordered_auxiliary_pending(self) -> bool:
         return any(
-            command.command_type != "get_project_files"
+            command.command_type not in {"get_project_files", "get_git_diff"}
             for command in self.auxiliary_commands.values()
         )
 
     def _cancel_discovery(self) -> None:
         for command in self.auxiliary_commands.values():
-            if command.command_type == "get_project_files":
+            if command.command_type in {"get_project_files", "get_git_diff"}:
                 command.cancel_scope.cancel()
 
     def _shutdown_is_next(self) -> bool:
@@ -410,7 +411,7 @@ class RpcCoordinator:
         running = self.running_command
         if selected_type == "shutdown":
             self._cancel_discovery()
-        if selected_type == "get_project_files" and (
+        if selected_type in {"get_project_files", "get_git_diff"} and (
             self.input_closed or any(c.command_type == "shutdown" for c in self.queued_commands)
         ):
             await reject(command, "Project file discovery unavailable during shutdown")
@@ -450,7 +451,7 @@ class RpcCoordinator:
                 apply_command_bound=run_message_limit is None,
             )
             return False
-        if selected_type == "get_project_files" or (
+        if selected_type in {"get_project_files", "get_git_diff"} or (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and command.allows_prompt_read

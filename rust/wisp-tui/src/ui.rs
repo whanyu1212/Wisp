@@ -5,6 +5,7 @@ use crate::mouse;
 use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::prompt_highlighting::{self, Highlight, Kind as PromptHighlightKind};
 use crate::reducer::{UiState, ViewStatus};
+use crate::side_panel::{self, SidePanel};
 use crate::startup_logo::{self, LogoChoice};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
@@ -12,21 +13,21 @@ use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
 use crate::transcript_view::{
-    RESULT_CONNECTOR, RESULT_INDENT, RowAnchor, RowGutter, RowPosition, TranscriptRow,
-    TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
+    BrowseTarget, RESULT_CONNECTOR, RESULT_INDENT, RowAnchor, RowGutter, RowPosition,
+    TranscriptRow, TranscriptRowCache, TranscriptRowKind, TranscriptRowTone, TranscriptViewport,
 };
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Margin, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::QueueKind;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-const MAX_COMPOSER_HEIGHT: u16 = 8;
+/// The framed composer's ceiling; one more than an unframed one, for its identity row.
+const MAX_COMPOSER_HEIGHT: u16 = 9;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
@@ -55,21 +56,18 @@ pub fn decision_context_visible(area: Rect) -> bool {
 }
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
-    let ceiling = area.height.saturating_sub(3).clamp(2, MAX_COMPOSER_HEIGHT);
+    let framed = area.height >= 16;
+    // The footer, the transcript's two rows, and the status line while running.
+    let ceiling = area
+        .height
+        .saturating_sub(3 + status_line_height(state))
+        .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
     if editable(state) {
-        let queue_rows = if state.active_prompt_editable() {
-            state
-                .queued_steering()
-                .saturating_add(state.queued_follow_ups())
-                .min(3)
-        } else {
-            0
-        };
         u16::try_from(
             layout
                 .map_or(1, |layout| layout.rows.len())
-                .saturating_add(queue_rows)
-                .saturating_add(if area.height >= 16 { 2 } else { 0 }),
+                // A framed composer adds its borders and the identity row.
+                .saturating_add(if framed { 3 } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
@@ -116,7 +114,7 @@ pub(crate) fn file_picker_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(composer, state, layout) + 1)
+        .saturating_sub(composer_height(composer, state, layout) + status_line_height(state) + 1)
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -144,7 +142,7 @@ pub(crate) fn docked_popup_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = surface
         .bottom()
-        .saturating_sub(composer_height(surface, state, layout) + 1)
+        .saturating_sub(composer_height(surface, state, layout) + status_line_height(state) + 1)
         .max(surface.y + 4);
     let height = (bottom - surface.y).min(height);
     Some(Rect::new(surface.x, bottom - height, surface.width, height))
@@ -210,6 +208,7 @@ pub fn render(
         LogoChoice::AdalBraille,
         None,
         None,
+        None,
     );
 }
 
@@ -223,7 +222,7 @@ pub fn render_interactive(
     editor: &PromptEditor,
     connection: &ConnectionInfo,
     notice: Option<&str>,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
     activity_frame: u8,
@@ -232,6 +231,7 @@ pub fn render_interactive(
     startup_logo: LogoChoice,
     decision_choice: Option<usize>,
     activity_elapsed: Option<std::time::Duration>,
+    side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -245,7 +245,27 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
-    let area = conversation_surface(area);
+    // A wide terminal docks the side panel at its right; the conversation lays out in
+    // the column beside it.
+    let column = match side_panel.filter(|panel| panel.docked()) {
+        Some(panel) => {
+            let (column, panel_area) = side_panel::split(area);
+            side_panel::render(
+                frame,
+                panel_area,
+                state,
+                panel,
+                bindings,
+                activity_frame,
+                activity_elapsed,
+                palette,
+            );
+            column
+        }
+        None => area,
+    };
+    let scrollbar_x = column.right().saturating_sub(1);
+    let area = conversation_surface(column);
 
     // A pending approval or trust decision docks above the footer in place of the
     // composer (the draft is kept). Decisions are keyboard-only, so no mouse regions.
@@ -272,10 +292,10 @@ pub fn render_interactive(
             browse_selected,
             connection,
             activity_frame,
-            activity_elapsed,
             palette,
             bindings,
             startup_logo,
+            scrollbar_x,
         );
         render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
         render_footer(
@@ -287,6 +307,8 @@ pub fn render_interactive(
             palette,
             bindings,
             jump_painted.is_some(),
+            false,
+            column.width,
         );
         // The jump label is drawn but not clickable: clicks never act while deciding.
         return mouse::Conversation::default();
@@ -296,14 +318,19 @@ pub fn render_interactive(
     let composer_layout =
         editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
     let composer_height = composer_height(area, state, composer_layout);
+    let status_height = status_line_height(state);
     let completion_height = completion.map_or(0, |view| {
-        (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 3))
+        (view.items.len().min(5) as u16).min(
+            area.height
+                .saturating_sub(composer_height + status_height + 3),
+        )
     });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(if completion_height > 0 { 0 } else { 2 }),
             Constraint::Length(completion_height),
+            Constraint::Length(status_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -318,37 +345,51 @@ pub fn render_interactive(
         browse_selected,
         connection,
         activity_frame,
-        activity_elapsed,
         palette,
         bindings,
         startup_logo,
+        scrollbar_x,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
+    if status_height > 0 {
+        render_status_line(
+            frame,
+            content_area(chunks[2]),
+            state,
+            activity_frame,
+            activity_elapsed,
+            palette,
+        );
+    }
+    let padded = area.height >= 16;
     let editor = render_composer(
         frame,
-        chunks[2],
+        chunks[3],
         state,
         composer_layout,
         composer_focused,
-        area.height >= 16,
+        padded,
         palette,
+        bindings,
     );
     render_footer(
         frame,
-        content_area(chunks[3]),
+        content_area(chunks[4]),
         state,
         viewport,
         notice,
         palette,
         bindings,
         jump_to_latest.is_some(),
+        composer_framed(state, padded, chunks[3]),
+        column.width,
     );
     mouse::Conversation {
         transcript: Rect {
-            width: frame.area().right().saturating_sub(chunks[0].x),
+            width: column.right().saturating_sub(chunks[0].x),
             ..chunks[0]
         },
         // The jump label sits on the transcript's last row, which holds no transcript text.
@@ -366,7 +407,7 @@ pub fn render_interactive(
     }
 }
 
-fn status_label(state: &UiState) -> String {
+pub(crate) fn status_label(state: &UiState) -> String {
     if state.configuration_active() {
         "configuring".into()
     } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
@@ -379,6 +420,24 @@ fn status_label(state: &UiState) -> String {
             ViewStatus::WaitingForTrust => "trust".into(),
             ViewStatus::Error => "error".into(),
         }
+    }
+}
+
+/// The colour of the footer's status label, shared by the composer border so the
+/// prompt shows at a glance whether Wisp is idle, working, or waiting on you.
+pub(crate) fn status_color(state: &UiState, palette: Palette) -> Color {
+    let active = matches!(
+        state.view_status,
+        ViewStatus::Running
+            | ViewStatus::WaitingForApproval
+            | ViewStatus::WaitingForTrust
+            | ViewStatus::Error
+    ) || state.interaction_status == crate::reducer::InteractionStatus::Compacting;
+    match state.view_status {
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => palette.warning,
+        ViewStatus::Error => palette.error,
+        _ if active => palette.primary,
+        _ => palette.muted,
     }
 }
 
@@ -404,7 +463,63 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
-fn footer_leading_parts(state: &UiState) -> Vec<String> {
+/// Folders longer than this show only their last component.
+const WORKSPACE_MAX_COLUMNS: usize = 32;
+
+/// Branch names longer than this end in `…`.
+const BRANCH_MAX_COLUMNS: usize = 32;
+
+/// Shorten `text` to `columns` display columns, ending in `…` when cut.
+pub(crate) fn clip_columns(text: &str, columns: usize) -> String {
+    if text.width() <= columns {
+        return text.to_owned();
+    }
+    let mut clipped = String::new();
+    for character in text.chars() {
+        if clipped.width() + character.to_string().width() + 1 > columns {
+            break;
+        }
+        clipped.push(character);
+    }
+    clipped.push('…');
+    clipped
+}
+
+fn display_workspace(cwd: &str) -> String {
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
+    workspace_label(cwd, home.as_deref())
+}
+
+/// Show a workspace folder compactly: `~` for the home folder, and only the last
+/// component of a long path.
+fn workspace_label(cwd: &str, home: Option<&str>) -> String {
+    let shown = match home {
+        Some(home) if cwd == home => "~".to_owned(),
+        Some(home) => cwd
+            .strip_prefix(home)
+            .filter(|rest| rest.starts_with('/'))
+            .map_or_else(|| cwd.to_owned(), |rest| format!("~{rest}")),
+        None => cwd.to_owned(),
+    };
+    if shown.width() <= WORKSPACE_MAX_COLUMNS {
+        return shown;
+    }
+    let last = shown
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(&shown);
+    format!("…/{last}")
+}
+
+/// Whether a run is going, so the status line above the composer replaces the
+/// footer's status and the transcript's working row.
+pub(crate) fn run_in_status_line(state: &UiState) -> bool {
+    !state.configuration_active()
+        && (state.view_status == ViewStatus::Running
+            || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
+}
+
+fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
@@ -416,20 +531,41 @@ fn footer_leading_parts(state: &UiState) -> Vec<String> {
         }
     }
     // Queue and mode stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer.
-    if state.mode_confirmed {
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
+    // framed composer names the mode first on its identity line instead.
+    if state.mode_confirmed && !identity_in_composer {
         parts.push(state.mode.as_str().to_string());
     }
     parts
 }
 
-fn footer_trailing_parts(state: &UiState) -> Vec<String> {
+/// The status line's closing parts: the identity when the composer cannot show it,
+/// and any compaction in progress.
+fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    if let Some(identity) = header_identity(state) {
-        parts.push(identity);
+    if !identity_in_composer {
+        if let Some(identity) = header_identity(state) {
+            parts.push(identity);
+        }
     }
     if let Some(reason) = state.context.compaction {
         parts.push(format!("compacting ({})", reason.as_str()));
+    }
+    parts
+}
+
+/// Where commands run, for the footer's left side. Folder and branch names come from
+/// the file system and the repository, so they are cleaned of terminal controls.
+pub(crate) fn footer_workspace_parts(state: &UiState) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(cwd) = state.workspace_cwd.as_deref() {
+        parts.push(display_workspace(&sanitize_for_terminal(cwd)));
+    }
+    if let Some(branch) = state.git_branch.as_deref() {
+        parts.push(clip_columns(
+            &sanitize_for_terminal(branch),
+            BRANCH_MAX_COLUMNS,
+        ));
     }
     parts
 }
@@ -526,13 +662,13 @@ fn render_transcript(
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     connection: &ConnectionInfo,
     activity_frame: u8,
-    activity_elapsed: Option<std::time::Duration>,
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
+    scrollbar_x: u16,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -557,22 +693,8 @@ fn render_transcript(
     let conversation = area;
     let active_reply = active_reply(state);
     let status_width = usize::from(content_area(conversation).width);
-    // The working row while waiting for output, or why the last prompt failed.
-    let status_lines: Vec<Line<'static>> = match waiting_for_output(state)
-        .then(|| {
-            activity_label(
-                state,
-                activity_frame,
-                activity_elapsed,
-                status_width,
-                palette,
-            )
-        })
-        .flatten()
-    {
-        Some(activity) => vec![activity],
-        None => failure_lines(state, status_width, palette),
-    };
+    // Why the last prompt failed; a run in progress shows in the status line.
+    let status_lines = failure_lines(state, status_width, palette);
     let activity_height = if status_lines.is_empty() {
         0
     } else {
@@ -652,7 +774,7 @@ fn render_transcript(
     let selected_row = browse_selected.and_then(|selected_entry| {
         rows.iter()
             .find(|row| {
-                row.anchor.entry_id == selected_entry
+                BrowseTarget::for_row(row) == selected_entry
                     && matches!(
                         row.kind,
                         TranscriptRowKind::CardAction
@@ -666,7 +788,7 @@ fn render_transcript(
             })
             .or_else(|| {
                 rows.iter().find(|row| {
-                    row.anchor.entry_id == selected_entry
+                    BrowseTarget::for_row(row) == selected_entry
                         && matches!(
                             row.kind,
                             TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
@@ -688,6 +810,14 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
+        let prompts = TurnBounds {
+            first: state
+                .transcript
+                .entries()
+                .iter()
+                .position(|entry| entry.role == TranscriptRole::User),
+            latest: run_prompt_index(state),
+        };
         for (offset, row) in rows.iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
@@ -705,6 +835,7 @@ fn render_transcript(
                 fold_rows.push(mouse::FoldRow {
                     y: area.y,
                     entry: row.anchor.entry_id,
+                    group: row.kind == TranscriptRowKind::CardGroup,
                 });
             }
             if offset == 0
@@ -716,11 +847,22 @@ fn render_transcript(
                     Block::default().style(palette.user_text()),
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
+                // The prompt's bar runs the full height of its surface, padding included.
+                if content_area(area).x > area.x {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("▎", palette.user_text().fg(palette.primary))),
+                        Rect::new(area.x, area.y - 1, 1, 1),
+                    );
+                }
             }
             let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
                 && row_tool_in_progress(state, row))
             .then_some(activity_frame);
+            let live_elapsed = pulse
+                .filter(|_| row.live_timer)
+                .and_then(|_| state.transcript.entry(row.anchor.entry_id))
+                .and_then(TranscriptEntry::running_elapsed);
             render_transcript_row(
                 frame,
                 area,
@@ -729,6 +871,8 @@ fn render_transcript(
                 user_surface,
                 palette,
                 pulse,
+                live_elapsed,
+                turn_rail(state, row, prompts, palette),
             );
         }
     }
@@ -747,7 +891,7 @@ fn render_transcript(
         }
     }
     if let Some((start, end)) = scroll {
-        render_scrollbar(frame, rows_area, start, end, palette);
+        render_scrollbar(frame, rows_area, scrollbar_x, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
     let jump_to_latest = (padding > 0 && !viewport.follows_tail())
@@ -818,19 +962,6 @@ fn active_reply(state: &UiState) -> Option<TranscriptEntryId> {
         .map(|entry| entry.id)
 }
 
-fn waiting_for_output(state: &UiState) -> bool {
-    if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        return true;
-    }
-    if state.configuration_active() || state.view_status != ViewStatus::Running {
-        return false;
-    }
-    // message.completed can be painted before command.finished. Keep the reply
-    // visible without briefly inserting a working row and shrinking its viewport.
-    // Response/tool boundaries, not card order, restore the between-steps indicator.
-    !state.transcript.has_visible_response() && !state.transcript.has_unresolved_tool_calls()
-}
-
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
     entry
         .tool_card()
@@ -877,47 +1008,227 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
     }
 }
 
-/// The working row: a spinner, what the agent is doing, how long the current command
-/// has run, and how to interrupt it. The spinner is one column wide, so only the
-/// elapsed time changes the row's width. When `width` is short, the interrupt hint
-/// goes first and then the elapsed time, rather than clipping mid-word.
-fn activity_label(
+/// One row above the composer while a run is going, so it never takes a row at idle.
+fn status_line_height(state: &UiState) -> u16 {
+    u16::from(run_in_status_line(state))
+}
+
+/// The run's status line: what is running and for how long, the session turn, and
+/// the run's tool count and time on the left; queued messages and the context on the
+/// right. The running item's text is clipped first, then the turn details drop.
+fn render_status_line(
+    frame: &mut Frame<'_>,
+    area: Rect,
     state: &UiState,
     activity_frame: u8,
-    elapsed: Option<std::time::Duration>,
-    width: usize,
+    run_elapsed: Option<std::time::Duration>,
     palette: Palette,
-) -> Option<Line<'static>> {
-    if state.configuration_active()
-        || !(state.view_status == ViewStatus::Running
-            || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
-    {
-        return None;
+) {
+    let width = usize::from(area.width);
+    let running = Style::default().fg(palette.secondary);
+    let muted = Style::default().fg(palette.muted);
+    let dim = muted.add_modifier(Modifier::DIM);
+
+    let mut right = Vec::new();
+    let queued = state
+        .queued_steering()
+        .saturating_add(state.queued_follow_ups());
+    if queued > 0 {
+        right.push(Span::styled(format!("{queued} queued"), running));
+        right.push(Span::styled(" · ", dim));
     }
-    let lead = format!(
-        "{} {}",
-        spinner_frame(activity_frame),
-        activity_phase(state)
-    );
-    let mut details: Vec<String> = elapsed.map(format_elapsed).into_iter().collect();
-    // Once Esc has requested cancellation, another Esc cannot start one; the footer
-    // already says the prompt is cancelling.
-    if !state.cancel_requested {
-        details.push("Esc to interrupt".to_owned());
+    let context = crate::context_view::indicator(state, 0);
+    let pressured =
+        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    right.push(Span::styled("ctx ", muted));
+    right.push(Span::styled(
+        context.strip_prefix("ctx ").unwrap_or(&context).to_owned(),
+        if pressured {
+            Style::default().fg(palette.warning)
+        } else {
+            muted
+        },
+    ));
+    let right = Line::from(right);
+
+    let activity = run_activity(state);
+    let mut lead = vec![Span::styled(
+        format!("{} ", spinner_frame(activity_frame)),
+        running,
+    )];
+    let mut detail = String::new();
+    let mut timer = None;
+    match activity.item {
+        Some(item) => {
+            lead.push(Span::styled(
+                format!(" {} ", item.label),
+                palette.chip(&item.label),
+            ));
+            lead.push(Span::raw(" "));
+            detail = item.detail;
+            timer = item.elapsed.map(|elapsed| {
+                crate::tool_cards::format_duration(
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                )
+            });
+        }
+        None => lead.push(Span::styled(activity_phase(state), running)),
     }
-    while !details.is_empty()
-        && lead.width() + details.iter().map(|part| part.width() + 3).sum::<usize>() > width
-    {
-        details.pop();
-    }
-    let mut spans = vec![Span::styled(lead, Style::default().fg(palette.primary))];
-    if !details.is_empty() {
-        spans.push(Span::styled(
-            format!(" · {}", details.join(" · ")),
-            Style::default().fg(palette.muted),
+    let turn_number = activity.turn;
+    let tools = activity.tools;
+    let mut totals = format!("{tools} tool{}", if tools == 1 { "" } else { "s" });
+    if let Some(elapsed) = run_elapsed {
+        totals.push_str(" · ");
+        totals.push_str(&crate::tool_cards::format_duration(
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         ));
     }
-    Some(Line::from(spans))
+    let mut tail = vec![Span::styled(" · ", dim)];
+    if turn_number > 0 {
+        tail.push(Span::styled(format!("turn {turn_number} "), muted));
+    }
+    tail.push(Span::styled(totals, dim));
+
+    // Fit the left side beside the right one, keeping at least a little of the
+    // running item's text before the turn details are shown.
+    const MIN_DETAIL_COLUMNS: usize = 8;
+    let right_width = right.width();
+    let mut budget = width.saturating_sub(right_width + 2);
+    let lead_width = Line::from(lead.clone()).width();
+    let show_right = lead_width <= budget;
+    if !show_right {
+        budget = width;
+    }
+    let timer_width = timer.as_ref().map_or(0, |timer| timer.width() + 1);
+    let tail_width = Line::from(tail.clone()).width();
+    let detail_floor = if detail.is_empty() {
+        0
+    } else {
+        detail.width().min(MIN_DETAIL_COLUMNS)
+    };
+    // The queue and context outrank the turn details, which show only beside them.
+    let show_tail = show_right && lead_width + detail_floor + timer_width + tail_width <= budget;
+    let detail_room = budget
+        .saturating_sub(lead_width + timer_width)
+        .saturating_sub(if show_tail { tail_width } else { 0 });
+    let mut left = lead;
+    if !detail.is_empty() && detail_room > 0 {
+        left.push(Span::styled(
+            clip_columns(&detail, detail_room),
+            Style::default().fg(palette.foreground),
+        ));
+    }
+    if let Some(timer) = timer.filter(|_| lead_width + timer_width <= budget) {
+        left.push(Span::raw(" "));
+        left.push(Span::styled(timer, running));
+    }
+    if show_tail {
+        left.extend(tail);
+    }
+    frame.render_widget(Paragraph::new(Line::from(left)), area);
+    if show_right {
+        let columns = u16::try_from(right_width)
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        frame.render_widget(
+            Paragraph::new(right),
+            Rect {
+                x: area.right() - columns,
+                width: columns,
+                ..area
+            },
+        );
+    }
+}
+
+/// What the run in progress is doing, as the status line and the side panel show it.
+pub(crate) struct RunActivity {
+    /// The call or background process that names the run, if one is going.
+    pub(crate) item: Option<RunningItem>,
+    /// The session turn the run has reached, or 0 before the model answers.
+    pub(crate) turn: u64,
+    /// Calls and background processes the run has started.
+    pub(crate) tools: usize,
+}
+
+pub(crate) fn run_activity(state: &UiState) -> RunActivity {
+    let turn = current_turn(state);
+    // Only calls after the latest reply name the run: once the model answers again, a
+    // background process started earlier no longer says what is happening. Cancelling
+    // outranks everything, since that is what the user is waiting on.
+    let item = turn
+        .iter()
+        .rev()
+        .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
+        .find_map(running_item)
+        .filter(|_| !state.cancel_requested);
+    RunActivity {
+        item,
+        turn: state.run_progress.map_or(0, |run| run.turn),
+        tools: turn
+            .iter()
+            .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
+            .count(),
+    }
+}
+
+/// The entries of the run in progress: everything after the prompt that started it,
+/// including steers and follow-ups it took in, or after the latest prompt otherwise.
+pub(crate) fn current_turn(state: &UiState) -> &[TranscriptEntry] {
+    let entries = state.transcript.entries();
+    let start = run_prompt_index(state)
+        .map_or(0, |index| index + 1)
+        .min(entries.len());
+    &entries[start..]
+}
+
+/// Where the prompt that started the run in progress sits, or the latest prompt.
+fn run_prompt_index(state: &UiState) -> Option<usize> {
+    state
+        .run_progress
+        .and_then(|run| state.transcript.entry_index(run.prompt))
+        .or_else(|| {
+            state
+                .transcript
+                .entries()
+                .iter()
+                .rposition(|entry| entry.role == TranscriptRole::User)
+        })
+}
+
+/// A call still in progress, as the status line names it.
+pub(crate) struct RunningItem {
+    pub(crate) label: String,
+    pub(crate) detail: String,
+    pub(crate) elapsed: Option<std::time::Duration>,
+}
+
+fn running_item(entry: &TranscriptEntry) -> Option<RunningItem> {
+    let (label, detail) = if let Some(card) = entry.tool_card() {
+        if !matches!(card.status, ToolStatus::Requested | ToolStatus::Running) {
+            return None;
+        }
+        (card.action_label(), card.display_arguments())
+    } else {
+        let card = entry.process_card()?;
+        if !matches!(
+            card.display_state,
+            ProcessDisplayState::Running | ProcessDisplayState::Polling
+        ) {
+            return None;
+        }
+        (
+            "Process".to_owned(),
+            card.task_label
+                .clone()
+                .unwrap_or_else(|| "Background command".to_owned()),
+        )
+    };
+    Some(RunningItem {
+        label: sanitize_for_terminal(&label),
+        detail: sanitize_for_terminal(&detail.split_whitespace().collect::<Vec<_>>().join(" ")),
+        elapsed: entry.running_elapsed(),
+    })
 }
 
 /// Why the last prompt failed, as up to three rows starting with `✗`, while nothing is
@@ -936,10 +1247,14 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
         .collect()
 }
 
-/// What the agent is waiting on while no reply text or tool card shows progress.
-fn activity_phase(state: &UiState) -> &'static str {
+/// What the run is doing when no call names it: compacting, cancelling, thinking, or
+/// otherwise working.
+pub(crate) fn activity_phase(state: &UiState) -> String {
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        return "Compacting context";
+        return "Compacting context".into();
+    }
+    if state.cancel_requested {
+        return "Cancelling".into();
     }
     let thinking = state
         .transcript
@@ -952,20 +1267,23 @@ fn activity_phase(state: &UiState) -> &'static str {
                 && entry.state == crate::transcript::TranscriptEntryState::Streaming
                 && !entry.thinking().is_empty()
         });
-    if thinking { "Thinking" } else { "Working" }
-}
-
-/// `9s`, `1m 05s` or `1h 02m`.
-fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let seconds = elapsed.as_secs();
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
+    // A call or background process still running is named by the status line itself.
+    if thinking {
+        "Thinking".into()
+    } else {
+        "Working".into()
     }
 }
 
-fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, palette: Palette) {
+/// Draw the transcript's scroll marker in column `x`, the conversation's right edge.
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    x: u16,
+    start: f64,
+    end: f64,
+    palette: Palette,
+) {
     let height = usize::from(area.height);
     if height == 0 {
         return;
@@ -981,7 +1299,6 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
         ((start / (start + 1.0 - end)) * travel as f64).round() as usize
     }
     .min(travel);
-    let x = frame.area().right().saturating_sub(1);
     for offset in 0..height {
         let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
@@ -1006,10 +1323,70 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
         TranscriptRowTone::DiffDeletion => Style::default()
             .fg(palette.deletion)
             .bg(palette.deletion_background),
+        TranscriptRowTone::Surface => Style::default().fg(palette.foreground).bg(palette.surface),
+        TranscriptRowTone::SurfaceNote => Style::default().fg(palette.muted).bg(palette.surface),
         _ => Style::default().fg(palette.muted),
     }
 }
 
+/// Where the transcript's first prompt and the running turn's prompt sit, found once
+/// per frame.
+#[derive(Clone, Copy)]
+struct TurnBounds {
+    first: Option<usize>,
+    latest: Option<usize>,
+}
+
+/// The rail beside a transcript row. A prompt keeps its accent bar; every row of the
+/// turn after it, replies included, shares one line that takes the running colour
+/// while the turn runs and ends in `╰` at its summary. The gap under a prompt and the
+/// gap after a finished turn stay bare.
+fn turn_rail(
+    state: &UiState,
+    row: &TranscriptRow,
+    prompts: TurnBounds,
+    palette: Palette,
+) -> Option<(&'static str, Color)> {
+    if row.role == TranscriptRole::User {
+        return Some(("▎", palette.primary));
+    }
+    let index = state.transcript.entry_index(row.anchor.entry_id)?;
+    let entry = &state.transcript.entries()[index];
+    if entry.role == TranscriptRole::User {
+        return None;
+    }
+    if row.kind == TranscriptRowKind::RunSummary {
+        return Some(("╰", palette.rail()));
+    }
+    // The gap that ends a turn, after its summary or before the next prompt, is bare.
+    if matches!(
+        row.kind,
+        TranscriptRowKind::Spacer | TranscriptRowKind::Rule
+    ) && (entry.run_summary().is_some()
+        || state
+            .transcript
+            .entry_after(entry.id)
+            .is_some_and(|next| next.role == TranscriptRole::User))
+    {
+        return None;
+    }
+    // Rows before the first prompt, such as a resumed session's notes, belong to no turn.
+    if prompts.first.is_none_or(|first| index < first) {
+        return None;
+    }
+    let running = state.view_status == ViewStatus::Running
+        && prompts.latest.is_some_and(|prompt| index > prompt);
+    Some((
+        "│",
+        if running {
+            palette.running_rail()
+        } else {
+            palette.rail()
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_transcript_row(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1018,6 +1395,8 @@ fn render_transcript_row(
     user_surface: bool,
     palette: Palette,
     pulse: Option<u8>,
+    live_elapsed: Option<std::time::Duration>,
+    rail: Option<(&'static str, Color)>,
 ) {
     // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
@@ -1033,6 +1412,14 @@ fn render_transcript_row(
     };
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
+    // Use the existing inset: decoration must not shift wrapping, copied text, or
+    // mouse hit targets.
+    if let Some((glyph, color)) = rail.filter(|_| content.x > area.x) {
+        frame.render_widget(
+            Paragraph::new(Span::styled(glyph, base.fg(color))),
+            Rect::new(area.x, area.y, 1, 1),
+        );
+    }
     let gutter = match row.gutter {
         RowGutter::None => None,
         RowGutter::Connector => Some(RESULT_CONNECTOR),
@@ -1051,23 +1438,17 @@ fn render_transcript_row(
         content.width -= columns;
     }
     if row.kind == TranscriptRowKind::Rule {
-        // The rule starts under the chip, after the status marker and its gap.
-        let start = content.width.min(2);
-        let columns = usize::from(content.width - start);
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "─".repeat(columns),
-                base.patch(palette.rule()),
-            )),
-            Rect::new(content.x + start, content.y, content.width - start, 1),
-        );
+        // Preserve the existing viewport anchors, but separate routine tools with air.
         return;
     }
     if code {
         frame.render_widget(Block::default().style(palette.composer()), content);
     } else if matches!(
         row.tone,
-        TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion
+        TranscriptRowTone::DiffAddition
+            | TranscriptRowTone::DiffDeletion
+            | TranscriptRowTone::Surface
+            | TranscriptRowTone::SurfaceNote
     ) {
         frame.render_widget(
             Block::default().style(base.patch(tone_style(row.tone, palette))),
@@ -1092,6 +1473,8 @@ fn render_transcript_row(
                 | TranscriptRowTone::Error
                 | TranscriptRowTone::DiffAddition
                 | TranscriptRowTone::DiffDeletion
+                | TranscriptRowTone::Surface
+                | TranscriptRowTone::SurfaceNote
         ) =>
         {
             base.patch(tone_style(row.tone, palette))
@@ -1112,10 +1495,6 @@ fn render_transcript_row(
             .position(|span| span.style.inline == InlineStyle::ToolName)
     })
     .flatten();
-    let marked = row
-        .spans
-        .iter()
-        .any(|span| span.style.inline == InlineStyle::ToolStatus);
     let mut spans = row
         .spans
         .into_iter()
@@ -1133,20 +1512,43 @@ fn render_transcript_row(
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
-        let chip = spans[label].style.patch(palette.chip());
-        fill_label_chip(&mut spans, label, chip);
+        let chip = spans[label]
+            .style
+            .patch(palette.chip(spans[label].content.trim()));
+        fill_label_chip(&mut spans, label, chip, palette);
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, base.fg(palette.muted)));
     }
-    // An exploration group's row holds only its summary, so its marker is drawn here; a
-    // repeated MCP call's row carries its own marker like any action line.
-    if row.kind == TranscriptRowKind::CardGroup && !marked {
-        let marker = base.patch(tone_style(row.tone, palette));
-        let glyph = spinner.unwrap_or_else(|| group_marker(row.tone).to_owned());
-        spans.insert(0, Span::styled(glyph, marker));
-    }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
+    // The arrow takes the blank middle of the label gap. A row cut short can put
+    // its `…` there instead, which stays.
+    if let Some(arrow) = row.fold_arrow.filter(|arrow| arrow.column < content.width) {
+        let position = (content.x + arrow.column, content.y);
+        if frame.buffer_mut()[position].symbol() == " " {
+            frame.buffer_mut()[position]
+                .set_symbol(arrow.symbol())
+                .set_fg(palette.muted);
+        }
+    }
+    // A finished call's time is muted; a running call's ticks in the running colour.
+    let live = live_elapsed.map(|elapsed| {
+        crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    });
+    let trailing = match (row.trailing.as_deref(), live.as_deref()) {
+        (Some(trailing), _) => Some((trailing, palette.muted)),
+        (None, Some(live)) => Some((live, palette.secondary)),
+        (None, None) => None,
+    };
+    if let Some((text, color)) = trailing {
+        let columns = u16::try_from(text.width())
+            .unwrap_or(u16::MAX)
+            .min(content.width);
+        frame.render_widget(
+            Paragraph::new(Span::styled(text.to_owned(), base.fg(color))),
+            Rect::new(content.right() - columns, content.y, columns, 1),
+        );
+    }
 }
 
 /// Fill a card's label as a chip one space wider than the name on each side. The padding
@@ -1154,7 +1556,7 @@ fn render_transcript_row(
 /// is either the label's own alignment padding or the gap after it, so the row's text, width
 /// and copied selection stay the same. The rest of the alignment padding stays plain, so
 /// stacked chips differ in width instead of forming one block.
-fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style) {
+fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style, palette: Palette) {
     let content = spans[label].content.to_string();
     let name = content.trim_end_matches(' ');
     let mut text = name.to_owned();
@@ -1178,27 +1580,29 @@ fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style) {
         after.content.to_mut().remove(0);
         text.push(' ');
     }
-    spans[label] = Span::styled(text, chip);
-    if !padding.is_empty() {
-        spans.insert(label + 1, Span::styled(padding, plain));
+    let mut face = text.as_str();
+    let mut decorated = Vec::new();
+    if let Some(rest) = face.strip_prefix(' ') {
+        decorated.push(Span::styled(" ", palette.chip_edge(chip, true)));
+        face = rest;
     }
+    let trailing = face.ends_with(' ');
+    decorated.push(Span::styled(face.trim_end_matches(' ').to_owned(), chip));
+    if trailing {
+        decorated.push(Span::styled(" ", palette.chip_edge(chip, false)));
+    }
+    if !padding.is_empty() {
+        decorated.push(Span::styled(padding, plain));
+    }
+    spans.splice(label..=label, decorated);
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
-pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A turning half circle marks work in progress, by shape rather than brightness.
+pub(crate) const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 pub(crate) fn spinner_frame(frame: u8) -> &'static str {
     SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
-}
-
-/// The marker of an `explored N files` group, which summarizes its members' tone.
-fn group_marker(tone: TranscriptRowTone) -> &'static str {
-    match tone {
-        TranscriptRowTone::Success => "✓  ",
-        TranscriptRowTone::Error => "✗  ",
-        TranscriptRowTone::Warning => "⊘  ",
-        _ => "●  ",
-    }
 }
 
 fn selected_detail<'a>(
@@ -1257,7 +1661,11 @@ fn render_detail(
     frame.render_widget(
         Paragraph::new(sanitize_for_terminal(&heading)).block(
             Block::default()
-                .title(" live retained detail ")
+                .title(if crate::diff_review::is_diff(presentation) {
+                    " review · this tool edit · before ↔ after "
+                } else {
+                    " live retained detail "
+                })
                 .border_style(palette.border())
                 .borders(Borders::ALL),
         ),
@@ -1266,17 +1674,21 @@ fn render_detail(
 
     let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
     let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
-    view.set_geometry(presentation, width, height);
-    let rows = view.visible_rows(presentation);
-    let lines = if rows.is_empty() {
-        vec![Line::styled(
-            "(no retained detail rows)",
-            Style::default().fg(palette.muted),
-        )]
+    let lines = if crate::diff_review::is_diff(presentation) {
+        view.review.lines(presentation, width, height, palette)
     } else {
-        rows.into_iter()
-            .map(|row| detail_line(row, palette))
-            .collect()
+        view.set_geometry(presentation, width, height);
+        let rows = view.visible_rows(presentation);
+        if rows.is_empty() {
+            vec![Line::styled(
+                "(no retained detail rows)",
+                Style::default().fg(palette.muted),
+            )]
+        } else {
+            rows.into_iter()
+                .map(|row| detail_line(row, palette))
+                .collect()
+        }
     };
     let title = if presentation.truncated {
         " detail • retained content incomplete "
@@ -1293,8 +1705,12 @@ fn render_detail(
         chunks[1],
     );
     frame.render_widget(
-        Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc close")
-            .style(Style::default().fg(palette.muted)),
+        Paragraph::new(if crate::diff_review::is_diff(presentation) {
+            "↑/↓ scroll · [/] hunk · Tab edit · s split · c context · Esc close"
+        } else {
+            "↑/↓ scroll · PgUp/PgDn · Home/End · Esc close"
+        })
+        .style(Style::default().fg(palette.muted)),
         chunks[2],
     );
 }
@@ -1329,7 +1745,7 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style = match semantic.inline {
         InlineStyle::Normal => style,
         InlineStyle::Code => style.patch(palette.semantic_inline_code()),
-        InlineStyle::Link => style.fg(palette.primary).add_modifier(Modifier::UNDERLINED),
+        InlineStyle::Link => style.fg(palette.link()).add_modifier(Modifier::UNDERLINED),
         InlineStyle::QuoteMarker => style.fg(palette.muted),
         InlineStyle::ListMarker => style.patch(palette.semantic_list_marker()),
         InlineStyle::TableBorder => style.fg(palette.muted),
@@ -1339,20 +1755,23 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         InlineStyle::ToolArgument => style.patch(palette.tool_argument()),
         InlineStyle::ToolStatus => style,
         // Modifiers, not colour, so the changed words stay visible in monochrome.
-        InlineStyle::DiffChange => style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        InlineStyle::DiffChange => palette.diff_change(style),
+        InlineStyle::DiffGutter => style.fg(palette.muted),
+        InlineStyle::DiffSign => style.fg(if style.bg == Some(palette.deletion_background) {
+            palette.error
+        } else if style.bg == Some(palette.addition_background) {
+            palette.success
+        } else {
+            palette.muted
+        }),
     };
-    style = match semantic.syntax {
-        SyntaxClass::Plain => style,
-        SyntaxClass::Comment => style.fg(palette.muted).add_modifier(Modifier::ITALIC),
-        SyntaxClass::Keyword => style.fg(palette.accent).add_modifier(Modifier::BOLD),
-        SyntaxClass::String => style.fg(palette.success),
-        SyntaxClass::Number | SyntaxClass::Constant => style.fg(palette.warning),
-        SyntaxClass::Type => style.fg(palette.secondary),
-        SyntaxClass::Function => style.fg(palette.primary),
-        SyntaxClass::Variable => style.fg(palette.foreground),
-        SyntaxClass::Operator => style.fg(palette.warning),
-        SyntaxClass::Punctuation => style.fg(palette.foreground),
-    };
+    style = palette.syntax(style, semantic.syntax);
+    if semantic.syntax == SyntaxClass::Comment {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if semantic.syntax == SyntaxClass::Keyword {
+        style = style.add_modifier(Modifier::BOLD);
+    }
     if semantic.strong {
         style = style.add_modifier(Modifier::BOLD);
     }
@@ -1365,6 +1784,118 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style
 }
 
+/// Whether the composer draws its frame, whose bottom border then names the mode
+/// and model in place of the footer.
+fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
+    editable(state) && padded && area.height >= 4
+}
+
+/// The framed composer's last row: mode first so narrow widths cut the model
+/// and effort, never the mode.
+fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
+    let separator = || Span::styled(" · ", Style::default().fg(palette.muted));
+    let mut spans = Vec::new();
+    if state.mode_confirmed {
+        let mut letters = state.mode.as_str().chars();
+        let label = letters
+            .next()
+            .map(|first| first.to_uppercase().chain(letters).collect::<String>())
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(provider) = state.provider.as_deref() {
+        if !spans.is_empty() {
+            spans.push(separator());
+        }
+        if let Some(model) = state
+            .model_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.selection.effective_model.as_deref())
+            .or(state.model.as_deref())
+        {
+            spans.push(Span::styled(
+                sanitize_for_terminal(model),
+                Style::default().fg(palette.foreground),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            sanitize_for_terminal(provider),
+            Style::default().fg(palette.muted),
+        ));
+        if let Some(effort) = state.effort.as_deref() {
+            spans.push(separator());
+            spans.push(Span::styled(
+                sanitize_for_terminal(effort),
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if state.model_selection_stale {
+            spans.push(Span::styled(
+                " (last confirmed; selection unavailable)",
+                Style::default().fg(palette.muted),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// The framed composer's last row: its identity on the left and, during a run, the
+/// keys that follow up or steer on the right when both fit.
+fn render_composer_identity_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    bindings: &Bindings,
+    palette: Palette,
+) {
+    let identity = composer_identity_line(state, palette);
+    frame.render_widget(Paragraph::new(identity.clone()), area);
+    if !state.active_prompt_editable() {
+        return;
+    }
+    let keys = keycap_hints(
+        &format!(
+            "{} follow-up · {} steer",
+            primary_label(bindings, KeyAction::Submit),
+            primary_label(bindings, KeyAction::AlternateSubmit)
+        ),
+        palette,
+    )
+    .style(Style::default().fg(palette.muted));
+    let keys_width = u16::try_from(keys.width()).unwrap_or(u16::MAX);
+    let identity_width = u16::try_from(identity.width()).unwrap_or(u16::MAX);
+    if identity_width.saturating_add(2).saturating_add(keys_width) <= area.width {
+        frame.render_widget(
+            Paragraph::new(keys),
+            Rect {
+                x: area.right() - keys_width,
+                width: keys_width,
+                ..area
+            },
+        );
+    }
+}
+
+/// Colour the composer's whole left side, corners included, as its accent. It keeps
+/// the border's own glyphs and weight, so the corners join in any terminal font.
+fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        if let Some(cell) = buffer.cell_mut((area.x, y)) {
+            cell.set_fg(color);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1373,15 +1904,14 @@ fn render_composer(
     focused: bool,
     padded: bool,
     palette: Palette,
+    bindings: &Bindings,
 ) -> Option<mouse::Editor> {
-    let queued_total = state
-        .queued_steering()
-        .saturating_add(state.queued_follow_ups());
-    let border_style = match state.view_status {
-        ViewStatus::Error => Style::default().fg(palette.error),
-        _ => palette.border(),
-    };
-    let framed_input = editable(state) && padded && area.height >= 3;
+    // The border stays quiet while idle or running and takes the waiting or error
+    // colour; the accent bar carries the run's state.
+    let status = status_color(state, palette);
+    let alerting = status == palette.warning || status == palette.error;
+    let border_style = Style::default().fg(if alerting { status } else { palette.muted });
+    let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
         Block::default()
             .borders(Borders::ALL)
@@ -1391,38 +1921,40 @@ fn render_composer(
         Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
     .style(palette.base());
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     if editable(state) {
         frame.render_widget(block, area);
-        let preview_rows = if state.active_prompt_editable() {
-            queued_total
-                .min(3)
-                .min(usize::from(inner.height.saturating_sub(1)))
-        } else {
-            0
-        };
-        if preview_rows > 0 {
-            let preview_area = Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: u16::try_from(preview_rows).unwrap_or(inner.height),
+        if framed_input {
+            // Waiting and error colours win; a run shows the running colour, and an
+            // idle composer keeps the accent.
+            let accent = if alerting {
+                status
+            } else if state.active_prompt_editable() {
+                palette.secondary
+            } else {
+                palette.accent
             };
-            frame.render_widget(
-                Paragraph::new(Text::from(queue_preview_lines(
-                    state,
-                    preview_rows,
-                    usize::from(inner.width),
-                ))),
-                preview_area,
+            paint_composer_accent(frame, area, accent);
+            inner.height = inner.height.saturating_sub(1);
+            // Indented past the prompt prefix so it lines up with the draft.
+            let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
+            render_composer_identity_row(
+                frame,
+                Rect {
+                    x: inner.x.saturating_add(prefix_width).min(inner.right()),
+                    y: inner.bottom(),
+                    width: inner.width.saturating_sub(prefix_width),
+                    height: 1,
+                },
+                state,
+                bindings,
+                palette,
             );
         }
         let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
         let prefix_area = Rect {
             x: inner.x,
-            y: inner
-                .y
-                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            y: inner.y,
             width: prefix_width.min(inner.width),
             height: 1,
         };
@@ -1434,13 +1966,9 @@ fn render_composer(
         }
         let editor_area = Rect {
             x: inner.x.saturating_add(prefix_width).min(inner.right()),
-            y: inner
-                .y
-                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            y: inner.y,
             width: inner.width.saturating_sub(prefix_width),
-            height: inner
-                .height
-                .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            height: inner.height,
         };
         let layout = layout.expect("editable composer requires a visual layout");
         let vertical_scroll = layout
@@ -1454,11 +1982,11 @@ fn render_composer(
             .collect::<Vec<_>>();
         if layout.is_empty {
             let placeholder = if state.active_prompt_editable() {
-                let hint = "Steer Wisp, or queue a follow-up…";
+                let hint = "Message to steer or follow up…";
                 if hint.width() <= usize::from(editor_area.width) {
                     hint
                 } else {
-                    "Steer Wisp…"
+                    "Steer or follow up…"
                 }
             } else {
                 "Ask Wisp anything…"
@@ -1548,44 +2076,6 @@ fn render_composer(
         area,
     );
     None
-}
-
-fn queue_preview_lines(state: &UiState, max_rows: usize, width: usize) -> Vec<Line<'static>> {
-    state
-        .queue_items()
-        .take(max_rows)
-        .map(|(kind, _, content)| {
-            let label = match kind {
-                QueueKind::Steering => "steer",
-                QueueKind::FollowUp => "later",
-            };
-            Line::from(bounded_queue_preview(
-                &format!("{label}: {}", bounded_decision_preview(content)),
-                width,
-            ))
-        })
-        .collect()
-}
-
-fn bounded_queue_preview(content: &str, width: usize) -> String {
-    if content.width() <= width {
-        return content.into();
-    }
-    if width <= 1 {
-        return "…".chars().take(width).collect();
-    }
-    let mut preview = String::new();
-    let mut used = 0_usize;
-    for grapheme in content.graphemes(true) {
-        let grapheme_width = grapheme.width();
-        if used.saturating_add(grapheme_width) > width - 1 {
-            break;
-        }
-        preview.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    preview.push('…');
-    preview
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2037,7 +2527,7 @@ fn join_hints(parts: impl IntoIterator<Item = String>, width: usize) -> String {
     out
 }
 
-fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
+pub(crate) fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
     let label = bindings.label(action);
     label
         .split(" / ")
@@ -2231,7 +2721,17 @@ fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
 }
 
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
-    let parts = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
+    join_hints(footer_hint_parts(state, bindings, None), width)
+}
+
+/// The footer's key hints in order. An offered `panel` hint goes beside the interrupt
+/// key during a run, and last otherwise.
+fn footer_hint_parts(
+    state: &UiState,
+    bindings: &Bindings,
+    mut panel: Option<String>,
+) -> Vec<String> {
+    let mut parts: Vec<String> = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
             "y once".into(),
             "t tool".into(),
@@ -2241,45 +2741,22 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
         ]
     } else if matches!(state.view_status, ViewStatus::WaitingForTrust) {
         vec!["y trust".into(), "n deny".into(), "Ctrl+G help".into()]
-    } else if state.active_prompt_editable() {
-        vec![
-            format!("{} steer", primary_label(bindings, KeyAction::Submit)),
-            format!(
-                "{} later",
-                primary_label(bindings, KeyAction::AlternateSubmit)
-            ),
-            "Esc/Ctrl-C cancels".into(),
-            format!(
-                "{} restore",
-                primary_label(bindings, KeyAction::RestoreQueue)
-            ),
-            "Ctrl+G help".into(),
-            browse_hint(state, bindings),
-        ]
     } else if state.cancel_requested {
         vec!["Ctrl+G help".into()]
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
-        vec![
-            "Esc/Ctrl-C cancels".into(),
-            "Ctrl+G help".into(),
-            browse_hint(state, bindings),
-        ]
+        // The composer names the keys that follow up or steer.
+        let mut parts = vec!["Esc interrupt".into()];
+        parts.extend(panel.take());
+        parts.push(browse_hint(state, bindings));
+        parts
     } else {
-        vec![
-            format!("{} send", primary_label(bindings, KeyAction::Submit)),
-            "/ commands".into(),
-            "Ctrl+G help".into(),
-            // Ahead of `@ files` so it still fits the 56-column cap of narrower
-            // terminals once there is something to browse.
-            browse_hint(state, bindings),
-            "@ files".into(),
-            format!("{} history", primary_label(bindings, KeyAction::History)),
-            format!("{} newline", primary_label(bindings, KeyAction::Newline)),
-        ]
+        // Help lists the remaining keys, sending included.
+        vec!["Ctrl+G help".into(), browse_hint(state, bindings)]
     };
-    join_hints(parts, width)
+    parts.extend(panel);
+    parts
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2292,10 +2769,16 @@ fn render_footer(
     palette: Palette,
     bindings: &Bindings,
     jump_painted: bool,
+    identity_in_composer: bool,
+    column_width: u16,
 ) {
     let width = usize::from(area.width);
-    // Keep the established status priorities when outer presentation margins grow.
-    let terminal_width = usize::from(frame.area().width);
+    // Keep the established status priorities when outer presentation margins grow,
+    // measured on the conversation's column rather than beside a docked panel.
+    let terminal_width = usize::from(column_width);
+    // A docked side panel shows the workspace, queue, mode, context, and model, so
+    // the footer keeps only the status and hints beside it.
+    let panel_docked = column_width < frame.area().width;
     let compaction_notice = state
         .context
         .compaction_notice
@@ -2316,14 +2799,26 @@ fn render_footer(
     } else {
         (terminal_width / 2).max(19)
     };
-    let leading = footer_leading_parts(state);
-    let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
-    let ctx_width = status_budget
-        .saturating_sub(leading_width)
-        .saturating_sub(if leading_width == 0 { 0 } else { 3 });
-    let mut status = leading;
-    status.push(crate::context_view::indicator(state, ctx_width));
-    status.extend(footer_trailing_parts(state));
+
+    // Right: the status the footer always keeps, label first since it carries the
+    // status colour, then the hints that still fit.
+    // While a run is going, the status line above the composer names the run, the
+    // queue, and the context, so the footer keeps only scroll markers and hints.
+    let mut status = Vec::new();
+    if panel_docked {
+        if !run_in_status_line(state) {
+            status.push(status_label(state));
+        }
+    } else if !run_in_status_line(state) {
+        let leading = footer_leading_parts(state, identity_in_composer);
+        let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
+        let ctx_width = status_budget
+            .saturating_sub(leading_width)
+            .saturating_sub(if leading_width == 0 { 0 } else { 3 });
+        status = leading;
+        status.push(crate::context_view::indicator(state, ctx_width));
+        status.extend(footer_trailing_parts(state, identity_in_composer));
+    }
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
     } else if !jump_painted && viewport.has_unseen_output() {
@@ -2333,69 +2828,155 @@ fn render_footer(
     }
     let status_line = join_hints(status, status_budget);
     let status_width = status_line.width();
-    let remaining = width.saturating_sub(status_width.saturating_add(2));
-    let (rest, rest_style) = match notice {
+
+    // Left: a notice, or where commands run. On a narrow row the branch goes
+    // first, then the hints; the folder stays while it fits beside the status.
+    let hint_cap = |room: usize| {
+        if terminal_width < 120 {
+            room.min(56)
+        } else {
+            room
+        }
+    };
+    let beside_status = width.saturating_sub(status_width.saturating_add(2));
+    let (left, left_style, hints) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
             Style::default().fg(palette.warning),
+            String::new(),
         ),
-        None => (
-            // Keep common shortcuts quiet and leave breathing room between
-            // the action hints and right-aligned session status.
-            footer_hints(
+        None => {
+            let workspace = if panel_docked {
+                Vec::new()
+            } else {
+                footer_workspace_parts(state)
+            };
+            let hints = footer_hints(
                 state,
                 bindings,
-                if terminal_width < 120 {
-                    remaining.min(56)
-                } else {
-                    remaining
-                },
-            ),
-            Style::default().fg(palette.muted),
-        ),
+                hint_cap(width.saturating_sub(status_width).saturating_sub(3)),
+            );
+            let hints_width = if hints.is_empty() {
+                0
+            } else {
+                hints.width() + 3
+            };
+            let left_room = (width / 3).min(beside_status.saturating_sub(hints_width + 2));
+            let left = join_hints(workspace.iter().cloned(), left_room);
+            if !left.is_empty() || workspace.is_empty() {
+                (left, Style::default().fg(palette.muted), hints)
+            } else {
+                // The folder alone does not fit beside every hint: keep the
+                // folder and give the hints what remains.
+                let left = join_hints(
+                    workspace.into_iter().take(1),
+                    (width / 3).min(beside_status),
+                );
+                let hint_room = beside_status
+                    .saturating_sub(left.width())
+                    .saturating_sub(if left.is_empty() { 1 } else { 3 });
+                let hints = footer_hints(state, bindings, hint_cap(hint_room));
+                (left, Style::default().fg(palette.muted), hints)
+            }
+        }
     };
-    let label = status_label(state);
-    let mut spans = Vec::new();
-    if let Some(tail) = status_line.strip_prefix(&label) {
-        let active = matches!(
-            state.view_status,
-            ViewStatus::Running
-                | ViewStatus::WaitingForApproval
-                | ViewStatus::WaitingForTrust
-                | ViewStatus::Error
-        ) || state.interaction_status == crate::reducer::InteractionStatus::Compacting;
-        let color = match state.view_status {
-            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => palette.warning,
-            ViewStatus::Error => palette.error,
-            _ if active => palette.primary,
-            _ => palette.muted,
-        };
-        spans.push(Span::styled(label, Style::default().fg(color)));
-        spans.push(Span::styled(
-            tail.to_owned(),
-            Style::default().fg(palette.muted),
-        ));
+    let left_width = left.width().min(beside_status);
+    // Where the panel is not docked, offer it with what room the workspace and the
+    // other hints leave, so it is the first thing a narrow footer drops.
+    let hints = if panel_docked || hints.is_empty() || decision_pending(state) {
+        hints
     } else {
-        spans.push(Span::styled(
-            status_line,
-            Style::default().fg(palette.muted),
-        ));
+        let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
+        let panel = format!("{} panel", primary_label(bindings, KeyAction::TogglePanel));
+        let offer = join_hints(footer_hint_parts(state, bindings, Some(panel)), usize::MAX);
+        if offer.width() + 3 <= hint_cap(room) {
+            offer
+        } else {
+            hints
+        }
+    };
+
+    let mut right = if status_line.is_empty() {
+        Vec::new()
+    } else {
+        status_spans(state, &status_line, palette)
+    };
+    if !hints.is_empty() {
+        if !right.is_empty() {
+            right.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        }
+        right.extend(keycap_hints(&hints, palette).spans);
     }
+    let right = Line::from(right).style(Style::default().fg(palette.muted));
+    let right_width = right.width();
     frame.render_widget(
-        Paragraph::new(rest).style(rest_style),
+        Paragraph::new(left).style(left_style),
         Rect {
-            width: remaining as u16,
+            width: left_width as u16,
             ..area
         },
     );
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        Paragraph::new(right).alignment(Alignment::Right),
         Rect {
-            x: area.right().saturating_sub(status_width as u16),
-            width: status_width as u16,
+            x: area.right().saturating_sub(right_width as u16),
+            width: right_width.min(width) as u16,
             ..area
         },
     );
+}
+
+/// Style the footer's status line: the label in the status colour and the context
+/// meter in the warning colour once the window is mostly full.
+fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Span<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let label = status_label(state);
+    let Some(tail) = status_line.strip_prefix(&label) else {
+        return vec![Span::styled(status_line.to_owned(), muted)];
+    };
+    let mut spans = vec![Span::styled(
+        label,
+        Style::default().fg(status_color(state, palette)),
+    )];
+    let pressured =
+        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    match tail.find("ctx ").filter(|_| pressured) {
+        Some(start) => {
+            let meter_end = tail[start..]
+                .find(" · ")
+                .map_or(tail.len(), |end| start + end);
+            spans.push(Span::styled(tail[..start].to_owned(), muted));
+            spans.push(Span::styled(
+                tail[start..meter_end].to_owned(),
+                Style::default().fg(palette.warning),
+            ));
+            spans.push(Span::styled(tail[meter_end..].to_owned(), muted));
+        }
+        None => spans.push(Span::styled(tail.to_owned(), muted)),
+    }
+    spans
+}
+
+/// The context meter turns to the warning colour from this fill.
+pub(crate) const CONTEXT_WARNING_FILL: f64 = 0.7;
+
+/// Style joined `key action` hints with each key as a keycap. Keys never contain
+/// spaces, so the first space ends the key; widths match the plain string.
+pub(crate) fn keycap_hints(hints: &str, palette: Palette) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (index, hint) in hints.split(" · ").enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(" · "));
+        }
+        match hint.split_once(' ') {
+            Some((key, action)) => {
+                spans.push(Span::styled(key.to_owned(), palette.keycap()));
+                spans.push(Span::raw(format!(" {action}")));
+            }
+            None => spans.push(Span::raw(hint.to_owned())),
+        }
+    }
+    Line::from(spans)
 }
 
 fn editable(state: &UiState) -> bool {
@@ -3124,7 +3705,8 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
                 terminal
                     .draw(|frame| {
-                        render_scrollbar(frame, frame.area(), start, end, Palette::default());
+                        let x = frame.area().right() - 1;
+                        render_scrollbar(frame, frame.area(), x, start, end, Palette::default());
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
@@ -3188,6 +3770,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
@@ -3260,6 +3843,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -3295,6 +3879,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -3339,10 +3924,11 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("fake/model-x"));
+        assert!(rendered.contains("model-x fake"));
         assert!(rendered.contains("hello"));
-        assert!(rendered.contains("Enter send"));
-        assert!(rendered.contains("/ commands"));
+        assert!(rendered.contains("Ctrl+G help"), "{rendered}");
+        assert!(!rendered.contains("Enter send"), "{rendered}");
+        assert!(!rendered.contains("/ commands"), "{rendered}");
         // Narrow footers drop optional hints; help remains available on Ctrl+G.
         assert!(!rendered.contains("rpc v"));
         assert!(!rendered.contains("events v"));
@@ -3363,7 +3949,7 @@ mod tests {
         assert!(rendered.contains("Browse commands"));
         assert!(rendered.contains("Mention a project file"));
         assert!(!rendered.contains("Connect a provider"));
-        assert!(rendered.contains("fake/model-x"));
+        assert!(rendered.contains("model-x fake"));
 
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(compact.contains("Wisp 0.9.0"));
@@ -3373,7 +3959,9 @@ mod tests {
 
         let mut unconfigured = state;
         unconfigured.provider = None;
-        let rendered = render_to_string(80, 18, &unconfigured, &PromptEditor::default());
+        // The framed composer's identity row leaves 13 transcript rows at 18; the
+        // action list is guaranteed from 14 (see the welcome height contract).
+        let rendered = render_to_string(80, 19, &unconfigured, &PromptEditor::default());
         assert!(rendered.contains("Connect a provider"));
         assert!(rendered.contains("/connect"));
     }
@@ -3512,10 +4100,13 @@ mod tests {
             &PromptEditor::default(),
             Some("Model catalog unavailable. Use /model <model> or press r to retry."),
         );
-        assert!(rendered.contains("plan"), "{rendered}");
+        assert!(
+            rendered.contains("Plan · custom-model fake · effort"),
+            "{rendered}"
+        );
         assert!(rendered.contains("ctx"), "{rendered}");
         assert!(rendered.contains('~'), "{rendered}");
-        assert!(rendered.contains("fake/custom-model"), "{rendered}");
+        assert!(rendered.contains("custom-model fake"), "{rendered}");
         assert!(rendered.contains("effort"), "{rendered}");
         assert!(rendered.contains("Model catalog unavailable"), "{rendered}");
 
@@ -3555,10 +4146,13 @@ mod tests {
             session_path: "/sessions/demo.jsonl".into(),
             session_name: Some("demo-session".into()),
         });
+        // While running, the status line above the composer carries the context.
         let running = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(running.contains("s:0/l:0"), "{running}");
-        assert!(running.contains("ctx"), "{running}");
-        assert!(running.contains('~') || running.contains('%'), "{running}");
+        let status = running
+            .lines()
+            .find(|line| line.contains("◐"))
+            .unwrap_or_else(|| panic!("status line: {running}"));
+        assert!(status.contains("ctx ~40%"), "{running}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -3674,13 +4268,12 @@ mod tests {
             None,
             &bindings,
         );
-        assert!(rendered.contains("Ctrl+Enter send"));
         let welcome_action = rendered
             .lines()
             .find(|line| line.contains("Ask Wisp anything"))
             .unwrap();
         assert!(welcome_action.contains("Ctrl+Enter"));
-        assert!(rendered.contains("F4 history"));
+        assert!(!rendered.contains("F4 history"));
         assert!(rendered.contains("Ctrl+G help"));
         assert!(!rendered.contains("Unbound theme"));
         assert!(!rendered.contains("Ctrl+T theme"));
@@ -3702,58 +4295,231 @@ mod tests {
             command_type: ActiveCommandType::Prompt,
         });
         let running = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(running.contains("Enter steer"));
-        assert!(running.contains("Alt+Enter later"));
-        assert!(running.contains("working"));
-        assert!(!running.contains("running"));
+        assert!(
+            running.contains("Enter follow-up · Alt+Enter steer"),
+            "{running}"
+        );
+        assert!(running.contains("Esc interrupt"), "{running}");
+        assert!(!running.contains("working"), "{running}");
 
         state.current_command = None;
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(compacting.contains("Esc/Ctrl-C cancels"));
-        assert!(compacting.contains("compacting"));
-        assert!(!compacting.contains("Enter send"));
+        assert!(compacting.contains("Esc interrupt"), "{compacting}");
+        assert!(compacting.contains("Compacting context"), "{compacting}");
+        assert!(!compacting.contains("Enter send"), "{compacting}");
+    }
+
+    fn status_row(state: &UiState, width: u16, elapsed: Option<u64>) -> (String, TestBackend) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_status_line(
+                    frame,
+                    frame.area(),
+                    state,
+                    0,
+                    elapsed.map(std::time::Duration::from_secs),
+                    Palette::default(),
+                );
+            })
+            .unwrap();
+        let backend = terminal.backend().clone();
+        let text = (0..width)
+            .map(|x| backend.buffer()[(x, 0)].symbol().to_owned())
+            .collect::<String>();
+        (text, backend)
+    }
+
+    fn running_state() -> UiState {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.transcript.append_prompt("first".into());
+        state.transcript.complete_message(1, "done".into());
+        let prompt = state.transcript.append_prompt("check ci".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
+        state
     }
 
     #[test]
-    fn working_row_shows_phase_elapsed_time_and_fits_narrow_rows() {
-        let mut state = UiState::unconfigured();
-        state.view_status = ViewStatus::Running;
-        state.interaction_status = InteractionStatus::Running;
-        let text = |state: &UiState, frame, elapsed, width| {
-            activity_label(state, frame, elapsed, width, Palette::default())
-                .unwrap()
-                .to_string()
-        };
-        let twelve = Some(std::time::Duration::from_secs(12));
-        assert_eq!(
-            text(&state, 0, twelve, 80),
-            "⠋ Working · 12s · Esc to interrupt"
+    fn status_line_names_the_run() {
+        let mut state = running_state();
+        // Between steps the phase stands in for a running call.
+        let (idle_step, _) = status_row(&state, 100, Some(151));
+        assert!(
+            idle_step.starts_with("◐ Working · turn 6 0 tools · 2m 31s"),
+            "{idle_step}"
         );
-        // The spinner is one column, so the row never jitters between frames.
-        let widths: std::collections::HashSet<_> = (0..20)
-            .map(|frame| text(&state, frame, twelve, 80).width())
-            .collect();
-        assert_eq!(widths.len(), 1);
-        // Short rows drop the hint, then the elapsed time, but never clip mid-word.
-        assert_eq!(text(&state, 0, twelve, 20), "⠋ Working · 12s");
-        assert_eq!(text(&state, 0, twelve, 12), "⠋ Working");
+
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "gh pr checks 766 --watch"}),
+            });
+        let (text, backend) = status_row(&state, 100, Some(151));
+        assert!(
+            text.starts_with("◐  Bash  gh pr checks 766 --watch "),
+            "{text}"
+        );
+        assert!(text.contains(" · turn 6 1 tool · 2m 31s"), "{text}");
+        assert!(text.trim_end().ends_with("ctx ~?"), "{text}");
+        let palette = Palette::default();
+        assert_eq!(style_at_text(&backend, "◐").unwrap().0, palette.secondary);
+        assert_eq!(
+            style_at_text(&backend, "Bash").map(|style| (Some(style.0), Some(style.1))),
+            Some((palette.chip("Bash").fg, palette.chip("Bash").bg))
+        );
+
+        // A short row clips the command, then drops the turn details, and keeps
+        // the context on the right.
+        let (narrow, _) = status_row(&state, 40, Some(151));
+        assert!(narrow.contains('…'), "{narrow}");
+        assert!(!narrow.contains("turn 6"), "{narrow}");
+        assert!(narrow.trim_end().ends_with("ctx ~?"), "{narrow}");
+
+        // Cancelling outranks the call still running.
         state.cancel_requested = true;
-        assert_eq!(text(&state, 0, twelve, 80), "⠋ Working · 12s");
+        let (cancelling, _) = status_row(&state, 100, None);
+        assert!(
+            cancelling.starts_with("◐ Cancelling · turn 6 1 tool"),
+            "{cancelling}"
+        );
         state.cancel_requested = false;
 
-        state.transcript.append_prompt("think".into());
-        state.transcript.append_thinking_delta(1, "considering");
-        assert!(text(&state, 0, None, 80).starts_with("⠋ Thinking"));
-        state.interaction_status = InteractionStatus::Compacting;
-        assert!(text(&state, 0, None, 80).starts_with("⠋ Compacting context"));
+        // A follow-up the run takes in joins it, so the tool count carries on.
+        state.transcript.observe_tool_result({
+            let mut result = tool_result("b1", "ok");
+            result.name = "bash".into();
+            result
+        });
+        state.transcript.append_prompt("follow-up".into());
+        let (joined, _) = status_row(&state, 100, None);
+        assert!(joined.contains("turn 6 1 tool"), "{joined}");
+    }
 
-        assert_eq!(format_elapsed(std::time::Duration::from_secs(9)), "9s");
-        assert_eq!(format_elapsed(std::time::Duration::from_secs(65)), "1m 05s");
-        assert_eq!(
-            format_elapsed(std::time::Duration::from_secs(3720)),
-            "1h 02m"
+    #[test]
+    fn running_card_shows_live_timer() {
+        let mut state = running_state();
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "sleep 5"}),
+            });
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                    None,
+                    None,
+                );
+            })
+            .unwrap();
+        let backend = terminal.backend();
+        let buffer = backend.buffer();
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("sleep 5")
+            })
+            .expect("card row");
+        let text = (0..buffer.area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect::<String>();
+        // The card's own clock ticks at the right edge in the running colour.
+        let end = (0..buffer.area.width)
+            .rev()
+            .find(|&x| buffer[(x, row)].symbol() == "s")
+            .expect("timer");
+        assert!(
+            usize::from(end) > text.find("sleep 5").unwrap() + 10,
+            "{text}"
         );
+        assert_eq!(
+            buffer[(end, row)].fg,
+            Palette::default().secondary,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_line_fits_short_screens() {
+        let state = running_state();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"line\n".repeat(20));
+        let mut cache = ComposerLayoutCache::default();
+        for height in 8..20 {
+            let area = Rect::new(0, 0, 60, height);
+            let layout = cache.layout(&editor, composer_editor_width(area.width));
+            // The transcript keeps two rows beside the status line and the footer.
+            assert!(
+                composer_height(area, &state, Some(layout)) + status_line_height(&state) + 3
+                    <= height,
+                "height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_line_shows_queue_and_pressure() {
+        let mut state = running_state();
+        let mut ids = TestIds::default();
+        reduce(
+            &mut state,
+            crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["steer".into()],
+                follow_up: vec!["later".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate {
+                total_tokens: 7_100,
+            },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        });
+        let (text, backend) = status_row(&state, 100, None);
+        assert!(text.trim_end().ends_with("2 queued · ctx ~71%"), "{text}");
+        let palette = Palette::default();
+        assert_eq!(
+            style_at_text(&backend, "2 queued").unwrap().0,
+            palette.secondary
+        );
+        assert_eq!(style_at_text(&backend, "~71%").unwrap().0, palette.warning);
     }
 
     #[test]
@@ -3763,12 +4529,12 @@ mod tests {
         state.interaction_status = InteractionStatus::Running;
         let first = render_to_string_with_activity(80, 18, &state, 0);
         let second = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(first.contains("⠋ Working · Esc to interrupt"), "{first}");
-        assert!(second.contains("⠙ Working"), "{second}");
+        assert!(first.contains("◐ Working"), "{first}");
+        assert!(second.contains("◓ Working"), "{second}");
 
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(compacting.contains("⠹ Compacting context"), "{compacting}");
+        assert!(compacting.contains("◑ Compacting context"), "{compacting}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -3784,8 +4550,8 @@ mod tests {
         state.view_status = ViewStatus::Running;
         for width in [30, 60] {
             for (interaction, label) in [
-                (InteractionStatus::Running, "⠋ Working"),
-                (InteractionStatus::Compacting, "⠋ Compacting context"),
+                (InteractionStatus::Running, "◐ Working"),
+                (InteractionStatus::Compacting, "◐ Compacting context"),
             ] {
                 state.interaction_status = interaction;
                 let rendered = render_to_string_with_notice(
@@ -3834,46 +4600,43 @@ mod tests {
     }
 
     #[test]
-    fn active_queue_editor_renders_bounded_sanitized_previews_and_counts() {
-        let mut state = UiState::new("fake".into(), None, None);
-        state.view_status = ViewStatus::Running;
-        state.interaction_status = InteractionStatus::Running;
-        state.current_command = Some(ActiveCommand {
-            id: "prompt-1".into(),
-            command_type: ActiveCommandType::Prompt,
-        });
+    fn running_composer_names_its_keys() {
+        let mut state = running_state();
         let mut ids = TestIds::default();
         reduce(
             &mut state,
             crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
-                steering: vec![
-                    "first\u{1b}[2J\u{202e}spoof".into(),
-                    format!("{}TAIL", "x".repeat(500)),
-                ],
-                follow_up: vec!["later one".into(), "later omitted".into()],
+                steering: vec!["first\u{1b}[2J\u{202e}spoof".into()],
+                follow_up: vec!["later one".into()],
             }),
             &mut ids,
         )
         .unwrap();
+
+        let empty = render_to_string(100, 20, &state, &PromptEditor::default());
+        assert!(empty.contains("Message to steer or follow up…"), "{empty}");
+        assert!(
+            empty.contains("Enter follow-up · Alt+Enter steer"),
+            "{empty}"
+        );
+        // The status line counts the queue; the composer no longer lists it.
+        assert!(empty.contains("2 queued"), "{empty}");
+        assert!(!empty.contains("spoof"), "{empty}");
+        assert!(!empty.contains("later one"), "{empty}");
+        // The footer keeps the hints a run needs and leaves status to the line above.
+        assert!(empty.contains("Esc interrupt"), "{empty}");
+        assert!(!empty.contains("working"), "{empty}");
+
         let mut editor = PromptEditor::default();
         editor.insert_paste("new steering");
+        let drafted = render_to_string(100, 20, &state, &editor);
+        assert!(drafted.contains("new steering"), "{drafted}");
 
-        let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("new steering"));
-        assert!(rendered.contains("s:2/l:2"));
-        assert!(rendered.contains("+1"));
-        assert!(rendered.contains("steer: first�[2J�spoof"));
-        assert!(rendered.contains("later: later one"));
-        assert!(!rendered.contains("TAIL"));
-        assert!(!rendered.contains("steering arrives"));
-        assert!(rendered.contains("Enter steer"));
-        assert!(rendered.contains("Alt+Enter later"));
-        assert!(!rendered.contains('\u{1b}'));
-        assert!(!rendered.contains('\u{202e}'));
-
+        // Too narrow for the queue beside the phase: what is running stays.
         let tiny = render_to_string(30, 8, &state, &editor);
-        assert!(!tiny.contains("terminal too"));
-        assert!(tiny.contains("s:2/l:2") || tiny.contains("steer:2"));
+        assert!(!tiny.contains("terminal too"), "{tiny}");
+        assert!(tiny.contains("◐ Working"), "{tiny}");
+        assert!(!tiny.contains("turn 6"), "{tiny}");
     }
 
     #[test]
@@ -4421,6 +5184,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -4436,6 +5200,233 @@ mod tests {
         assert!(unresolved.2.contains(Modifier::UNDERLINED));
         assert_eq!((editor.cursor_row(), editor.cursor_column()), cursor);
         assert_eq!(editor.text(), "/theme @src/main.rs @missing");
+    }
+
+    #[test]
+    fn workspace_label_shortens() {
+        let home = Some("/Users/ana");
+        assert_eq!(workspace_label("/Users/ana", home), "~");
+        assert_eq!(workspace_label("/Users/ana/Wisp", home), "~/Wisp");
+        assert_eq!(
+            workspace_label("/Users/anabel/Wisp", home),
+            "/Users/anabel/Wisp"
+        );
+        assert_eq!(workspace_label("/srv/wisp", None), "/srv/wisp");
+        assert_eq!(
+            workspace_label("/Users/ana/work/organization/team/deeply-nested-repo", home),
+            "…/deeply-nested-repo"
+        );
+    }
+
+    #[test]
+    fn workspace_parts_are_cleaned() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.workspace_cwd = Some("/srv/evil\u{1b}[2Jdir".into());
+        state.git_branch = Some(format!("main\u{202e}{}", "x".repeat(60)));
+        let parts = footer_workspace_parts(&state);
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{1b}')),
+            "{parts:?}"
+        );
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{202e}')),
+            "{parts:?}"
+        );
+        assert!(parts[1].width() <= BRANCH_MAX_COLUMNS, "{parts:?}");
+        assert!(parts[1].ends_with('…'), "{parts:?}");
+    }
+
+    #[test]
+    fn framed_composer_moves_identity() {
+        let draw = |height: u16| {
+            let mut state =
+                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+            state.mode_confirmed = true;
+            state.workspace_cwd = Some("/srv/wisp".into());
+            state.git_branch = Some("feat/x".into());
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row = |y: u16| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            (row(height - 3), row(height - 1))
+        };
+
+        let (identity, footer) = draw(20);
+        assert!(
+            identity
+                .trim_start()
+                .starts_with("│  Build · model-x fake · high"),
+            "{identity}"
+        );
+        assert!(
+            footer.trim_start().starts_with("/srv/wisp · feat/x"),
+            "{footer}"
+        );
+        assert!(footer.contains("idle · ctx"), "{footer}");
+        assert!(!footer.contains("model-x"), "{footer}");
+        assert!(!footer.contains("build"), "{footer}");
+
+        // Too short to frame the composer: the footer keeps mode and identity.
+        let (_, footer) = draw(12);
+        assert!(footer.contains("idle · build"), "{footer}");
+        assert!(footer.contains("fake/model-x · high"), "{footer}");
+    }
+
+    #[test]
+    fn narrow_footer_drops_branch_then_hints() {
+        let footer = |width: u16| {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            state.workspace_cwd = Some("/srv/wisp".into());
+            state.git_branch = Some("feat/footer".into());
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..width)
+                .map(|x| buffer[(x, 19)].symbol())
+                .collect::<String>()
+        };
+
+        let wide = footer(100);
+        assert!(wide.contains("/srv/wisp · feat/footer"), "{wide}");
+        assert!(wide.contains("idle · ctx"), "{wide}");
+        assert!(wide.contains("help"), "{wide}");
+
+        let narrow = footer(60);
+        assert!(narrow.contains("/srv/wisp"), "{narrow}");
+        assert!(!narrow.contains("feat/footer"), "{narrow}");
+        assert!(narrow.contains("idle · ctx"), "{narrow}");
+
+        let tight = footer(40);
+        assert!(tight.contains("/srv/wisp"), "{tight}");
+        assert!(!tight.contains("help"), "{tight}");
+        assert!(tight.contains("ctx"), "{tight}");
+    }
+
+    #[test]
+    fn footer_keys_render_as_keycaps() {
+        let state = UiState::new("fake".into(), None, None);
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let palette = Palette::default();
+        let key = style_at_text(terminal.backend(), "Ctrl+G").unwrap();
+        assert_eq!((key.0, key.1), (palette.foreground, palette.panel));
+        let action = style_at_text(terminal.backend(), " help").unwrap();
+        assert_eq!(action.0, palette.muted);
+        assert_ne!(action.1, palette.panel);
+    }
+
+    #[test]
+    fn composer_border_tracks_status() {
+        let border = |state: &UiState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+            let mut viewport = TranscriptViewport::default();
+            let mut row_cache = TranscriptRowCache::default();
+            let mut composer_cache = ComposerLayoutCache::default();
+            terminal
+                .draw(|frame| {
+                    render_interactive(
+                        frame,
+                        state,
+                        &mut viewport,
+                        &mut row_cache,
+                        &mut composer_cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                        None,
+                        true,
+                        None,
+                        0,
+                        Palette::default(),
+                        &Bindings::default(),
+                        LogoChoice::AdalBraille,
+                        None,
+                        None,
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let color = |backend: &TestBackend, text: &str| style_at_text(backend, text).unwrap().0;
+        let palette = Palette::default();
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate { total_tokens: 8000 },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        });
+        let idle = border(&state);
+        // The border dims at idle while the accent bar and effort stay lit.
+        assert_eq!(color(&idle, "╮"), palette.muted);
+        // The accent runs the composer's full height, corners included.
+        assert_eq!(color(&idle, "╭"), palette.accent);
+        assert_eq!(color(&idle, "╰"), palette.accent);
+        assert_eq!(color(&idle, "│›"), palette.accent);
+        assert_eq!(color(&idle, "high"), palette.warning);
+        // An 80% full window turns the meter amber.
+        assert_eq!(color(&idle, "▰"), palette.warning);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        assert!(state.editor_editable());
+        // A run keeps the border quiet and shows its colour on the accent bar.
+        let running = border(&state);
+        assert_eq!(color(&running, "╮"), palette.muted);
+        assert_eq!(color(&running, "╭"), palette.secondary);
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
+        state.context.budget.as_mut().unwrap().estimate.total_tokens = 2000;
+        assert_eq!(color(&border(&state), "▰"), palette.muted);
     }
 
     #[test]
@@ -4469,6 +5460,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -4482,9 +5474,10 @@ mod tests {
         let palette = Palette::default();
         assert_eq!(heading.0, palette.primary);
         assert!(heading.2.contains(Modifier::BOLD));
-        assert_eq!(marker.0, palette.primary);
-        assert!(marker.2.contains(Modifier::BOLD));
-        assert_eq!(inline.0, palette.warning);
+        assert_eq!(marker.0, palette.muted);
+        assert!(!marker.2.contains(Modifier::BOLD));
+        assert_eq!(inline.0, palette.foreground);
+        assert_eq!(inline.1, palette.panel);
         assert_eq!(fence.0, palette.secondary);
         assert!(fence.2.contains(Modifier::BOLD));
         assert_eq!(info.0, palette.accent);
@@ -4743,7 +5736,8 @@ mod tests {
     }
 
     fn draw_cards(state: &UiState, cache: &mut TranscriptRowCache) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        // Fit the expanded command fixture as well as its collapsed summaries.
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         terminal
             .draw(|frame| {
                 render(
@@ -4761,7 +5755,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_calls_group_by_tool() {
+    fn consecutive_tools_group_without_merging_different_tools() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("plan".into());
         observe_mcp_call(&mut state, "l1", "list_issues", "HY-0");
@@ -4787,22 +5781,32 @@ mod tests {
                 });
             finish_call(&mut state, call_id, "bash");
         }
-        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let first = state.transcript.entries()[7].id;
+        let mut cache = TranscriptRowCache::default();
+        let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP      linear/list_issues  id=HY-0"),
+            // The preview uses each command's own row text, which names `cargo test`.
+            screen.contains("Bash    ▸ 2 commands · cargo fmt, Rust tests"),
+            "{screen}"
+        );
+        assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
+        cache.fold_mut().expand_group(first);
+        let screen = draw_cards(&state, &mut cache);
+        assert!(
+            screen.contains("✓  MCP     ▸ linear/list_issues  id=HY-0"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP      linear/get_issue ×3  id=HY-1 … id=HY-3"),
+            screen.contains("✓  MCP     ▸ linear/get_issue ×3  id=HY-1 … id=HY-3"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP      linear/save_issue ×2  id=HY-4 · id=HY-5"),
+            screen.contains("✓  MCP     ▸ linear/save_issue ×2  id=HY-4 · id=HY-5"),
             "{screen}"
         );
-        // Bash commands differ call to call, so they keep their own rows.
+        // Expanding the group reveals every command's individual row.
         assert!(
-            screen.contains("cargo fmt") && screen.contains("cargo test"),
+            screen.contains("cargo fmt") && screen.contains("Rust tests"),
             "{screen}"
         );
     }
@@ -4831,9 +5835,9 @@ mod tests {
             .unwrap();
         let palette = Palette::default();
         let (_, chip_bg, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
-        assert_eq!(Some(chip_bg), palette.chip().bg);
+        assert_eq!(Some(chip_bg), palette.chip("MCP").bg);
         let (marker_fg, marker_bg, _) = style_at_text(terminal.backend(), "✓").unwrap();
-        assert_ne!(Some(marker_bg), palette.chip().bg);
+        assert_ne!(Some(marker_bg), palette.chip("MCP").bg);
         assert_eq!(marker_fg, palette.success);
     }
 
@@ -4847,14 +5851,14 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("MCP      linear/get_issue ×2  id=HY-2 · 1 of 2 done"),
+            screen.contains("MCP     ▸ linear/get_issue ×2  id=HY-2 · 1 of 2 done"),
             "{screen}"
         );
         // The cached header follows a later member's result.
         finish_call(&mut state, "g2", "mcp__linear__get_issue");
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP      linear/get_issue ×2  id=HY-1 · id=HY-2"),
+            screen.contains("✓  MCP     ▸ linear/get_issue ×2  id=HY-1 · id=HY-2"),
             "{screen}"
         );
         assert!(!screen.contains("of 2 done"), "{screen}");
@@ -4877,7 +5881,7 @@ mod tests {
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
             screen.contains(
-                "?  MCP      linear/save_issue ×2  id=HY-2 · 1 of 2 done · awaiting approval"
+                "?  MCP     ▸ linear/save_issue ×2  id=HY-2 · 1 of 2 done · awaiting approval"
             ),
             "{screen}"
         );
@@ -4910,7 +5914,428 @@ mod tests {
             })
             .unwrap();
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("✓  MCP      linear/… ×3"), "{screen}");
+        assert!(screen.contains("✓  MCP     ▸ linear/… ×3"), "{screen}");
+    }
+
+    #[test]
+    fn group_preview_counts_hidden_members() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("check".into());
+        for (call_id, command) in [
+            ("b1", "git status"),
+            ("b2", "git diff --stat"),
+            ("b3", "git log -1"),
+            ("b4", "git branch --show-current"),
+            ("b5", "git remote -v"),
+        ] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": command}),
+                });
+            finish_call(&mut state, call_id, "bash");
+        }
+        let screen = |width| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().to_string()
+        };
+        let wide = screen(80);
+        assert!(
+            wide.contains("▸ 5 commands · git status, git diff --stat +3"),
+            "{wide}"
+        );
+        let narrow = screen(36);
+        assert!(narrow.contains("▸ 5 commands"), "{narrow}");
+        assert!(!narrow.contains("git status"), "{narrow}");
+    }
+
+    #[test]
+    fn group_preview_is_relative() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("look".into());
+        state.transcript.set_tool_cwd("/repo");
+        for (call_id, path) in [("r1", "/repo/src/a.rs"), ("r2", "/repo/src/b.rs")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "read".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"path": path}),
+                });
+            finish_call(&mut state, call_id, "read");
+        }
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("▸ 2 actions · read src/a.rs, read src/b.rs"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn preview_counts_unknown_members() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("look".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "r1".into(),
+                name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"path": "src/a.rs"}),
+            });
+        finish_call(&mut state, "r1", "read");
+        // A result with no call event leaves its arguments unknown.
+        finish_call(&mut state, "r2", "read");
+        let mut cache = TranscriptRowCache::default();
+        let screen = draw_cards(&state, &mut cache);
+        assert!(
+            screen.contains("▸ 2 actions · read src/a.rs +1"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn diff_preview_rows_share_a_surface() {
+        use std::fmt::Write as _;
+        let old_text = format!(
+            "keep\n{}",
+            (0..9).fold(String::new(), |mut lines, line| {
+                let _ = writeln!(lines, "old {line}");
+                lines
+            })
+        );
+        let new_text = format!(
+            "keep\n{}",
+            (0..9).fold(String::new(), |mut lines, line| {
+                let _ = writeln!(lines, "new {line}");
+                lines
+            })
+        );
+        let (screen, backend) = render_file_card(
+            "edit",
+            json!({
+                "path": "notes.txt",
+                "edits": [{"oldText": old_text, "newText": new_text}]
+            }),
+            None,
+            false,
+            80,
+        );
+        let palette = Palette::default();
+        // Unchanged lines and the "more changed lines" row sit on the same surface
+        // as the tinted changes, so the preview reads as one block.
+        assert_eq!(
+            style_at_text(&backend, "keep").map(|style| style.1),
+            Some(palette.surface),
+            "{screen}"
+        );
+        assert_eq!(
+            style_at_text(&backend, "more changed lines").map(|style| style.1),
+            Some(palette.surface),
+            "{screen}"
+        );
+        assert_eq!(
+            style_at_text(&backend, "− old 0").map(|style| style.1),
+            Some(palette.deletion_background),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn shell_output_is_framed() {
+        let draw = |lines: usize| {
+            let mut state = UiState::unconfigured();
+            state.transcript.append_prompt("run".into());
+            let card = state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: "b1".into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": "cargo test"}),
+                });
+            let body = (0..lines)
+                .map(|line| format!("line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let mut result = tool_result("b1", &format!("Command exited with code 3: {body}"));
+            result.name = "bash".into();
+            result.exit_code = Some(3);
+            result.output_has_exit_status = true;
+            if lines > 500 {
+                // Like the live event: the output and its tail are both cut to 500
+                // lines, while the source counts still describe all of it.
+                let keep = |range: std::ops::Range<usize>| {
+                    range
+                        .map(|line| format!("line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                result.output = format!("Command exited with code 3: {}", keep(0..500));
+                result.output_tail = Some(keep(lines - 500..lines));
+            }
+            state.transcript.observe_tool_result(result);
+            let mut cache = TranscriptRowCache::default();
+            cache.fold_mut().expand(card);
+            let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut cache,
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let palette = Palette::default();
+
+        // Short output loses the completion envelope and closes with the exit status.
+        let short = draw(3);
+        let text = short.to_string();
+        assert!(!text.contains("Command exited"), "{text}");
+        assert!(text.contains("│  line 0"), "{text}");
+        assert_eq!(style_at_text(&short, "line 0").unwrap().1, palette.surface);
+        assert_eq!(style_at_text(&short, "exit 3").unwrap().1, palette.surface);
+
+        // A long tail counts the lines above it instead of the bytes.
+        let long = draw(40);
+        let text = long.to_string();
+        assert!(text.contains("(32 earlier lines)"), "{text}");
+        assert!(!text.contains("bytes omitted"), "{text}");
+        assert!(text.contains("line 39"), "{text}");
+        assert!(text.contains("exit 3"), "{text}");
+
+        // Lines the projected tail already dropped still count.
+        let projected = draw(600).to_string();
+        assert!(projected.contains("(592 earlier lines)"), "{projected}");
+    }
+
+    #[test]
+    fn fold_arrows_share_a_column() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("run".into());
+        for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo check")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"command": command}),
+                });
+            finish_call(&mut state, call_id, "bash");
+        }
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "r1".into(),
+                name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"path": "README.md"}),
+            });
+        finish_call(&mut state, "r1", "read");
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let column = |needle: &str| {
+            let line = screen
+                .lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?}: {screen}"));
+            line[..line.find(needle).unwrap()].chars().count()
+        };
+        // A group and a single foldable card put the arrow, then their text, in the
+        // same columns.
+        assert_eq!(column("▸ 2 commands"), column("▸ README.md"), "{screen}");
+    }
+
+    #[test]
+    fn finished_rows_show_duration() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("run".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        let mut result = tool_result("b1", "ok");
+        result.name = "bash".into();
+        result.duration_ms = Some(252_000);
+        state.transcript.observe_tool_result(result);
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        // The duration sits in a right-aligned column, off the action text.
+        let row = screen
+            .lines()
+            .find(|line| line.contains("Rust tests"))
+            .expect("action row");
+        assert!(!row.contains("· 4m 12s"), "{screen}");
+        assert!(
+            row.trim_end_matches(['"', ' ']).ends_with("4m 12s"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn turn_summary_closes_the_rail() {
+        let draw = |state: &UiState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let rail_at = |backend: &TestBackend, text: &str| {
+            let buffer = backend.buffer();
+            let y = (0..buffer.area.height)
+                .find(|&y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(text)
+                })
+                .unwrap_or_else(|| panic!("missing {text:?}"));
+            let x = (0..buffer.area.width)
+                .find(|&x| !buffer[(x, y)].symbol().trim().is_empty())
+                .unwrap();
+            let cell = &buffer[(x, y)];
+            (cell.symbol().to_owned(), cell.fg)
+        };
+        let palette = Palette::default();
+        let mut state = running_state();
+        state.transcript.complete_message(2, "Done.".into());
+        // While the turn runs, its rail takes the running colour through the reply.
+        let running = draw(&state);
+        assert_eq!(
+            rail_at(&running, "Done."),
+            ("│".to_owned(), palette.running_rail())
+        );
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("Build · gpt_x · 4m 12s · 31 tok/s".into())
+        );
+        let finished = draw(&state);
+        let screen = finished.to_string();
+        // The rail settles to grey and ends in `╰` at the totals, which follow the tail.
+        assert_eq!(
+            rail_at(&finished, "Done."),
+            ("│".to_owned(), palette.rail())
+        );
+        assert_eq!(
+            rail_at(&finished, "Build · gpt_x · 4m 12s · 31 tok/s"),
+            ("╰".to_owned(), palette.rail())
+        );
+        assert_eq!(
+            style_at_text(&finished, "Build · gpt_x").map(|style| style.0),
+            Some(palette.muted),
+            "{screen}"
+        );
+        // The earlier turn's gap before the next prompt has no rail.
+        let earlier = state.transcript.entries()[1].id;
+        let gap = TranscriptRow {
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Spacer,
+            },
+            role: TranscriptRole::Assistant,
+            kind: TranscriptRowKind::Spacer,
+            tone: TranscriptRowTone::Default,
+            spans: Vec::new(),
+            gutter: RowGutter::None,
+            fold_hint: crate::transcript_view::FoldHint::None,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
+        };
+        let prompts = TurnBounds {
+            first: Some(0),
+            latest: Some(2),
+        };
+        assert_eq!(turn_rail(&state, &gap, prompts, palette), None, "{screen}");
+        let reply = TranscriptRow {
+            kind: TranscriptRowKind::Content,
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Content(0),
+            },
+            ..gap
+        };
+        assert_eq!(
+            turn_rail(&state, &reply, prompts, palette),
+            Some(("│", palette.rail()))
+        );
+    }
+
+    #[test]
+    fn summary_closes_a_cancelled_turn() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        // The turn ends on the card, which carries the totals.
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("4.0s · 1 tool · cancelled".into())
+        );
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let lines = screen.lines().collect::<Vec<_>>();
+        let card = lines
+            .iter()
+            .position(|line| line.contains("Bash"))
+            .expect("card row");
+        let summary = lines
+            .iter()
+            .position(|line| line.contains("╰4.0s · 1 tool · cancelled"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(summary > card, "{screen}");
     }
 
     #[test]
@@ -4932,7 +6357,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘  MCP      linear/save_issue ×2  id=HY-1 · id=HY-2 · denied"),
+            screen.contains("⊘  MCP     ▸ linear/save_issue ×2  id=HY-1 · id=HY-2 · denied"),
             "{screen}"
         );
     }
@@ -4951,17 +6376,17 @@ mod tests {
         assert!(draw_cards(&state, &mut cache).contains("×3"));
         cache.fold_mut().expand_group(first.unwrap());
         let screen = draw_cards(&state, &mut cache);
-        assert!(!screen.contains("×3"), "{screen}");
+        assert!(screen.contains("×3"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
-                screen.contains(&format!("✓  MCP      linear/get_issue  id={id}")),
+                screen.contains(&format!("✓  MCP     ▸ linear/get_issue  id={id}")),
                 "{screen}"
             );
         }
     }
 
     #[test]
-    fn stacked_cards_draw_rules() {
+    fn stacked_cards_have_quiet_spacing() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("check".into());
         for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo test")] {
@@ -4991,6 +6416,10 @@ mod tests {
         poll.process_id = Some("process-1".into());
         poll.process_state = Some("running".into());
         state.transcript.observe_tool_result(poll);
+        let mut cache = TranscriptRowCache::default();
+        cache
+            .fold_mut()
+            .expand_group(state.transcript.entries()[1].id);
         let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
         terminal
             .draw(|frame| {
@@ -4998,7 +6427,7 @@ mod tests {
                     frame,
                     &state,
                     &mut TranscriptViewport::default(),
-                    &mut TranscriptRowCache::default(),
+                    &mut cache,
                     &PromptEditor::default(),
                     &connection(),
                     None,
@@ -5011,24 +6440,28 @@ mod tests {
             .iter()
             .position(|line| line.contains("cargo fmt"))
             .unwrap();
-        // A plain row separates the prompt's surface from the first card.
+        // A plain row separates the prompt from the persistent group header.
+        assert!(lines[first - 1].contains("▾ 2 commands"), "{screen}");
         assert!(
-            lines[first - 1].trim_matches(['"', ' ']).is_empty(),
+            lines[first - 2].trim_matches(['"', ' ']).is_empty(),
             "{screen}"
         );
-        assert!(lines[first + 1].contains("──────"), "{screen}");
-        assert!(lines[first + 2].contains("cargo test"), "{screen}");
-        let (fg, _, _) = style_at_text(terminal.backend(), "──────").unwrap();
-        assert_eq!(Some(fg), Palette::default().rule().fg);
+        assert!(
+            lines[first + 1].trim_matches(['"', ' ', '│']).is_empty(),
+            "{screen}"
+        );
+        assert!(lines[first + 1].contains('│'), "{screen}");
+        assert!(lines[first + 2].contains("Rust tests"), "{screen}");
         let palette = Palette::default();
         let user_bg = palette.user_text().bg;
-        let gap_row = u16::try_from(first - 1).unwrap();
+        let gap_row = u16::try_from(first - 2).unwrap();
         assert_ne!(
             Some(terminal.backend().buffer()[(5, gap_row)].bg),
             user_bg,
             "{screen}"
         );
-        let chip_bg = palette.chip().bg;
+        let chip = palette.chip("Process");
+        let chip_bg = chip.bg;
         let buffer = terminal.backend().buffer();
         let (x, y) = (0..buffer.area.height)
             .find_map(|y| {
@@ -5042,7 +6475,11 @@ mod tests {
         let bg_at = |x: u16| Some(buffer[(x, y)].bg);
         assert_eq!(
             (bg_at(x - 1), bg_at(x), bg_at(x + 7)),
-            (chip_bg, chip_bg, chip_bg),
+            (
+                palette.chip_edge(chip, true).bg,
+                chip_bg,
+                palette.chip_edge(chip, false).bg,
+            ),
             "{screen}"
         );
         assert_ne!(bg_at(x + 8), chip_bg, "{screen}");
@@ -5087,12 +6524,12 @@ mod tests {
             pending
                 .backend()
                 .to_string()
-                .contains("Read     README.md · awaiting approval")
+                .contains("Read      README.md · awaiting approval")
         );
         let palette = Palette::default();
         let (pending_fg, pending_bg, pending_modifiers) =
-            style_at_text(pending.backend(), "Read     README.md").unwrap();
-        let chip = palette.chip();
+            style_at_text(pending.backend(), "Read      README.md").unwrap();
+        let chip = palette.chip("Read");
         assert_eq!((Some(pending_fg), Some(pending_bg)), (chip.fg, chip.bg));
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
@@ -5119,38 +6556,43 @@ mod tests {
             complete
                 .backend()
                 .to_string()
-                .contains("Read     README.md")
+                .contains("Read    ▸ README.md")
         );
         assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, success_bg, success_modifiers) =
-            style_at_text(complete.backend(), "Read     README.md").unwrap();
+            style_at_text(complete.backend(), "Read    ▸ README.md").unwrap();
         assert_eq!((Some(success_fg), Some(success_bg)), (chip.fg, chip.bg));
         // The chip spans the marker's space, the name and one space; the alignment padding
         // after it stays plain, so stacked chips of different names differ in width.
         assert_eq!(
             Some(style_at_text(complete.backend(), " Read ").unwrap().1),
-            chip.bg
+            palette.chip_edge(chip, true).bg
         );
         assert_ne!(
             Some(
-                style_at_text(complete.backend(), "    README.md")
+                style_at_text(complete.backend(), "    ▸ README.md")
                     .unwrap()
                     .1
             ),
             chip.bg
         );
-        // Only the card selected in browse shows how to expand it.
+        // Only the card selected in browse shows how to expand it; every foldable
+        // card shows its muted arrow.
         assert!(!complete.backend().to_string().contains("to expand"));
+        assert_eq!(
+            style_at_text(complete.backend(), "▸ README.md").unwrap().0,
+            palette.muted
+        );
         assert_eq!(
             style_at_text(complete.backend(), "✓  Read").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
             style_at_text(complete.backend(), "README.md").unwrap().0,
-            Palette::default().success
+            Palette::default().foreground
         );
         assert!(
-            style_at_text(complete.backend(), "README.md")
+            !style_at_text(complete.backend(), "README.md")
                 .unwrap()
                 .2
                 .contains(Modifier::UNDERLINED)
@@ -5171,9 +6613,9 @@ mod tests {
         shell_result.name = "bash".into();
         shell.transcript.observe_tool_result(shell_result);
         let shell = draw(&shell);
-        let command = style_at_text(shell.backend(), "cargo test --workspace").unwrap();
-        assert_eq!(command.0, Palette::default().primary);
-        assert!(command.2.contains(Modifier::BOLD));
+        let command = style_at_text(shell.backend(), "Rust tests").unwrap();
+        assert_eq!(command.0, Palette::default().secondary);
+        assert!(!command.2.contains(Modifier::BOLD));
     }
 
     fn render_edit_card(arguments: serde_json::Value, width: u16) -> (String, TestBackend) {
@@ -5225,6 +6667,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -5248,10 +6691,10 @@ mod tests {
             110,
         );
         assert!(
-            rendered.contains("Edit     src/wisp/providers/google.py  +3 -3"),
+            rendered.contains("Edit      src/wisp/providers/google.py  +3 -3"),
             "{rendered}"
         );
-        assert!(rendered.contains("- retain portable"), "{rendered}");
+        assert!(rendered.contains("− retain portable"), "{rendered}");
         assert!(rendered.contains("+ so they cannot"), "{rendered}");
         assert!(
             rendered.contains("⋯"),
@@ -5264,6 +6707,29 @@ mod tests {
         assert!(!unchanged.contains(Modifier::UNDERLINED));
         let (_, _, changed_number) = style_at_text(&backend, "30").unwrap();
         assert!(changed_number.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn wrapped_deletion_aligns_continuation() {
+        let (rendered, _) = render_edit_card(
+            json!({
+                "path": "notes.txt",
+                "edits": [{"oldText": "alpha beta gamma delta epsilon zeta eta theta iota", "newText": "x"}]
+            }),
+            40,
+        );
+        let lines: Vec<&str> = rendered.lines().collect();
+        let sign = lines
+            .iter()
+            .position(|line| line.contains("− alpha"))
+            .unwrap_or_else(|| panic!("{rendered}"));
+        let column = |line: &str, text: &str| line.find(text).map(|at| line[..at].chars().count());
+        assert_eq!(
+            column(lines[sign + 1], "↳ "),
+            column(lines[sign], "− alpha"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('↪'), "{rendered}");
     }
 
     #[test]
@@ -5292,8 +6758,8 @@ mod tests {
             false,
             100,
         );
-        assert!(rendered.contains("   2 │ - b"), "{rendered}");
-        assert!(rendered.contains("   2 │ + B"), "{rendered}");
+        assert!(rendered.contains("   2      − b"), "{rendered}");
+        assert!(rendered.contains("      2 + B"), "{rendered}");
         assert!(
             rendered.contains("⏎ trailing newline removed"),
             "{rendered}"
@@ -5307,7 +6773,7 @@ mod tests {
             100,
         );
         assert!(created.contains("new.txt  new file"), "{created}");
-        assert!(created.contains("   1 │ + first"), "{created}");
+        assert!(created.contains("      1 + first"), "{created}");
 
         let (unterminated, _) = render_file_card(
             "write",
@@ -5316,7 +6782,7 @@ mod tests {
             true,
             100,
         );
-        assert!(unterminated.contains("   2 │ + second"), "{unterminated}");
+        assert!(unterminated.contains("      2 + second"), "{unterminated}");
         assert!(!unterminated.contains('⏎'), "{unterminated}");
 
         // Appending an unterminated line keeps the old final line as context.
@@ -5358,13 +6824,13 @@ mod tests {
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
         // Counts sit on the action line; the card has no `M path` heading or `@@` rows.
         assert!(
-            collapsed.contains("Edit     file.txt  +1 -1"),
+            collapsed.contains("Edit      file.txt  +1 -1"),
             "{collapsed}"
         );
         assert!(!collapsed.contains("M file.txt"));
         assert!(!collapsed.contains("@@"));
         assert!(!collapsed.contains("No newline"));
-        assert!(collapsed.contains("- old�[2J"));
+        assert!(collapsed.contains("− old�[2J"));
         assert!(collapsed.contains("+ new value"));
         // The browse hint lives once in the footer, not under each card.
         assert!(!collapsed.contains("Enter details"), "{collapsed}");
@@ -5388,13 +6854,14 @@ mod tests {
                     &PromptEditor::default(),
                     &connection(),
                     None,
-                    Some(card_id),
+                    Some(BrowseTarget::Entry(card_id)),
                     true,
                     None,
                     0,
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -5412,10 +6879,10 @@ mod tests {
         let (added_fg, added_background, _) =
             style_at_text(browse_terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, deleted_background, _) =
-            style_at_text(browse_terminal.backend(), "- old�[2J").unwrap();
-        assert_eq!(added_fg, Palette::default().addition);
+            style_at_text(browse_terminal.backend(), "− old�[2J").unwrap();
+        assert_eq!(added_fg, Palette::default().success);
         assert_eq!(added_background, Palette::default().addition_background);
-        assert_eq!(deleted_fg, Palette::default().deletion);
+        assert_eq!(deleted_fg, Palette::default().error);
         assert_eq!(deleted_background, Palette::default().deletion_background);
 
         let card = state
@@ -5445,13 +6912,14 @@ mod tests {
                     &PromptEditor::default(),
                     &connection(),
                     None,
-                    Some(card_id),
+                    Some(BrowseTarget::Entry(card_id)),
                     false,
                     None,
                     0,
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -5461,13 +6929,13 @@ mod tests {
             })
             .unwrap();
         let rendered = terminal.backend().to_string();
-        assert!(rendered.contains("live retained detail"));
-        assert!(rendered.contains("- old�[2J"));
+        assert!(rendered.contains("this tool edit"));
+        assert!(rendered.contains("− old�[2J"));
         assert!(rendered.contains("+ new value"));
         let (added_fg, _, _) = style_at_text(terminal.backend(), "+ new value").unwrap();
-        let (deleted_fg, _, _) = style_at_text(terminal.backend(), "- old�[2J").unwrap();
-        assert_eq!(added_fg, Palette::default().addition);
-        assert_eq!(deleted_fg, Palette::default().deletion);
+        let (deleted_fg, _, _) = style_at_text(terminal.backend(), "− old�[2J").unwrap();
+        assert_eq!(added_fg, Palette::default().success);
+        assert_eq!(deleted_fg, Palette::default().error);
     }
 
     #[test]
@@ -5491,6 +6959,9 @@ mod tests {
             spans,
             gutter,
             fold_hint,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
         };
         let action = row(
             TranscriptRowKind::CardAction,
@@ -5515,7 +6986,17 @@ mod tests {
                 .draw(|frame| {
                     for (y, row) in [&action, &detail].into_iter().enumerate() {
                         let area = Rect::new(0, y as u16, 40, 1);
-                        render_transcript_row(frame, area, row.clone(), None, false, palette, None);
+                        render_transcript_row(
+                            frame,
+                            area,
+                            row.clone(),
+                            None,
+                            false,
+                            palette,
+                            None,
+                            None,
+                            None,
+                        );
                     }
                     let selected = Some(action.anchor);
                     let area = Rect::new(0, 2, 40, 1);
@@ -5527,6 +7008,8 @@ mod tests {
                         false,
                         palette,
                         None,
+                        None,
+                        None,
                     );
                 })
                 .unwrap();
@@ -5536,8 +7019,8 @@ mod tests {
             assert_eq!(screen.matches("(→ to expand)").count(), 1, "{screen}");
             assert!(screen.contains("└ out"), "{screen}");
 
-            let (fg, bg, modifiers) = style_at_text(terminal.backend(), " Read ").unwrap();
-            let chip = palette.chip();
+            let (fg, bg, modifiers) = style_at_text(terminal.backend(), "Read ").unwrap();
+            let chip = palette.chip("Read");
             if no_color {
                 assert!(modifiers.contains(Modifier::REVERSED));
             } else {
@@ -5581,6 +7064,9 @@ mod tests {
                 }],
                 gutter: RowGutter::None,
                 fold_hint: crate::transcript_view::FoldHint::None,
+                fold_arrow: None,
+                trailing: None,
+                live_timer: false,
             };
             // Browse marks a selection only with a fold hint; this row has none, so the
             // selected and unselected renders match cell for cell.
@@ -5595,6 +7081,8 @@ mod tests {
                             selected,
                             false,
                             palette,
+                            None,
+                            None,
                             None,
                         );
                     }
@@ -5861,8 +7349,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(code.fg, Some(palette.warning));
-        assert!(code.bg.is_some());
+        assert_eq!(code.fg, Some(palette.foreground));
+        assert_eq!(code.bg, Some(palette.panel));
 
         let link = markdown_span_style(
             Style::default(),
@@ -5873,6 +7361,11 @@ mod tests {
             palette,
         );
         assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(link.fg, Some(palette.secondary));
+        // A theme whose secondary matches its body text keeps links in the accent.
+        let mut flat = palette;
+        flat.secondary = palette.foreground;
+        assert_eq!(flat.link(), flat.primary);
 
         let tool_command = markdown_span_style(
             Style::default().fg(palette.muted),
@@ -5882,8 +7375,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(tool_command.fg, Some(palette.primary));
-        assert!(tool_command.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(tool_command.fg, Some(palette.secondary));
+        assert!(!tool_command.add_modifier.contains(Modifier::BOLD));
 
         let tool_path = markdown_span_style(
             Style::default().fg(palette.muted),
@@ -5893,8 +7386,8 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(tool_path.fg, Some(palette.success));
-        assert!(tool_path.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(tool_path.fg, Some(palette.foreground));
+        assert!(!tool_path.add_modifier.contains(Modifier::UNDERLINED));
 
         let tool_argument = markdown_span_style(
             Style::default().fg(palette.muted),
@@ -5997,7 +7490,7 @@ mod tests {
         if expanded {
             cache.fold_mut().expand(card);
         }
-        let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
         terminal
             .draw(|frame| {
                 render_interactive(
@@ -6018,6 +7511,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -6033,7 +7527,7 @@ mod tests {
             .lines()
             .find(|line| line.contains("✓  Bash"))
             .expect("action row");
-        assert!(action.contains('…'), "{collapsed}");
+        assert!(action.contains("Rust tests"), "{collapsed}");
         assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
 
         let expanded = render_bash_card(command, Some((false, None)), 40, true);
@@ -6042,7 +7536,7 @@ mod tests {
             .find(|line| line.contains("✓  Bash"))
             .expect("action row");
         assert!(!action.contains('…'), "{expanded}");
-        assert!(expanded.contains("y_long_test_name"), "{expanded}");
+        assert!(expanded.contains("ong_test_name"), "{expanded}");
 
         // A diff's change counts stay visible when its path is cut.
         let (diff, _) = render_file_card(
@@ -6104,8 +7598,49 @@ mod tests {
         running.transcript.append_prompt("hello".into());
         assert!(running.active_prompt_editable());
         let hints = footer_hints(&running, &Bindings::default(), 200);
-        assert!(hints.contains("steer"), "{hints}");
-        assert!(hints.contains("F6 browse"), "{hints}");
+        assert_eq!(hints, "Esc interrupt · F6 browse");
+    }
+
+    #[test]
+    fn running_footer_orders_panel_hint() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.transcript.append_prompt("hello".into());
+        let footer = |width| {
+            render_to_string(width, 18, &state, &PromptEditor::default())
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned()
+        };
+        let wide = footer(140);
+        assert!(
+            wide.contains("Esc interrupt · Ctrl+B panel · F6 browse"),
+            "{wide}"
+        );
+        // A narrow row drops the panel hint before the others.
+        let narrow = footer(40);
+        assert!(narrow.contains("Esc interrupt · F6 browse"), "{narrow}");
+        assert!(!narrow.contains("panel"), "{narrow}");
+    }
+
+    #[test]
+    fn composer_effort_is_bold_warning() {
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+        state.effort = Some("high".into());
+        let line = composer_identity_line(&state, Palette::default());
+        let effort = line
+            .spans
+            .iter()
+            .find(|span| span.content == "high")
+            .unwrap();
+        assert_eq!(effort.style.fg, Some(Palette::default().warning));
+        assert!(effort.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -6167,10 +7702,36 @@ mod tests {
                         LogoChoice::AdalBraille,
                         None,
                         None,
+                        None,
                     );
                 })
                 .unwrap();
             terminal.backend().buffer().clone()
+        };
+        // Spinner cells that turn between two ticks. Live timers read the wall clock and
+        // may also tick, but nothing else may change.
+        let spinning = |first: &ratatui::buffer::Buffer, later: &ratatui::buffer::Buffer| {
+            let spinner = |cell: &ratatui::buffer::Cell| SPINNER_FRAMES.contains(&cell.symbol());
+            let timer = |cell: &ratatui::buffer::Cell| {
+                cell.symbol()
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || "<.ms ".contains(character))
+            };
+            let changed = first
+                .content
+                .iter()
+                .zip(&later.content)
+                .filter(|(a, b)| a != b)
+                .collect::<Vec<_>>();
+            assert!(
+                changed
+                    .iter()
+                    .all(|(a, b)| (spinner(a) && spinner(b)) || (timer(a) && timer(b)))
+            );
+            changed
+                .iter()
+                .filter(|(a, b)| spinner(a) && spinner(b))
+                .count()
         };
         for palette in [Palette::default(), crate::theme::themes()[0].palette(true)] {
             for tool in ["bash", "read"] {
@@ -6196,15 +7757,23 @@ mod tests {
                         arguments: json!({"command": "cargo test"}),
                         detail_source: crate::tool_detail::ToolDetailSource::None,
                     };
+                    // The card's marker and the status line both turn while the call runs.
                     state.transcript.observe_tool_call(call.clone());
-                    assert_ne!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None)
+                    assert_eq!(
+                        spinning(
+                            &draw(&state, 0, palette, None),
+                            &draw(&state, 1, palette, None)
+                        ),
+                        2
                     );
+                    // Awaiting approval, the card's `?` holds still.
                     state.transcript.observe_approval_requested(call);
                     assert_eq!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None)
+                        spinning(
+                            &draw(&state, 0, palette, None),
+                            &draw(&state, 1, palette, None)
+                        ),
+                        1
                     );
                     if outcome == "denied" {
                         state
@@ -6215,31 +7784,23 @@ mod tests {
                             .transcript
                             .observe_approval_resolved("pulse", true, None);
                         let first = draw(&state, 0, palette, None);
-                        let later = draw(&state, 4, palette, None);
-                        assert_ne!(first, later);
+                        let later = draw(&state, 1, palette, None);
                         let selected = state
                             .transcript
                             .entries()
                             .iter()
                             .find(|entry| entry.tool_card().is_some())
-                            .map(|entry| entry.id);
-                        assert_ne!(
-                            draw(&state, 0, palette, selected),
-                            draw(&state, 4, palette, selected)
+                            .map(|entry| BrowseTarget::Entry(entry.id));
+                        assert_eq!(
+                            spinning(
+                                &draw(&state, 0, palette, selected),
+                                &draw(&state, 1, palette, selected)
+                            ),
+                            2
                         );
-                        // Only the marker changes between ticks, and it changes shape, so
-                        // the activity also reads in monochrome.
-                        let changed: Vec<_> = first
-                            .content
-                            .iter()
-                            .zip(&later.content)
-                            .filter(|(a, b)| a != b)
-                            .collect();
-                        assert_eq!(changed.len(), 1, "{outcome}");
-                        let (a, b) = changed[0];
-                        assert!(SPINNER_FRAMES.contains(&a.symbol()));
-                        assert!(SPINNER_FRAMES.contains(&b.symbol()));
-                        assert_ne!(a.symbol(), b.symbol());
+                        // Only the markers change between ticks, and they change shape,
+                        // so the activity also reads in monochrome.
+                        assert_eq!(spinning(&first, &later), 2, "{outcome}");
                         let mut result = tool_result("pulse", "finished");
                         result.is_error = outcome == "error";
                         if outcome == "cancelled" {
@@ -6247,10 +7808,13 @@ mod tests {
                         }
                         state.transcript.observe_tool_result(result);
                     }
-                    // The working row may return once the tool settles; ticks 0 and 10
-                    // show the same spinner frame, so only the card marker is compared.
+                    // Once the call settles, only the status line keeps turning.
                     let settled = draw(&state, 0, palette, None);
-                    assert_eq!(settled, draw(&state, 10, palette, None), "{outcome}");
+                    assert_eq!(
+                        spinning(&settled, &draw(&state, 1, palette, None)),
+                        1,
+                        "{outcome}"
+                    );
                     let marker = match outcome {
                         "success" => "✓",
                         "error" => "✗",
@@ -6266,24 +7830,31 @@ mod tests {
     }
 
     #[test]
-    fn working_spinner_stops_for_visible_progress_and_returns_between_steps() {
+    fn status_line_follows_the_run() {
+        let status = |rendered: &str| {
+            // The status line is the last spinning row; running cards spin above it.
+            rendered
+                .lines()
+                .rev()
+                .find(|line| SPINNER_FRAMES.iter().any(|frame| line.contains(frame)))
+                .unwrap_or_else(|| panic!("status line: {rendered}"))
+                .to_owned()
+        };
         let mut state = UiState::new("fake".into(), None, None);
         state.view_status = ViewStatus::Running;
         state.interaction_status = crate::reducer::InteractionStatus::Running;
         state.transcript.append_prompt("check this".into());
         let waiting = render_to_string_with_activity(80, 18, &state, 0);
-        assert!(waiting.contains("⠋ Working"));
+        assert!(status(&waiting).contains("◐ Working"), "{waiting}");
         state
             .transcript
             .append_message_delta(1, "I will check that.");
         state
             .transcript
             .complete_message(1, "I will check that.".into());
-        let completed = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(!completed.contains("Working"), "{completed}");
         state.transcript.append_thinking_delta(2, "Next step");
         let thinking = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(thinking.contains("⠙ Thinking"), "{thinking}");
+        assert!(status(&thinking).contains("◓ Thinking"), "{thinking}");
         for index in 0..20 {
             state
                 .transcript
@@ -6294,11 +7865,14 @@ mod tests {
                     detail_source: crate::tool_detail::ToolDetailSource::None,
                 });
         }
+        // The latest call in progress names the run, at every size.
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
-            assert!(running.contains("check 19"), "{running}");
-            assert!(!running.contains("Working"), "{running}");
-            assert!(!running.contains("Esc to interrupt"), "{running}");
+            let line = status(&running);
+            // A narrow row clips the command.
+            assert!(line.contains(" Bash  c"), "{running}");
+            assert!(width < 80 || line.contains(" Bash  check 19"), "{running}");
+            assert!(!line.contains("Working"), "{running}");
         }
         for index in 0..20 {
             state
@@ -6306,7 +7880,14 @@ mod tests {
                 .observe_tool_result(tool_result(&format!("tool-{index}"), "done"));
         }
         let between_steps = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(between_steps.contains("⠹ Working"), "{between_steps}");
+        assert!(
+            status(&between_steps).contains("◑ Working"),
+            "{between_steps}"
+        );
+        assert!(
+            status(&between_steps).contains("20 tools"),
+            "{between_steps}"
+        );
 
         state
             .transcript
@@ -6316,44 +7897,20 @@ mod tests {
                 arguments: json!({"operation": "poll", "process_id": "process-1"}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
             });
-        let polling = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(!polling.contains("Working"), "{polling}");
         let mut process_result = tool_result("process-poll", "still running");
         process_result.name = "bash".into();
         process_result.process_id = Some("process-1".into());
         process_result.process_state = Some("running".into());
         state.transcript.observe_tool_result(process_result);
-        let process_between_steps = render_to_string_with_activity(80, 18, &state, 3);
+        let process = render_to_string_with_activity(80, 18, &state, 3);
         assert!(
-            process_between_steps.contains("Process  process-1"),
-            "{process_between_steps}"
+            status(&process).contains(" Process  Background command"),
+            "{process}"
         );
-        assert!(
-            process_between_steps.contains("⠸ Working"),
-            "{process_between_steps}"
-        );
-
-        // Polling the same process updates its earlier card in place. A reply
-        // after that card must not hide activity once the later poll settles.
+        // Once the model answers again, the background process no longer names the run.
         state.transcript.append_message_delta(3, "Checking again.");
-        state
-            .transcript
-            .complete_message(3, "Checking again.".into());
-        state
-            .transcript
-            .observe_tool_call(crate::tool_cards::ToolCallInput {
-                call_id: "process-poll-again".into(),
-                name: "bash".into(),
-                arguments: json!({"operation": "poll", "process_id": "process-1"}),
-                detail_source: crate::tool_detail::ToolDetailSource::None,
-            });
-        let mut result = tool_result("process-poll-again", "still running");
-        result.name = "bash".into();
-        result.process_id = Some("process-1".into());
-        result.process_state = Some("running".into());
-        state.transcript.observe_tool_result(result);
-        let after_poll = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(after_poll.contains("⠸ Working"), "{after_poll}");
+        let answering = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(status(&answering).contains("◒ Working"), "{answering}");
 
         for status in [
             ViewStatus::Idle,

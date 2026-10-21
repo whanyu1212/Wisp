@@ -1240,7 +1240,7 @@ async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
         ui.activity_frame >= 2,
         "silent activity timer did not advance"
     );
-    assert!(terminal.backend().to_string().contains("working"));
+    assert!(terminal.backend().to_string().contains("Working"));
 
     ui.state.view_status = ViewStatus::Idle;
     ui.state.interaction_status = InteractionStatus::Idle;
@@ -1249,4 +1249,11 @@ async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
     assert!(!ui.advance_activity_animation());
     assert_eq!(ui.activity_frame, stopped_frame);
     assert!(!ui.render_pending);
+
+    // An approval waits without animating, unless the side panel is timing it.
+    ui.state.view_status = ViewStatus::WaitingForApproval;
+    assert!(!ui.advance_activity_animation());
+    ui.state.side_panel_visible = true;
+    assert!(ui.advance_activity_animation());
+    assert!(ui.render_pending);
 }

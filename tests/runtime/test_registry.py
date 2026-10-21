@@ -8,6 +8,7 @@ import pytest
 
 import wisp.runtime.extensions as runtime_extensions
 from wisp.auth.storage import ApiKeyCredential, JsonAuthStore
+from wisp.config.runtime import WispConfig
 from wisp.events import AgentStarted
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.providers.anthropic import AnthropicProvider
@@ -22,6 +23,7 @@ from wisp.providers.openai_compatible import OpenAICompatibleProvider
 from wisp.providers.xai import XAIProvider
 from wisp.retry import RetryPolicy
 from wisp.rpc.handlers.inspection import rpc_connection_catalog_snapshot
+from wisp.rpc.host import build_runtime_for_config
 from wisp.runtime import (
     CommandDescriptor,
     CommandRegistry,
@@ -57,6 +59,21 @@ class _NamedFakeProvider(FakeProvider):
     def __init__(self, name: str) -> None:
         super().__init__()
         self.name = name
+
+
+def test_runtime_applies_configured_codex_read_timeout(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        runtime = await build_runtime_for_config(
+            WispConfig(auth_path=tmp_path / "auth.json", codex_read_timeout_seconds=600)
+        )
+        try:
+            provider = runtime.providers.get("openai-codex")
+            assert isinstance(provider, OpenAICodexProvider)
+            assert provider._http_client().timeout.read == 600
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
 
 
 def test_provider_registry_registers_and_resolves_provider() -> None:

@@ -444,7 +444,7 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
         }
         rows.push(row(
             DetailRowKind::Hunk,
-            format!("@@ edit {} @@", index + 1),
+            format!("@@ edit {} · fragment lines @@", index + 1),
         ));
         append_diff_rows(
             &mut rows,
@@ -461,12 +461,36 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
     DetailAvailability::LiveRetained(finalize_presentation(
         DetailPresentationKind::DiffModify,
         format!("M {}", display_path(&source.path)),
-        format!("+{additions} -{deletions}"),
+        format!("+{additions} -{deletions} · fragment lines"),
         additions,
         deletions,
         rows,
         false,
     ))
+}
+
+/// Build a review from an authorized, bounded Git snapshot with real line numbers.
+pub(crate) fn git_presentation(path: &str, before: &str, after: &str) -> ToolDetailPresentation {
+    let mut rows = Vec::new();
+    let mut additions = 0;
+    let mut deletions = 0;
+    append_diff_rows(
+        &mut rows,
+        before,
+        after,
+        true,
+        &mut additions,
+        &mut deletions,
+    );
+    finalize_presentation(
+        DetailPresentationKind::DiffModify,
+        path.into(),
+        format!("+{additions} -{deletions}"),
+        additions,
+        deletions,
+        rows,
+        false,
+    )
 }
 
 fn build_write_presentation(
@@ -569,14 +593,12 @@ fn append_diff_rows(
                 match change.tag() {
                     ChangeTag::Equal => {
                         let mut detail = row(DetailRowKind::Context, text);
-                        if line_numbers {
-                            detail.old_line = change
-                                .old_index()
-                                .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
-                            detail.new_line = change
-                                .new_index()
-                                .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
-                        }
+                        detail.old_line = change
+                            .old_index()
+                            .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
+                        detail.new_line = change
+                            .new_index()
+                            .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
                         rows.push(detail);
                         if missing_terminator {
                             rows.push(row(
@@ -588,11 +610,9 @@ fn append_diff_rows(
                     ChangeTag::Delete => {
                         *deletions = deletions.saturating_add(1);
                         let mut detail = row(DetailRowKind::Deletion, text);
-                        if line_numbers {
-                            detail.old_line = change
-                                .old_index()
-                                .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
-                        }
+                        detail.old_line = change
+                            .old_index()
+                            .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
                         rows.push(detail);
                         if missing_terminator {
                             rows.push(row(
@@ -604,11 +624,9 @@ fn append_diff_rows(
                     ChangeTag::Insert => {
                         *additions = additions.saturating_add(1);
                         let mut detail = row(DetailRowKind::Addition, text);
-                        if line_numbers {
-                            detail.new_line = change
-                                .new_index()
-                                .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
-                        }
+                        detail.new_line = change
+                            .new_index()
+                            .map(|line| u64::try_from(line + 1).unwrap_or(u64::MAX));
                         rows.push(detail);
                         if missing_terminator {
                             rows.push(row(

@@ -3,6 +3,32 @@
     "AgentCompleted": {
       "additionalProperties": false,
       "properties": {
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
+        "model_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Ms"
+        },
         "outcome": {
           "enum": [
             "completed",
@@ -12,6 +38,19 @@
           "title": "Outcome",
           "type": "string"
         },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Tokens"
+        },
         "session_id": {
           "title": "Session Id",
           "type": "string"
@@ -20,6 +59,12 @@
           "format": "date-time",
           "title": "Timestamp",
           "type": "string"
+        },
+        "tool_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Tool Calls",
+          "type": "integer"
         },
         "turns": {
           "title": "Turns",
@@ -37,7 +82,11 @@
         "timestamp",
         "session_id",
         "turns",
-        "outcome"
+        "outcome",
+        "duration_ms",
+        "tool_calls",
+        "output_tokens",
+        "model_ms"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -2192,6 +2241,119 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcGitDiffFile": {
+      "additionalProperties": false,
+      "description": "One authorized file pair, or an explicit unavailable-content notice.",
+      "properties": {
+        "after": {
+          "maxLength": 50000,
+          "title": "After",
+          "type": "string"
+        },
+        "before": {
+          "maxLength": 50000,
+          "title": "Before",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "file",
+            "directory"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "notice": {
+          "maxLength": 256,
+          "title": "Notice",
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^(?!(?:.*\\/)?\\.\\.?(?:\\/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+)*(?![\\s\\S])",
+          "title": "Path",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "modified",
+            "added",
+            "deleted",
+            "untracked"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "kind",
+        "status",
+        "before",
+        "after",
+        "notice"
+      ],
+      "title": "RpcGitDiffFile",
+      "type": "object"
+    },
+    "RpcGitDiffReported": {
+      "additionalProperties": false,
+      "description": "Bounded read-only Git snapshot; untracked content is never included.",
+      "properties": {
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/RpcGitDiffFile"
+          },
+          "maxItems": 256,
+          "title": "Files",
+          "type": "array"
+        },
+        "generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "head": {
+          "maxLength": 64,
+          "title": "Head",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.git_diff",
+          "default": "rpc.git_diff",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "generation",
+        "head",
+        "files",
+        "truncated"
+      ],
+      "title": "RpcGitDiffReported",
+      "type": "object"
+    },
     "RpcMcpHeaderFrom": {
       "additionalProperties": false,
       "description": "One HTTP header whose value Wisp builds from an environment variable.\n\nThe header is sent as ``\"{scheme} {value}\"``, or the bare value when\n``scheme`` is None. Showing it tells the user which variable's value goes to\nthe server.",
@@ -2880,6 +3042,19 @@
           "title": "Created",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -2940,7 +3115,8 @@
         "before_text",
         "created",
         "summary",
-        "truncated"
+        "truncated",
+        "duration_ms"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -4919,6 +5095,48 @@
       "title": "RpcStateSnapshot",
       "type": "object"
     },
+    "RpcWorkspaceReported": {
+      "additionalProperties": false,
+      "description": "Where the session's commands run and the Git branch checked out there.\n\nThe host sends it at startup, as each prompt run starts, and as it finishes, so a\nfrontend can show the folder and keep the branch current after a run switches\nit. A run's tools may work outside the session folder (``/init`` works from the\nproject root); the report at its start names the folder they use. A branch\nswitched outside Wisp while idle shows after the next run.",
+      "properties": {
+        "cwd": {
+          "format": "path",
+          "title": "Cwd",
+          "type": "string"
+        },
+        "git_branch": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Git Branch"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.workspace",
+          "default": "rpc.workspace",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "cwd",
+        "git_branch"
+      ],
+      "title": "RpcWorkspaceReported",
+      "type": "object"
+    },
     "SessionCostSummary": {
       "additionalProperties": false,
       "description": "Cumulative persisted list-price accounting for a session.",
@@ -5590,6 +5808,19 @@
           "title": "Created",
           "type": "boolean"
         },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -5811,6 +6042,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",
@@ -5929,6 +6161,19 @@
           "default": false,
           "title": "Created",
           "type": "boolean"
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Ms"
         },
         "exit_code": {
           "anyOf": [
@@ -6151,6 +6396,7 @@
         "created",
         "summary",
         "truncated",
+        "duration_ms",
         "process_id",
         "process_state",
         "process_error",
@@ -6682,6 +6928,7 @@
       "rpc.connection_catalog": "#/$defs/RpcConnectionCatalogReported",
       "rpc.device_code": "#/$defs/RpcDeviceCodeReported",
       "rpc.device_code.progress": "#/$defs/RpcDeviceCodeProgressReported",
+      "rpc.git_diff": "#/$defs/RpcGitDiffReported",
       "rpc.mcp": "#/$defs/RpcMcpStatusReported",
       "rpc.mcp.login": "#/$defs/RpcMcpLoginStarted",
       "rpc.mcp.preview": "#/$defs/RpcMcpSnippetPreviewed",
@@ -6699,6 +6946,7 @@
       "rpc.sessions": "#/$defs/RpcSessionsReported",
       "rpc.skills": "#/$defs/RpcSkillsReported",
       "rpc.state": "#/$defs/RpcStateReported",
+      "rpc.workspace": "#/$defs/RpcWorkspaceReported",
       "session.saved": "#/$defs/SessionSaved",
       "session.stats": "#/$defs/SessionStatsReported",
       "skill.catalog.updated": "#/$defs/SkillCatalogUpdated",
@@ -6803,6 +7051,9 @@
       "$ref": "#/$defs/RpcStateReported"
     },
     {
+      "$ref": "#/$defs/RpcWorkspaceReported"
+    },
+    {
       "$ref": "#/$defs/RpcPermissionsReported"
     },
     {
@@ -6822,6 +7073,9 @@
     },
     {
       "$ref": "#/$defs/RpcSkillsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcGitDiffReported"
     },
     {
       "$ref": "#/$defs/RpcProjectFilesReported"
@@ -6890,9 +7144,13 @@
   "title": "Wisp current live event output",
   "x-wisp-conformance-fixtures": {
     "agent.completed": {
+      "duration_ms": null,
+      "model_ms": null,
       "outcome": "completed",
+      "output_tokens": null,
       "session_id": "session-1",
       "timestamp": "2026-01-02T03:04:05Z",
+      "tool_calls": 0,
       "turns": 1,
       "type": "agent.completed"
     },
@@ -7124,6 +7382,24 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.device_code.progress"
     },
+    "rpc.git_diff": {
+      "command_id": "diff-1",
+      "files": [
+        {
+          "after": "new\n",
+          "before": "old\n",
+          "kind": "file",
+          "notice": "",
+          "path": "src/example.py",
+          "status": "modified"
+        }
+      ],
+      "generation": 1,
+      "head": "abc123",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "truncated": false,
+      "type": "rpc.git_diff"
+    },
     "rpc.mcp": {
       "command_id": "command-1",
       "status": {
@@ -7353,6 +7629,12 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.state"
     },
+    "rpc.workspace": {
+      "cwd": "/workspace",
+      "git_branch": "main",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.workspace"
+    },
     "session.saved": {
       "path": "fixture.jsonl",
       "session_id": "session-1",
@@ -7459,6 +7741,7 @@
       "before_text": null,
       "call_id": "call-1",
       "created": false,
+      "duration_ms": null,
       "exit_code": null,
       "failure_code": null,
       "is_error": false,
@@ -7493,6 +7776,7 @@
       "before_text": null,
       "call_id": "call-1",
       "created": false,
+      "duration_ms": null,
       "exit_code": null,
       "failure_code": null,
       "is_error": false,

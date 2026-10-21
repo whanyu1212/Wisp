@@ -211,10 +211,10 @@ def test_wheel_reaches_earlier_turns_idle_during_a_run_and_after_a_resize(
                     if bursts % 5 == 0:
                         full_frame()
                     next_wheel = now + 0.1
-            elif phase == "second turn" and b"beta-row-" in painted and b"working" in painted:
-                # The footer stays working until the command finishes; a completed
-                # reply no longer brings back the Working row. Differential output
-                # need not repeat a whole row, so any second-turn row will do.
+            elif phase == "second turn" and b"beta-row-" in painted and b"interrupt" in painted:
+                # The footer offers Esc interrupt until the command finishes.
+                # Differential output need not repeat a whole row, so any second-turn
+                # row will do.
                 assert prompts() == ["first", "second"]
                 assert not _read_after_prompt(command_log, 2)
                 busy_since = now

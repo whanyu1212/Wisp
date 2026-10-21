@@ -283,7 +283,7 @@ for line in sys.stdin:
                     except json.JSONDecodeError:
                         continue
             command_types = [command["type"] for command in commands]
-            if context_redraw_offset is None and b"3.0k" in output:
+            if context_redraw_offset is None and b"30%" in output:
                 context_redraw_offset = len(output)
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 111, 0, 0))
                 continue

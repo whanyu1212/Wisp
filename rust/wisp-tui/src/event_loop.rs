@@ -47,7 +47,7 @@ struct ActivationTarget {
     help_owner: Option<crate::key_help::Owner>,
     editor_revision: u64,
     editor_editable: bool,
-    browse_entry: Option<crate::TranscriptEntryId>,
+    browse_entry: Option<crate::BrowseTarget>,
     detail_entry: Option<crate::TranscriptEntryId>,
     rendered_decision: Option<RenderedDecisionContext>,
     rendered_decision_choice: Option<usize>,
@@ -270,6 +270,8 @@ pub(super) fn changes_activation_target(action: &UiAction) -> bool {
                 | BackendEvent::ContextEstimated(_)
                 | BackendEvent::SessionStatsReported { .. }
                 | BackendEvent::DeviceCodeProgress { .. }
+                | BackendEvent::RunCompleted { .. }
+                | BackendEvent::WorkspaceReported { .. }
                 | BackendEvent::Other { .. }
         ),
         _ => false,
@@ -465,6 +467,11 @@ async fn run_with_interrupts<B: FrameBackend>(
                 ui.draw(terminal, connection)?;
             }
             next_paint = now + FRAME_INTERVAL;
+            // A frame learns the terminal's width, which decides whether the panel
+            // is on screen; the reducer hears of a change before the loop waits.
+            if !eof {
+                ui.sync_side_panel(writer, limit).await?;
+            }
         }
         if eof && sources.ready_event.is_none() && sources.events.is_empty() {
             return Ok(Exit::Eof);

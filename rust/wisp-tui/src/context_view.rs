@@ -3,6 +3,7 @@
 use crate::reducer::UiState;
 use crate::theme::Palette;
 use crate::ui::sanitize_for_terminal;
+use crate::web_search::CostTotal;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -30,7 +31,7 @@ fn approximate(budget: &ContextBudget) -> bool {
         || !(budget.observed_is_current && budget.observed_tokens.is_some())
 }
 
-fn abbreviated(value: u64) -> String {
+pub(crate) fn abbreviated(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}m", value as f64 / 1_000_000.0)
     } else if value >= 1_000 {
@@ -40,6 +41,104 @@ fn abbreviated(value: u64) -> String {
     }
 }
 
+/// The context in use, for the side panel's reading.
+pub(crate) struct Usage {
+    pub tokens: u64,
+    pub window: Option<u64>,
+    /// The count includes an estimate rather than only what the provider reported.
+    pub approximate: bool,
+}
+
+pub(crate) fn usage(state: &UiState) -> Option<Usage> {
+    let budget = state.context.budget.as_ref()?;
+    Some(Usage {
+        tokens: tokens(budget),
+        window: budget.context_window.filter(|window| *window > 0),
+        approximate: approximate(budget),
+    })
+}
+
+/// The session's estimated cost, such as `$1.84` or `≥$1.84` when some usage had no
+/// price, or `None` before any usage was priced.
+pub(crate) fn session_cost(state: &UiState) -> Option<String> {
+    let cost = &state.context.stats.as_ref()?.cost;
+    if cost.priced_record_count == 0 {
+        return None;
+    }
+    let amount = cost.known_usd.parse::<f64>().map_or_else(
+        |_| format!("${}", sanitize_for_terminal(&cost.known_usd)),
+        format_usd,
+    );
+    Some(format!("{}{amount}", if cost.complete { "" } else { "≥" }))
+}
+
+/// What the latest run's replies cost, from the estimate each reply carries. `None`
+/// until a reply in it is priced. A reply that searched the web, or one with text that
+/// could not be priced, makes the total a floor (`≥$0.31`); an unpriced reply that
+/// only called tools carries no cost and is not counted.
+pub(crate) fn turn_cost(state: &UiState) -> Option<String> {
+    // `/compact` runs no turn of its own, so the finished run's total stays shown.
+    let running = state
+        .current_command
+        .as_ref()
+        .is_some_and(|command| command.command_type != crate::reducer::ActiveCommandType::Compact);
+    let total = if running {
+        // A run in progress spans the steers and follow-ups it takes in.
+        CostTotal::of(
+            crate::ui::current_turn(state)
+                .iter()
+                .filter_map(|entry| entry.cost()),
+        )
+    } else if let Some(total) = state.finished_run_cost {
+        total
+    } else {
+        // A session opened from history: its last run's steers are prompts like any
+        // other, so the turn is what follows the latest one.
+        let entries = state.transcript.entries();
+        let start = entries
+            .iter()
+            .rposition(|entry| entry.role == crate::transcript::TranscriptRole::User)
+            .map_or(0, |index| index + 1);
+        CostTotal::of(entries[start..].iter().filter_map(|entry| entry.cost()))
+    };
+    total.priced.then(|| {
+        format!(
+            "{}{}",
+            if total.floor { "≥" } else { "" },
+            format_usd(total.nano_usd as f64 / 1e9)
+        )
+    })
+}
+
+/// Round a cost for display like the backend's `format_usd`, keeping more places
+/// for small amounts so a short session never reads as `$0.00`.
+fn format_usd(usd: f64) -> String {
+    if usd == 0.0 {
+        "$0.00".into()
+    } else if usd < 0.0001 {
+        "<$0.0001".into()
+    } else if usd < 0.01 {
+        format!("${usd:.4}")
+    } else if usd < 1.0 {
+        format!("${usd:.3}")
+    } else {
+        format!("${usd:.2}")
+    }
+}
+
+/// Cells in the footer's context meter.
+pub(crate) const METER_CELLS: usize = 10;
+
+/// How full the context window is, as a fraction, when the window is known.
+pub(crate) fn fill(state: &UiState) -> Option<f64> {
+    let budget = state.context.budget.as_ref()?;
+    let window = budget.context_window.filter(|window| *window > 0)?;
+    Some(tokens(budget) as f64 / window as f64)
+}
+
+/// The footer's context reading: `ctx ▰▰▰▰▰▰▰▱▱▱ 68%`, or `ctx ~68%` when the meter
+/// does not fit in `width`. The meter caps at full; the percent does not. Without a
+/// known window it reads the token count, and `ctx ~…`/`ctx ~?` before a budget.
 pub(crate) fn indicator(state: &UiState, width: usize) -> String {
     let Some(budget) = &state.context.budget else {
         return if state.context.loading() {
@@ -49,24 +148,21 @@ pub(crate) fn indicator(state: &UiState, width: usize) -> String {
         }
         .into();
     };
-    let current = tokens(budget);
     let prefix = if approximate(budget) { "~" } else { "" };
-    let percent = budget
-        .context_window
-        .map(|window| format!("{:.0}%", current as f64 / window as f64 * 100.0));
-    let full = format!(
-        "ctx {prefix}{}/{} {}",
-        abbreviated(current),
-        budget
-            .context_window
-            .map(abbreviated)
-            .unwrap_or_else(|| "?".into()),
-        percent.as_deref().unwrap_or("")
+    let Some(fill) = fill(state) else {
+        return format!("ctx {prefix}{}", abbreviated(tokens(budget)));
+    };
+    let percent = format!("{prefix}{:.0}%", fill * 100.0);
+    let filled = ((fill * METER_CELLS as f64).round() as usize).min(METER_CELLS);
+    let meter = format!(
+        "ctx {}{} {percent}",
+        "▰".repeat(filled),
+        "▱".repeat(METER_CELLS - filled)
     );
-    if full.width() <= width {
-        full.trim_end().into()
+    if meter.width() <= width {
+        meter
     } else {
-        format!("ctx {prefix}{}", percent.unwrap_or_else(|| "?".into()))
+        format!("ctx {percent}")
     }
 }
 
@@ -289,22 +385,25 @@ mod tests {
     #[test]
     fn display_distinguishes_estimated_observed_hybrid_unknown_and_over_budget() {
         let mut state = state();
-        assert_eq!(indicator(&state, 80), "ctx ~3.0k/10.0k 30%");
+        assert_eq!(indicator(&state, 80), "ctx ▰▰▰▱▱▱▱▱▱▱ ~30%");
         assert_eq!(indicator(&state, 10), "ctx ~30%");
         assert!(rows(&state).join("\n").contains("≥$0.0123 USD"));
         let budget = state.context.budget.as_mut().unwrap();
         budget.observed_is_current = true;
         budget.observed_tokens = Some(4000);
         budget.accounting_method = ContextAccountingMethod::ProviderObserved;
-        assert!(indicator(&state, 80).contains("ctx 4.0k"));
+        assert_eq!(indicator(&state, 80), "ctx ▰▰▰▰▱▱▱▱▱▱ 40%");
         let budget = state.context.budget.as_mut().unwrap();
         budget.effective_tokens = Some(11000);
         budget.accounting_method = ContextAccountingMethod::ProviderObservedPlusEstimate;
+        // The meter stops at full; the percent still says how far over.
+        assert!(indicator(&state, 80).ends_with("▰▰▰▰▰▰▰▰▰▰ ~110%"));
         let text = rows(&state).join("\n");
         assert!(text.contains("110.0% · remaining: -2000 tokens · over budget"));
         assert!(text.contains("provider observation + trailing estimate"));
         state.context.budget.as_mut().unwrap().context_window = None;
         assert!(rows(&state).join("\n").contains("11000 / unknown"));
+        assert_eq!(indicator(&state, 80), "ctx ~11.0k");
         let stats = state.context.stats.as_mut().unwrap();
         stats.compaction = None;
         stats.cost.priced_record_count = 0;

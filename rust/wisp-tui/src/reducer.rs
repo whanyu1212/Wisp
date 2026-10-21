@@ -20,6 +20,7 @@ mod context;
 mod discovery;
 use command_controls::{CommandCatalog, PendingModeChange, PendingRead};
 mod event_projection;
+pub(crate) mod git_diff;
 mod model_selection;
 pub(crate) mod project_files;
 pub mod queue_management;
@@ -701,6 +702,15 @@ impl QueueSubmissionPreflightError {
     }
 }
 
+/// The run in progress, as the status line counts it: the prompt that started it and
+/// the agent turn it has reached. Steers and follow-ups injected mid-run join the run
+/// rather than starting a new one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunProgress {
+    pub prompt: crate::transcript::TranscriptEntryId,
+    pub turn: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -709,6 +719,10 @@ pub struct UiState {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    /// Where the session's commands run, as the backend last reported it.
+    pub workspace_cwd: Option<String>,
+    /// The Git branch checked out there, or the short commit for a detached HEAD.
+    pub git_branch: Option<String>,
     pub mode: AgentMode,
     pub mode_confirmed: bool,
     pub(crate) command_catalog: Option<CommandCatalog>,
@@ -738,6 +752,10 @@ pub struct UiState {
     /// Queue streamed reply text for the live terminal to reveal at an even pace instead
     /// of showing each delta as it arrives. Off by default, so reductions stay immediate.
     pub(crate) stream_pacing: bool,
+    pub(crate) run_progress: Option<RunProgress>,
+    /// What the last finished run's replies cost, added up when it completed: once a
+    /// history sync replaces the transcript, its prompt id no longer finds its replies.
+    pub(crate) finished_run_cost: Option<crate::web_search::CostTotal>,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
@@ -752,6 +770,10 @@ pub struct UiState {
     /// An MCP sign-in waiting for the user's browser.
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
+    pub(crate) git_diff: git_diff::GitDiff,
+    /// Whether the side panel is on screen, so the changed files stay loaded and
+    /// refresh after each run.
+    pub(crate) side_panel_visible: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -783,6 +805,8 @@ impl UiState {
             provider,
             model,
             effort,
+            workspace_cwd: None,
+            git_branch: None,
             mode: AgentMode::Build,
             mode_confirmed: false,
             command_catalog: None,
@@ -812,6 +836,8 @@ impl UiState {
             exit_requested: false,
             transcript: SharedTranscript::default(),
             stream_pacing: false,
+            run_progress: None,
+            finished_run_cost: None,
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
@@ -823,6 +849,8 @@ impl UiState {
             mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
+            git_diff: git_diff::GitDiff::default(),
+            side_panel_visible: false,
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -982,6 +1010,7 @@ pub enum CommandKind {
     ChangeMcpServers,
     Permissions,
     GetProjectFiles,
+    GetGitDiff,
     GetSessions,
     NewSession,
     SelectSession,
@@ -1023,6 +1052,7 @@ impl CommandKind {
             Self::PreviewMcpSnippet => "preview_mcp_snippet",
             Self::ChangeMcpServers => "mcp_change",
             Self::Permissions => "permissions",
+            Self::GetGitDiff => "get_git_diff",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
             Self::NewSession => "new_session",
@@ -1068,6 +1098,10 @@ pub enum BackendEvent {
     /// Carries a session-assigned result origin; presentation waits for `tool.result`.
     ToolExecutionEnded {
         call_id: String,
+    },
+    GitDiffReported {
+        command_id: String,
+        snapshot: git_diff::GitDiffReport,
     },
     ProjectFilesReported {
         command_id: String,
@@ -1119,7 +1153,21 @@ pub enum BackendEvent {
     MessageCompleted {
         turn: u64,
         content: String,
-        cost: Option<String>,
+        cost: Option<crate::web_search::MessageCost>,
+    },
+    /// Where the session's commands run and the branch checked out there.
+    WorkspaceReported {
+        cwd: String,
+        git_branch: Option<String>,
+    },
+    /// A run finished; its totals close the run's last reply.
+    RunCompleted {
+        outcome: String,
+        duration_ms: Option<u64>,
+        tool_calls: u64,
+        output_tokens: Option<u64>,
+        /// Time the run's model responses spent streaming, which throughput uses.
+        model_ms: Option<u64>,
     },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
@@ -1252,6 +1300,10 @@ pub enum UiAction {
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     SetProjectFilesOpen(bool),
     LoadContext,
+    SetGitDiffOpen(bool),
+    RefreshGitDiff,
+    /// The side panel appeared or went away, docked or as an overlay.
+    SetSidePanelVisible(bool),
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -1448,6 +1500,15 @@ pub fn reduce(
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
         }
+        UiAction::SetGitDiffOpen(open) => {
+            state.git_diff.set_open(open);
+            Ok(vec![UiEffect::RequestRender])
+        }
+        UiAction::RefreshGitDiff => {
+            state.git_diff.refresh();
+            Ok(vec![UiEffect::RequestRender])
+        }
+        UiAction::SetSidePanelVisible(visible) => Ok(set_side_panel_visible(state, visible, ids)?),
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
@@ -1552,6 +1613,7 @@ pub fn reduce(
             state.mcp_preview.close();
             state.permissions.close();
             state.project_files.close();
+            state.git_diff.close();
             state.model_operation = None;
             state.mode_change = None;
             state.mode_read = None;
@@ -1572,6 +1634,7 @@ pub fn reduce(
     }?;
     effects.extend(context::refresh_if_ready(state, ids)?);
     effects.extend(project_files::refresh_if_ready(state, ids)?);
+    effects.extend(git_diff::refresh_if_ready(state, ids)?);
     Ok(effects)
 }
 
@@ -1629,14 +1692,36 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state
+    let prompt = state
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.finished_run_cost = None;
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
         UiEffect::RequestRender,
     ])
+}
+
+/// Keep what the side panel shows loaded while it is on screen: the changed files
+/// follow it, and MCP status and the permission mode are read each time it appears.
+fn set_side_panel_visible(
+    state: &mut UiState,
+    visible: bool,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.side_panel_visible == visible {
+        return Ok(Vec::new());
+    }
+    state.side_panel_visible = visible;
+    state.git_diff.set_panel(visible);
+    let mut effects = vec![UiEffect::RequestRender];
+    if visible {
+        effects.extend(discovery::load_mcp(state, ids)?);
+        effects.extend(discovery::permissions(state, None, ids)?);
+    }
+    Ok(effects)
 }
 
 fn init_project(
@@ -1663,7 +1748,9 @@ fn init_project(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state.transcript.append_prompt("/init".into());
+    let prompt = state.transcript.append_prompt("/init".into());
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.finished_run_cost = None;
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -2791,6 +2878,7 @@ fn commit_session_and_hydrate(
     // previous session's failure; same-session history syncs keep it.
     state.last_command_error = None;
     state.transcript = SharedTranscript::default();
+    state.finished_run_cost = None;
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
     state.history_request = None;
@@ -3500,6 +3588,7 @@ fn handle_session_backend_event(
                 // A failure belongs to the session that produced it.
                 state.last_command_error = None;
                 state.transcript = SharedTranscript::default();
+                state.finished_run_cost = None;
                 state.selected_session = None;
                 state.last_session = None;
                 state.history = HistoryWindow::default();
@@ -4397,6 +4486,9 @@ fn handle_backend_event(
     if let Some(effects) = queue_management::finish(state, &event, ids)? {
         return Ok(effects);
     }
+    if let Some(effects) = state.git_diff.observe(&event) {
+        return Ok(effects);
+    }
     if let Some(effects) = state.project_files.observe(&event) {
         return Ok(effects);
     }
@@ -4489,6 +4581,9 @@ fn handle_backend_event(
             Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
         }
         BackendEvent::MessageStarted { turn } => {
+            if let Some(run) = state.run_progress.as_mut() {
+                run.turn = run.turn.max(turn);
+            }
             state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
         }
@@ -4528,6 +4623,54 @@ fn handle_backend_event(
                 .transcript
                 .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::WorkspaceReported { cwd, git_branch } => {
+            state.transcript.set_tool_cwd(&cwd);
+            state.workspace_cwd = Some(cwd);
+            state.git_branch = git_branch;
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::RunCompleted {
+            outcome,
+            duration_ms,
+            tool_calls,
+            output_tokens,
+            model_ms,
+        } => {
+            let summary = run_summary_line(
+                state,
+                &outcome,
+                duration_ms,
+                tool_calls,
+                output_tokens,
+                model_ms,
+            );
+            let result = crate::transcript::RunResult {
+                duration_ms,
+                outcome: crate::transcript::RunOutcome::parse(&outcome),
+            };
+            // Total the run while its prompt id still finds its replies, steers and
+            // follow-ups included.
+            state.finished_run_cost = state
+                .run_progress
+                .and_then(|run| state.transcript.entry_index(run.prompt))
+                .map(|index| {
+                    crate::web_search::CostTotal::of(
+                        state.transcript.entries()[index + 1..]
+                            .iter()
+                            .filter_map(|entry| entry.cost()),
+                    )
+                });
+            let recorded = state
+                .run_progress
+                .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));
+            // A run that reported nothing to total keeps no summary row.
+            let summarized = !summary.is_empty() && state.transcript.attach_run_summary(summary);
+            if recorded || summarized {
+                Ok(vec![UiEffect::RequestRender])
+            } else {
+                Ok(Vec::new())
+            }
         }
         BackendEvent::ToolCall(input) => {
             let call_id = input.call_id.clone();
@@ -4652,7 +4795,8 @@ fn handle_backend_event(
                 .append_prompt_with_display(content, local_display);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::ProjectFilesReported { .. }
+        BackendEvent::GitDiffReported { .. }
+        | BackendEvent::ProjectFilesReported { .. }
         | BackendEvent::ProjectFilesInvalidated(_)
         | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)
@@ -4753,6 +4897,8 @@ fn handle_backend_event(
                     SESSION_NOTICE_MAX_BYTES,
                 ));
             }
+            // The run may have changed files; the panel's list catches up once it ends.
+            state.git_diff.refresh_for_panel();
             let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
             if let Some(message) = init_failure {
                 effects.push(UiEffect::Notice(message));
@@ -4760,6 +4906,68 @@ fn handle_backend_event(
             }
             Ok(effects)
         }
+    }
+}
+
+/// The run's summary line, such as `╰ Build · gpt-6-astra · high · 6m 41s · 14 tools ·
+/// 31k tokens`. Mode, model, and effort are the session's settings when the run ends;
+/// parts that are unknown are left out, and a run that did not complete says how it
+/// ended.
+fn run_summary_line(
+    state: &UiState,
+    outcome: &str,
+    duration_ms: Option<u64>,
+    tool_calls: u64,
+    output_tokens: Option<u64>,
+    model_ms: Option<u64>,
+) -> String {
+    let mut parts = Vec::new();
+    if state.mode_confirmed {
+        parts.push(match state.mode {
+            AgentMode::Build => "Build".to_owned(),
+            AgentMode::Plan => "Plan".to_owned(),
+        });
+    }
+    if let Some(model) = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref())
+    {
+        parts.push(model.to_owned());
+    }
+    if let Some(effort) = state.effort.as_deref() {
+        parts.push(effort.to_owned());
+    }
+    if let Some(duration_ms) = duration_ms {
+        parts.push(crate::tool_cards::format_duration(duration_ms));
+    }
+    match tool_calls {
+        0 => {}
+        1 => parts.push("1 tool".to_owned()),
+        count => parts.push(format!("{count} tools")),
+    }
+    // Throughput over the time the model streamed, so tool time does not dilute it.
+    if let (Some(tokens), Some(model_ms)) = (
+        output_tokens.filter(|tokens| *tokens > 0),
+        model_ms.filter(|milliseconds| *milliseconds > 0),
+    ) {
+        parts.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
+    }
+    if outcome != "completed" {
+        parts.push(outcome.to_owned());
+    }
+    // The turn's rail draws the closing `╰`.
+    parts.join(" · ")
+}
+
+/// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
+fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
+    let rate = tokens as f64 * 1000.0 / model_ms as f64;
+    if rate < 10.0 {
+        format!("{rate:.1}")
+    } else {
+        format!("{rate:.0}")
     }
 }
 
@@ -4977,6 +5185,144 @@ mod tests {
         assert_eq!(state.latest_assistant_text(), Some("new answer"));
         assert_eq!(state.transcript.entries().len(), 2);
         assert_eq!(state.transcript.entries()[1].thinking(), "private thought");
+    }
+
+    fn sent(effects: &[UiEffect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(command_value)
+            .map(|command| command["type"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn sent_id(effects: &[UiEffect], kind: &str) -> String {
+        effects
+            .iter()
+            .filter_map(command_value)
+            .find(|command| command["type"] == kind)
+            .map(|command| command["id"].as_str().unwrap().to_owned())
+            .unwrap()
+    }
+
+    fn finish(
+        state: &mut UiState,
+        ids: &mut DeterministicIds,
+        id: &str,
+        kind: &str,
+    ) -> Vec<UiEffect> {
+        reduce(
+            state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: id.into(),
+                command_type: kind.into(),
+                ok: kind == "prompt",
+                error: (kind != "prompt").then(|| "unavailable".into()),
+            }),
+            ids,
+        )
+        .unwrap()
+    }
+
+    /// End a prompt run and return what its end sends.
+    fn end_run(state: &mut UiState, ids: &mut DeterministicIds) -> Vec<UiEffect> {
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-9".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        finish(state, ids, "prompt-9", "prompt")
+    }
+
+    #[test]
+    fn side_panel_loads_its_data() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        assert_eq!(
+            sent(&shown),
+            ["get_mcp_status", "get_permissions", "get_git_diff"]
+        );
+        let again = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        assert!(again.is_empty());
+        let hidden = reduce(&mut state, UiAction::SetSidePanelVisible(false), &mut ids).unwrap();
+        assert!(sent(&hidden).is_empty());
+    }
+
+    #[test]
+    fn run_end_refreshes_panel_files() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&shown, "get_git_diff"),
+            "get_git_diff",
+        );
+        let ended = end_run(&mut state, &mut ids);
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&ended, "get_git_diff"),
+            "get_git_diff",
+        );
+
+        // A snapshot under review in /diff is replaced only when /diff asks.
+        let opened = reduce(&mut state, UiAction::SetGitDiffOpen(true), &mut ids).unwrap();
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&opened, "get_git_diff"),
+            "get_git_diff",
+        );
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_git_diff".to_owned()));
+
+        // Without the panel, a run's end reads nothing.
+        reduce(&mut state, UiAction::SetGitDiffOpen(false), &mut ids).unwrap();
+        reduce(&mut state, UiAction::SetSidePanelVisible(false), &mut ids).unwrap();
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_git_diff".to_owned()));
+    }
+
+    #[test]
+    fn run_result_marks_its_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Submit("fix it".into()), &mut ids).unwrap();
+        // A steer the run took in joins it as another prompt.
+        state.transcript.append_prompt("and the docs".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 0,
+                output_tokens: None,
+                model_ms: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let result = |index: usize| state.transcript.entries()[index].run_result();
+        let cancelled = crate::transcript::RunOutcome::Cancelled;
+        assert_eq!(
+            result(0),
+            Some(crate::transcript::RunResult {
+                duration_ms: Some(4_000),
+                outcome: cancelled,
+            })
+        );
+        // The steer shares the outcome; the run's time stays with the prompt.
+        assert_eq!(
+            result(1),
+            Some(crate::transcript::RunResult {
+                duration_ms: None,
+                outcome: cancelled,
+            })
+        );
     }
 
     #[test]
@@ -5977,12 +6323,14 @@ mod tests {
             "stdout_truncated": true,
             "stderr_truncated": false,
             "stdout_dropped_bytes": 11,
-            "stderr_dropped_bytes": 12
+            "stderr_dropped_bytes": 12,
+            "duration_ms": 1250
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let BackendEvent::ToolResult(result) = BackendEvent::from_live(&live).unwrap() else {
             panic!("tool result expected");
         };
+        assert_eq!(result.duration_ms, Some(1250));
         assert_eq!(result.call_id, bounded_identity("call-7"));
         assert_eq!(result.exit_code, Some(1));
         assert_eq!(result.failure_code.as_deref(), Some("internal_error"));
@@ -5991,6 +6339,143 @@ mod tests {
         assert_eq!(result.stderr.as_deref(), Some("err"));
         assert_eq!(result.stdout_dropped_bytes, 11);
         assert!(result.truncated);
+    }
+
+    #[test]
+    fn workspace_event_updates_state() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let value = serde_json::json!({
+            "type": "rpc.workspace",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "cwd": "/srv/wisp",
+            "git_branch": "main"
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let event = BackendEvent::from_live(&live).unwrap();
+        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        assert_eq!(state.workspace_cwd.as_deref(), Some("/srv/wisp"));
+        assert_eq!(state.git_branch.as_deref(), Some("main"));
+
+        let outside = serde_json::json!({
+            "type": "rpc.workspace",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "cwd": "/tmp",
+            "git_branch": null
+        });
+        let live = wisp_protocol::events::deserialize(outside).unwrap();
+        let event = BackendEvent::from_live(&live).unwrap();
+        reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        assert_eq!(state.git_branch, None);
+    }
+
+    #[test]
+    fn throughput_keeps_a_digit() {
+        assert_eq!(tokens_per_second(1_234, 40_000), "31");
+        assert_eq!(tokens_per_second(42, 5_000), "8.4");
+    }
+
+    #[test]
+    fn cancelled_run_closes_on_card() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: bounded_identity("call-1"),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "cargo test"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 1,
+                output_tokens: None,
+                model_ms: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        // The turn ends on the card, so the card carries the totals; the reply keeps
+        // its text.
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+        let reply = &state.transcript.entries()[1];
+        assert_eq!(reply.display_content(), "Running the tests.");
+        assert_eq!(reply.run_summary(), None);
+        let card = state.transcript.entries().last().unwrap();
+        assert_eq!(card.run_summary(), Some("4.0s · 1 tool · cancelled"));
+    }
+
+    #[test]
+    fn empty_run_keeps_no_summary() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hi".into());
+        state.transcript.complete_message(1, "hello".into());
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "completed".into(),
+                duration_ms: None,
+                tool_calls: 0,
+                output_tokens: None,
+                model_ms: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(
+            state.transcript.entries().last().unwrap().run_summary(),
+            None
+        );
+    }
+
+    #[test]
+    fn run_summary_closes_last_reply() {
+        let mut state = UiState::new("fake".into(), Some("gpt_x".into()), None);
+        state.mode = AgentMode::Build;
+        state.mode_confirmed = true;
+        state.effort = Some("high".into());
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hello".into());
+        let value = serde_json::json!({
+            "type": "agent.completed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "session_id": "s",
+            "turns": 2,
+            "outcome": "completed",
+            "duration_ms": 252_000,
+            "tool_calls": 3,
+            "output_tokens": 1_234,
+            "model_ms": 40_000
+        });
+        let live = wisp_protocol::events::deserialize(value).unwrap();
+        let completed = BackendEvent::from_live(&live).unwrap();
+
+        // No reply yet: the summary has nowhere to go.
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(completed.clone()),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+
+        state.transcript.complete_message(1, "Done.".into());
+        reduce(&mut state, UiAction::BackendEvent(completed), &mut ids).unwrap();
+        let reply = state.transcript.entries().last().unwrap();
+        assert_eq!(
+            reply.run_summary(),
+            Some("Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s")
+        );
+        assert_eq!(reply.display_content(), "Done.");
     }
 
     #[test]

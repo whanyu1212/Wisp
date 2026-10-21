@@ -19,6 +19,7 @@ from tests.tui_e2e.support import (
     frame_cursor,
     reap,
     run_settled,
+    screen_rows,
     welcome_ready,
 )
 
@@ -41,8 +42,22 @@ def test_run_settled_ignores_partial_frame() -> None:
 
     assert not run_settled(partial, len(welcome), b"fake", b"response", b"to:")
     assert not run_settled(welcome + running, len(welcome), b"fake", b"response", b"to:")
-    settled = welcome + running + _frame(b"idle")
+    settled = welcome + running + _frame(b"\x1b[2;1Hidle")
     assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
+
+
+def test_screen_rows_join_partial_repaints() -> None:
+    # The second frame rewrites only the cells that differ, as Ratatui does.
+    output = _frame(b"\x1b[2;3Hworking") + _frame(b"\x1b[2;3Hidle\x1b[2;7H\x1b[K")
+    assert screen_rows(output) == ["", "  idle"]
+
+    reused = _frame(b"\x1b[2;1Hidea") + _frame(b"\x1b[2;3Hl\x1b[2;4He")
+    assert screen_rows(reused)[-1] == "idle"
+    assert run_settled(reused + _frame(b""), 0, b"l")
+
+    # A branch named after a status word does not settle a working run.
+    branch = _frame(b"\x1b[2;1Hidle \xc2\xb7 fix/idle     working \xc2\xb7 ctx ~?")
+    assert not run_settled(branch, 0, b"fix")
 
 
 def test_run_settled_respects_offset() -> None:

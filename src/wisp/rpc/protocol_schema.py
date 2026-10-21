@@ -288,6 +288,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_sessions": {},
     "get_skills": {},
     "get_project_files": {},
+    "get_git_diff": {},
     "get_state": {},
     "init": {},
     "navigate_session_tree": {"entry_id": "entry-1"},
@@ -505,6 +506,22 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "rpc.sessions": {"command_id": "command-1"},
     "rpc.skills": {"command_id": "command-1", "catalog": {}},
+    "rpc.git_diff": {
+        "command_id": "diff-1",
+        "generation": 1,
+        "head": "abc123",
+        "files": [
+            {
+                "path": "src/example.py",
+                "kind": "file",
+                "status": "modified",
+                "before": "old\n",
+                "after": "new\n",
+                "notice": "",
+            }
+        ],
+        "truncated": False,
+    },
     "rpc.project_files": {
         "command_id": "command-1",
         "generation": 1,
@@ -513,6 +530,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "rpc.workspace": {"cwd": Path("/workspace"), "git_branch": "main"},
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "session.saved": {"session_id": "session-1", "path": Path("fixture.jsonl")},
     "session.stats": {"command_id": "command-1", "stats": _SESSION_STATS},

@@ -381,6 +381,23 @@ class RpcPermissionsReported(WispEvent):
     permissions: PermissionState
 
 
+class RpcWorkspaceReported(WispEvent):
+    """Where the session's commands run and the Git branch checked out there.
+
+    The host sends it at startup, as each prompt run starts, and as it finishes, so a
+    frontend can show the folder and keep the branch current after a run switches
+    it. A run's tools may work outside the session folder (``/init`` works from the
+    project root); the report at its start names the folder they use. A branch
+    switched outside Wisp while idle shows after the next run.
+    """
+
+    type: Literal["rpc.workspace"] = "rpc.workspace"
+    cwd: Path
+    # The current branch, or the short commit for a detached HEAD; None outside a
+    # Git work tree or when Git does not answer in time.
+    git_branch: str | None = None
+
+
 class RpcStateReported(WispEvent):
     """Immediate, non-persisted in-memory state returned over RPC."""
 
@@ -458,6 +475,26 @@ class RpcProjectFilesReported(WispEvent):
     command_id: str = Field(min_length=1, max_length=256)
     generation: int = Field(ge=1, le=2**53 - 1, strict=True)
     entries: tuple[RpcProjectFile, ...] = Field(max_length=MAX_PROJECT_FILES)
+    truncated: bool
+
+
+class RpcGitDiffFile(RpcProjectFile):
+    """One authorized file pair, or an explicit unavailable-content notice."""
+
+    status: Literal["modified", "added", "deleted", "untracked"]
+    before: str = Field(max_length=50_000)
+    after: str = Field(max_length=50_000)
+    notice: str = Field(max_length=256)
+
+
+class RpcGitDiffReported(WispEvent):
+    """Bounded read-only Git snapshot; untracked content is never included."""
+
+    type: Literal["rpc.git_diff"] = "rpc.git_diff"
+    command_id: str = Field(min_length=1, max_length=256)
+    generation: int = Field(ge=1, le=2**53 - 1, strict=True)
+    head: str = Field(max_length=64)
+    files: tuple[RpcGitDiffFile, ...] = Field(max_length=256)
     truncated: bool
 
 

@@ -365,7 +365,9 @@ def test_finite_burst_beyond_event_queue_capacity_drains_in_order(tmp_path: Path
         tui.send(b"pressure burst\r")
         tui.wait_until(
             # Ctrl+C below quits only when idle; while the run is working it cancels.
-            lambda output: run_settled(output, offset, b"BURST-FIRST", b"BURST-LAST"),
+            # Ratatui may reuse an already painted BURST- prefix. The completion-only
+            # suffixes must arrive, but need not be emitted beside that reused prefix.
+            lambda output: run_settled(output, offset, b"FIRST", b"LAST"),
             failure="bounded burst did not reach its final event",
         )
         assert b"frontend cannot keep up" not in tui.output
@@ -487,9 +489,12 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
         assert backend_pid_path.exists()
         offset = len(tui.output)
         tui.send(b"interrupt pressure\r")
-        tui.wait_for(
-            b"SIGNAL-BURST-",
-            since=offset,
+        # Each 1 KiB delta wraps over about ten rows, so the transcript's tail can
+        # show only a delta's padding without its marker.
+        tui.wait_until(
+            lambda output: any(
+                marker in output[offset:] for marker in (b"SIGNAL-BURST-", b"x" * 64)
+            ),
             failure="sustained burst did not begin rendering",
         )
         assert not burst_done.exists(), "backend finished before SIGINT exercised pressure"
@@ -508,7 +513,7 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
             lambda output: (
                 burst_done.exists()
                 and cancel_received.exists()
-                and run_settled(output, signal_offset, b"BURST-LAST")
+                and run_settled(output, signal_offset, b"LAST")
             ),
             failure="finite burst did not settle after cancellation",
         )

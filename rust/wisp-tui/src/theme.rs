@@ -75,19 +75,34 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// A tinted label chip, such as a tool card's `Read`: accent text on a faint wash
-    /// of the accent. The wash is a colour of its own, so it stays visible over a glass
+    /// A tool-specific label on a tinted surface. The wash stays visible over a glass
     /// theme's terminal background. Where the accent is too faint on its wash, the text
     /// moves toward the foreground until it reads; monochrome palettes reverse the
     /// row's colours instead.
-    pub fn chip(self) -> Style {
-        const TINT: f64 = 0.2;
+    pub fn chip(self, label: &str) -> Style {
+        const TINT: f64 = 0.18;
         if self.monochrome {
             return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
         }
-        let fill = mix(self.accent, self.background, TINT);
+        // Stable hue families keep tools distinguishable even in a theme whose accents
+        // are close together. Blend them into the theme, then enforce text contrast.
+        // Status remains on the marker, so a failed Read does not change identity.
+        let accent = match label.trim() {
+            "Read" => Color::Rgb(132, 178, 224),
+            "Search" => Color::Rgb(103, 194, 168),
+            "List" => Color::Rgb(166, 191, 122),
+            "Explore" => Color::Rgb(115, 196, 213),
+            "Bash" => Color::Rgb(225, 163, 112),
+            "Edit" => Color::Rgb(190, 151, 223),
+            "Write" => Color::Rgb(218, 146, 172),
+            "MCP" => Color::Rgb(148, 157, 225),
+            "Process" => Color::Rgb(215, 191, 109),
+            _ => self.muted,
+        };
+        let accent = mix(accent, self.secondary, 0.85);
+        let fill = mix(accent, self.background, TINT);
         let text = (0..=20)
-            .map(|step| mix(self.foreground, self.accent, f64::from(step) / 20.0))
+            .map(|step| mix(self.foreground, accent, f64::from(step) / 20.0))
             .find(|text| contrast_ratio(*text, fill) >= 4.5)
             .unwrap_or(self.foreground);
         Style::default()
@@ -96,16 +111,72 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
+    /// Shade the existing padding cells to give a compact chip a shallow edge.
+    pub fn chip_edge(self, chip: Style, leading: bool) -> Style {
+        let (Some(text), Some(fill)) = (chip.fg, chip.bg) else {
+            return chip;
+        };
+        if self.monochrome {
+            return chip;
+        }
+        chip.bg(if leading {
+            mix(text, fill, 0.16)
+        } else {
+            mix(fill, self.background, 0.35)
+        })
+    }
+
     pub fn tool_argument(self) -> Style {
         Style::default().fg(self.secondary)
     }
 
     pub fn tool_command(self) -> Style {
-        self.semantic_command()
+        Style::default().fg(self.secondary)
     }
 
     pub fn tool_path(self) -> Style {
-        self.semantic_path(true)
+        Style::default().fg(self.foreground)
+    }
+
+    /// Emphasize only changed words, preserving a non-color cue in monochrome.
+    pub fn diff_change(self, base: Style) -> Style {
+        if self.monochrome {
+            return base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        }
+        let tint = if base.bg == Some(self.deletion_background) {
+            self.error
+        } else {
+            self.success
+        };
+        let background = base.bg.unwrap_or(self.background);
+        // Keep normal text legible even for the light palettes.
+        let fill = (0..=8)
+            .map(|step| mix(tint, background, 0.24 - f64::from(step) * 0.03))
+            .find(|fill| contrast_ratio(self.foreground, *fill) >= 4.5)
+            .unwrap_or(background);
+        base.fg(self.foreground)
+            .bg(fill)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    }
+
+    pub fn syntax(self, base: Style, class: crate::syntax::SyntaxClass) -> Style {
+        use crate::syntax::SyntaxClass;
+        let color = match class {
+            SyntaxClass::Plain => return base,
+            SyntaxClass::Comment => self.muted,
+            SyntaxClass::Keyword => self.accent,
+            SyntaxClass::String => self.success,
+            SyntaxClass::Number | SyntaxClass::Constant | SyntaxClass::Operator => self.warning,
+            SyntaxClass::Type => self.secondary,
+            SyntaxClass::Function => self.primary,
+            SyntaxClass::Variable | SyntaxClass::Punctuation => self.foreground,
+        };
+        let color = if base.bg.is_some_and(|bg| contrast_ratio(color, bg) < 4.5) {
+            self.foreground
+        } else {
+            color
+        };
+        base.fg(color)
     }
 
     pub fn semantic_command(self) -> Style {
@@ -140,13 +211,13 @@ impl Palette {
     }
 
     pub fn semantic_list_marker(self) -> Style {
-        Style::default()
-            .fg(self.primary)
-            .add_modifier(Modifier::BOLD)
+        // Muted, since the accent colour is reserved for speaker labels and chips.
+        Style::default().fg(self.muted)
     }
 
     pub fn semantic_inline_code(self) -> Style {
-        Style::default().fg(self.warning).bg(self.panel)
+        // A neutral surface keeps the accent colours for labels and status.
+        Style::default().fg(self.foreground).bg(self.panel)
     }
 
     pub fn semantic_code_delimiter(self) -> Style {
@@ -167,6 +238,29 @@ impl Palette {
 
     pub fn semantic_fence_body(self) -> Style {
         Style::default().fg(self.secondary)
+    }
+
+    /// Links read in the secondary colour, apart from the accent that marks
+    /// speakers and status, unless a theme's secondary is too close to its body
+    /// text to tell apart.
+    pub fn link(self) -> Color {
+        if contrast_ratio(self.secondary, self.foreground) < 1.5 {
+            self.primary
+        } else {
+            self.secondary
+        }
+    }
+
+    /// The rail of a finished turn: a border tone, quieter than muted text, so it
+    /// frames the turn without reading as content.
+    pub fn rail(self) -> Color {
+        mix(self.muted, self.background, 0.4)
+    }
+
+    /// The rail of a turn still running: the running colour, quieted toward the
+    /// background so it frames the turn without competing with its text.
+    pub fn running_rail(self) -> Color {
+        mix(self.secondary, self.background, 0.55)
     }
 
     pub fn composer(self) -> Style {
@@ -190,19 +284,16 @@ impl Palette {
         })
     }
 
-    pub fn border(self) -> Style {
-        Style::default().fg(self.muted)
+    /// The key of a shortcut hint, on a raised surface so it reads apart from its action.
+    pub fn keycap(self) -> Style {
+        if self.monochrome {
+            return Style::default().add_modifier(Modifier::BOLD);
+        }
+        Style::default().fg(self.foreground).bg(self.panel)
     }
 
-    /// The thin rule between back-to-back tool cards: the muted colour, halfway faded into
-    /// the background so the rule separates rows without competing with their text. A glass
-    /// theme shows the terminal's own background instead of `background`, so its rule keeps
-    /// the plain muted colour rather than fading toward a colour that isn't on screen.
-    pub fn rule(self) -> Style {
-        if self.monochrome || self.terminal_background {
-            return Style::default().fg(self.muted);
-        }
-        Style::default().fg(mix(self.muted, self.background, 0.5))
+    pub fn border(self) -> Style {
+        Style::default().fg(self.muted)
     }
 
     pub fn selection(self) -> Style {

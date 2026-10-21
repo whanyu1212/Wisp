@@ -59,13 +59,19 @@ pub enum RowPosition {
     /// A plain gap below a prompt's highlighted surface, before the reply or card that follows.
     /// The prompt owns it, after its `Spacer`, which is the surface's bottom padding.
     UserLeadOut,
+    /// The run's totals, closing the turn's rail. The turn's last entry owns it, after its
+    /// body and before its `Spacer`.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CardSection {
     Action,
+    Metadata,
     Detail,
     Omission,
+    /// A closing note after the detail, such as a shell's exit status.
+    Footer,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -86,6 +92,29 @@ pub struct RowAnchor {
     pub position: RowPosition,
 }
 
+/// Groups and their first member share an entry ID but have independent controls.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BrowseTarget {
+    Entry(TranscriptEntryId),
+    Group(TranscriptEntryId),
+}
+
+impl BrowseTarget {
+    pub fn entry_id(self) -> TranscriptEntryId {
+        match self {
+            Self::Entry(id) | Self::Group(id) => id,
+        }
+    }
+
+    pub fn for_row(row: &TranscriptRow) -> Self {
+        if row.kind == TranscriptRowKind::CardGroup {
+            Self::Group(row.anchor.entry_id)
+        } else {
+            Self::Entry(row.anchor.entry_id)
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TranscriptRowKind {
     Header,
@@ -100,6 +129,8 @@ pub enum TranscriptRowKind {
     /// The gap between back-to-back collapsed cards, drawn as a thin rule. Like a spacer it
     /// holds no text, so a copied selection gets an empty line.
     Rule,
+    /// The muted totals that end a finished turn's rail.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +145,12 @@ pub enum TranscriptRowTone {
     Error,
     DiffAddition,
     DiffDeletion,
+    /// A row of a framed block, such as a diff preview's unchanged line or shell
+    /// output, on the block's surface.
+    Surface,
+    /// A framed block's muted note, such as a diff's "more changed lines" row or a
+    /// shell's `exit 0`, on the same surface.
+    SurfaceNote,
 }
 
 /// The result connector that opens the first row under a card's action line.
@@ -122,6 +159,9 @@ pub(crate) const RESULT_CONNECTOR: &str = "└ ";
 pub(crate) const RESULT_INDENT: &str = "  ";
 /// The action columns a card must keep before its row also reserves a fold hint.
 const ACTION_COLUMNS_BESIDE_HINT: usize = 24;
+
+/// Columns kept clear between a row's text and its right-aligned trailing text.
+const TRAILING_GAP: usize = 2;
 
 /// What the selected row says Right or Left, or a click, would do. Browse marks its
 /// selection only with this hint, so the row otherwise looks like any other.
@@ -180,7 +220,36 @@ pub struct TranscriptRow {
     /// hint's columns whether or not it is selected, so moving the selection never
     /// rewraps a row; the renderer shows the hint only on the selected row.
     pub fold_hint: FoldHint,
+    /// A foldable row's `▸`/`▾`, drawn over the space in the middle of the gap after
+    /// its label so copied text keeps a plain space and source offsets stay put.
+    pub fold_arrow: Option<FoldArrow>,
+    /// Right-aligned muted text, such as how long a call ran. The projection keeps
+    /// its columns clear of `spans`; it is not part of the copied text.
+    pub trailing: Option<String>,
+    /// A call still in progress keeps the trailing columns for a live timer, which
+    /// the renderer paints each frame so the cached row never goes stale.
+    pub live_timer: bool,
 }
+
+/// Columns a live timer keeps, enough for `59m 59s`.
+pub(crate) const LIVE_TIMER_COLUMNS: usize = 7;
+
+/// Where a foldable row draws its arrow, in columns from the start of its text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FoldArrow {
+    pub column: u16,
+    pub expanded: bool,
+}
+
+impl FoldArrow {
+    pub fn symbol(self) -> &'static str {
+        if self.expanded { "▾" } else { "▸" }
+    }
+}
+
+/// Separates a row's label from its text. The middle column holds a foldable row's
+/// arrow, so text starts in the same column whether or not the row folds.
+pub(crate) const LABEL_GAP: &str = "   ";
 
 impl TranscriptRow {
     #[cfg(test)]
@@ -198,6 +267,7 @@ impl TranscriptRow {
                     .len()
                     .saturating_mul(std::mem::size_of::<TranscriptSpan>()),
             )
+            .saturating_add(self.trailing.as_ref().map_or(0, String::len))
     }
 
     fn plain(
@@ -229,13 +299,18 @@ impl TranscriptRow {
             spans,
             gutter: RowGutter::None,
             fold_hint: FoldHint::None,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
         }
     }
 }
 
 fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
     match kind {
-        TranscriptRowKind::Placeholder | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
+        TranscriptRowKind::Placeholder
+        | TranscriptRowKind::Thought
+        | TranscriptRowKind::RunSummary => TranscriptRowTone::Muted,
         TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
@@ -336,14 +411,24 @@ impl FoldState {
         self.expanded_groups.contains(&start)
     }
 
+    /// A completion may prepend calls to an open group. Preserve its expansion by
+    /// recognizing the previous start anywhere in the current run.
+    pub fn is_run_expanded(&self, members: &[TranscriptEntryId]) -> bool {
+        members.iter().any(|id| self.is_group_expanded(*id))
+    }
+
     pub fn expand_group(&mut self, start: TranscriptEntryId) {
         if self.expanded_groups.insert(start) {
             self.bump();
         }
     }
 
-    pub fn collapse_group(&mut self, start: TranscriptEntryId) {
-        if self.expanded_groups.remove(&start) {
+    pub fn collapse_group(&mut self, members: &[TranscriptEntryId]) {
+        let mut changed = false;
+        for id in members {
+            changed |= self.expanded_groups.remove(id);
+        }
+        if changed {
             self.bump();
         }
     }
@@ -396,6 +481,8 @@ struct CardRowStyle<'a> {
     argument_style: crate::markdown::InlineStyle,
     suffix_start: usize,
     emphasis: &'a [std::ops::Range<usize>],
+    syntax: &'a [crate::syntax::SyntaxToken],
+    gutters: &'a [std::ops::Range<usize>],
 }
 
 impl CardRowStyle<'_> {
@@ -406,14 +493,30 @@ impl CardRowStyle<'_> {
         argument_style: crate::markdown::InlineStyle::Normal,
         suffix_start: usize::MAX,
         emphasis: &[],
+        syntax: &[],
+        gutters: &[],
     };
 
-    fn inline_at(&self, kind: TranscriptRowKind, offset: usize) -> crate::markdown::InlineStyle {
+    /// The inline style of the grapheme of `len` bytes at `offset`.
+    fn inline_at(
+        &self,
+        kind: TranscriptRowKind,
+        offset: usize,
+        len: usize,
+    ) -> crate::markdown::InlineStyle {
         use crate::markdown::InlineStyle;
         if !matches!(
             kind,
             TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
         ) {
+            if let Some(range) = self.gutters.iter().find(|range| range.contains(&offset)) {
+                // A gutter ends with its sign and one space; `−` is three bytes.
+                return if offset + len + 1 >= range.end {
+                    InlineStyle::DiffSign
+                } else {
+                    InlineStyle::DiffGutter
+                };
+            }
             return if self.emphasis.iter().any(|range| range.contains(&offset)) {
                 InlineStyle::DiffChange
             } else {
@@ -441,17 +544,24 @@ struct CardProjection {
     action_label_end: usize,
     action_argument_start: usize,
     action_argument_style: crate::markdown::InlineStyle,
+    metadata: String,
     detail: String,
     detail_base: usize,
     detail_tones: Vec<CardDetailTone>,
     /// Byte ranges of `detail` holding changed words in a diff preview.
     detail_emphasis: Vec<std::ops::Range<usize>>,
+    detail_syntax: Vec<crate::syntax::SyntaxToken>,
+    detail_gutters: Vec<std::ops::Range<usize>>,
     /// Where a status note or a diff's `+N -M` summary starts in `action`. It is
     /// styled like plain text and kept whole when the row is truncated.
     action_suffix_start: usize,
     inline_detail: bool,
     omission: Option<String>,
     omission_before_detail: bool,
+    /// Closes the detail, such as `exit 0` under shell output.
+    footer: Option<String>,
+    /// The omission, detail, and footer rows share a surface, like shell output.
+    framed: bool,
     action_tone: TranscriptRowTone,
 }
 
@@ -460,6 +570,8 @@ impl CardProjection {
         self.action
             .len()
             .saturating_add(self.detail.len())
+            .saturating_add(self.footer.as_ref().map_or(0, String::len))
+            .saturating_add(self.metadata.len())
             .saturating_add(
                 self.detail_tones
                     .len()
@@ -467,6 +579,16 @@ impl CardProjection {
             )
             .saturating_add(
                 self.detail_emphasis
+                    .len()
+                    .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
+            )
+            .saturating_add(
+                self.detail_syntax
+                    .len()
+                    .saturating_mul(std::mem::size_of::<crate::syntax::SyntaxToken>()),
+            )
+            .saturating_add(
+                self.detail_gutters
                     .len()
                     .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
             )
@@ -892,6 +1014,26 @@ impl TranscriptRowCache {
                     position.absolute_byte_offset,
                     width,
                 )?,
+            RowPosition::RunSummary => {
+                // Model and effort names come from providers: keep terminal controls
+                // inert and the row to one line.
+                let summary = entry
+                    .run_summary()?
+                    .graphemes(true)
+                    .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                    .collect::<String>();
+                let summary = self.clip_to_columns(&summary, width);
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        TranscriptRowKind::RunSummary,
+                        summary,
+                        entry.display_content().len(),
+                    ),
+                    next: spacer_after(transcript, entry),
+                }
+            }
             RowPosition::Spacer if next_entry().is_some() => {
                 let rule = transcript
                     .entry_after(entry.id)
@@ -943,7 +1085,7 @@ impl TranscriptRowCache {
             _ => return None,
         };
         let group_signature = (projected.row.kind == TranscriptRowKind::CardGroup)
-            .then(|| mcp_group_signature(transcript, entry))
+            .then(|| card_group_signature(transcript, entry))
             .flatten();
         Some(CachedRow {
             row: projected.row,
@@ -987,16 +1129,53 @@ impl TranscriptRowCache {
         anchor: RowAnchor,
         width: usize,
     ) -> ProjectedRow {
-        let line_count = entry
+        let expanded = self.fold.is_expanded(entry.id);
+        let foldable = !entry.thinking().is_empty();
+        let fold_hint = if !foldable {
+            FoldHint::None
+        } else if expanded {
+            self.fold.collapse_hint()
+        } else {
+            self.fold.expand_hint()
+        };
+        let mut row_width = width;
+        // Like a card's action row, the hint shows only where its columns are kept.
+        let fold_hint = if width >= ACTION_COLUMNS_BESIDE_HINT + fold_hint.width() {
+            row_width -= fold_hint.width();
+            fold_hint
+        } else {
+            FoldHint::None
+        };
+        let trailing = entry
+            .thinking_ms()
+            .map(|milliseconds| crate::tool_cards::format_duration(u64::from(milliseconds)))
+            .filter(|duration| {
+                row_width >= ACTION_COLUMNS_BESIDE_HINT + duration.width() + TRAILING_GAP
+            });
+        if let Some(duration) = &trailing {
+            row_width -= duration.width() + TRAILING_GAP;
+        }
+        // `◇` and `Thought` fill the status marker and chip columns of the tool rows
+        // around it, and its first line summarizes it.
+        let label = "◇  Thought";
+        let mut text = label.to_owned();
+        if let Some(summary) = entry
             .thinking()
             .lines()
-            .filter(|line| !line.is_empty())
-            .count();
-        let text = if line_count > 1 {
-            format!("thought · {line_count} lines")
-        } else {
-            "thought".into()
-        };
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+        {
+            let room = row_width.saturating_sub(label.width() + LABEL_GAP.len());
+            let summary = summary
+                .graphemes(true)
+                .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                .collect::<String>();
+            let summary = self.clip_to_columns(&summary, room);
+            if !summary.is_empty() {
+                text.push_str(LABEL_GAP);
+                text.push_str(&summary);
+            }
+        }
         let next = if self.fold.is_expanded(entry.id) && !entry.thinking().is_empty() {
             Some(RowAnchor {
                 entry_id: entry.id,
@@ -1024,15 +1203,10 @@ impl TranscriptRowCache {
                 })
             }
         });
-        let _ = width;
         let mut row = TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, 0);
-        if !entry.thinking().is_empty() {
-            row.fold_hint = if self.fold.is_expanded(entry.id) {
-                self.fold.collapse_hint()
-            } else {
-                self.fold.expand_hint()
-            };
-        }
+        row.fold_hint = fold_hint;
+        row.fold_arrow = foldable.then(|| self.fold_arrow_after(label, expanded));
+        row.trailing = trailing;
         ProjectedRow { row, next }
     }
 
@@ -1115,26 +1289,77 @@ impl TranscriptRowCache {
         width: usize,
     ) -> Option<ProjectedRow> {
         let (start, members) = card_run(transcript, entry.id)?;
-        if start != entry.id || self.fold.is_group_expanded(start) {
+        if start != entry.id {
             return None;
         }
+        let expanded = self.fold.is_run_expanded(&members);
         let last = transcript.entry(*members.last()?)?;
-        let next = separator_after(transcript, last);
-        if card_group_key(entry)? == CardGroupKey::Explore {
+        let next = if expanded {
+            Some(card_action_anchor(entry.id))
+        } else {
+            separator_after(transcript, last)
+        };
+        let hint = if expanded {
+            self.fold.collapse_hint()
+        } else {
+            self.fold.expand_hint()
+        };
+        let kind = card_group_key(entry)?;
+        if !matches!(kind, CardGroupKey::Mcp(_)) {
+            let tone = explore_group_tone(transcript, &members);
+            let marker = status_marker(match tone {
+                TranscriptRowTone::Success => ToolStatus::Done,
+                TranscriptRowTone::Error => ToolStatus::Error,
+                TranscriptRowTone::Warning => ToolStatus::Cancelled,
+                _ => ToolStatus::Running,
+            });
+            let (label, unit) = match &kind {
+                CardGroupKey::Explore => ("Explore".to_owned(), "actions"),
+                CardGroupKey::Tool(name) => (
+                    entry.tool_card()?.chip_label(),
+                    if name == "bash" { "commands" } else { "calls" },
+                ),
+                CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
+            };
+            let mut source = format!("{marker}{label}{LABEL_GAP}{} {unit}", members.len());
+            let count_end = source.len();
+            let (row_width, fold_hint) = if width >= ACTION_COLUMNS_BESIDE_HINT + hint.width() {
+                (width - hint.width(), hint)
+            } else {
+                (width, FoldHint::None)
+            };
+            // An open group lists its members below, so only a closed one previews them.
+            if !expanded {
+                let budget = row_width.saturating_sub(self.action_columns(&source));
+                source.push_str(&self.group_preview(transcript, &kind, &members, budget));
+            }
+            let spans = self.single_action_row_spans(
+                &source,
+                row_width,
+                CardRowStyle {
+                    marker_end: marker.len(),
+                    label_end: marker.len() + label.len(),
+                    argument_start: count_end,
+                    argument_style: crate::markdown::InlineStyle::ToolArgument,
+                    ..CardRowStyle::PLAIN
+                },
+                TranscriptRowKind::CardGroup,
+            );
             let mut row = TranscriptRow::plain(
                 anchor,
                 TranscriptRole::Tool,
                 TranscriptRowKind::CardGroup,
-                format!("explored {} files", members.len()),
+                String::new(),
                 0,
             );
-            row.tone = explore_group_tone(transcript, &members);
-            row.fold_hint = self.fold.expand_hint();
+            row.spans = spans;
+            row.tone = tone;
+            row.fold_hint = fold_hint;
+            row.fold_arrow = Some(self.fold_arrow_after(&format!("{marker}{label}"), expanded));
             return Some(ProjectedRow { row, next });
         }
         // A repeated MCP call reads like one card's action line, with a count after its
         // target, so it keeps the marker, chip and argument columns of the rows around it.
-        let hint = self.fold.expand_hint();
         let (row_width, fold_hint) = if width >= ACTION_COLUMNS_BESIDE_HINT + hint.width() {
             (width - hint.width(), hint)
         } else {
@@ -1156,6 +1381,7 @@ impl TranscriptRowCache {
         row.spans = spans;
         row.tone = header.tone;
         row.fold_hint = fold_hint;
+        row.fold_arrow = Some(self.fold_arrow_after(&header.source[..header.label_end], expanded));
         Some(ProjectedRow { row, next })
     }
 
@@ -1319,6 +1545,8 @@ impl TranscriptRowCache {
                     argument_style: projection.action_argument_style,
                     suffix_start: projection.action_suffix_start,
                     emphasis: &[],
+                    syntax: &[],
+                    gutters: &[],
                 };
                 // A collapsed card keeps its action on one row; expanding it (Right in
                 // browse) wraps the full command or path instead and shows any hidden
@@ -1326,21 +1554,71 @@ impl TranscriptRowCache {
                 let expanded = self.fold.is_expanded(entry.id);
                 let mut row_width = width;
                 let mut fold_hint = FoldHint::None;
+                let mut fold_arrow = None;
+                let mut trailing = None;
+                let mut live_timer = false;
                 if absolute_offset == 0 {
+                    // The duration takes a right-aligned column, and is the first thing
+                    // a narrow row drops. It is counted before deciding whether the
+                    // action overflows, since the action then has that much less room.
+                    let duration = entry
+                        .tool_card()
+                        .and_then(|card| card.duration_label())
+                        .map(|duration| {
+                            let reserved = duration.width() + TRAILING_GAP;
+                            (duration, reserved)
+                        });
+                    // A call still running keeps the same columns for its live timer.
+                    let in_progress = duration.is_none()
+                        && entry.tool_card().is_some_and(|card| {
+                            matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
+                        });
+                    let reserved = duration.as_ref().map_or(
+                        if in_progress {
+                            LIVE_TIMER_COLUMNS + TRAILING_GAP
+                        } else {
+                            0
+                        },
+                        |(_, reserved)| *reserved,
+                    );
+                    let text_width =
+                        if reserved > 0 && width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
+                            width - reserved
+                        } else {
+                            width
+                        };
                     let hint = if expanded {
                         self.fold.collapse_hint()
                     } else if (!projection.inline_detail
                         && card_position_after_action(entry, &projection).is_some())
-                        || self.action_columns(&projection.action) > width
+                        || self.action_columns(&projection.action) > text_width
                     {
                         self.fold.expand_hint()
                     } else {
                         FoldHint::None
                     };
+                    if hint != FoldHint::None {
+                        fold_arrow = Some(self.fold_arrow_after(
+                            &projection.action[..projection.action_label_end],
+                            expanded,
+                        ));
+                    }
                     if hint != FoldHint::None && width >= ACTION_COLUMNS_BESIDE_HINT + hint.width()
                     {
                         row_width = width - hint.width();
                         fold_hint = hint;
+                    }
+                    if let Some((duration, reserved)) = duration {
+                        if row_width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
+                            row_width -= reserved;
+                            trailing = Some(duration);
+                        }
+                    } else if in_progress
+                        && row_width
+                            >= ACTION_COLUMNS_BESIDE_HINT + LIVE_TIMER_COLUMNS + TRAILING_GAP
+                    {
+                        row_width -= LIVE_TIMER_COLUMNS + TRAILING_GAP;
+                        live_timer = true;
                     }
                 }
                 if absolute_offset == 0 && !expanded {
@@ -1354,6 +1632,9 @@ impl TranscriptRowCache {
                         next,
                     ) {
                         projected.row.fold_hint = fold_hint;
+                        projected.row.fold_arrow = fold_arrow;
+                        projected.row.trailing = trailing;
+                        projected.row.live_timer = live_timer;
                         return Some(projected);
                     }
                 }
@@ -1371,11 +1652,34 @@ impl TranscriptRowCache {
                     next,
                 );
                 projected.row.fold_hint = fold_hint;
+                projected.row.fold_arrow = fold_arrow;
+                projected.row.trailing = trailing;
+                projected.row.live_timer = live_timer;
+                Some(projected)
+            }
+            CardSection::Metadata if !projection.metadata.is_empty() => {
+                let next = card_position_after_metadata(entry, &projection)
+                    .or_else(|| separator_after(transcript, entry));
+                let mut projected = self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    &projection.metadata,
+                    0,
+                    absolute_offset,
+                    result_width(width),
+                    TranscriptRowKind::CardDetail,
+                    TranscriptRowTone::Default,
+                    CardRowStyle::PLAIN,
+                    next,
+                );
+                projected.row.gutter = result_gutter(entry, &projection, anchor);
                 Some(projected)
             }
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
-                    separator_after(transcript, entry)
+                    card_footer_position(entry, &projection)
+                        .or_else(|| separator_after(transcript, entry))
                 } else {
                     projection
                         .omission
@@ -1387,6 +1691,7 @@ impl TranscriptRowCache {
                                 absolute_byte_offset: 0,
                             }),
                         })
+                        .or_else(|| card_footer_position(entry, &projection))
                         .or_else(|| separator_after(transcript, entry))
                 };
                 let tone = projection.detail_tone(absolute_offset);
@@ -1402,6 +1707,8 @@ impl TranscriptRowCache {
                     tone,
                     CardRowStyle {
                         emphasis: &projection.detail_emphasis,
+                        syntax: &projection.detail_syntax,
+                        gutters: &projection.detail_gutters,
                         ..CardRowStyle::PLAIN
                     },
                     next,
@@ -1420,7 +1727,8 @@ impl TranscriptRowCache {
                         }),
                     })
                 } else {
-                    separator_after(transcript, entry)
+                    card_footer_position(entry, &projection)
+                        .or_else(|| separator_after(transcript, entry))
                 };
                 let mut projected = self.build_card_text_row(
                     entry,
@@ -1431,19 +1739,50 @@ impl TranscriptRowCache {
                     absolute_offset,
                     result_width(width),
                     TranscriptRowKind::CardOmission,
-                    TranscriptRowTone::Warning,
+                    if projection.framed {
+                        TranscriptRowTone::SurfaceNote
+                    } else {
+                        TranscriptRowTone::Warning
+                    },
                     CardRowStyle::PLAIN,
                     next,
                 );
                 projected.row.gutter = result_gutter(entry, &projection, anchor);
                 Some(projected)
             }
-            CardSection::Detail => None,
+            CardSection::Footer => {
+                let footer = projection.footer.as_deref()?;
+                let mut projected = self.build_card_text_row(
+                    entry,
+                    anchor,
+                    section,
+                    footer,
+                    0,
+                    absolute_offset,
+                    result_width(width),
+                    TranscriptRowKind::CardOmission,
+                    TranscriptRowTone::SurfaceNote,
+                    CardRowStyle::PLAIN,
+                    separator_after(transcript, entry),
+                );
+                projected.row.gutter = result_gutter(entry, &projection, anchor);
+                Some(projected)
+            }
+            CardSection::Detail | CardSection::Metadata => None,
         }
     }
 
     /// The display columns of an action line, or `usize::MAX` when it holds a line
     /// break and so can never fit one row.
+    /// The arrow for a foldable row whose label ends `label`: the middle column of
+    /// the gap after it.
+    fn fold_arrow_after(&mut self, label: &str, expanded: bool) -> FoldArrow {
+        FoldArrow {
+            column: u16::try_from(self.action_columns(label).saturating_add(1)).unwrap_or(u16::MAX),
+            expanded,
+        }
+    }
+
     fn action_columns(&mut self, text: &str) -> usize {
         let mut column = 0_usize;
         for grapheme in text.graphemes(true) {
@@ -1482,6 +1821,63 @@ impl TranscriptRowCache {
         row.tone = tone;
         row.spans = spans;
         Some(ProjectedRow { row, next })
+    }
+
+    /// What a closed group ran, in order, as `" · first, second +2"`, fitted to
+    /// `budget` columns. Members that do not fit are counted rather than cut, and the
+    /// preview is left out when not even one member fits.
+    fn group_preview(
+        &mut self,
+        transcript: &Transcript,
+        kind: &CardGroupKey,
+        members: &[TranscriptEntryId],
+        budget: usize,
+    ) -> String {
+        let items = group_preview_items(transcript, kind, members);
+        // Members whose arguments are unknown are still counted in `+N`, so the
+        // preview always agrees with the header's count.
+        let total = members.len();
+        let mut preview = String::new();
+        let mut shown = 0;
+        for (index, item) in items.iter().enumerate() {
+            let separator = if index == 0 { " · " } else { ", " };
+            let item = self.clip_to_columns(item, GROUP_PREVIEW_ITEM_COLUMNS);
+            let candidate = format!("{preview}{separator}{item}");
+            let hidden = total - index - 1;
+            let more = if hidden == 0 {
+                String::new()
+            } else {
+                format!(" +{hidden}")
+            };
+            if self.action_columns(&candidate) + self.action_columns(&more) > budget {
+                break;
+            }
+            preview = candidate;
+            shown += 1;
+        }
+        if shown > 0 && shown < total {
+            preview.push_str(&format!(" +{}", total - shown));
+        }
+        preview
+    }
+
+    /// Shorten `text` to at most `columns` display columns, ending in `…` when cut.
+    fn clip_to_columns(&mut self, text: &str, columns: usize) -> String {
+        if self.action_columns(text) <= columns {
+            return text.to_owned();
+        }
+        let mut clipped = String::new();
+        let mut used = 0;
+        for grapheme in text.graphemes(true) {
+            let width = UnicodeWidthStr::width(sanitize_grapheme(grapheme, used).as_str());
+            if used + width + 1 > columns {
+                break;
+            }
+            clipped.push_str(grapheme);
+            used += width;
+        }
+        clipped.push('…');
+        clipped
     }
 
     /// Style an action line as one row of at most `width` columns. A line that does not
@@ -1557,7 +1953,7 @@ impl TranscriptRowCache {
             column += UnicodeWidthStr::width(safe.as_str());
             push(
                 &safe,
-                style.inline_at(kind, offset),
+                style.inline_at(kind, offset, grapheme.len()),
                 offset,
                 offset + grapheme.len(),
             );
@@ -1611,7 +2007,38 @@ impl TranscriptRowCache {
 
         let mut text = String::new();
         let mut action_spans: Vec<TranscriptSpan> = Vec::new();
-        let mut column = 0_usize;
+        let logical_start = source[..relative_start]
+            .rfind('\n')
+            .map_or(0, |index| index + 1);
+        let indent = if relative_start > logical_start {
+            style
+                .gutters
+                .iter()
+                .find(|range| range.start == logical_start)
+                // Columns, not bytes: the removed-line sign `−` is one column wide.
+                .and_then(|range| source.get(range.clone()))
+                .map_or(0, UnicodeWidthStr::width)
+        } else {
+            0
+        };
+        let indent = if width > indent + 4 { indent } else { 0 };
+        let mut column = indent;
+        if indent > 0 {
+            let prefix = format!("{}↳ ", " ".repeat(indent.saturating_sub(2)));
+            text.push_str(&prefix);
+            action_spans.push(TranscriptSpan {
+                text: prefix,
+                style: TranscriptSpanStyle {
+                    inline: crate::markdown::InlineStyle::DiffGutter,
+                    ..TranscriptSpanStyle::default()
+                },
+                affinity: SourceAffinity {
+                    source_offset: relative_start,
+                    source_end: relative_start,
+                    output_offset: 0,
+                },
+            });
+        }
         let mut next_offset = None;
         let mut preserve_terminal_break = false;
         for (offset, grapheme) in source[relative_start..].grapheme_indices(true) {
@@ -1629,11 +2056,20 @@ impl TranscriptRowCache {
                 next_offset = Some(relative);
                 break;
             }
-            if kind == TranscriptRowKind::CardAction || !style.emphasis.is_empty() {
-                let inline = style.inline_at(kind, relative);
+            if kind == TranscriptRowKind::CardAction
+                || !style.emphasis.is_empty()
+                || !style.syntax.is_empty()
+                || !style.gutters.is_empty()
+            {
+                let inline = style.inline_at(kind, relative, grapheme.len());
+                let syntax = style
+                    .syntax
+                    .iter()
+                    .find(|token| token.range.contains(&relative))
+                    .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class);
                 if let Some(last) = action_spans
                     .last_mut()
-                    .filter(|last| last.style.inline == inline)
+                    .filter(|last| last.style.inline == inline && last.style.syntax == syntax)
                 {
                     last.text.push_str(&safe);
                     last.affinity.source_end = relative + grapheme.len();
@@ -1642,6 +2078,7 @@ impl TranscriptRowCache {
                         text: safe.clone(),
                         style: TranscriptSpanStyle {
                             inline,
+                            syntax,
                             ..TranscriptSpanStyle::default()
                         },
                         affinity: SourceAffinity {
@@ -1921,6 +2358,7 @@ impl TranscriptRowCache {
         let mut cursor = start;
         let mut word_break = None::<(usize, usize, usize)>;
         let mut previous_space = false;
+        let mut row_full_width = false;
         while cursor < snapshot.output_len {
             let block_index = snapshot
                 .block_starts
@@ -1947,13 +2385,17 @@ impl TranscriptRowCache {
             let local = cursor.saturating_sub(block_start);
             let mut span_start = 0_usize;
             let mut advanced = false;
-            for span in &block.spans {
+            for (span_index, span) in block.spans.iter().enumerate() {
                 let span_end = span_start + span.text.len();
                 if local >= span_end {
                     span_start = span_end;
                     continue;
                 }
                 let relative_start = local.saturating_sub(span_start);
+                // Code and tables keep the full width from where they start in a row,
+                // even after a list or quote marker; prose wraps at the measure. The
+                // span decides this once, not per grapheme.
+                let span_full_width = keeps_full_width(block, span_index, span);
                 for (relative_offset, grapheme) in
                     span.text[relative_start..].grapheme_indices(true)
                 {
@@ -2002,7 +2444,13 @@ impl TranscriptRowCache {
                         }
                     }
                     previous_space = space;
-                    if !spans.is_empty() && column.saturating_add(grapheme_width) > width {
+                    row_full_width |= span_full_width;
+                    let wrap_width = if row_full_width {
+                        width
+                    } else {
+                        width.min(PROSE_COLUMNS)
+                    };
+                    if !spans.is_empty() && column.saturating_add(grapheme_width) > wrap_width {
                         if let Some((offset, count, last_len)) = word_break {
                             spans.truncate(count);
                             if let Some(last) = spans.last_mut() {
@@ -2076,6 +2524,9 @@ impl TranscriptRowCache {
                 spans,
                 gutter: RowGutter::None,
                 fold_hint: FoldHint::None,
+                fold_arrow: None,
+                trailing: None,
+                live_timer: false,
             },
             next,
         }
@@ -2129,7 +2580,11 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
             }),
-            RowPosition::Spacer => {
+            RowPosition::Spacer if entry.run_summary().is_some() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            }),
+            RowPosition::Spacer | RowPosition::RunSummary => {
                 if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
                     Some(RowAnchor {
                         entry_id: start,
@@ -2140,6 +2595,22 @@ impl TranscriptRowCache {
                 }
             }
         }
+    }
+
+    /// An entry's final row: its run summary when it closes a turn, else its body's last row.
+    fn end_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
+        if entry.run_summary().is_some() {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            };
+        }
+        self.last_anchor(transcript, entry, width)
     }
 
     /// Whether `entry` is a card showing result rows, expanded or as an inline diff preview.
@@ -2195,7 +2666,9 @@ impl TranscriptRowCache {
                 }
                 Some(offset) if offset == target => return Some(anchor),
                 Some(_) => return Some(anchor),
-                None if next.position == RowPosition::Spacer => return Some(anchor),
+                None if matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary) => {
+                    return Some(anchor);
+                }
                 None => return Some(previous),
             }
         }
@@ -2222,7 +2695,9 @@ impl TranscriptRowCache {
             if next == target {
                 return Some(current);
             }
-            if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+            if next.entry_id != entry.id
+                || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+            {
                 return Some(current);
             }
             current = next;
@@ -2313,7 +2788,9 @@ impl TranscriptRowCache {
                 let Some(next) = cached.next else {
                     return current;
                 };
-                if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+                if next.entry_id != entry.id
+                    || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+                {
                     return current;
                 }
                 current = next;
@@ -2402,6 +2879,7 @@ impl TranscriptRowCache {
                             RowPosition::Spacer
                                 | RowPosition::UserLeadIn
                                 | RowPosition::UserLeadOut
+                                | RowPosition::RunSummary
                         )
                 })
         });
@@ -2463,7 +2941,7 @@ fn tool_action_projection(
     let argument_start = if card.mcp_target().is_some()
         || (card.arguments_available && !card.action_arguments.is_empty())
     {
-        label_end.saturating_add(2)
+        label_end.saturating_add(LABEL_GAP.len())
     } else {
         usize::MAX
     };
@@ -2472,8 +2950,23 @@ fn tool_action_projection(
         "read" | "ls" | "edit" | "write" => crate::markdown::InlineStyle::ToolPath,
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
+    let label = card.chip_label();
+    let rest = if card.mcp_target().is_none() && card.arguments_available {
+        card.display_arguments()
+    } else {
+        // `action()` separates its parts with two spaces; the row uses the label gap.
+        let action = card.action();
+        action
+            .strip_prefix(label.as_str())
+            .map(|rest| rest.strip_prefix("  ").unwrap_or(rest).to_owned())
+            .unwrap_or_default()
+    };
     (
-        format!("{marker}{}", card.action()),
+        if rest.is_empty() {
+            format!("{marker}{label}")
+        } else {
+            format!("{marker}{label}{LABEL_GAP}{rest}")
+        },
         marker.len(),
         label_end,
         argument_start,
@@ -2511,87 +3004,158 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                     DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
                 );
                 let mut action_suffix_start = note_start;
-                let (preview, detail_tones, detail_emphasis) = if diff {
-                    // The action line already names the file; carry the change counts
-                    // there instead of a separate `M path +N -M` heading row.
-                    action_suffix_start = action_suffix_start.min(action.len());
-                    if detail.kind == DetailPresentationKind::DiffCreate {
-                        action.push_str("  new file");
-                    }
-                    if !detail.summary.is_empty() {
-                        action.push_str("  ");
-                        action.push_str(&detail.summary);
-                    }
-                    let preview = crate::diff_card::preview(detail);
-                    let tones = preview
-                        .tones
-                        .into_iter()
-                        .map(|(range, tone)| CardDetailTone {
-                            start: range.start,
-                            end: range.end,
-                            tone,
-                        })
-                        .collect();
-                    (preview.text, tones, preview.emphasis)
-                } else {
-                    let (preview, tones) = structured_card_preview(detail);
-                    (preview, tones, Vec::new())
-                };
+                let (preview, detail_tones, detail_emphasis, detail_syntax, detail_gutters) =
+                    if diff {
+                        // The action line already names the file; carry the change counts
+                        // there instead of a separate `M path +N -M` heading row.
+                        action_suffix_start = action_suffix_start.min(action.len());
+                        if detail.kind == DetailPresentationKind::DiffCreate {
+                            action.push_str("  new file");
+                        }
+                        if !detail.summary.is_empty() {
+                            action.push_str("  ");
+                            action.push_str(&detail.summary);
+                        }
+                        let preview = crate::diff_card::preview(detail);
+                        let tones = preview
+                            .tones
+                            .into_iter()
+                            .map(|(range, tone)| CardDetailTone {
+                                start: range.start,
+                                end: range.end,
+                                tone,
+                            })
+                            .collect();
+                        (
+                            preview.text,
+                            tones,
+                            preview.emphasis,
+                            preview.syntax,
+                            preview.gutters,
+                        )
+                    } else {
+                        let (preview, tones) = structured_card_preview(detail);
+                        (preview, tones, Vec::new(), Vec::new(), Vec::new())
+                    };
                 return Some(CardProjection {
                     action,
                     action_marker_end,
                     action_label_end,
                     action_argument_start,
                     action_argument_style,
+                    metadata: String::new(),
                     detail: preview,
                     detail_base: 0,
                     detail_tones,
                     detail_emphasis,
+                    detail_syntax,
+                    detail_gutters,
                     action_suffix_start,
                     inline_detail: diff,
                     omission: None,
                     omission_before_detail: false,
+                    footer: None,
+                    framed: false,
                     action_tone: tool_status_tone(card.status),
                 });
             }
             let tail_preview = card.status == ToolStatus::Error
-                || (card.status == ToolStatus::Done && card.name == "bash");
+                || (matches!(card.status, ToolStatus::Done | ToolStatus::Running)
+                    && card.name == "bash");
             let retained_preview = if tail_preview {
                 card.retained_output.preview_tail()
             } else {
                 card.retained_output.preview_head()
             };
-            let detail = if card.detail.is_empty() {
-                retained_preview.text.clone()
-            } else if retained_preview.text.is_empty() || retained_preview.text == card.detail {
-                card.detail.clone()
+            let mut metadata = if card.detail == retained_preview.text {
+                String::new()
             } else {
-                format!("{}\n{}", card.detail, retained_preview.text)
+                card.detail.clone()
             };
+            if card.display_arguments() != card.action_arguments {
+                metadata = if metadata.is_empty() {
+                    card.action_arguments.clone()
+                } else {
+                    format!("{}\n{metadata}", card.action_arguments)
+                };
+            }
             let shown_output_bytes = retained_preview.text.len() as u64;
             let omitted = card
                 .retained_output
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
-            let omission = card_omission(omitted, card.backend_truncated, tail_preview);
+            // Shell output reads as a framed block: what scrolled away above, the
+            // tail, and the exit status below once it finishes. While the command
+            // runs, the note says the tail is still moving.
+            let framed = tail_preview && card.name == "bash";
+            let omission = match retained_preview.dropped_lines {
+                lines if framed && lines > 0 => Some(format!(
+                    "({lines} earlier line{}{}){}",
+                    if lines == 1 { "" } else { "s" },
+                    if card.backend_truncated {
+                        "; tool reported truncation"
+                    } else {
+                        ""
+                    },
+                    if card.status == ToolStatus::Running {
+                        " · live"
+                    } else {
+                        ""
+                    }
+                )),
+                _ => card_omission(omitted, card.backend_truncated, tail_preview),
+            };
+            let mut detail = retained_preview.text.clone();
+            let mut detail_base = if tail_preview {
+                usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
+            } else {
+                0
+            };
+            let footer = card
+                .exit_code
+                .filter(|_| framed)
+                .map(|code| format!("exit {code}"));
+            if let Some(code) = card
+                .exit_code
+                .filter(|_| framed && retained_preview.base_offset == 0)
+            {
+                // The footer names the exit status, so the envelope opening the
+                // output is dropped; offsets stay those of the retained output.
+                let status = format!("Command exited with code {code}");
+                if let Some(rest) = detail.strip_prefix(&status) {
+                    let stripped = status.len() + if rest.starts_with(": ") { 2 } else { 0 };
+                    detail = detail[stripped..].to_owned();
+                    detail_base += stripped;
+                }
+            }
+            let detail_tones = if framed && !detail.is_empty() {
+                vec![CardDetailTone {
+                    start: 0,
+                    end: detail.len(),
+                    tone: TranscriptRowTone::Surface,
+                }]
+            } else {
+                Vec::new()
+            };
             Some(CardProjection {
                 action,
                 action_marker_end,
                 action_label_end,
                 action_argument_start,
                 action_argument_style,
+                metadata,
                 detail,
-                detail_base: if tail_preview {
-                    usize::try_from(retained_preview.base_offset).unwrap_or(usize::MAX)
-                } else {
-                    0
-                },
-                detail_tones: Vec::new(),
+                detail_base,
+                detail_tones,
                 detail_emphasis: Vec::new(),
+                detail_syntax: Vec::new(),
+                detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
+                footer,
+                framed,
                 action_tone: tool_status_tone(card.status),
             })
         }
@@ -2601,22 +3165,35 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .base_offset
                 .saturating_add(card.backend_dropped_bytes);
             let omission = card_omission(omitted, card.backend_truncated, true);
-            let mut action = format!("{}{}", process_marker(card), card.action());
+            let mut action = format!(
+                "{}{}{LABEL_GAP}{}",
+                process_marker(card),
+                card.chip_label(),
+                card.task_label.as_deref().unwrap_or("Background command")
+            );
             let note_start = push_status_note(&mut action, card.status_note());
+            // Background output has no completion line, so the row names the exit code.
+            let exit = card.exit_code.map(|code| format!("exit {code}"));
+            let exit_start = push_status_note(&mut action, exit.as_deref());
             Some(CardProjection {
                 action,
                 action_marker_end: process_marker(card).len(),
                 action_label_end: process_marker(card).len() + card.chip_label().len(),
                 action_argument_start: usize::MAX,
                 action_argument_style: crate::markdown::InlineStyle::Normal,
+                metadata: card.action(),
                 detail: preview.text,
                 detail_base: usize::try_from(preview.base_offset).unwrap_or(usize::MAX),
                 detail_tones: Vec::new(),
                 detail_emphasis: Vec::new(),
-                action_suffix_start: note_start,
+                detail_syntax: Vec::new(),
+                detail_gutters: Vec::new(),
+                action_suffix_start: note_start.min(exit_start),
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
+                footer: None,
+                framed: false,
                 action_tone: process_state_tone(card.display_state),
             })
         }
@@ -2741,6 +3318,9 @@ fn result_gutter(
     projection: &CardProjection,
     anchor: RowAnchor,
 ) -> RowGutter {
+    if projection.inline_detail {
+        return RowGutter::Indent;
+    }
     if card_position_after_action(entry, projection) == Some(anchor) {
         RowGutter::Connector
     } else {
@@ -2749,6 +3329,22 @@ fn result_gutter(
 }
 
 fn card_position_after_action(
+    entry: &TranscriptEntry,
+    projection: &CardProjection,
+) -> Option<RowAnchor> {
+    if !projection.metadata.is_empty() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Metadata,
+                absolute_byte_offset: 0,
+            }),
+        });
+    }
+    card_position_after_metadata(entry, projection)
+}
+
+fn card_position_after_metadata(
     entry: &TranscriptEntry,
     projection: &CardProjection,
 ) -> Option<RowAnchor> {
@@ -2770,10 +3366,24 @@ fn card_position_after_action(
             }),
         });
     }
-    projection.omission.as_ref().map(|_| RowAnchor {
+    projection
+        .omission
+        .as_ref()
+        .map(|_| RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Card(CardPosition {
+                section: CardSection::Omission,
+                absolute_byte_offset: 0,
+            }),
+        })
+        .or_else(|| card_footer_position(entry, projection))
+}
+
+fn card_footer_position(entry: &TranscriptEntry, projection: &CardProjection) -> Option<RowAnchor> {
+    projection.footer.as_ref().map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Card(CardPosition {
-            section: CardSection::Omission,
+            section: CardSection::Footer,
             absolute_byte_offset: 0,
         }),
     })
@@ -2827,7 +3437,7 @@ impl McpGroupHeader {
         let marker = status_marker(shown.status);
         let mut source = format!("{marker}{}", first.chip_label());
         let label_end = source.len();
-        source.push_str("  ");
+        source.push_str(LABEL_GAP);
         source.push_str(&first.mcp_target()?);
         let count = format!(" ×{}", cards.len());
         if !compact {
@@ -2881,10 +3491,12 @@ impl McpGroupHeader {
         CardRowStyle {
             marker_end: self.marker_end,
             label_end: self.label_end,
-            argument_start: self.label_end + 2,
+            argument_start: self.label_end + LABEL_GAP.len(),
             argument_style: crate::markdown::InlineStyle::ToolArgument,
             suffix_start: self.suffix_start,
             emphasis: &[],
+            syntax: &[],
+            gutters: &[],
         }
     }
 
@@ -2898,6 +3510,32 @@ impl McpGroupHeader {
     }
 }
 
+/// Widest a single member may appear in a closed group's preview.
+const GROUP_PREVIEW_ITEM_COLUMNS: usize = 40;
+
+/// Each member's arguments for a closed group's preview, in order. Exploration mixes
+/// tools, so each item there also names its tool.
+fn group_preview_items(
+    transcript: &Transcript,
+    kind: &CardGroupKey,
+    members: &[TranscriptEntryId],
+) -> Vec<String> {
+    members
+        .iter()
+        .filter_map(|id| transcript.entry(*id)?.tool_card())
+        .filter_map(|card| {
+            // The same text the member's own row shows, so a closed group and its
+            // open members read alike.
+            shown_arguments(card)?;
+            let arguments = card.display_arguments();
+            Some(match kind {
+                CardGroupKey::Explore => format!("{} {arguments}", card.name),
+                _ => arguments,
+            })
+        })
+        .collect()
+}
+
 /// A card's arguments as its action line shows them, if it shows any.
 fn shown_arguments(card: &crate::tool_cards::ToolCardSnapshot) -> Option<&str> {
     card.arguments_available
@@ -2905,13 +3543,26 @@ fn shown_arguments(card: &crate::tool_cards::ToolCardSnapshot) -> Option<&str> {
         .filter(|arguments| !arguments.is_empty())
 }
 
-/// The signature of the collapsed MCP group row that `entry` heads, if it heads one.
-fn mcp_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Option<u64> {
+/// Identifies the content of a collapsed group independently of its clipped display.
+fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Option<u64> {
     let (start, members) = card_run(transcript, entry.id)?;
-    if start != entry.id || !matches!(card_group_key(entry)?, CardGroupKey::Mcp(_)) {
+    if start != entry.id {
         return None;
     }
-    McpGroupHeader::new(transcript, &members, false).map(|header| header.signature())
+    match card_group_key(entry)? {
+        CardGroupKey::Explore | CardGroupKey::Tool(_) => {
+            // A closed group previews its members, so their arguments key the row too.
+            use std::hash::{Hash, Hasher};
+            let key = card_group_key(entry)?;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            members.len().hash(&mut hasher);
+            group_preview_items(transcript, &key, &members).hash(&mut hasher);
+            Some(hasher.finish())
+        }
+        CardGroupKey::Mcp(_) => {
+            McpGroupHeader::new(transcript, &members, false).map(|header| header.signature())
+        }
+    }
 }
 
 fn explore_group_tone(transcript: &Transcript, members: &[TranscriptEntryId]) -> TranscriptRowTone {
@@ -2940,6 +3591,16 @@ fn explore_tone_rank(tone: TranscriptRowTone) -> u8 {
     }
 }
 
+fn card_action_anchor(entry_id: TranscriptEntryId) -> RowAnchor {
+    RowAnchor {
+        entry_id,
+        position: RowPosition::Card(CardPosition {
+            section: CardSection::Action,
+            absolute_byte_offset: 0,
+        }),
+    }
+}
+
 fn card_header_cache_valid(
     transcript: &Transcript,
     fold: &FoldState,
@@ -2949,36 +3610,33 @@ fn card_header_cache_valid(
     if cached.entry_revision != entry.revision() {
         return false;
     }
-    let grouped_start = collapsed_group_start(fold, transcript, entry.id);
     match cached.row.kind {
         TranscriptRowKind::CardGroup => {
-            let Some(start) = grouped_start else {
+            let Some((start, members)) = card_run(transcript, entry.id) else {
                 return false;
             };
             if start != entry.id {
                 return false;
             }
-            let Some((_, members)) = card_run(transcript, entry.id) else {
-                return false;
-            };
             let Some(last) = members.last().copied().and_then(|id| transcript.entry(id)) else {
                 return false;
             };
-            if cached.next != separator_after(transcript, last) {
+            let next = if fold.is_run_expanded(&members) {
+                Some(card_action_anchor(entry.id))
+            } else {
+                separator_after(transcript, last)
+            };
+            if cached.next != next {
                 return false;
             }
-            if card_group_key(entry) == Some(CardGroupKey::Explore) {
-                let expected = format!("explored {} files", members.len());
-                cached.row.spans.len() == 1
-                    && cached.row.spans[0].text == expected
-                    && cached.row.tone == explore_group_tone(transcript, &members)
-            } else {
-                cached.group_signature.is_some()
-                    && cached.group_signature == mcp_group_signature(transcript, entry)
-            }
+            cached.group_signature.is_some()
+                && cached.group_signature == card_group_signature(transcript, entry)
+                && (matches!(card_group_key(entry), Some(CardGroupKey::Mcp(_)))
+                    || cached.row.tone == explore_group_tone(transcript, &members))
         }
         TranscriptRowKind::CardAction => {
-            grouped_start.is_none_or(|start| start != entry.id || fold.is_group_expanded(start))
+            cached.row.anchor.position != RowPosition::Header
+                || card_run(transcript, entry.id).is_none_or(|(start, _)| start != entry.id)
         }
         _ => false,
     }
@@ -3057,6 +3715,22 @@ impl TranscriptViewport {
                 entry_id: to,
                 position: RowPosition::Header,
             });
+        }
+    }
+
+    /// Keep a run's header as the top row when an earlier call joins the run and the
+    /// header moves to it; the old start's `Header` anchor now draws a member card.
+    pub(crate) fn follow_moved_group_header(
+        &mut self,
+        from: TranscriptEntryId,
+        to: TranscriptEntryId,
+    ) {
+        let header = |entry_id| RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        };
+        if !self.follow_tail && self.top == Some(header(from)) {
+            self.top = Some(header(to));
         }
     }
 
@@ -3436,7 +4110,7 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
         let entry = transcript.entries().last()?;
-        let mut top = cache.last_anchor(transcript, entry, self.width);
+        let mut top = cache.end_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
@@ -3495,7 +4169,10 @@ fn scroll_anchor_rank(
     };
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
-        RowPosition::Spacer | RowPosition::UserLeadIn | RowPosition::UserLeadOut => 1.0,
+        RowPosition::Spacer
+        | RowPosition::UserLeadIn
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => 1.0,
         RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
@@ -3504,15 +4181,28 @@ fn scroll_anchor_rank(
         RowPosition::Markdown(position) => content_fraction(position.source_offset),
         RowPosition::Card(position) => {
             let card = cache.card_snapshot(entry)?;
-            let total = card.action.len().saturating_add(card.detail.len()).max(1);
+            let total = card
+                .action
+                .len()
+                .saturating_add(card.metadata.len())
+                .saturating_add(card.detail.len())
+                .max(1);
             let offset = match position.section {
                 CardSection::Action => position.absolute_byte_offset,
-                CardSection::Detail => card.action.len().saturating_add(
-                    position
-                        .absolute_byte_offset
-                        .saturating_sub(card.detail_base),
-                ),
-                CardSection::Omission => total,
+                CardSection::Metadata => card
+                    .action
+                    .len()
+                    .saturating_add(position.absolute_byte_offset),
+                CardSection::Detail => card
+                    .action
+                    .len()
+                    .saturating_add(card.metadata.len())
+                    .saturating_add(
+                        position
+                            .absolute_byte_offset
+                            .saturating_sub(card.detail_base),
+                    ),
+                CardSection::Omission | CardSection::Footer => total,
             };
             0.05 + 0.9 * (offset as f64 / total as f64).min(1.0)
         }
@@ -3544,7 +4234,23 @@ fn cached_row_valid(
     if cached.entry_revision == entry.revision() {
         return true;
     }
+    // The body's last row leads to the run summary once one is attached, so a row that
+    // ended the entry must still lead where the entry now ends.
+    let ended_body = cached.next.is_none_or(|next| {
+        next.entry_id == entry.id
+            && matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+    });
+    if ended_body
+        && !matches!(
+            cached.row.kind,
+            TranscriptRowKind::Spacer | TranscriptRowKind::Rule | TranscriptRowKind::RunSummary
+        )
+        && cached.next != separator_after(transcript, entry)
+    {
+        return false;
+    }
     match cached.row.kind {
+        TranscriptRowKind::RunSummary => false,
         TranscriptRowKind::Header if entry.role == TranscriptRole::Assistant => false,
         TranscriptRowKind::Header => {
             let expected = RowPosition::Content(0);
@@ -3693,14 +4399,21 @@ fn normalize_anchor(
         }
         RowPosition::Card(position) => {
             let collapsed_group = collapsed_group_start(&cache.fold, transcript, entry.id);
+            let action = if card_run(transcript, entry.id).is_some_and(|(start, members)| {
+                start == entry.id && cache.fold.is_run_expanded(&members)
+            }) {
+                card_action_anchor(entry.id)
+            } else {
+                RowAnchor {
+                    entry_id: collapsed_group.unwrap_or(entry.id),
+                    position: RowPosition::Header,
+                }
+            };
             let projection = cache.card_snapshot(entry)?;
             if (!cache.fold.is_expanded(entry.id) && !projection.inline_detail)
                 || collapsed_group.is_some()
             {
-                return Some(RowAnchor {
-                    entry_id: collapsed_group.unwrap_or(entry.id),
-                    position: RowPosition::Header,
-                });
+                return Some(action);
             }
             let normalized = match position.section {
                 CardSection::Action => {
@@ -3708,7 +4421,7 @@ fn normalize_anchor(
                     RowAnchor {
                         entry_id: entry.id,
                         position: if offset == 0 {
-                            RowPosition::Header
+                            action.position
                         } else {
                             RowPosition::Card(CardPosition {
                                 section: CardSection::Action,
@@ -3717,6 +4430,15 @@ fn normalize_anchor(
                         },
                     }
                 }
+                CardSection::Metadata if !projection.metadata.is_empty() => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Card(CardPosition {
+                        section: CardSection::Metadata,
+                        absolute_byte_offset: position
+                            .absolute_byte_offset
+                            .min(projection.metadata.len()),
+                    }),
+                },
                 CardSection::Detail if !projection.detail.is_empty() => {
                     let end = projection
                         .detail_base
@@ -3739,6 +4461,15 @@ fn normalize_anchor(
                         absolute_byte_offset: position
                             .absolute_byte_offset
                             .min(projection.omission.as_ref().map_or(0, String::len)),
+                    }),
+                },
+                CardSection::Footer if projection.footer.is_some() => RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Card(CardPosition {
+                        section: CardSection::Footer,
+                        absolute_byte_offset: position
+                            .absolute_byte_offset
+                            .min(projection.footer.as_ref().map_or(0, String::len)),
                     }),
                 },
                 _ => RowAnchor {
@@ -3768,13 +4499,20 @@ fn normalize_anchor(
             }
             Some(match separator_after(transcript, entry) {
                 Some(spacer) => spacer,
-                None => cache.last_anchor(transcript, entry, width),
+                None => cache.end_anchor(transcript, entry, width),
             })
         }
         // The lead-out likewise needs its prompt to still be followed by a reply or card; the
         // prompt's own surface padding is the nearest row that exists either way.
         RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => {
             Some(match separator_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.end_anchor(transcript, entry, width),
+            })
+        }
+        // A summary that is no longer shown resumes at the entry's own gap or last row.
+        RowPosition::RunSummary if entry.run_summary().is_none() => {
+            Some(match spacer_after(transcript, entry) {
                 Some(spacer) => spacer,
                 None => cache.last_anchor(transcript, entry, width),
             })
@@ -3797,8 +4535,25 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Card(_)
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
-        | RowPosition::UserLeadOut => None,
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => None,
     }
+}
+
+/// Assistant prose wraps at a readable measure even on wide terminals.
+const PROSE_COLUMNS: usize = 100;
+
+/// Whether a span keeps the full width: code, raw HTML and tables stay aligned, while
+/// paragraphs, headings and lists wrap at [`PROSE_COLUMNS`].
+fn keeps_full_width(
+    block: &crate::markdown::MarkdownBlock,
+    index: usize,
+    span: &TranscriptSpan,
+) -> bool {
+    matches!(
+        span.style.block,
+        crate::markdown::BlockStyle::Code | crate::markdown::BlockStyle::RawHtml
+    ) || block.span_in_table(index)
 }
 
 /// Large messages stay fully readable as plain text without building an oversized Markdown tree.
@@ -3830,7 +4585,20 @@ fn push_styled_span(
 
 /// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed
 /// cards.
+/// What follows an entry's body: the run summary when the entry ends its turn, then the
+/// gap before the next entry.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    if entry.run_summary().is_some() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::RunSummary,
+        });
+    }
+    spacer_after(transcript, entry)
+}
+
+/// The gap before the entry that follows, if any.
+fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
@@ -3887,32 +4655,50 @@ fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAn
 /// What lets adjacent tool cards share one collapsed row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CardGroupKey {
-    /// Reads, searches and listings, mixed freely: `explored N files`.
+    /// Reads, searches and listings, mixed freely: `Explore N actions`.
     Explore,
     /// Repeated calls to one MCP server's tool, keyed by the full tool name.
     Mcp(String),
+    /// Consecutive successful calls to exactly the same tool.
+    Tool(String),
 }
 
-/// The group a card can join. Bash, edits and writes stay on their own rows, since each
-/// command or diff preview is worth seeing.
+/// The specialized group a card can join.
 fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
     let card = entry.tool_card()?;
     if matches!(card.name.as_str(), "read" | "grep" | "find" | "ls") {
         Some(CardGroupKey::Explore)
+    } else if card.mcp_target().is_some() {
+        Some(CardGroupKey::Mcp(card.name.clone()))
+    } else if card.status == ToolStatus::Done {
+        Some(CardGroupKey::Tool(card.name.clone()))
     } else {
-        card.mcp_target()
-            .map(|_| CardGroupKey::Mcp(card.name.clone()))
+        None
     }
 }
 
-/// The run of at least two adjacent cards with the same group key that holds `entry_id`,
-/// as its first entry and every member in order.
+/// Find a collapsible sequence. Specialized exploration/MCP runs retain their live
+/// summaries; other groups contain successful calls to one tool only. A different
+/// tool, assistant message, process card, or unfinished call ends the sequence.
 pub(crate) fn card_run(
     transcript: &Transcript,
     entry_id: TranscriptEntryId,
 ) -> Option<(TranscriptEntryId, Vec<TranscriptEntryId>)> {
     let key = card_group_key(transcript.entry(entry_id)?)?;
-    let joins = |entry: &TranscriptEntry| card_group_key(entry).as_ref() == Some(&key);
+    matching_card_run(transcript, entry_id, |entry| {
+        card_group_key(entry).as_ref() == Some(&key)
+    })
+}
+
+/// Collect a maximal adjacent run using one membership rule in both directions.
+fn matching_card_run(
+    transcript: &Transcript,
+    entry_id: TranscriptEntryId,
+    joins: impl Fn(&TranscriptEntry) -> bool,
+) -> Option<(TranscriptEntryId, Vec<TranscriptEntryId>)> {
+    if !joins(transcript.entry(entry_id)?) {
+        return None;
+    }
     let mut start = entry_id;
     while let Some(previous) = transcript.entry_before(start) {
         if !joins(previous) {
@@ -3937,8 +4723,8 @@ fn collapsed_group_start(
     transcript: &Transcript,
     entry_id: TranscriptEntryId,
 ) -> Option<TranscriptEntryId> {
-    let (start, _) = card_run(transcript, entry_id)?;
-    (!fold.is_group_expanded(start)).then_some(start)
+    let (start, members) = card_run(transcript, entry_id)?;
+    (!fold.is_run_expanded(&members)).then_some(start)
 }
 
 fn is_line_break(grapheme: &str) -> bool {
@@ -3996,6 +4782,213 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(content, ["alpha beta", "gamma delta", "abcdefghijkl", "mn"]);
+    }
+
+    #[test]
+    fn prose_caps_but_code_stays_wide() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explain".into());
+        let prose = "word ".repeat(40);
+        let code = format!("let value = {};", "x".repeat(130));
+        let item = format!("- item {prose}\n\n  ```rust\n  {code}\n  ```");
+        let quote = format!("> quoted {prose}\n>\n> ```\n> {code}\n> ```");
+        let cell = "y".repeat(120);
+        let table =
+            format!("- table {prose}\n\n  | a | b |\n  |---|---|\n  | {cell} | z |\n\n  {prose}");
+        let answer = transcript
+            .complete_message(
+                1,
+                format!("{prose}\n\n```rust\n{code}\n```\n\n{item}\n\n{quote}\n\n{table}"),
+            )
+            .unwrap();
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 160, 120);
+
+        let rows = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| row.anchor.entry_id == answer)
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+
+        // Lists and quotes holding code or a table still cap their prose, while the
+        // code and table rows inside them keep the full width.
+        let prose_rows = rows.iter().filter(|row| {
+            row.contains("word") && !row.contains("let value") && !row.contains(&cell)
+        });
+        assert!(prose_rows.clone().count() >= 10, "{rows:#?}");
+        assert!(
+            prose_rows.clone().all(|row| row.trim_end().width() <= 100),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row.contains(&code)), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.starts_with("│ ") && row.contains(&code)),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
+    }
+
+    #[test]
+    fn summary_row_ends_the_turn() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        let reply = transcript.append_message_delta(1, "done");
+        transcript.complete_message(1, "done".into());
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 60, 20);
+        // Rows cached before the run completes still lead to its summary after.
+        viewport.visible_rows(&transcript, &mut cache);
+        assert!(transcript.attach_run_summary("4.0s · 1 tool".into()));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        // Following the tail, the summary is the last row.
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let last = rows.last().unwrap();
+        assert_eq!(last.kind, TranscriptRowKind::RunSummary);
+        assert_eq!(last.plain_text(), "4.0s · 1 tool");
+
+        transcript.append_prompt("second".into());
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let summary = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::RunSummary,
+        };
+        let spacer = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Spacer,
+        };
+        // Walking back from the gap passes the summary, then the reply's text.
+        assert_eq!(
+            cache.previous_anchor(&transcript, spacer, 60),
+            Some(summary)
+        );
+        let before = cache.previous_anchor(&transcript, summary, 60).unwrap();
+        assert_eq!(before.entry_id, reply);
+        assert!(matches!(
+            before.position,
+            RowPosition::Markdown(_) | RowPosition::Content(_)
+        ));
+        assert_eq!(
+            cache.row_at(&transcript, before, 60).unwrap().next,
+            Some(summary)
+        );
+    }
+
+    #[test]
+    fn summary_row_is_inert() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        transcript.complete_message(1, "done".into());
+        assert!(transcript.attach_run_summary(format!("evil\u{1b}[2J{}", "x".repeat(200))));
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let summary = rows.last().unwrap().plain_text();
+        // Provider-named text cannot reach the terminal as a control sequence, and the
+        // row stays one line.
+        assert!(!summary.contains('\u{1b}'), "{summary:?}");
+        assert!(
+            summary.width() <= 40 && summary.ends_with('…'),
+            "{summary:?}"
+        );
+    }
+
+    #[test]
+    fn running_rows_keep_their_arrow() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "r1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "/zz/src/some/deeply/nested/module.rs"}),
+        });
+        // While the call runs, its live timer takes the right columns; an action cut
+        // short to make room can still be expanded.
+        for width in 40..80 {
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let action = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap();
+            if action.plain_text().contains('…') {
+                assert!(action.fold_arrow.is_some(), "width {width}: {action:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn cut_rows_keep_their_arrow() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "r1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "/zz/src/some/deeply/nested/module.rs"}),
+        });
+        let mut result = tool_result("r1", "");
+        result.duration_ms = Some(1500);
+        transcript.observe_tool_result(result);
+        // At every width, an action cut short to make room for the duration can
+        // still be expanded to show it whole.
+        for width in 40..80 {
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let action = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap();
+            if action.plain_text().contains('…') {
+                assert!(action.fold_arrow.is_some(), "width {width}: {action:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn thought_row_shows_duration() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("think".into());
+        let answer = transcript.append_thinking_delta(1, "first\nsecond");
+        transcript.append_message_delta(1, "answer");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+
+        let thought = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .find(|row| row.anchor.entry_id == answer && row.kind == TranscriptRowKind::Thought)
+            .unwrap();
+
+        // The first line summarizes the thought; the time sits in the right column.
+        assert_eq!(thought.plain_text(), "◇  Thought   first");
+        assert_eq!(
+            thought.fold_arrow,
+            Some(FoldArrow {
+                column: 11,
+                expanded: false
+            })
+        );
+        assert!(
+            thought
+                .trailing
+                .as_deref()
+                .is_some_and(|time| time.ends_with('s'))
+        );
     }
 
     #[test]
@@ -4255,6 +5248,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
@@ -4279,7 +5273,7 @@ mod tests {
         assert!(
             pending_action
                 .plain_text()
-                .contains("Read     README.md · awaiting approval")
+                .contains("Read      README.md · awaiting approval")
         );
         assert_eq!(pending_action.tone, TranscriptRowTone::Pending);
 
@@ -4293,7 +5287,7 @@ mod tests {
             .iter()
             .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction)
             .unwrap();
-        assert!(action.plain_text().contains("Read     README.md"));
+        assert!(action.plain_text().contains("Read      README.md"));
         assert_eq!(action.tone, TranscriptRowTone::Success);
         assert!(completed.iter().any(|row| {
             row.kind == TranscriptRowKind::CardDetail && row.plain_text() == "first"
@@ -4327,7 +5321,13 @@ mod tests {
         let collapsed = viewport.visible_rows(&transcript, &mut cache);
         assert!(collapsed.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("explored 2 files")
+                && row.plain_text().contains("Explore   2 actions")
+                && row.spans.iter().any(|span| {
+                    span.text == "Explore"
+                        && span.style.inline == crate::markdown::InlineStyle::ToolName
+                })
+                // The arrow shares the column of every other built-in label's rows.
+                && row.fold_arrow.is_some_and(|arrow| arrow.column == 11)
         }));
         assert!(
             !collapsed
@@ -4335,7 +5335,37 @@ mod tests {
                 .any(|row| row.kind == TranscriptRowKind::CardDetail)
         );
 
+        // Resizing a collapsed group clips the same semantic source, including its
+        // marker and chip. A cached narrow row must remain valid on the next paint.
+        for width in [1, 8, 16, 30, 80] {
+            viewport.set_geometry(&transcript, &mut cache, width, 12);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let group = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap();
+            assert!(group.plain_text().width() <= width);
+            assert_eq!(rows, viewport.visible_rows(&transcript, &mut cache));
+        }
+
         cache.fold_mut().expand_group(first);
+        for width in [8, 30, 80] {
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.kind == TranscriptRowKind::CardGroup)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                rows.iter()
+                    .filter(|row| row.kind == TranscriptRowKind::CardAction)
+                    .count(),
+                2
+            );
+            assert_eq!(rows, viewport.visible_rows(&transcript, &mut cache));
+        }
         let grouped = viewport.visible_rows(&transcript, &mut cache);
         assert!(grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
@@ -4392,7 +5422,7 @@ mod tests {
         let grouped = viewport.visible_rows(&transcript, &mut cache);
         assert!(grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("explored 2 files")
+                && row.plain_text().contains("Explore   2 actions")
         }));
         assert!(!grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
@@ -4430,10 +5460,238 @@ mod tests {
             .iter()
             .find(|row| {
                 row.kind == TranscriptRowKind::CardGroup
-                    && row.plain_text().contains("explored 2 files")
+                    && row.plain_text().contains("Explore   2 actions")
             })
             .expect("collapsed explore group");
         assert_eq!(row.tone, TranscriptRowTone::Error);
+    }
+
+    #[test]
+    fn different_tools_and_attention_rows_remain_separate() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("check the project".into());
+        let mut ids = Vec::new();
+        for (call_id, name) in [("read", "read"), ("shell", "bash"), ("edit", "edit")] {
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: name.into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"path": "a.rs", "command": "cargo test"}),
+                }),
+            );
+            if call_id != "edit" {
+                let mut result = tool_result(call_id, "done");
+                result.name = name.into();
+                transcript.observe_tool_result(result);
+            }
+        }
+        ids.push(
+            transcript.observe_approval_requested(crate::tool_cards::ToolCallInput {
+                call_id: "approval".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"command": "git push"}),
+            }),
+        );
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardGroup)
+        );
+        assert!(rows.iter().any(|row| {
+            row.anchor.entry_id == ids[2] && row.kind == TranscriptRowKind::CardAction
+        }));
+        assert!(card_run(&transcript, ids[2]).is_none());
+        assert!(card_run(&transcript, ids[3]).is_none());
+        assert!(rows.iter().any(|row| {
+            row.anchor.entry_id == ids[3]
+                && row.kind == TranscriptRowKind::CardAction
+                && row.plain_text().contains("awaiting approval")
+        }));
+
+        let mut failed = tool_result("edit", "failed");
+        failed.name = "edit".into();
+        failed.is_error = true;
+        transcript.observe_tool_result(failed);
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(rows.iter().any(|row| {
+            row.anchor.entry_id == ids[2]
+                && row.kind == TranscriptRowKind::CardAction
+                && row.tone == TranscriptRowTone::Error
+        }));
+    }
+
+    #[test]
+    fn expanded_activity_survives_out_of_order_completion_and_can_collapse() {
+        let mut transcript = Transcript::default();
+        let mut ids = Vec::new();
+        for index in 0..3 {
+            let call_id = format!("shell-{index}");
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.clone(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"command": format!("echo {index}")}),
+                }),
+            );
+            if index > 0 {
+                let mut result = tool_result(&call_id, "done");
+                result.name = "bash".into();
+                transcript.observe_tool_result(result);
+            }
+        }
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let group = rows
+            .iter()
+            .find(|row| row.plain_text().contains("Bash      2 commands"))
+            .expect("closed group");
+        // The arrow sits in the middle of the gap after the 7-column label.
+        assert_eq!(
+            group.fold_arrow,
+            Some(FoldArrow {
+                column: 11,
+                expanded: false
+            })
+        );
+        cache.fold_mut().expand_group(ids[1]);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind == TranscriptRowKind::CardAction)
+                .count(),
+            3
+        );
+
+        let mut result = tool_result("shell-0", "done");
+        result.name = "bash".into();
+        transcript.observe_tool_result(result);
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            rows.iter()
+                .any(|row| row.plain_text().contains("Bash      3 commands")
+                    && row.fold_arrow.is_some_and(|arrow| arrow.expanded))
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind == TranscriptRowKind::CardAction)
+                .count(),
+            3
+        );
+        let (start, members) = card_run(&transcript, ids[2]).unwrap();
+        assert_eq!(start, ids[0]);
+        cache.fold_mut().collapse_group(&members);
+        assert!(!cache.fold().is_group_expanded(ids[1]));
+        assert!(
+            viewport
+                .visible_rows(&transcript, &mut cache)
+                .iter()
+                .any(|row| { row.plain_text().contains("Bash      3 commands") })
+        );
+    }
+
+    #[test]
+    fn another_tool_splits_two_bash_groups() {
+        let mut transcript = Transcript::default();
+        let mut ids = Vec::new();
+        for (index, name) in [
+            "bash", "bash", "bash", "bash", "bash", "edit", "bash", "bash",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call_id = format!("call-{index}");
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.clone(),
+                    name: name.into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"command": "git status", "path": "notes.md"}),
+                }),
+            );
+            let mut result = tool_result(&call_id, "done");
+            result.name = name.into();
+            transcript.observe_tool_result(result);
+        }
+        for id in &ids[..5] {
+            assert_eq!(
+                card_run(&transcript, *id),
+                Some((ids[0], ids[..5].to_vec()))
+            );
+        }
+        assert!(card_run(&transcript, ids[5]).is_none());
+        for id in &ids[6..] {
+            assert_eq!(
+                card_run(&transcript, *id),
+                Some((ids[6], ids[6..].to_vec()))
+            );
+        }
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        assert!(
+            rows.iter()
+                .any(|row| row.plain_text().contains("Bash      5 commands"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.plain_text().contains("Bash      2 commands"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.anchor.entry_id == ids[5]
+                    && row.kind == TranscriptRowKind::CardAction)
+        );
+    }
+
+    #[test]
+    fn completed_bash_activity_grows_without_crossing_assistant_messages() {
+        let mut transcript = Transcript::default();
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        for count in 1..=3 {
+            let call_id = format!("shell-{count}");
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.clone(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"command": format!("echo {count}")}),
+            });
+            let mut result = tool_result(&call_id, "done");
+            result.name = "bash".into();
+            transcript.observe_tool_result(result);
+            viewport.set_geometry(&transcript, &mut cache, 80, 20);
+            viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            if count >= 2 {
+                assert!(rows.iter().any(|row| {
+                    row.plain_text()
+                        .contains(&format!("Bash      {count} commands"))
+                }));
+            }
+        }
+        transcript.complete_message(1, "Checks finished.".into());
+        let last = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "after-message".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "git status"}),
+        });
+        let mut result = tool_result("after-message", "clean");
+        result.name = "bash".into();
+        transcript.observe_tool_result(result);
+        assert!(card_run(&transcript, last).is_none());
     }
 
     #[test]
@@ -4448,13 +5706,14 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         viewport.set_geometry(&transcript, &mut cache, 80, 12);
         let collapsed = viewport.visible_rows(&transcript, &mut cache);
+        // Collapsed, the thought shows only its first line as a summary.
         assert!(collapsed.iter().any(|row| {
-            row.kind == TranscriptRowKind::Thought && row.plain_text().contains("thought")
+            row.kind == TranscriptRowKind::Thought && row.plain_text() == "◇  Thought   secret plan"
         }));
         assert!(
             !collapsed
                 .iter()
-                .any(|row| row.plain_text().contains("secret plan"))
+                .any(|row| row.plain_text().contains("more"))
         );
         assert!(
             collapsed
@@ -4465,11 +5724,7 @@ mod tests {
         let assistant = transcript.entries().last().unwrap().id;
         cache.fold_mut().expand(assistant);
         let expanded = viewport.visible_rows(&transcript, &mut cache);
-        assert!(
-            expanded
-                .iter()
-                .any(|row| row.plain_text().contains("secret plan"))
-        );
+        assert!(expanded.iter().any(|row| row.plain_text() == "more"));
         assert_eq!(transcript.latest_assistant_text(), Some("visible answer"));
     }
 
@@ -4557,7 +5812,8 @@ mod tests {
                 .omission
                 .as_deref()
                 .unwrap()
-                .contains("omitted before this preview")
+                .ends_with("earlier lines)"),
+            "shell tails count the lines above them"
         );
     }
 
@@ -4597,8 +5853,42 @@ mod tests {
                 .omission
                 .as_deref()
                 .unwrap()
-                .contains("omitted before this preview")
+                .ends_with("earlier lines)"),
+            "shell tails count the lines above them"
         );
+    }
+
+    #[test]
+    fn running_bash_tails_live() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("watch".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-live".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "cargo watch"}),
+        });
+        let mut completed = tool_result(
+            "call-live",
+            &format!("{}LATEST LINE", "compiling\n".repeat(100)),
+        );
+        completed.name = "bash".into();
+        transcript.observe_tool_result(completed);
+        // No event streams foreground output yet, so retained output stands in.
+        let mut entry = transcript.entry(card_id).unwrap().clone();
+        let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+            panic!("tool card");
+        };
+        card.status = ToolStatus::Running;
+        card.exit_code = None;
+
+        let projection = card_projection(&entry).unwrap();
+        assert!(projection.framed);
+        assert!(projection.omission_before_detail);
+        assert!(projection.detail.ends_with("LATEST LINE"));
+        assert!(projection.footer.is_none());
+        let omission = projection.omission.unwrap();
+        assert!(omission.ends_with("earlier lines) · live"), "{omission}");
     }
 
     #[test]
@@ -4645,7 +5935,11 @@ mod tests {
                 .count(),
             1
         );
-        assert!(card_rows[0].plain_text().contains("2 calls · 2 polls"));
+        assert!(
+            card_rows
+                .iter()
+                .any(|row| row.plain_text().contains("2 calls · 2 polls"))
+        );
         assert_eq!(card_rows[0].tone, TranscriptRowTone::Success);
         let omission = card_rows
             .iter()
@@ -4891,6 +6185,24 @@ mod tests {
             before
                 .iter()
                 .any(|row| row.kind == TranscriptRowKind::CardDetail)
+        );
+
+        let output_row = before
+            .iter()
+            .find(|row| {
+                matches!(
+                    row.anchor.position,
+                    RowPosition::Card(CardPosition {
+                        section: CardSection::Detail,
+                        ..
+                    })
+                )
+            })
+            .unwrap();
+        assert_eq!(output_row.plain_text(), "first");
+        assert_eq!(
+            output_row.spans.first().unwrap().affinity.source_offset,
+            first_base
         );
 
         transcript.observe_tool_call(call("poll-2"));
@@ -5256,6 +6568,7 @@ mod tests {
         transcript.complete_message(1, "done".into());
         let mut cache = TranscriptRowCache::default();
         // An expanded card shows its result rows, so it keeps a blank row before the next card.
+        cache.fold_mut().expand_group(first);
         cache.fold_mut().expand(first);
         let top = RowAnchor {
             entry_id: prompt,
@@ -5267,11 +6580,13 @@ mod tests {
             .skip_while(|row| row.anchor.entry_id != first)
             .map(|row| row.kind)
             .collect::<Vec<_>>();
-        tool_rows.truncate(9);
+        tool_rows.truncate(10);
         assert_eq!(
             tool_rows,
             [
+                TranscriptRowKind::CardGroup,
                 TranscriptRowKind::CardAction,
+                TranscriptRowKind::CardDetail,
                 TranscriptRowKind::CardDetail,
                 TranscriptRowKind::CardDetail,
                 TranscriptRowKind::Spacer,
@@ -5279,7 +6594,6 @@ mod tests {
                 TranscriptRowKind::Rule,
                 TranscriptRowKind::CardGroup,
                 TranscriptRowKind::Rule,
-                TranscriptRowKind::CardAction,
             ]
         );
         assert!(rows.iter().any(|row| row.anchor.entry_id == group));

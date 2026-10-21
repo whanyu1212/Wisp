@@ -209,6 +209,9 @@ pub struct ToolResultInput {
     pub stderr_truncated: bool,
     pub stdout_dropped_bytes: u64,
     pub stderr_dropped_bytes: u64,
+    /// How long the tool ran, as the backend measured it; `None` for results that
+    /// never ran or were recorded before durations were kept.
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,6 +225,8 @@ pub struct ToolCardSnapshot {
     pub call_id: String,
     pub name: String,
     pub action_arguments: String,
+    pub command_summary: Option<CommandSummary>,
+    pub process_id: Option<String>,
     pub status: ToolStatus,
     pub arguments_available: bool,
     pub detail: String,
@@ -231,6 +236,12 @@ pub struct ToolCardSnapshot {
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
+    /// Kept as 32 bits, which spans 49 days, so the card stays compact.
+    pub duration_ms: Option<u32>,
+    /// The folder this call's run used, which its paths are shown relative to.
+    pub display_base: Option<std::sync::Arc<str>>,
+    /// A shell's exit status, when its output opens with Wisp's completion envelope.
+    pub exit_code: Option<i32>,
 }
 
 impl ToolCardSnapshot {
@@ -239,6 +250,8 @@ impl ToolCardSnapshot {
             call_id: call_identity_for_display(&input.call_id),
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
+            command_summary: command_summary(input),
+            process_id: None,
             status,
             arguments_available: true,
             detail: String::new(),
@@ -248,6 +261,9 @@ impl ToolCardSnapshot {
             retryable: false,
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
+            duration_ms: None,
+            display_base: None,
+            exit_code: None,
         }
     }
 
@@ -288,6 +304,7 @@ impl ToolCardSnapshot {
         }
         self.name = name;
         self.action_arguments = action_arguments;
+        self.command_summary = command_summary(input);
         self.arguments_available = true;
         true
     }
@@ -323,6 +340,18 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        self.duration_ms = input
+            .duration_ms
+            .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
+        self.exit_code = input
+            .exit_code
+            .filter(|_| input.output_has_exit_status)
+            .and_then(|code| i32::try_from(code).ok());
+        self.process_id = input
+            .process_id
+            .as_ref()
+            .filter(|id| id.len() <= PROCESS_ID_DISPLAY_MAX_CHARS)
+            .cloned();
         let retain_tail = self.status == ToolStatus::Error
             || (self.status == ToolStatus::Done && self.name == "bash");
         let selected_output = if retain_tail && self.status == ToolStatus::Done {
@@ -352,6 +381,16 @@ impl ToolCardSnapshot {
             .retained_output
             .source_bytes
             .saturating_sub(u64::try_from(self.retained_output.text.len()).unwrap_or(u64::MAX));
+        // A projected tail already lost its earlier lines; count them from the source
+        // so "(N earlier lines)" names every line above what is shown.
+        self.retained_output.source_lines = self
+            .retained_output
+            .source_lines
+            .max(input.output_source_lines);
+        self.retained_output.dropped_lines = self
+            .retained_output
+            .source_lines
+            .saturating_sub(logical_line_count(&self.retained_output.text));
         if retain_tail {
             self.retained_output.base_offset = self.retained_output.dropped_bytes;
         }
@@ -471,6 +510,14 @@ impl ToolCardSnapshot {
         ))
     }
 
+    /// How long a finished call ran, for its action line. Calls that were denied,
+    /// cancelled, or never ran show none.
+    pub fn duration_label(&self) -> Option<String> {
+        matches!(self.status, ToolStatus::Done | ToolStatus::Error)
+            .then_some(self.duration_ms?)
+            .map(|milliseconds| format_duration(u64::from(milliseconds)))
+    }
+
     /// The state the action line spells out because its marker alone does not: `?`
     /// needs saying what it waits for, and `⊘` stands for both denial and
     /// cancellation.
@@ -505,6 +552,48 @@ impl ToolCardSnapshot {
         action
     }
 
+    /// A concise display summary; the original arguments remain in retained detail.
+    /// The arguments as the action line shows them, relative to the folder the call's
+    /// run used. Before the backend has reported one, the TUI's own working directory
+    /// stands in: the launcher starts the TUI and its backend in the same folder.
+    pub fn display_arguments(&self) -> String {
+        let cwd = self.display_base.as_deref().map(str::to_owned).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|root| root.display().to_string())
+        });
+        let Some(cwd) = cwd.as_deref().filter(|cwd| cwd.len() > 1) else {
+            return self
+                .command_summary
+                .filter(|_| self.name == "bash")
+                .map_or_else(|| self.action_arguments.clone(), CommandSummary::label);
+        };
+        match self.name.as_str() {
+            "bash" => self.command_summary.map_or_else(
+                || workspace_relative_command(&self.action_arguments, cwd),
+                CommandSummary::label,
+            ),
+            "read" | "edit" | "write" | "ls" => match self
+                .action_arguments
+                .strip_prefix(cwd)
+                .and_then(|rest| rest.strip_prefix('/'))
+            {
+                Some("") => ".".to_owned(),
+                Some(relative) => relative.to_owned(),
+                None => self.action_arguments.clone(),
+            },
+            "grep" | "find" => match self.action_arguments.rsplit_once(" in ") {
+                Some((pattern, path)) => match path.strip_prefix(cwd) {
+                    Some("") => format!("{pattern} in ."),
+                    Some(rest) if rest.starts_with('/') => format!("{pattern} in {}", &rest[1..]),
+                    _ => self.action_arguments.clone(),
+                },
+                None => self.action_arguments.clone(),
+            },
+            _ => self.action_arguments.clone(),
+        }
+    }
+
     pub fn preview(&self) -> &str {
         &self.detail
     }
@@ -517,12 +606,15 @@ impl ToolCardSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessCardSnapshot {
     pub process_id: String,
+    pub task_label: Option<String>,
     pub display_state: ProcessDisplayState,
     pub poll_count: u32,
     pub call_count: u32,
     pub retained_output: BoundedText,
     pub backend_truncated: bool,
     pub backend_dropped_bytes: u64,
+    /// The finished process's exit code; background output carries no exit line.
+    pub exit_code: Option<i32>,
     last_stream_label: Option<&'static str>,
     last_sequence: Option<u64>,
     approval_sequence: Option<u64>,
@@ -533,12 +625,14 @@ impl ProcessCardSnapshot {
     pub fn new(process_id: String) -> Self {
         Self {
             process_id,
+            task_label: None,
             display_state: ProcessDisplayState::Observed,
             poll_count: 0,
             call_count: 0,
             retained_output: BoundedText::default(),
             backend_truncated: false,
             backend_dropped_bytes: 0,
+            exit_code: None,
             last_stream_label: None,
             last_sequence: None,
             approval_sequence: None,
@@ -697,6 +791,15 @@ impl ProcessCardSnapshot {
             );
         if update_display_state {
             self.display_state = process_result_state(operation, result);
+            self.exit_code = result
+                .exit_code
+                .and_then(|code| i32::try_from(code).ok())
+                .filter(|_| {
+                    matches!(
+                        self.display_state,
+                        ProcessDisplayState::Completed | ProcessDisplayState::Failed
+                    )
+                });
         }
         true
     }
@@ -757,7 +860,9 @@ impl ProcessCardSnapshot {
         retained.dropped_bytes = retained.base_offset;
         retained.dropped_lines = source_lines.saturating_sub(logical_line_count(&retained.text));
 
+        self.task_label = newer.task_label.clone().or_else(|| self.task_label.clone());
         self.display_state = newer.display_state;
+        self.exit_code = newer.exit_code;
         self.poll_count = self.poll_count.saturating_add(newer.poll_count);
         self.call_count = self.call_count.saturating_add(newer.call_count);
         self.retained_output = retained;
@@ -1204,6 +1309,58 @@ fn format_find(arguments: &Map<String, Value>) -> String {
     format!("{} in {path}", clip_chars(&one_line(&pattern), 64))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandSummary(u8);
+
+impl CommandSummary {
+    fn label(self) -> String {
+        [
+            "Python tests",
+            "Python quality checks",
+            "Rust tests",
+            "Rust build",
+            "Rust lint checks",
+        ]
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, label)| (self.0 & (1 << index) != 0).then_some(label))
+        .collect::<Vec<_>>()
+        .join(" + ")
+    }
+}
+
+// Classify the complete source command before display normalization or clipping.
+fn command_summary(input: &ToolCallInput) -> Option<CommandSummary> {
+    if input.name != "bash" {
+        return None;
+    }
+    summarize_command(input.arguments.get("command")?.as_str()?)
+}
+
+fn summarize_command(command: &str) -> Option<CommandSummary> {
+    if command.contains([';', '|', '`', '$', '\n', '\r', '>', '<', '\'', '"']) {
+        return None;
+    }
+    let mut flags = 0;
+    for part in command.split("&&") {
+        if part.contains('&') {
+            return None;
+        }
+        let words = part.split_whitespace().collect::<Vec<_>>();
+        let words = words.strip_prefix(&["uv", "run"]).unwrap_or(&words);
+        flags |= match words {
+            ["pytest", ..] => 1,
+            ["ruff" | "mypy", ..] => 2,
+            ["cargo", "test", ..] => 4,
+            ["cargo", "build", ..] => 8,
+            ["cargo", "clippy", ..] => 16,
+            ["cd", _] => continue,
+            _ => return None,
+        };
+    }
+    (flags != 0).then_some(CommandSummary(flags))
+}
+
 fn format_bash(arguments: &Map<String, Value>) -> String {
     let operation = arguments
         .get("operation")
@@ -1467,9 +1624,235 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
     .saturating_add(u64::from(!source.ends_with('\n')))
 }
 
+/// A Bash command as its action line shows it when it runs in `cwd`: a leading
+/// `cd <cwd> &&` is a no-op there and is dropped, and `<cwd>/` path prefixes become
+/// relative. Once the command changes folder (`cd`, `pushd`), relative paths would
+/// read against the wrong folder, so the rest is shown as written.
+fn workspace_relative_command(command: &str, cwd: &str) -> String {
+    let (start, rest) = command
+        .strip_prefix("start ")
+        .map_or(("", command), |rest| ("start ", rest));
+    let rest = strip_redundant_cd(rest, cwd).unwrap_or(rest);
+    let changes_folder = rest
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(')
+        })
+        .any(|word| matches!(word, "cd" | "pushd" | "popd"));
+    if changes_folder {
+        return format!("{start}{rest}");
+    }
+    let prefix = format!("{cwd}/");
+    let mut shown = String::with_capacity(rest.len());
+    let mut remaining = rest;
+    while let Some(index) = remaining.find(&prefix) {
+        // Only a path that starts a word is under `cwd`; `/x/a/b` is not `a/b` when
+        // `cwd` is `/a`.
+        let starts_word = remaining[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|before| before.is_whitespace() || matches!(before, '\'' | '"' | '='));
+        shown.push_str(&remaining[..index]);
+        remaining = &remaining[index + prefix.len()..];
+        if !starts_word {
+            shown.push_str(&prefix);
+        } else if remaining
+            .chars()
+            .next()
+            .is_none_or(|after| after.is_whitespace() || matches!(after, '\'' | '"'))
+        {
+            // The folder itself, written with a trailing slash.
+            shown.push('.');
+        }
+    }
+    shown.push_str(remaining);
+    format!("{start}{shown}")
+}
+
+/// The command after a leading `cd <cwd> && `, when the target is exactly `cwd`
+/// (quoted or with a trailing slash), or None.
+fn strip_redundant_cd<'a>(command: &'a str, cwd: &str) -> Option<&'a str> {
+    let after_cd = command.strip_prefix("cd ")?;
+    let (target, rest) = after_cd.split_once(" && ")?;
+    let target = target.trim();
+    let unquoted = ['\'', '"']
+        .into_iter()
+        .find_map(|quote| target.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(target);
+    let unquoted = unquoted.strip_suffix('/').unwrap_or(unquoted);
+    (unquoted == cwd).then_some(rest)
+}
+
+/// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
+/// Each unit is chosen after rounding, so 9.96 s reads `10s` rather than `10.0s`.
+pub(crate) fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 100 {
+        return "<0.1s".into();
+    }
+    let tenths = milliseconds.saturating_add(50) / 100;
+    if tenths < 100 {
+        return format!("{}.{}s", tenths / 10, tenths % 10);
+    }
+    let seconds = milliseconds.saturating_add(500) / 1000;
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    if seconds < 3600 {
+        return format!("{}m {:02}s", seconds / 60, seconds % 60);
+    }
+    let minutes = milliseconds.saturating_add(30_000) / 60_000;
+    format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redundant_cd_is_hidden() {
+        let cwd = "/Users/ana/Wisp";
+        let shown = |command: &str| workspace_relative_command(command, cwd);
+        assert_eq!(shown("cd /Users/ana/Wisp && cargo test"), "cargo test");
+        assert_eq!(shown("cd '/Users/ana/Wisp/' && git status"), "git status");
+        assert_eq!(
+            shown("start cd /Users/ana/Wisp && npm run dev"),
+            "start npm run dev"
+        );
+        // A cd that changes folder stays, and paths after it are shown as written.
+        assert_eq!(
+            shown("cd /Users/ana/Wisp/rust && cargo test"),
+            "cd /Users/ana/Wisp/rust && cargo test"
+        );
+        assert_eq!(
+            shown("cd rust && cat /Users/ana/Wisp/README.md"),
+            "cd rust && cat /Users/ana/Wisp/README.md"
+        );
+        assert_eq!(
+            shown("cd /Users/ana/Wisp && cd rust && ls /Users/ana/Wisp/a"),
+            "cd rust && ls /Users/ana/Wisp/a"
+        );
+        assert_eq!(shown("cd .. && ls"), "cd .. && ls");
+        assert_eq!(
+            shown("cd /Users/ana/Wispy && ls"),
+            "cd /Users/ana/Wispy && ls"
+        );
+    }
+
+    #[test]
+    fn search_paths_become_relative() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        let card = |path: String| {
+            ToolCardSnapshot::requested(
+                &ToolCallInput {
+                    call_id: "c".into(),
+                    name: "grep".into(),
+                    arguments: serde_json::json!({"pattern": "todo", "path": path}),
+                    detail_source: ToolDetailSource::None,
+                },
+                ToolStatus::Requested,
+            )
+        };
+        assert_eq!(
+            card(format!("{cwd}/src")).display_arguments(),
+            "/todo/ in src"
+        );
+        assert_eq!(card(cwd.clone()).display_arguments(), "/todo/ in .");
+        assert_eq!(
+            card("/elsewhere".into()).display_arguments(),
+            "/todo/ in /elsewhere"
+        );
+    }
+
+    #[test]
+    fn command_paths_become_relative() {
+        let cwd = "/Users/ana/Wisp";
+        let shown = |command: &str| workspace_relative_command(command, cwd);
+        assert_eq!(
+            shown("cat /Users/ana/Wisp/src/a.rs \"/Users/ana/Wisp/b c\""),
+            "cat src/a.rs \"b c\""
+        );
+        assert_eq!(
+            shown("ls /mnt/Users/ana/Wisp/x"),
+            "ls /mnt/Users/ana/Wisp/x"
+        );
+        assert_eq!(shown("ls /Users/ana/Wisp"), "ls /Users/ana/Wisp");
+        assert_eq!(shown("rm -rf /Users/ana/Wisp/"), "rm -rf .");
+        assert_eq!(
+            shown("make --prefix=/Users/ana/Wisp/ x"),
+            "make --prefix=. x"
+        );
+    }
+
+    #[test]
+    fn duration_formats_compactly() {
+        let cases = [
+            (40, "<0.1s"),
+            (250, "0.3s"),
+            (9_960, "10s"),
+            (59_600, "1m 00s"),
+            (4_500, "4.5s"),
+            (12_400, "12s"),
+            (252_000, "4m 12s"),
+            (3_900_000, "1h 05m"),
+        ];
+        for (milliseconds, label) in cases {
+            assert_eq!(format_duration(milliseconds), label);
+        }
+    }
+
+    #[test]
+    fn command_summaries_only_label_known_invocations() {
+        assert_eq!(
+            summarize_command("cd /project && uv run pytest -q")
+                .unwrap()
+                .label(),
+            "Python tests"
+        );
+        assert_eq!(
+            summarize_command("uv run ruff check . && uv run mypy")
+                .unwrap()
+                .label(),
+            "Python quality checks"
+        );
+        for command in [
+            "echo pytest",
+            "cargo test && rm -rf cache",
+            "pytest; deploy",
+            "start cargo test",
+        ] {
+            assert!(summarize_command(command).is_none());
+        }
+    }
+
+    #[test]
+    fn command_summaries_do_not_hide_shell_separators_or_clipped_suffixes() {
+        for command in [
+            "pytest & deploy".to_owned(),
+            "pytest\ndeploy".into(),
+            "pytest && deploy".into(),
+            format!("pytest {} ; deploy", "x".repeat(300)),
+        ] {
+            let input = ToolCallInput {
+                call_id: "test".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({"command": command}),
+                detail_source: ToolDetailSource::None,
+            };
+            let card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+            assert_eq!(card.display_arguments(), card.action_arguments);
+            assert!(card.command_summary.is_none());
+        }
+    }
+
+    #[test]
+    fn historical_merges_keep_known_process_task_labels() {
+        let older = ProcessCardSnapshot::new("process-1".into());
+        let mut live = older.clone();
+        live.task_label = Some("Python tests".into());
+        live.prepend_historical_older(&older);
+        assert_eq!(live.task_label.as_deref(), Some("Python tests"));
+        live.merge_historical_newer(&older);
+        assert_eq!(live.task_label.as_deref(), Some("Python tests"));
+    }
 
     fn result(output: &str) -> ToolResultInput {
         ToolResultInput {
@@ -1501,6 +1884,7 @@ mod tests {
             stderr_truncated: false,
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
+            duration_ms: None,
         }
     }
 
@@ -1911,6 +2295,21 @@ mod tests {
         assert!(card.observe(ProcessOperation::Poll, &failed, 0));
         assert_eq!(card.display_state, ProcessDisplayState::Failed);
         assert!(card.display_state.terminal());
+        assert_eq!(card.exit_code, Some(2));
+    }
+
+    #[test]
+    fn running_process_has_no_exit() {
+        let mut card = ProcessCardSnapshot::new("process-1".into());
+        card.begin(ProcessOperation::Poll, 0);
+        let mut running = result("partial");
+        running.name = "bash".into();
+        running.exit_code = Some(0);
+        running.process_id = Some("process-1".into());
+        running.process_state = Some("running".into());
+
+        assert!(card.observe(ProcessOperation::Poll, &running, 0));
+        assert_eq!(card.exit_code, None);
     }
 
     #[test]

@@ -48,6 +48,7 @@ class RpcMessageToolResultSnapshot(BaseModel):
     created: bool = False
     summary: str | None = None
     truncated: bool = False
+    duration_ms: int | None = Field(default=None, ge=0)
 
 
 class RpcSkillInvocationSnapshot(BaseModel):

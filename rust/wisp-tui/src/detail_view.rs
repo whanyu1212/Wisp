@@ -42,6 +42,7 @@ struct DetailCacheKey {
 
 #[derive(Debug)]
 pub struct DetailView {
+    pub(crate) review: crate::diff_review::DiffReview,
     selected_entry: Option<TranscriptEntryId>,
     top: Option<DetailAnchor>,
     width: usize,
@@ -56,6 +57,7 @@ pub struct DetailView {
 impl Default for DetailView {
     fn default() -> Self {
         Self {
+            review: crate::diff_review::DiffReview::default(),
             selected_entry: None,
             top: None,
             width: 1,
@@ -79,6 +81,7 @@ impl DetailView {
     }
 
     pub fn open(&mut self, entry_id: TranscriptEntryId, presentation: &ToolDetailPresentation) {
+        self.review.reset();
         self.selected_entry = Some(entry_id);
         self.top = presentation.rows.first().map(|row| DetailAnchor {
             row_key: row.key,
@@ -94,6 +97,7 @@ impl DetailView {
     }
 
     pub fn close(&mut self) {
+        self.review.reset();
         self.selected_entry = None;
         self.top = None;
         self.clear_cache();

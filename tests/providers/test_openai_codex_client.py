@@ -198,15 +198,23 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
 
 
 class _ReadTimeoutStream(httpx.AsyncByteStream):
+    def __init__(self, message: str = "") -> None:
+        self.message = message
+
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield (
             b'data: {"type":"response.created","response":{"id":"response-id"}}\n\n'
             b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
         )
-        raise httpx.ReadTimeout("Codex stream stalled")
+        raise httpx.ReadTimeout(self.message)
 
 
-def test_openai_codex_provider_does_not_retry_post_start_read_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "message", ["", "  ", "Codex stream stalled", "https://secret@example.test"]
+)
+def test_openai_codex_provider_does_not_retry_post_start_read_timeout(
+    tmp_path: Path, message: str
+) -> None:
     attempts = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -214,12 +222,14 @@ def test_openai_codex_provider_does_not_retry_post_start_read_timeout(tmp_path: 
         attempts += 1
         return httpx.Response(
             200,
-            stream=_ReadTimeoutStream(),
+            stream=_ReadTimeoutStream(message),
             headers={"content-type": "text/event-stream"},
         )
 
     async def run() -> list[object]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=httpx.Timeout(5, read=42)
+        ) as client:
             provider = OpenAICodexProvider(
                 auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
                 client=client,
@@ -235,7 +245,13 @@ def test_openai_codex_provider_does_not_retry_post_start_read_timeout(tmp_path: 
         ProviderResponseStarted(model="gpt-5.6-sol"),
         ProviderTextDelta(delta="partial"),
         ProviderResponseFailed(
-            message="Codex stream stalled",
+            message=(
+                "OpenAI Codex ReadTimeout: read-idle timeout; configured limit 42s "
+                "(attempt 1; response_id=response-id). "
+                "The response stream had started; it was not automatically retried. "
+                "Resume the session to continue; "
+                "inspect completed tool results before rerunning work."
+            ),
             partial_content="partial",
             response_id="response-id",
         ),
@@ -243,9 +259,11 @@ def test_openai_codex_provider_does_not_retry_post_start_read_timeout(tmp_path: 
     assert attempts == 1
 
 
+@pytest.mark.parametrize("read_timeout", [None, 600.0])
 def test_openai_codex_provider_configures_owned_client_timeouts(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
+    read_timeout: float | None,
 ) -> None:
     real_async_client = httpx.AsyncClient
     created_client: httpx.AsyncClient | None = None
@@ -268,7 +286,8 @@ def test_openai_codex_provider_configures_owned_client_timeouts(
 
     monkeypatch.setattr(openai_codex_module.httpx, "AsyncClient", create_client)
     provider = OpenAICodexProvider(
-        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path))
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+        **({"read_timeout_seconds": read_timeout} if read_timeout is not None else {}),
     )
 
     async def run() -> list[object]:
@@ -280,13 +299,66 @@ def test_openai_codex_provider_configures_owned_client_timeouts(
     ]
     assert seen_timeout is not None
     assert seen_timeout.connect == 10.0
-    assert seen_timeout.read == 300.0
+    assert seen_timeout.read == (read_timeout if read_timeout is not None else 300.0)
     assert seen_timeout.write == 30.0
     assert seen_timeout.pool == 10.0
     assert created_client is not None
     assert not created_client.is_closed
     anyio.run(provider.aclose)
     assert created_client.is_closed
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), -float("inf")])
+def test_openai_codex_rejects_unbounded_read_timeout(value: float) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        OpenAICodexProvider(read_timeout_seconds=value)
+
+
+@pytest.mark.parametrize(
+    ("error_type", "detail"),
+    [
+        (httpx.ReadTimeout, "read-idle timeout; configured limit 600s"),
+        (httpx.ConnectTimeout, "connect timeout; configured limit 10s"),
+        (httpx.WriteTimeout, "write timeout; configured limit 30s"),
+        (httpx.PoolTimeout, "pool timeout; configured limit 10s"),
+        (httpx.ConnectError, "network/transport failure"),
+    ],
+)
+@pytest.mark.parametrize("max_retries", [0, 1])
+def test_openai_codex_opening_failure_keeps_diagnostics_after_retries(
+    tmp_path: Path, error_type: type[httpx.HTTPError], detail: str, max_retries: int
+) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise error_type("", request=request)
+
+    async def run() -> list[object]:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=httpx.Timeout(connect=10, read=600, write=30, pool=10),
+        ) as client:
+            provider = OpenAICodexProvider(
+                auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+                client=client,
+                retry_policy=RetryPolicy(
+                    max_retries=max_retries, base_delay_seconds=0.0001, max_delay_seconds=1
+                ),
+            )
+            return [event async for event in provider.stream([Message(role="user", content="hi")])]
+
+    events = anyio.run(run)
+    failure = events[-1]
+    assert isinstance(failure, ProviderResponseFailed)
+    assert failure.message == (
+        f"OpenAI Codex {error_type.__name__}: {detail} (attempt {max_retries + 1}). "
+        "No response stream started; no further automatic retries will be made."
+    )
+    assert attempts == max_retries + 1
+    assert len(events) == max_retries + 1
+    assert all(isinstance(event, ProviderRetrying) for event in events[:-1])
 
 
 def test_openai_codex_provider_does_not_retry_terminal_quota_error(tmp_path: Path) -> None:

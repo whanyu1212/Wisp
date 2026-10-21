@@ -65,6 +65,7 @@ fn fixture(scenario: &str) -> LiveUi {
         stderr_truncated: false,
         stdout_dropped_bytes: 0,
         stderr_dropped_bytes: 0,
+        duration_ms: None,
     };
     ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);
@@ -90,7 +91,7 @@ fn fixture(scenario: &str) -> LiveUi {
     }
     if scenario == "tools" {
         ui.transcript_row_cache.fold_mut().expand(tool);
-        ui.browse_selected = Some(tool);
+        ui.browse_selected = Some(BrowseTarget::Entry(tool));
         ui.transcript_viewport.reduce(
             TranscriptViewAction::Home,
             &ui.state.transcript,
@@ -167,6 +168,65 @@ fn fixture(scenario: &str) -> LiveUi {
         }));
         ui.discovery_view = Some(DiscoveryView::permissions());
     }
+    if matches!(scenario, "activity-rail" | "activity-rail-expanded") {
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("Inspect the project, update the docs, and run the checks.".into());
+        for (index, (name, arguments)) in [
+            ("read", json!({"path": "AGENTS.md"})),
+            (
+                "grep",
+                json!({"pattern": "Deploy", "path": ".github/workflows"}),
+            ),
+            ("ls", json!({"path": ".github/workflows"})),
+            ("bash", json!({"command": "git status --short"})),
+            ("bash", json!({"command": "gh pr view 766"})),
+            ("bash", json!({"command": "gh pr checks 766"})),
+            ("bash", json!({"command": "gh pr diff 766 --stat"})),
+            ("bash", json!({"command": "git log -1 --oneline"})),
+            (
+                "edit",
+                json!({"path": "README.md", "old_string": "old", "new_string": "new"}),
+            ),
+            ("bash", json!({"command": "git diff --check"})),
+            ("bash", json!({"command": "git diff --stat"})),
+            (
+                "write",
+                json!({"path": "notes.md", "content": "Checked workflows."}),
+            ),
+            ("mcp__github__get_pull_request", json!({"number": 766})),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call_id = format!("activity-{index}");
+            ui.state.transcript.observe_tool_call(ToolCallInput {
+                call_id: call_id.clone(),
+                name: name.into(),
+                arguments,
+                detail_source: tool_detail::ToolDetailSource::None,
+            });
+            let mut finished = result.clone();
+            finished.call_id = call_id;
+            finished.name = name.into();
+            ui.state.transcript.observe_tool_result(finished);
+        }
+        ui.state.transcript.complete_message(
+            1,
+            "Updated the project documentation.\n\n- Checked the deployment workflows.\n- Updated README.md and wrote notes.md.\n- Inspected PR #766.".into(),
+        );
+        ui.editor = PromptEditor::default();
+        if scenario == "activity-rail-expanded" {
+            let first_bash = ui.state.transcript.entries()[4].id;
+            ui.transcript_row_cache.fold_mut().expand_group(first_bash);
+            ui.transcript_viewport.reduce(
+                TranscriptViewAction::Home,
+                &ui.state.transcript,
+                &mut ui.transcript_row_cache,
+            );
+        }
+    }
     ui
 }
 
@@ -213,6 +273,8 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             let user = row_containing(&buffer, "Review the startup");
             let label = row_containing(&buffer, "you");
             assert_eq!(buffer[(3, label - 1)].symbol(), " ");
+            // The prompt's bar covers its top padding too.
+            assert_eq!(buffer[(2, label - 1)].symbol(), buffer[(2, label)].symbol());
             assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
             assert_eq!(buffer[(97, label - 1)].bg, palette.panel);
             assert_eq!(buffer[(3, label - 2)].bg, canvas);
@@ -301,7 +363,10 @@ fn scrolling_up_from_the_live_view_keeps_the_prompt_until_it_is_reached() {
         (0..buffer.area.height)
             .filter_map(|y| {
                 let row = screen_row(buffer, y);
+                // Replies sit beside the turn's rail.
                 row.trim()
+                    .trim_start_matches('│')
+                    .trim_start()
                     .strip_prefix("reply line ")?
                     .split_whitespace()
                     .next()?
@@ -363,7 +428,8 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         );
         assert_eq!(buffer[(margin + 1, editor.area.y)].symbol(), "›");
         assert_eq!(buffer[(editor.area.x, editor.area.y)].symbol(), "a");
-        let bottom_padding = u16::from(height >= 16);
+        // A framed composer ends with its identity row and bottom border.
+        let bottom_padding = if height >= 16 { 2 } else { 0 };
         assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
         if bottom_padding > 0 {
             assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
@@ -456,20 +522,27 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
             .as_ref()
             .unwrap();
         let composer_top = editor.area.y - u16::from(height >= 16);
-        assert!(reply < composer_top);
-        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
+        // The status line sits right above the composer for the whole run, so the
+        // reply streams above it without the transcript changing size.
+        let status = composer_top - 1;
+        assert!(reply < status);
+        let status_text = (0..width)
+            .map(|x| buffer[(x, status)].symbol())
+            .collect::<String>();
+        assert!(status_text.contains("◐ Working"), "{status_text}");
+        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "◐"));
         if height >= 16 {
             for x in 0..width {
                 assert_eq!(buffer[(x, 0)].symbol(), " ");
-                assert_eq!(buffer[(x, composer_top - 1)].symbol(), " ");
-                assert_eq!(buffer[(x, composer_top - 1)].bg, ui.palette().background);
+                assert_eq!(buffer[(x, status - 1)].symbol(), " ");
+                assert_eq!(buffer[(x, status - 1)].bg, ui.palette().background);
             }
         }
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
         assert!(screen_text(&next).contains("wisp"));
-        assert!(!screen_text(&next).contains("Working"));
-        assert!(!screen_text(&next).contains("Esc to interrupt"));
+        assert!(screen_text(&next).contains("◓ Working"));
+        assert_eq!(row_containing(&next, "wisp"), reply);
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
@@ -524,10 +597,10 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
         .await
         .unwrap();
         // Paint the real intermediate state, even if command.finished is delayed
-        // by persistence or transport. Neither a spinner nor a smaller viewport
-        // should briefly replace the finished reply.
+        // by persistence or transport. The run is still going, so the status line
+        // stays and the transcript keeps its size.
         let completed = draw(&mut ui, width, height);
-        assert!(!screen_text(&completed).contains("Working"));
+        assert!(screen_text(&completed).contains("Working"));
         ui.dispatch(
             UiAction::BackendEvent(BackendEvent::CommandFinished {
                 command_id: "visual-next-prompt".into(),
@@ -541,20 +614,19 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
         .await
         .unwrap();
         let idle = draw(&mut ui, width, height);
-        for y in 0..composer_top {
+        // Above the status line, the finished reply looks the same as it streamed.
+        for y in 0..composer_top.saturating_sub(1) {
             for x in 0..width {
                 assert_eq!(
                     streaming[(x, y)],
                     completed[(x, y)],
                     "{width}x{height} at {x},{y}"
                 );
-                assert_eq!(
-                    completed[(x, y)],
-                    idle[(x, y)],
-                    "{width}x{height} at {x},{y}"
-                );
             }
         }
+        // At idle the status line gives its row back to the transcript.
+        assert!(!screen_text(&idle).contains("Working"));
+        assert!(screen_text(&idle).contains("Response line 39."));
     }
 }
 
@@ -566,7 +638,7 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     assert!(text.contains("Now check the remaining edge cases."));
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
-    assert!(text.contains("⠋ Working"));
+    assert!(text.contains("◐ Working"));
     let thumb = |buffer: &ratatui::buffer::Buffer| {
         (0..buffer.area.height)
             .filter(|&y| buffer[(79, y)].symbol() == "┃")
@@ -593,8 +665,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
     assert!(streaming.contains("wisp"));
-    assert!(!streaming.contains("Working"));
-    assert!(!streaming.contains("Esc to interrupt"));
+    // The status line stays while the reply streams.
+    assert!(streaming.contains("◐ Working"));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript
@@ -611,10 +683,10 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
     let text = screen_text(&draw(&mut ui, 30, 8));
     let compact: String = text
         .chars()
-        .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃'))
+        .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '▎'))
         .collect();
     assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
-    assert!(text.contains("⠋ Working"), "{text}");
+    assert!(text.contains("◐ Working"), "{text}");
     assert!(!text.contains("Startup review"));
 }
 
@@ -627,6 +699,7 @@ fn capture_conversation_screens() {
     for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
         for (variant, selected, no_color) in [
             ("dark", theme::default_theme(), false),
+            ("grove", theme::resolve("grove").unwrap(), false),
             ("light", theme::paper_theme(), false),
             ("mono", theme::default_theme(), true),
         ] {
@@ -640,6 +713,8 @@ fn capture_conversation_screens() {
                 "permissions",
                 "new-turn",
                 "scrollback",
+                "activity-rail",
+                "activity-rail-expanded",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
@@ -668,7 +743,9 @@ fn capture_conversation_screens() {
                     let cells = terminal.backend().buffer().content.iter().map(|cell| json!({
                     "text": cell.symbol(), "fg": rgb(cell.fg), "bg": rgb(cell.bg),
                     "bold": cell.modifier.contains(Modifier::BOLD), "dim": cell.modifier.contains(Modifier::DIM), "italic": cell.modifier.contains(Modifier::ITALIC),
-                    "underline": cell.modifier.contains(Modifier::UNDERLINED), "reverse": cell.modifier.contains(Modifier::REVERSED),
+                    "underline": cell.modifier.contains(Modifier::UNDERLINED),
+                    "underline_color": match cell.underline_color { Color::Rgb(..) => Some(rgb(cell.underline_color)), _ => None },
+                    "reverse": cell.modifier.contains(Modifier::REVERSED),
                     "strike": cell.modifier.contains(Modifier::CROSSED_OUT)
                 })).collect::<Vec<_>>();
                     let suffix = if tick == 0 {

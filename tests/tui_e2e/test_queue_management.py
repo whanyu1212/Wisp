@@ -183,9 +183,10 @@ main()
         tui.wait_ready()
         tui.send(b"hold this run\r")
         tui.wait_for(b"blocked-provider-ready", failure="provider did not block")
-        tui.send(b"first steering\r")
+        # Alt+Enter steers the run; Enter queues a follow-up.
+        tui.send(b"first steering\x1b\r")
         wait_report("steer", 1)
-        tui.send(b"later follow-up\x1b\r")
+        tui.send(b"later follow-up\r")
         wait_report("follow_up", 1)
         tui.send(b"draft-kept\x1b[18~")
         tui.wait_for(b"Switch queue", failure="queue manager did not open")
@@ -222,14 +223,14 @@ main()
         settle()
         tui.send(b"\x1b")
         # The draft is visible under the overlay too, so wait until the overlay is
-        # gone: an unread Esc followed by Alt+Enter parses as Esc and a plain Enter.
+        # gone, so the Enter that follows reaches the composer.
         wait_for_full_repaint(
             lambda frame: b"draft-kept" in frame and idle_footer not in frame,
             failure="queue overlay lost the composer draft",
         )
         # Keep work across cancellation, then restore it on the first attempt
         # in a replacement run without opening the manager or manually refreshing.
-        tui.send(b"\x1b\r")
+        tui.send(b"\r")
         wait_report("follow_up", 2)
         old_token = reports("follow_up")[-1]["state"]["token"]
         metadata_before_cancel = {
@@ -237,7 +238,8 @@ main()
         }
         offset = len(tui.output)
         tui.send(b"\x03")
-        # The provider blocks, so "working" was painted and the cancel redraws idle.
+        # The provider blocks, so the running footer was painted and the cancel
+        # redraws idle.
         tui.wait_for(b"idle", since=offset, failure="run did not cancel")
         # Statistics and branch metadata refresh independently after a prompt.
         # Idle status (or statistics alone) does not mean both have completed.
@@ -263,7 +265,7 @@ main()
         )
         offset = len(tui.output)
         tui.send(b"\x03")
-        # The resize above painted this blocked run as "working", so the cancel redraws idle.
+        # The resize above painted this blocked run's footer, so the cancel redraws idle.
         tui.wait_for(b"idle", since=offset, failure="replacement run did not cancel")
         tui.quit()
     finally:

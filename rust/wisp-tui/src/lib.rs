@@ -11,10 +11,12 @@ mod connection_panel;
 mod context_view;
 mod detail_view;
 mod diff_card;
+mod diff_review;
 mod discovery_view;
 mod event_loop;
 mod file_picker;
 mod framing;
+mod git_diff_view;
 pub mod history;
 mod hydration_profile;
 mod key_help;
@@ -43,6 +45,7 @@ pub mod reducer;
 mod session_catalog_tests;
 mod session_picker;
 mod session_tree_picker;
+mod side_panel;
 mod startup_logo;
 mod stream_reveal;
 mod syntax;
@@ -121,8 +124,8 @@ use tokio::time::{Instant, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::TranscriptEntryId;
 use transcript_view::{
-    RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction, TranscriptViewport,
-    card_run,
+    BrowseTarget, RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction,
+    TranscriptViewport, card_run,
 };
 use ui::{ComposerLayoutCache, ConnectionInfo};
 use wisp_protocol::commands::{ApprovalScope, QueueKind, WispTypedClientRpcCommands};
@@ -495,6 +498,7 @@ enum OverlayKind {
     PromptHistory,
     Discovery,
     Context,
+    GitDiff,
     Queue,
     Help,
     Model,
@@ -502,6 +506,7 @@ enum OverlayKind {
     SessionTree,
     Session,
     Detail,
+    SidePanel,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -537,6 +542,8 @@ struct LiveUi {
     theme: ThemeSelection,
     theme_preferences: Option<ThemePreferences>,
     theme_picker: Option<ThemePicker>,
+    /// The session summary docked beside the transcript, or opened over it.
+    side_panel: side_panel::SidePanel,
     logo_choice: LogoChoice,
     startup_logo: LogoChoice,
     logo_picker: Option<LogoPicker>,
@@ -550,7 +557,7 @@ struct LiveUi {
     transcript_row_cache: TranscriptRowCache,
     pending_history_navigation: Option<PendingHistoryNavigation>,
     detail_view: DetailView,
-    browse_selected: Option<TranscriptEntryId>,
+    browse_selected: Option<BrowseTarget>,
     editor: PromptEditor,
     clipboard: Box<dyn ClipboardBackend>,
     composer_layout_cache: ComposerLayoutCache,
@@ -579,6 +586,7 @@ struct LiveUi {
     rendered_overlay: Option<OverlayKind>,
     command_help: Option<Help>,
     context_view: Option<context_view::ContextView>,
+    git_diff_view: Option<git_diff_view::GitDiffView>,
     queue_view: Option<queue_view::QueueView>,
     discovery_view: Option<DiscoveryView>,
     completion: Completion,
@@ -596,6 +604,7 @@ impl Default for LiveUi {
             theme: ThemeSelection::default(),
             theme_preferences: None,
             theme_picker: None,
+            side_panel: side_panel::SidePanel::default(),
             logo_choice: LogoChoice::Random,
             startup_logo: LogoChoice::AdalBraille,
             logo_picker: None,
@@ -633,6 +642,7 @@ impl Default for LiveUi {
             rendered_overlay: None,
             command_help: None,
             context_view: None,
+            git_diff_view: None,
             queue_view: None,
             discovery_view: None,
             completion: Completion::default(),
@@ -759,6 +769,7 @@ impl LiveUi {
                                     | "set_mcp_server_enabled"
                                     | "reconnect_mcp"
                                     | "get_project_files"
+                                    | "get_git_diff"
                                     | "get_sessions"
                             )
                         ) || (command_type == Some("configure")
@@ -1093,7 +1104,7 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::OpenExactDetail(entry_id) => {
-                    if self.browse_selected != Some(entry_id) {
+                    if self.browse_selected != Some(BrowseTarget::Entry(entry_id)) {
                         self.state.history.active_exact_detail = None;
                         continue;
                     }
@@ -1258,12 +1269,16 @@ impl LiveUi {
             self.rendered_model_picker = false;
             self.command_help = None;
             self.context_view = None;
+            self.git_diff_view = None;
+            self.state.git_diff.set_open(false);
             self.discovery_view = None;
             self.prompt_history_view = None;
             self.completion.dismiss();
             self.file_picker.dismiss();
             self.theme_picker = None;
             self.logo_picker = None;
+            // A decision owns the screen; a docked panel stays beside it.
+            self.side_panel.close_overlay();
             self.state.project_files.set_open(false);
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1279,7 +1294,7 @@ impl LiveUi {
             }
             if self
                 .browse_selected
-                .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
+                .is_some_and(|target| retained_detail(&self.state, target.entry_id()).is_none())
             {
                 self.browse_selected = None;
             }
@@ -1519,6 +1534,8 @@ impl LiveUi {
             Some(OverlayKind::Discovery)
         } else if self.queue_view.is_some() {
             Some(OverlayKind::Queue)
+        } else if self.git_diff_view.is_some() {
+            Some(OverlayKind::GitDiff)
         } else if self.context_view.is_some() {
             Some(OverlayKind::Context)
         } else if self.command_help.is_some() {
@@ -1533,6 +1550,8 @@ impl LiveUi {
             Some(OverlayKind::Session)
         } else if self.detail_view.is_open() {
             Some(OverlayKind::Detail)
+        } else if self.side_panel.overlay_open() {
+            Some(OverlayKind::SidePanel)
         } else {
             None
         }
@@ -1550,6 +1569,10 @@ impl LiveUi {
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
+        if let Ok(size) = terminal.size() {
+            self.side_panel.observe_width(size.width);
+        }
+        self.side_panel.sync_files(&self.state.git_diff);
         let overlay = self.active_overlay();
         let palette = self.palette();
         let mut painted = mouse::Frame {
@@ -1609,7 +1632,15 @@ impl LiveUi {
                 self.startup_logo,
                 self.decision_choice,
                 activity_elapsed,
+                Some(&self.side_panel),
             );
+            // Popups docked to the composer lay out in the conversation's column, beside
+            // a docked side panel; centred popups still centre on the whole screen.
+            let column = if self.side_panel.docked() {
+                side_panel::split(frame.area()).0
+            } else {
+                frame.area()
+            };
             // A selection belongs to the transcript layout it started in. An approval panel,
             // completion rows, help, or a popup changes or covers that layout, and highlighting
             // or copying the same cells would then mark text that is not the transcript.
@@ -1638,7 +1669,7 @@ impl LiveUi {
             // A confirmation whose details did not fit is drawn with a hint, but
             // is not armed: nothing may be confirmed while partly hidden.
             if ui::decision_context_visible(frame.area())
-                && ui::decision_panel_complete(&self.state, frame.area(), self.notice.as_deref())
+                && ui::decision_panel_complete(&self.state, column, self.notice.as_deref())
             {
                 rendered_decision_context = self.current_decision_context();
                 rendered_decision_choice = self.decision_choice;
@@ -1654,7 +1685,7 @@ impl LiveUi {
                 && self.file_picker.is_open()
             {
                 if let Some(area) = ui::file_picker_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
@@ -1679,13 +1710,13 @@ impl LiveUi {
                 .is_some()
             {
                 let width = ui::docked_popup_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
                     1,
                 )
-                .map_or(frame.area().width, |area| area.width);
+                .map_or(column.width, |area| area.width);
                 self.discovery_view
                     .as_mut()
                     .and_then(DiscoveryView::docked_mcp)
@@ -1713,12 +1744,22 @@ impl LiveUi {
             };
             let area = match docked_height {
                 Some(height) => ui::docked_popup_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
                     height,
                 ),
+                // The side panel lies over the right of the transcript, down to the
+                // composer, so the prompt stays in view.
+                None if overlay == Some(OverlayKind::SidePanel) => ui::docked_popup_area(
+                    column,
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                    column.height,
+                )
+                .map(side_panel::overlay_area),
                 None => ui::overlay_area(frame.area()),
             };
             let Some((kind, area)) = overlay.zip(area) else {
@@ -1755,6 +1796,15 @@ impl LiveUi {
                     &self.state,
                     palette,
                 ),
+                OverlayKind::GitDiff => {
+                    self.git_diff_view.as_mut().expect("active diff").render(
+                        frame,
+                        area,
+                        &self.state.git_diff,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
                 OverlayKind::Context => {
                     self.context_view.as_mut().expect("active context").render(
                         frame,
@@ -1818,6 +1868,19 @@ impl LiveUi {
                     );
                     mouse::Rows::default()
                 }
+                OverlayKind::SidePanel => {
+                    side_panel::render(
+                        frame,
+                        area,
+                        &self.state,
+                        &self.side_panel,
+                        &self.bindings,
+                        self.activity_frame,
+                        activity_elapsed,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
             };
             rendered_overlay = Some(kind);
         })?;
@@ -1847,7 +1910,10 @@ impl LiveUi {
     fn activity_animation_active(&self) -> bool {
         !self.state.configuration_active()
             && (self.state.view_status == ViewStatus::Running
-                || self.state.interaction_status == InteractionStatus::Compacting)
+                || self.state.interaction_status == InteractionStatus::Compacting
+                // The side panel times how long an approval has waited.
+                || (self.state.view_status == ViewStatus::WaitingForApproval
+                    && self.state.side_panel_visible))
     }
 
     /// How long the current command has run, for the working row. The clock restarts
@@ -2357,7 +2423,7 @@ impl LiveUi {
         Ok(None)
     }
 
-    fn visible_foldable_entries(&mut self) -> Vec<TranscriptEntryId> {
+    fn visible_foldable_entries(&mut self) -> Vec<BrowseTarget> {
         let rows = self
             .transcript_viewport
             .visible_rows(&self.state.transcript, &mut self.transcript_row_cache);
@@ -2372,10 +2438,11 @@ impl LiveUi {
                     | TranscriptRowKind::CardOmission
                     | TranscriptRowKind::Thought
             ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_));
-            if !foldable || !seen.insert(row.anchor.entry_id) {
+            let target = BrowseTarget::for_row(&row);
+            if !foldable || !seen.insert(target) {
                 continue;
             }
-            entries.push(row.anchor.entry_id);
+            entries.push(target);
         }
         entries
     }
@@ -2385,20 +2452,25 @@ impl LiveUi {
     }
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
-        let selected = self.browse_selected?;
-        let (start, _) = card_run(&self.state.transcript, selected)?;
-        (!self.transcript_row_cache.fold().is_group_expanded(start)).then_some(start)
+        let BrowseTarget::Group(selected) = self.browse_selected? else {
+            return None;
+        };
+        let (start, members) = card_run(&self.state.transcript, selected)?;
+        (!self.transcript_row_cache.fold().is_run_expanded(&members)).then_some(start)
     }
 
     fn expand_selected_fold(&mut self) {
         let Some(selected) = self.browse_selected else {
             return;
         };
-        if let Some(start) = self.selected_closed_group() {
-            self.transcript_row_cache.fold_mut().expand_group(start);
-            self.browse_selected = Some(start);
-        } else {
-            self.transcript_row_cache.fold_mut().expand(selected);
+        match selected {
+            BrowseTarget::Group(_) => {
+                if let Some(start) = self.selected_closed_group() {
+                    self.transcript_row_cache.fold_mut().expand_group(start);
+                    self.browse_selected = Some(BrowseTarget::Group(start));
+                }
+            }
+            BrowseTarget::Entry(entry) => self.transcript_row_cache.fold_mut().expand(entry),
         }
         self.notice = Some(Self::browse_notice());
         self.render_pending = true;
@@ -2408,20 +2480,29 @@ impl LiveUi {
     /// click moves an existing browse selection to that row but never starts browsing,
     /// so typing still reaches the prompt. A collapsed group opens even when its first
     /// card was expanded on its own.
-    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId) {
+    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId, group: bool) {
         let fold = self.transcript_row_cache.fold_mut();
-        let closed_group = card_run(&self.state.transcript, entry)
-            .map(|(start, _)| start)
-            .filter(|start| !fold.is_group_expanded(*start));
-        if let Some(start) = closed_group {
-            fold.expand_group(start);
+        let mut selected = entry;
+        if group {
+            if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+                if fold.is_run_expanded(&members) {
+                    fold.collapse_group(&members);
+                } else {
+                    fold.expand_group(start);
+                }
+                selected = start;
+            }
         } else if fold.is_expanded(entry) {
             fold.collapse(entry);
         } else {
             fold.expand(entry);
         }
         if self.browse_selected.is_some() {
-            self.browse_selected = Some(closed_group.unwrap_or(entry));
+            self.browse_selected = Some(if group {
+                BrowseTarget::Group(selected)
+            } else {
+                BrowseTarget::Entry(selected)
+            });
         }
         self.render_pending = true;
     }
@@ -2430,11 +2511,16 @@ impl LiveUi {
         let Some(selected) = self.browse_selected else {
             return;
         };
-        if self.transcript_row_cache.fold().is_expanded(selected) {
-            self.transcript_row_cache.fold_mut().collapse(selected);
-        } else if let Some((start, _)) = card_run(&self.state.transcript, selected) {
-            self.transcript_row_cache.fold_mut().collapse_group(start);
-            self.browse_selected = Some(start);
+        let entry = selected.entry_id();
+        if matches!(selected, BrowseTarget::Entry(_))
+            && self.transcript_row_cache.fold().is_expanded(entry)
+        {
+            self.transcript_row_cache.fold_mut().collapse(entry);
+        } else if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+            self.transcript_row_cache
+                .fold_mut()
+                .collapse_group(&members);
+            self.browse_selected = Some(BrowseTarget::Group(start));
         }
         self.notice = Some(Self::browse_notice());
         self.render_pending = true;
@@ -2486,12 +2572,30 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    /// A run's header moves to an earlier call that joins the run after it was selected,
+    /// such as a same-tool call that finishes late, so a group target follows the run's
+    /// current start.
+    fn current_browse_target(&self, target: BrowseTarget) -> BrowseTarget {
+        match target {
+            BrowseTarget::Group(entry) => card_run(&self.state.transcript, entry)
+                .map_or(target, |(start, _)| BrowseTarget::Group(start)),
+            BrowseTarget::Entry(_) => target,
+        }
+    }
+
     fn reconcile_browse_selection(&mut self) {
         if self.browse_selected.is_none() || self.detail_view.is_open() {
             return;
         }
+        let previous = self.browse_selected.expect("checked above");
+        let selected = self.current_browse_target(previous);
+        if let (BrowseTarget::Group(from), BrowseTarget::Group(to)) = (previous, selected) {
+            self.transcript_viewport.follow_moved_group_header(from, to);
+        }
         let entries = self.visible_foldable_entries();
-        if !entries.contains(&self.browse_selected.expect("checked above")) {
+        if entries.contains(&selected) {
+            self.browse_selected = Some(selected);
+        } else {
             self.browse_selected = entries.last().copied();
             self.notice = if self.browse_selected.is_some() {
                 Some(Self::browse_notice())
@@ -2502,7 +2606,7 @@ impl LiveUi {
     }
 
     fn open_selected_detail(&mut self) {
-        let Some(entry_id) = self.browse_selected else {
+        let Some(BrowseTarget::Entry(entry_id)) = self.browse_selected else {
             return;
         };
         let Some(presentation) = retained_detail(&self.state, entry_id) else {
@@ -2519,7 +2623,7 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        let Some(entry_id) = self.browse_selected else {
+        let Some(BrowseTarget::Entry(entry_id)) = self.browse_selected else {
             return Ok(LoopControl::Continue);
         };
         if self
@@ -2652,6 +2756,13 @@ impl LiveUi {
                 self.queue_view = Some(queue_view::QueueView::default());
                 self.render_pending = true;
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+            }
+            Command::Diff => {
+                self.git_diff_view = Some(git_diff_view::GitDiffView::default());
+                self.editor.clear();
+                self.render_pending = true;
+                self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                     .await
             }
             Command::Context => {
@@ -3083,6 +3194,52 @@ impl LiveUi {
             .await
     }
 
+    /// Tell the reducer when the side panel appears or goes away, so what it shows
+    /// is loaded while it is on screen.
+    async fn sync_side_panel(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.state.input_ready {
+            return Ok(LoopControl::Continue);
+        }
+        match self.side_panel.take_visibility_change() {
+            Some(visible) => {
+                self.dispatch(UiAction::SetSidePanelVisible(visible), writer, limit)
+                    .await
+            }
+            None => Ok(LoopControl::Continue),
+        }
+    }
+
+    /// Open the view a side panel row summarizes, as its slash command would, without
+    /// clearing a draft from the composer.
+    async fn open_from_panel(
+        &mut self,
+        target: side_panel::Target,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match target {
+            side_panel::Target::Diff(path) => {
+                self.git_diff_view = Some(git_diff_view::GitDiffView::opened_at(path));
+                self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
+                    .await
+            }
+            side_panel::Target::Queue => {
+                self.queue_view = Some(queue_view::QueueView::default());
+                self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+            }
+            side_panel::Target::Mcp => {
+                self.discovery_view = Some(DiscoveryView::mcp());
+                self.notice = None;
+                self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
+            }
+        }
+    }
+
     async fn poll_session_catalog(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
@@ -3234,6 +3391,52 @@ impl LiveUi {
             self.render_pending = true;
             return LoopControl::Continue;
         };
+        if crate::diff_review::is_diff(presentation) {
+            match key.code {
+                KeyCode::Up => self.detail_view.review.scroll(-1),
+                KeyCode::Down => self.detail_view.review.scroll(1),
+                KeyCode::PageUp => self.detail_view.review.page(false),
+                KeyCode::PageDown => self.detail_view.review.page(true),
+                KeyCode::Home => self.detail_view.review.home(),
+                KeyCode::End => self.detail_view.review.end(),
+                KeyCode::Char(']') => self.detail_view.review.jump_hunk(true),
+                KeyCode::Char('[') => self.detail_view.review.jump_hunk(false),
+                KeyCode::Char('s') => {
+                    self.detail_view.review.split = !self.detail_view.review.split
+                }
+                KeyCode::Char('c') => {
+                    self.detail_view.review.context = !self.detail_view.review.context
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    let diffs = self
+                        .state
+                        .transcript
+                        .entries()
+                        .iter()
+                        .filter_map(|entry| {
+                            retained_detail(&self.state, entry.id)
+                                .filter(|detail| crate::diff_review::is_diff(detail))
+                                .map(|_| entry.id)
+                        })
+                        .collect::<Vec<_>>();
+                    if let Some(index) = diffs.iter().position(|id| *id == entry_id) {
+                        let next = if key.code == KeyCode::BackTab {
+                            (index + diffs.len() - 1) % diffs.len()
+                        } else {
+                            (index + 1) % diffs.len()
+                        };
+                        let id = diffs[next];
+                        if let Some(detail) = retained_detail(&self.state, id) {
+                            self.detail_view.open(id, detail);
+                            self.browse_selected = Some(BrowseTarget::Entry(id));
+                        }
+                    }
+                }
+                _ => return LoopControl::Continue,
+            }
+            self.render_pending = true;
+            return LoopControl::Continue;
+        }
         match key.code {
             KeyCode::Up => self.detail_view.scroll_lines(presentation, -1),
             KeyCode::Down => self.detail_view.scroll_lines(presentation, 1),
@@ -3263,11 +3466,15 @@ impl LiveUi {
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.selected_closed_group().is_some() {
-                    self.expand_selected_fold();
+                if matches!(self.browse_selected, Some(BrowseTarget::Group(_))) {
+                    if self.selected_closed_group().is_some() {
+                        self.expand_selected_fold();
+                    } else {
+                        self.collapse_selected_fold();
+                    }
                     return Ok(LoopControl::Continue);
                 }
-                let selected = self.browse_selected;
+                let selected = self.browse_selected.map(BrowseTarget::entry_id);
                 let has_detail = selected.is_some_and(|entry_id| {
                     retained_detail(&self.state, entry_id).is_some()
                         || self
@@ -3848,6 +4055,23 @@ impl LiveUi {
             }
             return Ok(LoopControl::Continue);
         }
+        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::TogglePanel))
+        {
+            // The overlay would open hidden under another overlay or over a decision,
+            // so there Ctrl+B only hides or shows a docked panel.
+            let decision_pending = matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            );
+            let covered = decision_pending
+                || !matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel));
+            if !(covered && self.side_panel.toggles_overlay()) {
+                self.side_panel.toggle();
+                self.rendered_overlay = None;
+                self.render_pending = true;
+            }
+            return Ok(LoopControl::Continue);
+        }
         if self.active_overlay().is_none()
             && self.editor_editable()
             && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ManageQueue))
@@ -3881,7 +4105,8 @@ impl LiveUi {
                     | OverlayKind::Logo
                     | OverlayKind::Session
                     | OverlayKind::PromptHistory
-                    | OverlayKind::Queue => key.code == KeyCode::Enter,
+                    | OverlayKind::Queue
+                    | OverlayKind::SidePanel => key.code == KeyCode::Enter,
                     OverlayKind::Discovery => self
                         .discovery_view
                         .as_ref()
@@ -4027,6 +4252,24 @@ impl LiveUi {
                     _ => Ok(LoopControl::Continue),
                 }
             }
+            Input::Key(key) if overlay == Some(OverlayKind::GitDiff) => {
+                self.render_pending = true;
+                if is_escape(key) || is_ctrl_c(key) {
+                    self.git_diff_view = None;
+                    return self
+                        .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                        .await;
+                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+                    return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
+                } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
+                    self.git_diff_view
+                        .as_mut()
+                        .expect("open diff")
+                        .key(key.code);
+                }
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::GitDiff) => Ok(LoopControl::Continue),
             Input::Key(key) if overlay == Some(OverlayKind::Context) => {
                 if is_escape(key) || is_ctrl_c(key) {
                     self.context_view = None;
@@ -4081,6 +4324,32 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
+            // Esc or Ctrl+C closes the overlaid panel, like /diff, so this comes before
+            // Ctrl+C's interrupt. Enter opens the focused row's view in its place,
+            // keeping any draft in the composer.
+            Input::Key(key) if overlay == Some(OverlayKind::SidePanel) => {
+                if is_ctrl_c(key) {
+                    self.side_panel.close_overlay();
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
+                    return Ok(LoopControl::Continue);
+                }
+                match self.side_panel.key(key.code, &self.state) {
+                    side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
+                    side_panel::OverlayKey::Open(target) => {
+                        self.side_panel.close_overlay();
+                        self.render_pending = true;
+                        return self.open_from_panel(target, writer, limit).await;
+                    }
+                    side_panel::OverlayKey::Moved => {}
+                    side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::SidePanel) => Ok(LoopControl::Continue),
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
             Input::Key(key) if overlay == Some(OverlayKind::SessionTree) => {
                 self.handle_session_tree_picker_key(key, writer, limit)
@@ -4280,17 +4549,19 @@ impl LiveUi {
                         let content = self.editor.text().to_owned();
                         let alternate =
                             self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
+                        // Enter queues a follow-up, so a stray Enter waits for the run
+                        // instead of redirecting it; Alt+Enter steers the run now.
                         let action = match (alternate, self.editor.has_folds()) {
-                            (true, true) => UiAction::FollowUpPresented {
+                            (false, true) => UiAction::FollowUpPresented {
                                 content,
                                 presentation: self.editor.compact_text(),
                             },
-                            (false, true) => UiAction::SteerPresented {
+                            (true, true) => UiAction::SteerPresented {
                                 content,
                                 presentation: self.editor.compact_text(),
                             },
-                            (true, false) => UiAction::FollowUp(content),
-                            (false, false) => UiAction::Steer(content),
+                            (false, false) => UiAction::FollowUp(content),
+                            (true, false) => UiAction::Steer(content),
                         };
                         self.dispatch_queue_action(action, writer, limit).await
                     }
@@ -6662,7 +6933,7 @@ mod tests {
             .transcript
             .entries()
             .first()
-            .map(|entry| entry.id);
+            .map(|entry| BrowseTarget::Entry(entry.id));
         assert!(!live_ui.transcript_viewport.follows_tail());
         assert!(live_ui.transcript_viewport.has_unseen_output());
         assert!(live_ui.browse_selected.is_some());
@@ -7008,10 +7279,11 @@ mod tests {
             ..LiveUi::default()
         };
 
+        // Alt+Enter steers the run now; Enter queues a follow-up.
         live_ui.editor.insert_paste("steer now");
         live_ui
             .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
             )
@@ -7029,7 +7301,7 @@ mod tests {
         live_ui.editor.insert_paste("later please");
         live_ui
             .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
             )
@@ -9280,7 +9552,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
         assert_eq!(live_ui.editor.text(), "draft");
 
         live_ui
@@ -9311,7 +9583,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!live_ui.detail_view.is_open());
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
         live_ui
             .handle_input(
                 Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -9423,7 +9695,7 @@ mod tests {
             &mut live_ui.transcript_row_cache,
         );
         live_ui.enter_or_cycle_browse();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
 
         live_ui.transcript_viewport.set_geometry(
             &live_ui.state.transcript,
@@ -9447,7 +9719,7 @@ mod tests {
             );
         }
         assert!(live_ui.visible_foldable_entries().is_empty());
-        assert_eq!(live_ui.browse_selected, Some(card_id));
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
 
         let connection = ConnectionInfo {
             backend_version: "0.1.0".into(),
@@ -9502,8 +9774,11 @@ mod tests {
             1,
         );
         live_ui.enter_or_cycle_browse();
-        assert_eq!(live_ui.browse_selected, Some(card_id));
-        assert_eq!(live_ui.visible_foldable_entries(), vec![card_id]);
+        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
+        assert_eq!(
+            live_ui.visible_foldable_entries(),
+            vec![BrowseTarget::Entry(card_id)]
+        );
 
         let (writer_tx, _writer_rx) = mpsc::channel(4);
         live_ui

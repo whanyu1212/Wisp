@@ -28,6 +28,7 @@ from .project_root import (
 )
 from .repository_status import (
     MAX_GIT_STATUS_LINES,
+    read_current_branch,
     read_repository_status,
 )
 
@@ -50,6 +51,7 @@ __all__ = [
     "PROJECT_FILE_CANDIDATES",
     "build_project_context",
     "build_untrusted_project_context",
+    "read_current_branch",
     "read_repository_status",
     "resolve_project_context_root",
 ]

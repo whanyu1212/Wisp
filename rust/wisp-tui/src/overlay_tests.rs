@@ -9,12 +9,13 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 12] = [
+const KINDS: [OverlayKind; 14] = [
     OverlayKind::Theme,
     OverlayKind::Logo,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
     OverlayKind::Context,
+    OverlayKind::GitDiff,
     OverlayKind::Queue,
     OverlayKind::Help,
     OverlayKind::Model,
@@ -22,6 +23,7 @@ const KINDS: [OverlayKind; 12] = [
     OverlayKind::SessionTree,
     OverlayKind::Session,
     OverlayKind::Detail,
+    OverlayKind::SidePanel,
 ];
 
 fn base() -> LiveUi {
@@ -100,6 +102,7 @@ fn open(ui: &mut LiveUi, kind: OverlayKind) {
             ui.open_prompt_history();
         }
         OverlayKind::Discovery => ui.discovery_view = Some(DiscoveryView::skills(None)),
+        OverlayKind::GitDiff => ui.git_diff_view = Some(git_diff_view::GitDiffView::default()),
         OverlayKind::Context => ui.context_view = Some(context_view::ContextView::default()),
         OverlayKind::Queue => ui.queue_view = Some(queue_view::QueueView::default()),
         OverlayKind::Help => ui.command_help = Some(Help::default()),
@@ -120,6 +123,8 @@ fn open(ui: &mut LiveUi, kind: OverlayKind) {
                 None,
             ))
         }
+        // Closed width is zero, below what docks, so the toggle opens the overlay.
+        OverlayKind::SidePanel => ui.side_panel.toggle(),
         OverlayKind::Detail => {
             let target = ui
                 .state
@@ -202,7 +207,21 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
             .unwrap();
         let draft = ui.editor.clone();
         draw(&mut ui, &mut terminal);
-        let popup = ui::overlay_area(terminal.backend().buffer().area).unwrap();
+        let screen = terminal.backend().buffer().area;
+        // The side panel lies at the right of the conversation rather than centred.
+        let popup = if kind == OverlayKind::SidePanel {
+            ui::docked_popup_area(
+                screen,
+                &ui.state,
+                &ui.editor,
+                &mut ui.composer_layout_cache,
+                screen.height,
+            )
+            .map(side_panel::overlay_area)
+        } else {
+            ui::overlay_area(screen)
+        }
+        .unwrap();
         for y in 0..32 {
             for x in 0..100 {
                 if !popup.contains((x, y).into()) {
@@ -911,4 +930,146 @@ async fn api_key_entry_docks_above_the_composer_and_shows_its_cursor() {
     let cursor = terminal.get_cursor_position().unwrap();
     assert_eq!(usize::from(cursor.y), top + 1);
     assert!(rows[top + 1].contains("› ••••••••"), "{}", rows.join("\n"));
+}
+
+fn ctrl_b() -> Input {
+    Input::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+}
+
+#[tokio::test]
+async fn ctrl_b_follows_width() {
+    let (writer, _receiver) = mpsc::channel(16);
+    // Too narrow to dock: Ctrl+B lays the panel over the transcript, above the
+    // composer and its draft, and Esc closes it.
+    let mut ui = base();
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+    draw(&mut ui, &mut terminal);
+    assert!(!text(terminal.backend().buffer()).contains("Context"));
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    draw(&mut ui, &mut terminal);
+    let screen = text(terminal.backend().buffer());
+    assert!(screen.contains("Context"), "{screen}");
+    assert!(
+        screen.contains("Esc close · Tab sections · Enter open"),
+        "{screen}"
+    );
+    assert!(screen.contains("keep this"), "{screen}");
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), None);
+
+    // Wide enough: the panel docks unasked, Ctrl+B hides it, and an overlay left
+    // open by a narrow terminal docks when the terminal widens.
+    let mut ui = base();
+    let mut wide = Terminal::new(TestBackend::new(200, 32)).unwrap();
+    draw(&mut ui, &mut wide);
+    assert!(text(wide.backend().buffer()).contains("Ctrl+B hide panel"));
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    draw(&mut ui, &mut wide);
+    assert!(!text(wide.backend().buffer()).contains("Context"));
+
+    let mut ui = base();
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    draw(&mut ui, &mut wide);
+    assert_eq!(ui.active_overlay(), None);
+    assert!(text(wide.backend().buffer()).contains("Ctrl+B hide panel"));
+}
+
+#[tokio::test]
+async fn panel_enter_opens_diff() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(std::sync::Arc::new(reducer::git_diff::GitDiffSnapshot {
+        generation: 1,
+        head: "abc".into(),
+        truncated: false,
+        files: vec![reducer::git_diff::GitDiffFile {
+            path: "src/lib.rs".into(),
+            status: "modified".into(),
+            before: "a\n".into(),
+            after: "b\n".into(),
+            notice: String::new(),
+        }],
+    }));
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    draw(&mut ui, &mut terminal);
+    // Typed keys go to the panel, not the composer.
+    ui.handle_input(key(KeyCode::Char('x')), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    // Enter acts only on a focus the user has seen drawn.
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    // Focus starts on the changed file; Enter opens /diff and keeps the draft.
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(!ui.side_panel.overlay_open());
+    assert!(
+        ui.editor.text().starts_with("keep this"),
+        "{}",
+        ui.editor.text()
+    );
+}
+
+#[tokio::test]
+async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+
+    // Ctrl+C closes the overlay rather than quitting an idle session.
+    let mut ui = base();
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    assert_eq!(
+        ui.handle_input(ctrl_c(), &writer, 8192).await.unwrap(),
+        LoopControl::Continue
+    );
+    assert_eq!(ui.active_overlay(), None);
+
+    // An approval closes the overlay, and Ctrl+B cannot lay it over the decision.
+    let mut ui = base();
+    ui.state.current_command = Some(ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: ActiveCommandType::Prompt,
+    });
+    ui.state.view_status = ViewStatus::Running;
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "call-1".into(),
+            name: "read".into(),
+            arguments: json!({}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "read".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        })),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.side_panel.overlay_open());
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    assert!(!ui.side_panel.overlay_open());
+    while receiver.try_recv().is_ok() {}
+
+    // Under another overlay, Ctrl+B does not open a hidden panel.
+    let mut ui = base();
+    open(&mut ui, OverlayKind::Context);
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    assert!(!ui.side_panel.overlay_open());
 }

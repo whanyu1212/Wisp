@@ -643,7 +643,7 @@ async fn rebound_browse_enter_keeps_fixed_detail_activation() {
     };
     ui.state.transcript.observe_tool_result(*result);
     draw(&mut ui, 80, 24);
-    ui.browse_selected = Some(id);
+    ui.browse_selected = Some(BrowseTarget::Entry(id));
     let (writer, mut received) = mpsc::channel(8);
     ui.handle_input(
         Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -653,5 +653,26 @@ async fn rebound_browse_enter_keeps_fixed_detail_activation() {
     .await
     .unwrap();
     assert!(ui.detail_view.is_open());
+    for key in [KeyCode::Char('s'), KeyCode::Char('c')] {
+        ui.handle_input(
+            Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(ui.detail_view.review.split);
+    assert!(ui.detail_view.review.context);
+    draw(&mut ui, 120, 30);
+    draw(&mut ui, 40, 15);
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.detail_view.is_open());
     assert!(received.try_recv().is_err());
 }

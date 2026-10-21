@@ -25,6 +25,7 @@ from wisp.events import (
     PermissionMode,
     PermissionState,
     RpcCommandFinished,
+    RpcGitDiffReported,
     RpcProjectFilesReported,
     SkillCatalogUpdated,
     TrustRequested,
@@ -48,7 +49,7 @@ from wisp.rpc.execution import (
     RpcCommandExecutor,
     rpc_session_state,
 )
-from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot
+from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
 from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
 from wisp.rpc.handlers.project_files import RpcProjectFiles
 from wisp.runtime.api import WispRuntime
@@ -768,6 +769,7 @@ class RpcHost:
             write_event(event)
         for notice in _broad_root_notices(project_context_root):
             write_event(ErrorEvent(message=notice))
+        write_event(await rpc_workspace_report(cwd))
         return host
 
     async def run_with_streams(
@@ -902,7 +904,7 @@ class RpcHost:
             self._published_events_drained.set()
 
     async def _publish_project_files(
-        self, report: RpcProjectFilesReported, scope: anyio.CancelScope
+        self, report: RpcProjectFilesReported | RpcGitDiffReported, scope: anyio.CancelScope
     ) -> bool:
         """Commit only a current result, serialized against policy invalidation."""
 
@@ -948,7 +950,7 @@ async def build_runtime_for_config(
     *,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
 ) -> WispRuntime:
-    """Build a runtime from the configuration's auth, retry, MCP, and endpoint settings.
+    """Build a runtime from the configuration's auth, retry, timeout, MCP, and endpoint settings.
 
     Args:
         config (WispConfig): Runtime configuration.
@@ -963,6 +965,7 @@ async def build_runtime_for_config(
     return await build_runtime(
         auth_path=config.auth_path,
         retry_policy=config.retry_policy,
+        codex_read_timeout_seconds=config.codex_read_timeout_seconds,
         mcp_servers=config.mcp_servers,
         openai_compatible=config.openai_compatible,
         anthropic_cache_ttl=anthropic_cache_ttl,

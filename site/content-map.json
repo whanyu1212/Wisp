@@ -88,6 +88,17 @@
     "searchable": true
   },
   {
+    "source": "contributing/0.2.4-release.md",
+    "title": "Wisp 0.2.4 release decision and checklist",
+    "description": "Release decision, prepublication checklist, public-install acceptance, and rollback guidance for Wisp 0.2.4.",
+    "route": "maintainers/releases/0.2.4-release.html",
+    "section": "maintainers",
+    "order": 36,
+    "layout": "archive",
+    "listed": false,
+    "searchable": false
+  },
+  {
     "source": "contributing/development.md",
     "title": "Development setup",
     "description": "Wisp targets Python 3.12 or newer and uses uv for its locked development environment. Clone the repository, then install the package and development dependencies:",
