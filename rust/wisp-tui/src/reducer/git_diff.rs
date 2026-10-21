@@ -19,7 +19,10 @@ pub(crate) struct GitDiff {
     pub snapshot: Option<Arc<GitDiffSnapshot>>,
     pub error: Option<String>,
     generation: u64,
+    /// `/diff` is open.
     open: bool,
+    /// The side panel shows the changed files.
+    panel: bool,
     refresh: bool,
     pending: Option<Pending>,
 }
@@ -35,16 +38,46 @@ impl GitDiff {
     }
 
     pub fn set_open(&mut self, open: bool) {
-        if self.open == open {
-            return;
+        self.set_readers(open, self.panel);
+    }
+
+    pub fn set_panel(&mut self, panel: bool) {
+        self.set_readers(self.open, panel);
+    }
+
+    /// Refresh for the side panel after a run, unless `/diff` is open: a snapshot
+    /// under review is replaced only when its reader asks.
+    pub fn refresh_for_panel(&mut self) {
+        if self.panel && !self.open {
+            self.refresh();
         }
+    }
+
+    /// Whether `/diff` or the side panel reads the snapshot, so it is kept current.
+    fn wanted(&self) -> bool {
+        self.open || self.panel
+    }
+
+    /// Opening `/diff` always reads a fresh snapshot; the panel reads one when it
+    /// appears. Once neither reads it, an in-flight read is dropped.
+    fn set_readers(&mut self, open: bool, panel: bool) {
+        let was_wanted = self.wanted();
+        let was_open = self.open;
+        let opens_view = open && !was_open;
         self.open = open;
-        self.refresh = open;
-        if open {
+        self.panel = panel;
+        // Closing `/diff` hands the panel a snapshot that may predate a run that
+        // ended while it was open, so the panel reads a new one.
+        let closes_view_for_panel = !open && was_open && panel;
+        if opens_view || closes_view_for_panel || (self.wanted() && !was_wanted) {
+            self.refresh = true;
             self.retire_snapshot();
-        } else if let Some(pending) = &mut self.pending {
-            pending.superseded = true;
-            pending.report = None;
+        } else if was_wanted && !self.wanted() {
+            self.refresh = false;
+            if let Some(pending) = &mut self.pending {
+                pending.superseded = true;
+                pending.report = None;
+            }
         }
     }
 
@@ -58,7 +91,7 @@ impl GitDiff {
     }
 
     pub(super) fn close(&mut self) {
-        self.set_open(false);
+        self.set_readers(false, false);
         self.pending = None;
         self.snapshot = None;
     }
@@ -72,7 +105,7 @@ impl GitDiff {
                 self.generation = *generation;
                 // Nothing painted under the previous authority may remain selectable.
                 self.retire_snapshot();
-                self.refresh = self.open;
+                self.refresh = self.wanted();
                 return None;
             }
             BackendEvent::GitDiffReported {
@@ -97,7 +130,7 @@ impl GitDiff {
                     return Some(Vec::new());
                 }
                 let pending = self.pending.take().expect("matched Git diff");
-                if !pending.superseded && self.open {
+                if !pending.superseded && self.wanted() {
                     let result = if !ok {
                         Err(super::bounded_session_text(
                             error.as_deref().unwrap_or("Git diff failed."),
@@ -137,7 +170,7 @@ pub(super) fn refresh_if_ready(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     let files = &mut state.git_diff;
-    if !files.open || !files.refresh || files.pending.is_some() || state.exit_requested {
+    if !files.wanted() || !files.refresh || files.pending.is_some() || state.exit_requested {
         return Ok(Vec::new());
     }
     let id = ids.next_id(CommandKind::GetGitDiff);
@@ -185,6 +218,25 @@ mod tests {
             format!("{}-{}", kind.prefix(), self.0)
         }
     }
+    #[test]
+    fn panel_outlives_closed_diff() {
+        let mut files = GitDiff::default();
+        files.set_panel(true);
+        assert!(files.wanted() && files.refresh);
+        files.refresh = false;
+        files.set_open(true);
+        assert!(files.refresh, "/diff opens on a fresh snapshot");
+        files.refresh = false;
+        files.set_open(false);
+        assert!(files.wanted(), "the panel still reads the snapshot");
+        assert!(files.refresh, "a run may have ended while /diff was open");
+        files.refresh = false;
+        files.refresh_for_panel();
+        assert!(files.refresh);
+        files.set_panel(false);
+        assert!(!files.wanted() && !files.refresh);
+    }
+
     #[test]
     fn publishes_only_correlated_success_and_retires_on_policy_change() {
         let mut state = UiState::new("fake".into(), None, None);

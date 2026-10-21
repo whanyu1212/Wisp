@@ -5,6 +5,7 @@ use crate::mouse;
 use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::prompt_highlighting::{self, Highlight, Kind as PromptHighlightKind};
 use crate::reducer::{UiState, ViewStatus};
+use crate::side_panel::{self, SidePanel};
 use crate::startup_logo::{self, LogoChoice};
 use crate::syntax::SyntaxClass;
 use crate::theme::Palette;
@@ -207,6 +208,7 @@ pub fn render(
         LogoChoice::AdalBraille,
         None,
         None,
+        None,
     );
 }
 
@@ -229,6 +231,7 @@ pub fn render_interactive(
     startup_logo: LogoChoice,
     decision_choice: Option<usize>,
     activity_elapsed: Option<std::time::Duration>,
+    side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
     let area = frame.area();
     frame.render_widget(Block::default().style(palette.base()), area);
@@ -242,7 +245,19 @@ pub fn render_interactive(
         return mouse::Conversation::default();
     }
 
-    let area = conversation_surface(area);
+    // A wide terminal docks the side panel at its right; the conversation lays out in
+    // the column beside it.
+    let column = match side_panel.filter(|panel| panel.docked()) {
+        Some(panel) => {
+            let (column, panel_area) = side_panel::split(area);
+            let toggle = primary_label(bindings, KeyAction::TogglePanel);
+            side_panel::render(frame, panel_area, state, panel, &toggle, palette);
+            column
+        }
+        None => area,
+    };
+    let scrollbar_x = column.right().saturating_sub(1);
+    let area = conversation_surface(column);
 
     // A pending approval or trust decision docks above the footer in place of the
     // composer (the draft is kept). Decisions are keyboard-only, so no mouse regions.
@@ -272,6 +287,7 @@ pub fn render_interactive(
             palette,
             bindings,
             startup_logo,
+            scrollbar_x,
         );
         render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
         render_footer(
@@ -284,6 +300,7 @@ pub fn render_interactive(
             bindings,
             jump_painted.is_some(),
             false,
+            column.width,
         );
         // The jump label is drawn but not clickable: clicks never act while deciding.
         return mouse::Conversation::default();
@@ -323,6 +340,7 @@ pub fn render_interactive(
         palette,
         bindings,
         startup_logo,
+        scrollbar_x,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -359,10 +377,11 @@ pub fn render_interactive(
         bindings,
         jump_to_latest.is_some(),
         composer_framed(state, padded, chunks[3]),
+        column.width,
     );
     mouse::Conversation {
         transcript: Rect {
-            width: frame.area().right().saturating_sub(chunks[0].x),
+            width: column.right().saturating_sub(chunks[0].x),
             ..chunks[0]
         },
         // The jump label sits on the transcript's last row, which holds no transcript text.
@@ -380,7 +399,7 @@ pub fn render_interactive(
     }
 }
 
-fn status_label(state: &UiState) -> String {
+pub(crate) fn status_label(state: &UiState) -> String {
     if state.configuration_active() {
         "configuring".into()
     } else if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
@@ -398,7 +417,7 @@ fn status_label(state: &UiState) -> String {
 
 /// The colour of the footer's status label, shared by the composer border so the
 /// prompt shows at a glance whether Wisp is idle, working, or waiting on you.
-fn status_color(state: &UiState, palette: Palette) -> Color {
+pub(crate) fn status_color(state: &UiState, palette: Palette) -> Color {
     let active = matches!(
         state.view_status,
         ViewStatus::Running
@@ -443,7 +462,7 @@ const WORKSPACE_MAX_COLUMNS: usize = 32;
 const BRANCH_MAX_COLUMNS: usize = 32;
 
 /// Shorten `text` to `columns` display columns, ending in `…` when cut.
-fn clip_columns(text: &str, columns: usize) -> String {
+pub(crate) fn clip_columns(text: &str, columns: usize) -> String {
     if text.width() <= columns {
         return text.to_owned();
     }
@@ -529,7 +548,7 @@ fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<Str
 
 /// Where commands run, for the footer's left side. Folder and branch names come from
 /// the file system and the repository, so they are cleaned of terminal controls.
-fn footer_workspace_parts(state: &UiState) -> Vec<String> {
+pub(crate) fn footer_workspace_parts(state: &UiState) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(cwd) = state.workspace_cwd.as_deref() {
         parts.push(display_workspace(&sanitize_for_terminal(cwd)));
@@ -641,6 +660,7 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
+    scrollbar_x: u16,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -863,7 +883,7 @@ fn render_transcript(
         }
     }
     if let Some((start, end)) = scroll {
-        render_scrollbar(frame, rows_area, start, end, palette);
+        render_scrollbar(frame, rows_area, scrollbar_x, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
     let jump_to_latest = (padding > 0 && !viewport.follows_tail())
@@ -1228,7 +1248,15 @@ fn activity_phase(state: &UiState) -> String {
     }
 }
 
-fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, palette: Palette) {
+/// Draw the transcript's scroll marker in column `x`, the conversation's right edge.
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    x: u16,
+    start: f64,
+    end: f64,
+    palette: Palette,
+) {
     let height = usize::from(area.height);
     if height == 0 {
         return;
@@ -1244,7 +1272,6 @@ fn render_scrollbar(frame: &mut Frame<'_>, area: Rect, start: f64, end: f64, pal
         ((start / (start + 1.0 - end)) * travel as f64).round() as usize
     }
     .min(travel);
-    let x = frame.area().right().saturating_sub(1);
     for offset in 0..height {
         let thumb = offset == position;
         let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
@@ -2471,7 +2498,7 @@ fn join_hints(parts: impl IntoIterator<Item = String>, width: usize) -> String {
     out
 }
 
-fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
+pub(crate) fn primary_label(bindings: &Bindings, action: KeyAction) -> String {
     let label = bindings.label(action);
     label
         .split(" / ")
@@ -2706,10 +2733,15 @@ fn render_footer(
     bindings: &Bindings,
     jump_painted: bool,
     identity_in_composer: bool,
+    column_width: u16,
 ) {
     let width = usize::from(area.width);
-    // Keep the established status priorities when outer presentation margins grow.
-    let terminal_width = usize::from(frame.area().width);
+    // Keep the established status priorities when outer presentation margins grow,
+    // measured on the conversation's column rather than beside a docked panel.
+    let terminal_width = usize::from(column_width);
+    // A docked side panel shows the workspace, queue, mode, context, and model, so
+    // the footer keeps only the status and hints beside it.
+    let panel_docked = column_width < frame.area().width;
     let compaction_notice = state
         .context
         .compaction_notice
@@ -2736,7 +2768,11 @@ fn render_footer(
     // While a run is going, the status line above the composer names the run, the
     // queue, and the context, so the footer keeps only scroll markers and hints.
     let mut status = Vec::new();
-    if !run_in_status_line(state) {
+    if panel_docked {
+        if !run_in_status_line(state) {
+            status.push(status_label(state));
+        }
+    } else if !run_in_status_line(state) {
         let leading = footer_leading_parts(state, identity_in_composer);
         let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
         let ctx_width = status_budget
@@ -2773,7 +2809,11 @@ fn render_footer(
             String::new(),
         ),
         None => {
-            let workspace = footer_workspace_parts(state);
+            let workspace = if panel_docked {
+                Vec::new()
+            } else {
+                footer_workspace_parts(state)
+            };
             let hints = footer_hints(
                 state,
                 bindings,
@@ -2804,6 +2844,22 @@ fn render_footer(
         }
     };
     let left_width = left.width().min(beside_status);
+    // Where the panel is not docked, offer it with what room the workspace and the
+    // other hints leave, so it is the first thing a narrow footer drops.
+    let hints = if panel_docked || hints.is_empty() || decision_pending(state) {
+        hints
+    } else {
+        let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
+        let offer = format!(
+            "{hints} · {} panel",
+            primary_label(bindings, KeyAction::TogglePanel)
+        );
+        if offer.width() + 3 <= hint_cap(room) {
+            offer
+        } else {
+            hints
+        }
+    };
 
     let mut right = if status_line.is_empty() {
         Vec::new()
@@ -2867,11 +2923,11 @@ fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Spa
 }
 
 /// The context meter turns to the warning colour from this fill.
-const CONTEXT_WARNING_FILL: f64 = 0.7;
+pub(crate) const CONTEXT_WARNING_FILL: f64 = 0.7;
 
 /// Style joined `key action` hints with each key as a keycap. Keys never contain
 /// spaces, so the first space ends the key; widths match the plain string.
-fn keycap_hints(hints: &str, palette: Palette) -> Line<'static> {
+pub(crate) fn keycap_hints(hints: &str, palette: Palette) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, hint) in hints.split(" · ").enumerate() {
         if index > 0 {
@@ -3614,7 +3670,8 @@ mod tests {
                 let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
                 terminal
                     .draw(|frame| {
-                        render_scrollbar(frame, frame.area(), start, end, Palette::default());
+                        let x = frame.area().right() - 1;
+                        render_scrollbar(frame, frame.area(), x, start, end, Palette::default());
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
@@ -3751,6 +3808,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -3786,6 +3844,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -4341,6 +4400,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -5089,6 +5149,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -5286,6 +5347,7 @@ mod tests {
                         LogoChoice::AdalBraille,
                         None,
                         None,
+                        None,
                     );
                 })
                 .unwrap();
@@ -5361,6 +5423,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -6569,6 +6632,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -6741,6 +6805,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -6796,6 +6861,7 @@ mod tests {
                     Palette::default(),
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
+                    None,
                     None,
                     None,
                 );
@@ -7387,6 +7453,7 @@ mod tests {
                     LogoChoice::AdalBraille,
                     None,
                     None,
+                    None,
                 );
             })
             .unwrap();
@@ -7533,6 +7600,7 @@ mod tests {
                         palette,
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
+                        None,
                         None,
                         None,
                     );

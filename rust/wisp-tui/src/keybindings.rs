@@ -28,10 +28,11 @@ pub(crate) enum Action {
     LineUp,
     LineDown,
     ManageQueue,
+    TogglePanel,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 14] = [
+    pub(crate) const ALL: [Self; 15] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -46,6 +47,7 @@ impl Action {
         Self::LineUp,
         Self::LineDown,
         Self::ManageQueue,
+        Self::TogglePanel,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -55,6 +57,7 @@ impl Action {
             Self::Newline => "prompt.newline",
             Self::RestoreQueue => "queue.restore",
             Self::ManageQueue => "queue.manage",
+            Self::TogglePanel => "panel.toggle",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -74,6 +77,7 @@ impl Action {
             Self::Newline => "Insert a newline",
             Self::RestoreQueue => "Restore the newest queued prompt",
             Self::ManageQueue => "Inspect and manage queues (/queue)",
+            Self::TogglePanel => "Show or hide the side panel",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",
@@ -241,6 +245,11 @@ impl Default for Bindings {
             "Ctrl+T",
         )];
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
+        chords[TogglePanel.index()] = vec![Chord::exact(
+            KeyCode::Char('b'),
+            KeyModifiers::CONTROL,
+            "Ctrl+B",
+        )];
         chords[PageUp.index()] = vec![Chord::exact(KeyCode::PageUp, KeyModifiers::NONE, "PgUp")];
         chords[PageDown.index()] =
             vec![Chord::exact(KeyCode::PageDown, KeyModifiers::NONE, "PgDn")];

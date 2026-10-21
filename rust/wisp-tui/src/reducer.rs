@@ -768,6 +768,9 @@ pub struct UiState {
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) git_diff: git_diff::GitDiff,
+    /// Whether the side panel is on screen, so the changed files stay loaded and
+    /// refresh after each run.
+    pub(crate) side_panel_visible: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -843,6 +846,7 @@ impl UiState {
             permissions: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             git_diff: git_diff::GitDiff::default(),
+            side_panel_visible: false,
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -1294,6 +1298,8 @@ pub enum UiAction {
     LoadContext,
     SetGitDiffOpen(bool),
     RefreshGitDiff,
+    /// The side panel appeared or went away, docked or as an overlay.
+    SetSidePanelVisible(bool),
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -1498,6 +1504,7 @@ pub fn reduce(
             state.git_diff.refresh();
             Ok(vec![UiEffect::RequestRender])
         }
+        UiAction::SetSidePanelVisible(visible) => Ok(set_side_panel_visible(state, visible, ids)?),
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
@@ -1690,6 +1697,26 @@ fn submit(
         UiEffect::RecordPromptHistory(content),
         UiEffect::RequestRender,
     ])
+}
+
+/// Keep what the side panel shows loaded while it is on screen: the changed files
+/// follow it, and MCP status and the permission mode are read each time it appears.
+fn set_side_panel_visible(
+    state: &mut UiState,
+    visible: bool,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.side_panel_visible == visible {
+        return Ok(Vec::new());
+    }
+    state.side_panel_visible = visible;
+    state.git_diff.set_panel(visible);
+    let mut effects = vec![UiEffect::RequestRender];
+    if visible {
+        effects.extend(discovery::load_mcp(state, ids)?);
+        effects.extend(discovery::permissions(state, None, ids)?);
+    }
+    Ok(effects)
 }
 
 fn init_project(
@@ -4610,8 +4637,16 @@ fn handle_backend_event(
                 output_tokens,
                 model_ms,
             );
+            let result = crate::transcript::RunResult {
+                duration_ms,
+                outcome: crate::transcript::RunOutcome::parse(&outcome),
+            };
+            let recorded = state
+                .run_progress
+                .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));
             // A run that reported nothing to total keeps no summary row.
-            if !summary.is_empty() && state.transcript.attach_run_summary(summary) {
+            let summarized = !summary.is_empty() && state.transcript.attach_run_summary(summary);
+            if recorded || summarized {
                 Ok(vec![UiEffect::RequestRender])
             } else {
                 Ok(Vec::new())
@@ -4842,6 +4877,8 @@ fn handle_backend_event(
                     SESSION_NOTICE_MAX_BYTES,
                 ));
             }
+            // The run may have changed files; the panel's list catches up once it ends.
+            state.git_diff.refresh_for_panel();
             let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
             if let Some(message) = init_failure {
                 effects.push(UiEffect::Notice(message));
@@ -5128,6 +5165,144 @@ mod tests {
         assert_eq!(state.latest_assistant_text(), Some("new answer"));
         assert_eq!(state.transcript.entries().len(), 2);
         assert_eq!(state.transcript.entries()[1].thinking(), "private thought");
+    }
+
+    fn sent(effects: &[UiEffect]) -> Vec<String> {
+        effects
+            .iter()
+            .filter_map(command_value)
+            .map(|command| command["type"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn sent_id(effects: &[UiEffect], kind: &str) -> String {
+        effects
+            .iter()
+            .filter_map(command_value)
+            .find(|command| command["type"] == kind)
+            .map(|command| command["id"].as_str().unwrap().to_owned())
+            .unwrap()
+    }
+
+    fn finish(
+        state: &mut UiState,
+        ids: &mut DeterministicIds,
+        id: &str,
+        kind: &str,
+    ) -> Vec<UiEffect> {
+        reduce(
+            state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: id.into(),
+                command_type: kind.into(),
+                ok: kind == "prompt",
+                error: (kind != "prompt").then(|| "unavailable".into()),
+            }),
+            ids,
+        )
+        .unwrap()
+    }
+
+    /// End a prompt run and return what its end sends.
+    fn end_run(state: &mut UiState, ids: &mut DeterministicIds) -> Vec<UiEffect> {
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-9".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        finish(state, ids, "prompt-9", "prompt")
+    }
+
+    #[test]
+    fn side_panel_loads_its_data() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        assert_eq!(
+            sent(&shown),
+            ["get_mcp_status", "get_permissions", "get_git_diff"]
+        );
+        let again = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        assert!(again.is_empty());
+        let hidden = reduce(&mut state, UiAction::SetSidePanelVisible(false), &mut ids).unwrap();
+        assert!(sent(&hidden).is_empty());
+    }
+
+    #[test]
+    fn run_end_refreshes_panel_files() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&shown, "get_git_diff"),
+            "get_git_diff",
+        );
+        let ended = end_run(&mut state, &mut ids);
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&ended, "get_git_diff"),
+            "get_git_diff",
+        );
+
+        // A snapshot under review in /diff is replaced only when /diff asks.
+        let opened = reduce(&mut state, UiAction::SetGitDiffOpen(true), &mut ids).unwrap();
+        finish(
+            &mut state,
+            &mut ids,
+            &sent_id(&opened, "get_git_diff"),
+            "get_git_diff",
+        );
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_git_diff".to_owned()));
+
+        // Without the panel, a run's end reads nothing.
+        reduce(&mut state, UiAction::SetGitDiffOpen(false), &mut ids).unwrap();
+        reduce(&mut state, UiAction::SetSidePanelVisible(false), &mut ids).unwrap();
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_git_diff".to_owned()));
+    }
+
+    #[test]
+    fn run_result_marks_its_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Submit("fix it".into()), &mut ids).unwrap();
+        // A steer the run took in joins it as another prompt.
+        state.transcript.append_prompt("and the docs".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted {
+                outcome: "cancelled".into(),
+                duration_ms: Some(4_000),
+                tool_calls: 0,
+                output_tokens: None,
+                model_ms: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let result = |index: usize| state.transcript.entries()[index].run_result();
+        let cancelled = crate::transcript::RunOutcome::Cancelled;
+        assert_eq!(
+            result(0),
+            Some(crate::transcript::RunResult {
+                duration_ms: Some(4_000),
+                outcome: cancelled,
+            })
+        );
+        // The steer shares the outcome; the run's time stays with the prompt.
+        assert_eq!(
+            result(1),
+            Some(crate::transcript::RunResult {
+                duration_ms: None,
+                outcome: cancelled,
+            })
+        );
     }
 
     #[test]

@@ -45,6 +45,7 @@ pub mod reducer;
 mod session_catalog_tests;
 mod session_picker;
 mod session_tree_picker;
+mod side_panel;
 mod startup_logo;
 mod stream_reveal;
 mod syntax;
@@ -505,6 +506,7 @@ enum OverlayKind {
     SessionTree,
     Session,
     Detail,
+    SidePanel,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -540,6 +542,8 @@ struct LiveUi {
     theme: ThemeSelection,
     theme_preferences: Option<ThemePreferences>,
     theme_picker: Option<ThemePicker>,
+    /// The session summary docked beside the transcript, or opened over it.
+    side_panel: side_panel::SidePanel,
     logo_choice: LogoChoice,
     startup_logo: LogoChoice,
     logo_picker: Option<LogoPicker>,
@@ -600,6 +604,7 @@ impl Default for LiveUi {
             theme: ThemeSelection::default(),
             theme_preferences: None,
             theme_picker: None,
+            side_panel: side_panel::SidePanel::default(),
             logo_choice: LogoChoice::Random,
             startup_logo: LogoChoice::AdalBraille,
             logo_picker: None,
@@ -1272,6 +1277,8 @@ impl LiveUi {
             self.file_picker.dismiss();
             self.theme_picker = None;
             self.logo_picker = None;
+            // A decision owns the screen; a docked panel stays beside it.
+            self.side_panel.close_overlay();
             self.state.project_files.set_open(false);
             self.detail_view.close();
             self.state.history.active_exact_detail = None;
@@ -1543,6 +1550,8 @@ impl LiveUi {
             Some(OverlayKind::Session)
         } else if self.detail_view.is_open() {
             Some(OverlayKind::Detail)
+        } else if self.side_panel.overlay_open() {
+            Some(OverlayKind::SidePanel)
         } else {
             None
         }
@@ -1560,6 +1569,10 @@ impl LiveUi {
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
+        if let Ok(size) = terminal.size() {
+            self.side_panel.observe_width(size.width);
+        }
+        self.side_panel.sync_files(&self.state.git_diff);
         let overlay = self.active_overlay();
         let palette = self.palette();
         let mut painted = mouse::Frame {
@@ -1619,7 +1632,15 @@ impl LiveUi {
                 self.startup_logo,
                 self.decision_choice,
                 activity_elapsed,
+                Some(&self.side_panel),
             );
+            // Popups docked to the composer lay out in the conversation's column, beside
+            // a docked side panel; centred popups still centre on the whole screen.
+            let column = if self.side_panel.docked() {
+                side_panel::split(frame.area()).0
+            } else {
+                frame.area()
+            };
             // A selection belongs to the transcript layout it started in. An approval panel,
             // completion rows, help, or a popup changes or covers that layout, and highlighting
             // or copying the same cells would then mark text that is not the transcript.
@@ -1648,7 +1669,7 @@ impl LiveUi {
             // A confirmation whose details did not fit is drawn with a hint, but
             // is not armed: nothing may be confirmed while partly hidden.
             if ui::decision_context_visible(frame.area())
-                && ui::decision_panel_complete(&self.state, frame.area(), self.notice.as_deref())
+                && ui::decision_panel_complete(&self.state, column, self.notice.as_deref())
             {
                 rendered_decision_context = self.current_decision_context();
                 rendered_decision_choice = self.decision_choice;
@@ -1664,7 +1685,7 @@ impl LiveUi {
                 && self.file_picker.is_open()
             {
                 if let Some(area) = ui::file_picker_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
@@ -1689,13 +1710,13 @@ impl LiveUi {
                 .is_some()
             {
                 let width = ui::docked_popup_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
                     1,
                 )
-                .map_or(frame.area().width, |area| area.width);
+                .map_or(column.width, |area| area.width);
                 self.discovery_view
                     .as_mut()
                     .and_then(DiscoveryView::docked_mcp)
@@ -1723,12 +1744,22 @@ impl LiveUi {
             };
             let area = match docked_height {
                 Some(height) => ui::docked_popup_area(
-                    frame.area(),
+                    column,
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
                     height,
                 ),
+                // The side panel lies over the right of the transcript, down to the
+                // composer, so the prompt stays in view.
+                None if overlay == Some(OverlayKind::SidePanel) => ui::docked_popup_area(
+                    column,
+                    &self.state,
+                    &self.editor,
+                    &mut self.composer_layout_cache,
+                    column.height,
+                )
+                .map(side_panel::overlay_area),
                 None => ui::overlay_area(frame.area()),
             };
             let Some((kind, area)) = overlay.zip(area) else {
@@ -1833,6 +1864,18 @@ impl LiveUi {
                         area,
                         &self.state,
                         &mut self.detail_view,
+                        palette,
+                    );
+                    mouse::Rows::default()
+                }
+                OverlayKind::SidePanel => {
+                    let toggle = ui::primary_label(&self.bindings, KeyAction::TogglePanel);
+                    side_panel::render(
+                        frame,
+                        area,
+                        &self.state,
+                        &self.side_panel,
+                        &toggle,
                         palette,
                     );
                     mouse::Rows::default()
@@ -3147,6 +3190,25 @@ impl LiveUi {
             .await
     }
 
+    /// Tell the reducer when the side panel appears or goes away, so what it shows
+    /// is loaded while it is on screen.
+    async fn sync_side_panel(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.state.input_ready {
+            return Ok(LoopControl::Continue);
+        }
+        match self.side_panel.take_visibility_change() {
+            Some(visible) => {
+                self.dispatch(UiAction::SetSidePanelVisible(visible), writer, limit)
+                    .await
+            }
+            None => Ok(LoopControl::Continue),
+        }
+    }
+
     async fn poll_session_catalog(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
@@ -3962,6 +4024,23 @@ impl LiveUi {
             }
             return Ok(LoopControl::Continue);
         }
+        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::TogglePanel))
+        {
+            // The overlay would open hidden under another overlay or over a decision,
+            // so there Ctrl+B only hides or shows a docked panel.
+            let decision_pending = matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            );
+            let covered = decision_pending
+                || !matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel));
+            if !(covered && self.side_panel.toggles_overlay()) {
+                self.side_panel.toggle();
+                self.rendered_overlay = None;
+                self.render_pending = true;
+            }
+            return Ok(LoopControl::Continue);
+        }
         if self.active_overlay().is_none()
             && self.editor_editable()
             && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ManageQueue))
@@ -4213,6 +4292,16 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
+            // The overlaid panel only reads: Esc or Ctrl+C closes it, like /diff, so
+            // this comes before Ctrl+C's interrupt.
+            Input::Key(key) if overlay == Some(OverlayKind::SidePanel) => {
+                if is_escape(key) || is_ctrl_c(key) {
+                    self.side_panel.close_overlay();
+                    self.render_pending = true;
+                }
+                Ok(LoopControl::Continue)
+            }
+            Input::Paste(_) if overlay == Some(OverlayKind::SidePanel) => Ok(LoopControl::Continue),
             Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
             Input::Key(key) if overlay == Some(OverlayKind::SessionTree) => {
                 self.handle_session_tree_picker_key(key, writer, limit)

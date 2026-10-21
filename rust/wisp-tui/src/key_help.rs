@@ -131,6 +131,10 @@ impl KeyHelp {
             Owner::Overlay(OverlayKind::Context | OverlayKind::Help) => {
                 &["Up/Down/Page/Home/End scroll; r refreshes; Esc/Ctrl+C closes."]
             }
+            Owner::Overlay(OverlayKind::SidePanel) => &[
+                "Side panel: the session, its context, cost, changed files, and turns.",
+                "Ctrl+B or Esc closes it; on a wide terminal it stays docked beside the transcript.",
+            ],
             Owner::Overlay(OverlayKind::Detail) => &[
                 "Details: arrows/Page/Home/End scroll; Esc returns to card browse.",
                 "Diff review: [ / ] previous/next hunk; Tab / Shift+Tab next/previous retained edit.",

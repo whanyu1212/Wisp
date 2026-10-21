@@ -94,6 +94,31 @@ pub enum TranscriptEntryKind {
     Process(ProcessCardSnapshot),
 }
 
+/// How a finished run ended and how long it took, kept on the prompt that started it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunResult {
+    pub duration_ms: Option<u64>,
+    pub outcome: RunOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunOutcome {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl RunOutcome {
+    /// Read the backend's outcome word; anything unrecognised counts as a failure.
+    pub(crate) fn parse(outcome: &str) -> Self {
+        match outcome {
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Failed,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptEntry {
     pub id: TranscriptEntryId,
@@ -117,6 +142,8 @@ pub struct TranscriptEntry {
     cost: Option<String>,
     /// Display-only summary closing the last reply of a finished run.
     run_summary: Option<String>,
+    /// How the run this prompt started ended, for the side panel's turn list.
+    run_result: Option<RunResult>,
     decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
@@ -181,6 +208,10 @@ impl TranscriptEntry {
         self.run_summary
             .as_deref()
             .filter(|_| self.unrevealed.is_empty())
+    }
+
+    pub(crate) fn run_result(&self) -> Option<RunResult> {
+        self.run_result
     }
 
     pub fn thinking(&self) -> &str {
@@ -545,6 +576,31 @@ impl Transcript {
         entry.run_summary = Some(summary);
         // The entry's last row now leads to the summary row, so cached rows rebuild.
         Self::bump_revision(entry);
+        true
+    }
+
+    /// Record how the run that `prompt` started ended. Steers and follow-ups the run
+    /// took in share its outcome but not its time, which belongs to the prompt. Only
+    /// the side panel reads it, so the entries' own rows stay cached.
+    pub(crate) fn attach_run_result(
+        &mut self,
+        prompt: TranscriptEntryId,
+        result: RunResult,
+    ) -> bool {
+        let Some(start) = self
+            .entry_index(prompt)
+            .filter(|index| self.entries[*index].role == TranscriptRole::User)
+        else {
+            return false;
+        };
+        for (offset, entry) in self.entries[start..].iter_mut().enumerate() {
+            if entry.role == TranscriptRole::User {
+                entry.run_result = Some(RunResult {
+                    duration_ms: result.duration_ms.filter(|_| offset == 0),
+                    ..result
+                });
+            }
+        }
         true
     }
 
@@ -1624,6 +1680,7 @@ impl Transcript {
                 searches: Vec::new(),
                 cost: None,
                 run_summary: None,
+                run_result: None,
                 thinking_started: None,
                 running_since: None,
                 thinking_ms: None,
@@ -2317,6 +2374,7 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            run_result: None,
             thinking_started: None,
             running_since: None,
             thinking_ms: None,
@@ -2413,6 +2471,7 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            run_result: None,
             thinking_started: None,
             running_since: None,
             thinking_ms: None,

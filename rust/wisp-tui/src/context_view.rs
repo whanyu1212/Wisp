@@ -30,7 +30,7 @@ fn approximate(budget: &ContextBudget) -> bool {
         || !(budget.observed_is_current && budget.observed_tokens.is_some())
 }
 
-fn abbreviated(value: u64) -> String {
+pub(crate) fn abbreviated(value: u64) -> String {
     if value >= 1_000_000 {
         format!("{:.1}m", value as f64 / 1_000_000.0)
     } else if value >= 1_000 {
@@ -38,6 +38,37 @@ fn abbreviated(value: u64) -> String {
     } else {
         value.to_string()
     }
+}
+
+/// The context in use, for the side panel's reading.
+pub(crate) struct Usage {
+    pub tokens: u64,
+    pub window: Option<u64>,
+    /// The count includes an estimate rather than only what the provider reported.
+    pub approximate: bool,
+}
+
+pub(crate) fn usage(state: &UiState) -> Option<Usage> {
+    let budget = state.context.budget.as_ref()?;
+    Some(Usage {
+        tokens: tokens(budget),
+        window: budget.context_window.filter(|window| *window > 0),
+        approximate: approximate(budget),
+    })
+}
+
+/// The session's estimated cost, such as `$1.84` or `≥$1.84` when some usage had no
+/// price, or `None` before any usage was priced.
+pub(crate) fn session_cost(state: &UiState) -> Option<String> {
+    let cost = &state.context.stats.as_ref()?.cost;
+    if cost.priced_record_count == 0 {
+        return None;
+    }
+    let amount = cost.known_usd.parse::<f64>().map_or_else(
+        |_| sanitize_for_terminal(&cost.known_usd),
+        |usd| format!("{usd:.2}"),
+    );
+    Some(format!("{}${amount}", if cost.complete { "" } else { "≥" }))
 }
 
 /// Cells in the footer's context meter.

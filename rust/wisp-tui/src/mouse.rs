@@ -634,7 +634,8 @@ impl LiveUi {
             OverlayKind::GitDiff
             | OverlayKind::Context
             | OverlayKind::Help
-            | OverlayKind::Detail => false,
+            | OverlayKind::Detail
+            | OverlayKind::SidePanel => false,
         }
     }
 }

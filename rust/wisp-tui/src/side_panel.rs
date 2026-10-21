@@ -1,0 +1,965 @@
+//! The side panel: what the session is, what it costs, and what it changed, beside
+//! the transcript on a wide terminal or over it as an overlay opened with Ctrl+B.
+//!
+//! The panel only reads state. The reducer keeps its data loaded while it is on
+//! screen (see `UiAction::SetSidePanelVisible`); this module decides where it goes
+//! and draws it.
+
+use std::sync::Arc;
+
+use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
+use crate::reducer::{UiState, ViewStatus};
+use crate::theme::Palette;
+use crate::transcript::{RunOutcome, TranscriptRole};
+use crate::ui::{self, sanitize_for_terminal};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use unicode_width::UnicodeWidthStr;
+use wisp_protocol::commands::PermissionMode;
+use wisp_protocol::events::McpServerStatus;
+
+/// The panel's width, its border included.
+pub(crate) const PANEL_WIDTH: u16 = 56;
+
+/// What the transcript keeps beside a docked panel: replies wrap at 100 columns,
+/// plus the turn rail and the conversation margins.
+const MIN_TRANSCRIPT_WIDTH: u16 = 104;
+
+/// Changed files listed before the rest are counted on one line.
+const MAX_FILE_ROWS: usize = 8;
+
+const SPINNER_OUTCOME: &str = "…";
+
+/// Whether a terminal this wide docks the panel beside the transcript.
+pub(crate) fn docks(width: u16) -> bool {
+    width >= PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH
+}
+
+/// Where the panel is and whether the reducer knows it is on screen.
+#[derive(Debug, Default)]
+pub(crate) struct SidePanel {
+    /// Hidden with Ctrl+B on a terminal wide enough to dock it.
+    hidden: bool,
+    /// Opened with Ctrl+B on a terminal too narrow to dock it.
+    overlay: bool,
+    /// The width of the last frame, which decides whether the panel docks.
+    width: u16,
+    /// The visibility last reported to the reducer.
+    reported_visible: bool,
+    files: Option<FileSummary>,
+}
+
+impl SidePanel {
+    pub(crate) fn docked(&self) -> bool {
+        !self.hidden && docks(self.width)
+    }
+
+    pub(crate) fn overlay_open(&self) -> bool {
+        self.overlay && !docks(self.width)
+    }
+
+    fn visible(&self) -> bool {
+        self.docked() || self.overlay_open()
+    }
+
+    /// Ctrl+B: hide or show the docked panel, or open or close the overlay.
+    pub(crate) fn toggle(&mut self) {
+        if docks(self.width) {
+            self.hidden = !self.hidden;
+        } else {
+            self.overlay = !self.overlay;
+        }
+    }
+
+    /// Whether Ctrl+B would open or close the overlay rather than the docked panel.
+    pub(crate) fn toggles_overlay(&self) -> bool {
+        !docks(self.width)
+    }
+
+    pub(crate) fn close_overlay(&mut self) {
+        self.overlay = false;
+    }
+
+    /// Follow the terminal's width. An overlay open when the terminal grows wide
+    /// enough becomes the docked panel.
+    pub(crate) fn observe_width(&mut self, width: u16) {
+        if self.overlay && docks(width) {
+            self.overlay = false;
+            self.hidden = false;
+        }
+        self.width = width;
+    }
+
+    /// The visibility to report to the reducer, once, after it changes.
+    pub(crate) fn take_visibility_change(&mut self) -> Option<bool> {
+        let visible = self.visible();
+        (visible != self.reported_visible).then(|| {
+            self.reported_visible = visible;
+            visible
+        })
+    }
+
+    /// Count the changed files' lines once per snapshot. While a new snapshot loads,
+    /// the last counts stay on screen rather than blinking out after every run.
+    pub(crate) fn sync_files(&mut self, files: &GitDiff) {
+        let Some(snapshot) = &files.snapshot else {
+            // A failed read replaces the counts with its error.
+            if files.error.is_some() {
+                self.files = None;
+            }
+            return;
+        };
+        if self
+            .files
+            .as_ref()
+            .is_none_or(|summary| !Arc::ptr_eq(&summary.snapshot, snapshot))
+        {
+            self.files = Some(FileSummary::new(snapshot.clone()));
+        }
+    }
+}
+
+/// The panel's area on a terminal too narrow to dock it: the right-hand side of the
+/// conversation, above the composer, so the prompt stays in view.
+pub(crate) fn overlay_area(above_composer: Rect) -> Rect {
+    let width = PANEL_WIDTH.min(above_composer.width);
+    Rect {
+        x: above_composer.right() - width,
+        width,
+        ..above_composer
+    }
+}
+
+/// Split a frame into the conversation and the docked panel at its right.
+pub(crate) fn split(area: Rect) -> (Rect, Rect) {
+    let width = PANEL_WIDTH.min(area.width);
+    (
+        Rect {
+            width: area.width - width,
+            ..area
+        },
+        Rect {
+            x: area.right() - width,
+            width,
+            ..area
+        },
+    )
+}
+
+#[derive(Debug)]
+struct FileSummary {
+    snapshot: Arc<GitDiffSnapshot>,
+    /// The listed files only: the rest are counted, not diffed, so a large
+    /// working tree cannot stall a frame.
+    rows: Vec<FileRow>,
+}
+
+#[derive(Debug)]
+struct FileRow {
+    status: char,
+    path: String,
+    additions: usize,
+    deletions: usize,
+    /// Whether line counts are known: an untracked file, or one Git could not read,
+    /// shows none.
+    counted: bool,
+}
+
+impl FileSummary {
+    fn new(snapshot: Arc<GitDiffSnapshot>) -> Self {
+        let rows = snapshot
+            .files
+            .iter()
+            .take(MAX_FILE_ROWS)
+            .map(|file| {
+                let status = match file.status.as_str() {
+                    "untracked" => '?',
+                    "added" => 'A',
+                    "deleted" => 'D',
+                    _ => 'M',
+                };
+                let counted = status != '?' && file.notice.is_empty();
+                let (additions, deletions) = if counted {
+                    line_counts(&file.before, &file.after)
+                } else {
+                    (0, 0)
+                };
+                FileRow {
+                    status,
+                    path: sanitize_for_terminal(&file.path),
+                    additions,
+                    deletions,
+                    counted,
+                }
+            })
+            .collect();
+        Self { snapshot, rows }
+    }
+}
+
+fn line_counts(before: &str, after: &str) -> (usize, usize) {
+    let diff = similar::TextDiff::from_lines(before, after);
+    diff.iter_all_changes()
+        .fold((0, 0), |(added, deleted), change| match change.tag() {
+            similar::ChangeTag::Insert => (added + 1, deleted),
+            similar::ChangeTag::Delete => (added, deleted + 1),
+            similar::ChangeTag::Equal => (added, deleted),
+        })
+}
+
+/// Draw the panel into `area`. A docked panel has a rule on its left; an overlay is
+/// boxed so it reads as lying over the transcript.
+pub(crate) fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    panel: &SidePanel,
+    toggle_key: &str,
+    palette: Palette,
+) {
+    let overlay = !panel.docked();
+    let block = if overlay {
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(palette.border())
+            .padding(Padding::horizontal(1))
+    } else {
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(Style::default().fg(palette.rail()))
+            .padding(Padding::new(2, 1, 1, 0))
+    };
+    let inner = block.inner(area);
+    frame.render_widget(block.style(palette.overlay()), area);
+    let width = usize::from(inner.width);
+    let height = usize::from(inner.height);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let hint = if overlay {
+        format!("{toggle_key} close · Esc close")
+    } else {
+        format!("{toggle_key} hide panel")
+    };
+    let mut sections = vec![
+        header_lines(state, width, palette),
+        context_lines(state, width, palette),
+        model_lines(state, width, palette),
+        file_lines(state, panel, width, palette),
+    ];
+    let mcp = mcp_line(state, width, palette);
+    // The turn list takes what the other sections leave, keeping its newest turns.
+    let fixed: usize = sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
+        + mcp.as_ref().map_or(0, |_| 2)
+        + 1;
+    let turns = turn_lines(state, width, height.saturating_sub(fixed + 1), palette);
+    if !turns.is_empty() {
+        sections.push(turns);
+    }
+    if let Some(mcp) = mcp {
+        sections.push(vec![mcp]);
+    }
+
+    let mut lines = Vec::new();
+    for section in sections {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.extend(section);
+    }
+    lines.truncate(height.saturating_sub(1));
+    let hint_row = Rect {
+        y: inner.bottom() - 1,
+        height: 1,
+        ..inner
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(
+        Paragraph::new(ui::keycap_hints(&hint, palette)).style(Style::default().fg(palette.muted)),
+        hint_row,
+    );
+}
+
+/// A row with `left` at the start and `right` against the end; the left side is
+/// clipped to leave room for the right.
+fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let right_width: usize = right.iter().map(|span| span.content.width()).sum();
+    let room = width.saturating_sub(right_width + usize::from(right_width > 0));
+    let mut spans = clip_spans(left, room);
+    let left_width: usize = spans.iter().map(|span| span.content.width()).sum();
+    spans.push(Span::raw(
+        " ".repeat(width.saturating_sub(left_width + right_width)),
+    ));
+    spans.extend(right);
+    Line::from(spans)
+}
+
+fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut used = 0;
+    let mut clipped = Vec::new();
+    for span in spans {
+        let span_width = span.content.width();
+        if used + span_width <= width {
+            used += span_width;
+            clipped.push(span);
+        } else {
+            let text = ui::clip_columns(&span.content, width - used);
+            clipped.push(Span::styled(text, span.style));
+            break;
+        }
+    }
+    clipped
+}
+
+fn heading(title: &str, palette: Palette) -> Span<'static> {
+    Span::styled(
+        title.to_owned(),
+        Style::default()
+            .fg(palette.muted)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+/// The session's name, or its first prompt before it has one, and where it works.
+fn header_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+    let title = state
+        .selected_session
+        .as_ref()
+        .and_then(|session| session.session_name.as_deref())
+        .map(sanitize_for_terminal)
+        .or_else(|| {
+            state
+                .transcript
+                .entries()
+                .iter()
+                .find(|entry| entry.role == TranscriptRole::User)
+                .map(|entry| first_line(entry.display_content()))
+        })
+        .unwrap_or_else(|| "New session".to_owned());
+    let mut lines = vec![spread(
+        vec![Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        )],
+        vec![Span::styled(
+            ui::status_label(state),
+            Style::default().fg(ui::status_color(state, palette)),
+        )],
+        width,
+    )];
+    let workspace = ui::footer_workspace_parts(state);
+    if !workspace.is_empty() {
+        lines.push(Line::styled(
+            ui::clip_columns(&workspace.join(" · "), width),
+            Style::default().fg(palette.muted),
+        ));
+    }
+    lines
+}
+
+fn first_line(text: &str) -> String {
+    sanitize_for_terminal(
+        text.lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or(""),
+    )
+    .trim()
+    .to_owned()
+}
+
+/// `Context  198.8k / 272.0k 73%` over a bar of the window's fill.
+fn context_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let Some(usage) = crate::context_view::usage(state) else {
+        let reading = if state.context.loading() {
+            "reading…"
+        } else {
+            "unknown"
+        };
+        return vec![spread(
+            vec![heading("Context", palette)],
+            vec![Span::styled(reading, muted)],
+            width,
+        )];
+    };
+    let prefix = if usage.approximate { "~" } else { "" };
+    let used = crate::context_view::abbreviated(usage.tokens);
+    let Some(window) = usage.window else {
+        return vec![spread(
+            vec![heading("Context", palette)],
+            vec![Span::raw(format!("{prefix}{used}"))],
+            width,
+        )];
+    };
+    let fill = usage.tokens as f64 / window as f64;
+    let pressured = fill >= ui::CONTEXT_WARNING_FILL;
+    let level = if pressured {
+        Style::default().fg(palette.warning)
+    } else {
+        muted
+    };
+    let mut lines = vec![spread(
+        vec![heading("Context", palette)],
+        vec![
+            Span::raw(format!("{prefix}{used}")),
+            Span::styled(
+                format!(" / {} ", crate::context_view::abbreviated(window)),
+                muted,
+            ),
+            Span::styled(format!("{prefix}{:.0}%", fill * 100.0), level),
+        ],
+        width,
+    )];
+    let filled = ((fill * width as f64).round() as usize).min(width);
+    lines.push(Line::from(vec![
+        Span::styled(
+            "━".repeat(filled),
+            Style::default().fg(if pressured {
+                palette.warning
+            } else {
+                palette.secondary
+            }),
+        ),
+        Span::styled(
+            "━".repeat(width - filled),
+            Style::default().fg(palette.panel),
+        ),
+    ]));
+    lines
+}
+
+/// The model, its effort, the session's cost, and the permission mode.
+fn model_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let mut lines = vec![Line::from(heading("Model", palette))];
+    let model = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref());
+    let mut identity = Vec::new();
+    if let Some(model) = model {
+        identity.push(Span::raw(sanitize_for_terminal(model)));
+    }
+    if let Some(provider) = state.provider.as_deref() {
+        if !identity.is_empty() {
+            identity.push(Span::raw(" "));
+        }
+        identity.push(Span::styled(sanitize_for_terminal(provider), muted));
+    }
+    let effort = state
+        .effort
+        .as_deref()
+        .map(|effort| {
+            vec![Span::styled(
+                sanitize_for_terminal(effort),
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        })
+        .unwrap_or_default();
+    if !identity.is_empty() || !effort.is_empty() {
+        lines.push(spread(identity, effort, width));
+    }
+    let cost = crate::context_view::session_cost(state).map_or_else(
+        || vec![Span::styled("cost unknown", muted)],
+        |cost| {
+            vec![
+                Span::styled("cost ", muted),
+                Span::raw(cost),
+                Span::styled(" session", muted),
+            ]
+        },
+    );
+    let permissions = state.permissions.snapshot.as_ref().map(|permissions| {
+        vec![
+            Span::styled("permissions ", muted),
+            Span::raw(match permissions.mode {
+                PermissionMode::Ask => "ask",
+                PermissionMode::Yolo => "YOLO",
+            }),
+        ]
+    });
+    lines.push(spread(cost, permissions.unwrap_or_default(), width));
+    lines
+}
+
+/// Git's changed files with their line counts; the rest are counted on one row.
+fn file_lines(
+    state: &UiState,
+    panel: &SidePanel,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let Some(summary) = &panel.files else {
+        let note = if let Some(error) = &state.git_diff.error {
+            sanitize_for_terminal(error)
+        } else {
+            "reading…".to_owned()
+        };
+        return vec![
+            Line::from(heading("Changed files", palette)),
+            Line::styled(ui::clip_columns(&note, width), muted),
+        ];
+    };
+    let count = summary.snapshot.files.len();
+    let mut lines = vec![spread(
+        vec![heading("Changed files", palette)],
+        vec![Span::styled(
+            match count {
+                0 => String::new(),
+                1 => "1 file".to_owned(),
+                count => format!("{count} files"),
+            },
+            muted,
+        )],
+        width,
+    )];
+    if count == 0 {
+        lines.push(Line::styled("No changes", muted));
+        return lines;
+    }
+    for row in &summary.rows {
+        let status_style = Style::default().fg(match row.status {
+            'A' => palette.success,
+            'D' => palette.deletion,
+            '?' => palette.muted,
+            _ => palette.warning,
+        });
+        let counts = if row.counted {
+            let mut counts = vec![Span::styled(
+                format!("+{}", row.additions),
+                Style::default().fg(palette.addition),
+            )];
+            if row.deletions > 0 {
+                counts.push(Span::styled(
+                    format!(" −{}", row.deletions),
+                    Style::default().fg(palette.deletion),
+                ));
+            }
+            counts
+        } else {
+            Vec::new()
+        };
+        let counts_width: usize = counts.iter().map(|span| span.content.width()).sum();
+        let path_room = width.saturating_sub(2 + counts_width + usize::from(counts_width > 0));
+        lines.push(spread(
+            vec![
+                Span::styled(format!("{} ", row.status), status_style),
+                Span::raw(clip_path(&row.path, path_room)),
+            ],
+            counts,
+            width,
+        ));
+    }
+    if count > MAX_FILE_ROWS {
+        lines.push(Line::styled(
+            format!("+{} more · /diff to review", count - MAX_FILE_ROWS),
+            muted,
+        ));
+    }
+    lines
+}
+
+/// Keep a path's end, where its file name is: `…/providers/codex.py`.
+fn clip_path(path: &str, width: usize) -> String {
+    if path.width() <= width {
+        return path.to_owned();
+    }
+    let mut kept = String::new();
+    for character in path.chars().rev() {
+        if kept.width() + character.to_string().width() + 1 > width {
+            break;
+        }
+        kept.insert(0, character);
+    }
+    format!("…{kept}")
+}
+
+/// The session's prompts, newest last, with how long each run took and how it
+/// ended. Prompts loaded from history have no timing.
+fn turn_lines(state: &UiState, width: usize, rows: usize, palette: Palette) -> Vec<Line<'static>> {
+    if rows < 2 {
+        return Vec::new();
+    }
+    let muted = Style::default().fg(palette.muted);
+    let prompts: Vec<_> = state
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.role == TranscriptRole::User)
+        .collect();
+    if prompts.is_empty() {
+        return Vec::new();
+    }
+    let running = matches!(
+        state.view_status,
+        ViewStatus::Running | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+    );
+    let shown = prompts.len().min(rows - 1);
+    let first = prompts.len() - shown;
+    let number_width = prompts.len().to_string().len();
+    let mut lines = vec![spread(
+        vec![heading("Turns", palette)],
+        vec![Span::styled(prompts.len().to_string(), muted)],
+        width,
+    )];
+    for (index, prompt) in prompts.iter().enumerate().skip(first) {
+        let latest = index + 1 == prompts.len();
+        let (duration, outcome) = match prompt.run_result() {
+            Some(result) => (
+                result
+                    .duration_ms
+                    .map(crate::tool_cards::format_duration)
+                    .unwrap_or_default(),
+                match result.outcome {
+                    RunOutcome::Completed => {
+                        Span::styled("✓", Style::default().fg(palette.success))
+                    }
+                    RunOutcome::Cancelled => Span::styled("⊘", muted),
+                    RunOutcome::Failed => Span::styled("✗", Style::default().fg(palette.error)),
+                },
+            ),
+            None if latest && running => (
+                String::new(),
+                Span::styled(SPINNER_OUTCOME, Style::default().fg(palette.secondary)),
+            ),
+            None => (String::new(), Span::raw(" ")),
+        };
+        let text_style = if latest { Style::default() } else { muted };
+        let mut right = Vec::new();
+        if !duration.is_empty() {
+            right.push(Span::styled(format!("{duration} "), muted));
+        }
+        right.push(outcome);
+        lines.push(spread(
+            vec![
+                Span::styled(format!("{:>number_width$} ", index + 1), muted),
+                Span::styled(first_line(prompt.display_content()), text_style),
+            ],
+            right,
+            width,
+        ));
+    }
+    lines
+}
+
+/// `MCP ●●●○ 3/4 connected`, once the servers' status is known.
+fn mcp_line(state: &UiState, width: usize, palette: Palette) -> Option<Line<'static>> {
+    let servers = &state.mcp.snapshot.as_ref()?.servers;
+    if servers.is_empty() {
+        return None;
+    }
+    let connected = servers
+        .iter()
+        .filter(|server| server.status == McpServerStatus::Connected)
+        .count();
+    let mut dots = vec![heading("MCP ", palette)];
+    for server in servers.iter().take(12) {
+        let (dot, color) = match server.status {
+            McpServerStatus::Connected => ("●", palette.success),
+            McpServerStatus::Disabled => ("○", palette.muted),
+            McpServerStatus::Disconnected | McpServerStatus::Unavailable => ("●", palette.error),
+        };
+        dots.push(Span::styled(dot, Style::default().fg(color)));
+    }
+    Some(spread(
+        dots,
+        vec![Span::styled(
+            format!("{connected}/{} connected", servers.len()),
+            Style::default().fg(palette.muted),
+        )],
+        width,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keybindings::Bindings;
+    use crate::prompt_editor::PromptEditor;
+    use crate::reducer::git_diff::GitDiffFile;
+    use crate::startup_logo::LogoChoice;
+    use crate::transcript::RunResult;
+    use crate::transcript_view::{TranscriptRowCache, TranscriptViewport};
+    use crate::ui::{ComposerLayoutCache, ConnectionInfo};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use wisp_protocol::events::{
+        ContextAccountingMethod, ContextBudget, ContextEstimate, McpServerSnapshot,
+        McpStatusSnapshot, PermissionState, SessionCostSummary, SessionStats, SessionTokenUsage,
+    };
+
+    fn budget() -> ContextBudget {
+        ContextBudget {
+            estimate: ContextEstimate {
+                total_tokens: 198_800,
+            },
+            observed_tokens: Some(198_800),
+            observed_is_current: true,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::ProviderObserved,
+            context_window: Some(272_000),
+            reserve_tokens: 1_000,
+        }
+    }
+
+    fn file(path: &str, status: &str, before: &str, after: &str) -> GitDiffFile {
+        GitDiffFile {
+            path: path.into(),
+            status: status.into(),
+            before: before.into(),
+            after: after.into(),
+            notice: String::new(),
+        }
+    }
+
+    fn changes(files: Vec<GitDiffFile>) -> Arc<GitDiffSnapshot> {
+        Arc::new(GitDiffSnapshot {
+            generation: 1,
+            head: "abc123".into(),
+            files,
+            truncated: false,
+        })
+    }
+
+    /// A session two runs in, with everything the panel shows loaded.
+    fn session() -> UiState {
+        let mut state = UiState::new(
+            "openai-codex".into(),
+            Some("gpt-6-astra".into()),
+            Some("high".into()),
+        );
+        state.workspace_cwd = Some("/srv/wisp".into());
+        state.git_branch = Some("fix/timeouts".into());
+        state.context.budget = Some(budget());
+        state.context.stats = Some(Box::new(SessionStats {
+            session_id: None,
+            active_message_count: 4,
+            compaction_count: 0,
+            usage: SessionTokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+                cache_read_input_tokens: None,
+                cache_write_input_tokens: None,
+            },
+            context: budget(),
+            compaction: None,
+            cost: SessionCostSummary {
+                known_usd: "1.8412".into(),
+                complete: true,
+                priced_record_count: 3,
+                unpriced_record_count: 0,
+            },
+        }));
+        state.permissions.snapshot = Some(Arc::new(PermissionState {
+            mode: PermissionMode::Ask,
+            saved_mode: None,
+            project_path: None,
+            session_only_yolo: false,
+        }));
+        state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
+            servers: ["docs", "linear"]
+                .into_iter()
+                .map(|name| McpServerSnapshot {
+                    name: name.into(),
+                    status: McpServerStatus::Connected,
+                    tool_names: Vec::new(),
+                    error: None,
+                    launch: None,
+                    sign_in: None,
+                })
+                .collect(),
+        }));
+        state.git_diff.snapshot = Some(changes(vec![
+            file("src/lib.rs", "modified", "a\nb\n", "a\nc\nd\n"),
+            file("notes.md", "untracked", "", "new\n"),
+        ]));
+        for (turn, (prompt, outcome)) in [
+            ("why does codex time out", RunOutcome::Completed),
+            ("add a read timeout setting", RunOutcome::Cancelled),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = state.transcript.append_prompt(prompt.into());
+            state
+                .transcript
+                .complete_message(turn as u64 + 1, "Done.".into());
+            state.transcript.attach_run_result(
+                id,
+                RunResult {
+                    duration_ms: Some(252_000),
+                    outcome,
+                },
+            );
+        }
+        state
+    }
+
+    fn screen(state: &UiState, panel: &mut SidePanel, width: u16) -> Vec<String> {
+        panel.observe_width(width);
+        panel.sync_files(&state.git_diff);
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                ui::render_interactive(
+                    frame,
+                    state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &ConnectionInfo {
+                        backend_version: "test".into(),
+                    },
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                    None,
+                    Some(panel),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    /// The panel's columns of each row.
+    fn panel_text(rows: &[String], width: u16) -> String {
+        let start = usize::from(width - PANEL_WIDTH);
+        rows.iter()
+            .map(|row| {
+                row.chars()
+                    .skip(start)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn wide_terminal_docks_panel() {
+        let rows = screen(&session(), &mut SidePanel::default(), 200);
+        let panel = panel_text(&rows, 200);
+        for expected in [
+            "why does codex time out",
+            "/srv/wisp · fix/timeouts",
+            "198.8k / 272.0k 73%",
+            "gpt-6-astra openai-codex",
+            "cost $1.84 session",
+            "permissions ask",
+            "2 files",
+            "M src/lib.rs",
+            "+2 −1",
+            "? notes.md",
+            "Turns",
+            "4m 12s ✓",
+            "4m 12s ⊘",
+            "2/2 connected",
+            "Ctrl+B hide panel",
+        ] {
+            assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+    }
+
+    #[test]
+    fn docked_panel_trims_footer() {
+        let rows = screen(&session(), &mut SidePanel::default(), 200);
+        let footer = rows.last().unwrap();
+        let conversation: String = footer
+            .chars()
+            .take(usize::from(200 - PANEL_WIDTH))
+            .collect();
+        assert!(conversation.contains("idle · Enter send"), "{conversation}");
+        assert!(!conversation.contains("/srv/wisp"), "{conversation}");
+        assert!(!conversation.contains("ctx"), "{conversation}");
+    }
+
+    #[test]
+    fn undocked_footer_offers_panel() {
+        let rows = screen(&session(), &mut SidePanel::default(), 140);
+        let footer = rows.last().unwrap();
+        assert!(!rows.iter().any(|row| row.contains("Changed files")));
+        assert!(footer.contains("/srv/wisp · fix/timeouts"), "{footer}");
+        assert!(footer.contains("Ctrl+B panel"), "{footer}");
+    }
+
+    #[test]
+    fn long_file_lists_point_to_diff() {
+        let mut state = session();
+        state.git_diff.snapshot = Some(changes(
+            (0..10)
+                .map(|index| {
+                    file(
+                        &format!("src/deeply/nested/module_{index}.rs"),
+                        "added",
+                        "",
+                        "x\n",
+                    )
+                })
+                .collect(),
+        ));
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("10 files"), "{panel}");
+        assert!(panel.contains("A src/deeply/nested/module_7.rs"), "{panel}");
+        assert!(!panel.contains("module_8.rs"), "{panel}");
+        assert!(panel.contains("+2 more · /diff to review"), "{panel}");
+    }
+
+    #[test]
+    fn running_turn_has_no_result() {
+        let mut state = session();
+        state.transcript.append_prompt("now push it".into());
+        state.view_status = ViewStatus::Running;
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("working"), "{panel}");
+        let latest = panel
+            .lines()
+            .find(|line| line.contains("3 now push it"))
+            .unwrap();
+        assert!(latest.ends_with('…'), "{latest}");
+    }
+
+    #[test]
+    fn long_paths_keep_file_name() {
+        assert_eq!(
+            clip_path("src/wisp/providers/codex.py", 14),
+            "…ders/codex.py"
+        );
+        assert_eq!(clip_path("src/lib.rs", 14), "src/lib.rs");
+    }
+
+    #[test]
+    fn visibility_reports_once() {
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        assert_eq!(panel.take_visibility_change(), Some(true));
+        assert_eq!(panel.take_visibility_change(), None);
+        panel.toggle();
+        assert_eq!(panel.take_visibility_change(), Some(false));
+        // Narrowing leaves the panel hidden until Ctrl+B opens the overlay.
+        panel.observe_width(100);
+        assert_eq!(panel.take_visibility_change(), None);
+        panel.toggle();
+        assert!(panel.overlay_open());
+        assert_eq!(panel.take_visibility_change(), Some(true));
+    }
+}
