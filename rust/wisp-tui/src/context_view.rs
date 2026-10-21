@@ -65,10 +65,26 @@ pub(crate) fn session_cost(state: &UiState) -> Option<String> {
         return None;
     }
     let amount = cost.known_usd.parse::<f64>().map_or_else(
-        |_| sanitize_for_terminal(&cost.known_usd),
-        |usd| format!("{usd:.2}"),
+        |_| format!("${}", sanitize_for_terminal(&cost.known_usd)),
+        format_usd,
     );
-    Some(format!("{}${amount}", if cost.complete { "" } else { "≥" }))
+    Some(format!("{}{amount}", if cost.complete { "" } else { "≥" }))
+}
+
+/// Round a cost for display like the backend's `format_usd`, keeping more places
+/// for small amounts so a short session never reads as `$0.00`.
+fn format_usd(usd: f64) -> String {
+    if usd == 0.0 {
+        "$0.00".into()
+    } else if usd < 0.0001 {
+        "<$0.0001".into()
+    } else if usd < 0.01 {
+        format!("${usd:.4}")
+    } else if usd < 1.0 {
+        format!("${usd:.3}")
+    } else {
+        format!("${usd:.2}")
+    }
 }
 
 /// Cells in the footer's context meter.

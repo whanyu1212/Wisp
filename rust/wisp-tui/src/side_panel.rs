@@ -509,20 +509,30 @@ fn file_lines(
         ];
     };
     let count = summary.snapshot.files.len();
+    // A partial snapshot omits files past Git's limits, so its count is a floor.
+    let partial = summary.snapshot.truncated;
     let mut lines = vec![spread(
         vec![heading("Changed files", palette)],
         vec![Span::styled(
-            match count {
-                0 => String::new(),
-                1 => "1 file".to_owned(),
-                count => format!("{count} files"),
+            match (count, partial) {
+                (0, _) => String::new(),
+                (1, false) => "1 file".to_owned(),
+                (count, false) => format!("{count} files"),
+                (count, true) => format!("{count}+ files"),
             },
             muted,
         )],
         width,
     )];
     if count == 0 {
-        lines.push(Line::styled("No changes", muted));
+        lines.push(Line::styled(
+            if partial {
+                "Changed files omitted · /diff to review"
+            } else {
+                "No changes"
+            },
+            muted,
+        ));
         return lines;
     }
     for row in &summary.rows {
@@ -563,6 +573,9 @@ fn file_lines(
             format!("+{} more · /diff to review", count - MAX_FILE_ROWS),
             muted,
         ));
+    }
+    if partial {
+        lines.push(Line::styled("partial: some files omitted", muted));
     }
     lines
 }
@@ -922,6 +935,37 @@ mod tests {
         assert!(panel.contains("A src/deeply/nested/module_7.rs"), "{panel}");
         assert!(!panel.contains("module_8.rs"), "{panel}");
         assert!(panel.contains("+2 more · /diff to review"), "{panel}");
+    }
+
+    #[test]
+    fn partial_snapshot_says_so() {
+        let mut state = session();
+        let mut snapshot = changes(vec![file("src/lib.rs", "modified", "a\n", "b\n")]);
+        Arc::get_mut(&mut snapshot).unwrap().truncated = true;
+        state.git_diff.snapshot = Some(snapshot);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("1+ files"), "{panel}");
+        assert!(panel.contains("partial: some files omitted"), "{panel}");
+
+        let mut empty = changes(Vec::new());
+        Arc::get_mut(&mut empty).unwrap().truncated = true;
+        state.git_diff.snapshot = Some(empty);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(!panel.contains("No changes"), "{panel}");
+        assert!(panel.contains("Changed files omitted"), "{panel}");
+    }
+
+    #[test]
+    fn small_costs_keep_precision() {
+        let cost = |usd: &str| {
+            let mut state = session();
+            state.context.stats.as_mut().unwrap().cost.known_usd = usd.into();
+            crate::context_view::session_cost(&state).unwrap()
+        };
+        assert_eq!(cost("0.0012"), "$0.0012");
+        assert_eq!(cost("0.25"), "$0.250");
+        assert_eq!(cost("0.00001"), "<$0.0001");
+        assert_eq!(cost("1.8412"), "$1.84");
     }
 
     #[test]
