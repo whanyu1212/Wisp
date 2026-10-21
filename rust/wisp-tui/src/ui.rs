@@ -26,8 +26,9 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-/// The framed composer's ceiling; two more than an unframed one, for its identity row
-/// and the blank row above it.
+/// The composer's ceiling with its frame and blank row. A framed composer without the
+/// blank row stops one row lower, and an unframed one two rows lower, so neither
+/// spends the rows they leave out on more draft.
 const MAX_COMPOSER_HEIGHT: u16 = 10;
 /// From this conversation height the framed composer leaves a blank row between the
 /// draft and its identity; a shorter screen keeps that row for the transcript.
@@ -66,7 +67,10 @@ fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>)
     let ceiling = area
         .height
         .saturating_sub(3 + status_line_height(state))
-        .clamp(2, MAX_COMPOSER_HEIGHT - 2 * u16::from(!framed));
+        .clamp(
+            2,
+            MAX_COMPOSER_HEIGHT - u16::from(!framed) - u16::from(!(framed && gap)),
+        );
     if editable(state) {
         u16::try_from(
             layout
@@ -4484,6 +4488,24 @@ mod tests {
             Palette::default().secondary,
             "{text}"
         );
+    }
+
+    #[test]
+    fn composer_cap_follows_gap() {
+        let state = UiState::new("fake".into(), None, None);
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"line\n".repeat(20));
+        let mut cache = ComposerLayoutCache::default();
+        let mut height = |rows: u16| {
+            let area = Rect::new(0, 0, 60, rows);
+            let layout = cache.layout(&editor, composer_editor_width(area.width));
+            composer_height(area, &state, Some(layout))
+        };
+        // A framed composer shows six rows of a long draft with or without the blank
+        // row, which is the only row the higher ceiling adds.
+        assert_eq!(height(14), 8);
+        assert_eq!(height(20), 9);
+        assert_eq!(height(30), 10);
     }
 
     #[test]
