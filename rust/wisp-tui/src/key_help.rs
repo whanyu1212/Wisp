@@ -133,6 +133,8 @@ impl KeyHelp {
             }
             Owner::Overlay(OverlayKind::SidePanel) => &[
                 "Side panel: the session, its context, cost, changed files, and turns.",
+                "Tab/Shift+Tab move between the queue, changed files, and MCP; Up/Down/Home/End select.",
+                "Enter opens the focused row: /queue, /diff at that file, or /mcp.",
                 "Ctrl+B or Esc closes it; on a wide terminal it stays docked beside the transcript.",
             ],
             Owner::Overlay(OverlayKind::Detail) => &[

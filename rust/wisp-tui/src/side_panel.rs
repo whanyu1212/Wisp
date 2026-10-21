@@ -5,6 +5,7 @@
 //! screen (see `UiAction::SetSidePanelVisible`); this module decides where it goes
 //! and draws it.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
 use crate::transcript::{RunOutcome, TranscriptRole};
 use crate::ui::{self, sanitize_for_terminal};
+use crossterm::event::KeyCode;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -52,6 +54,54 @@ pub(crate) struct SidePanel {
     /// The visibility last reported to the reducer.
     reported_visible: bool,
     files: Option<FileSummary>,
+    /// The overlay's keyboard focus, when it has moved off the first row it can act
+    /// on. Clamped to what the panel shows, since queues drain and files refresh.
+    cursor: Option<Cursor>,
+    /// How many of each section's focusable rows the last frame drew, by
+    /// `Section::index`: a short panel cuts off its last sections, and focus must
+    /// not land where the user cannot see it. `None` before the first frame.
+    drawn: Cell<Option<[usize; 3]>>,
+}
+
+/// A section of the overlay that focus can land on. Each opens the view it
+/// summarizes; the turn list has nowhere to go yet, so focus skips it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Section {
+    Queue,
+    Files,
+    Mcp,
+}
+
+impl Section {
+    fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Cursor {
+    section: Section,
+    row: usize,
+}
+
+/// What Enter on a focused row opens.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Target {
+    /// `/diff`, at this file when one is named.
+    Diff(Option<String>),
+    Queue,
+    Mcp,
+}
+
+/// What a key in the overlay asks of the app.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OverlayKey {
+    Close,
+    /// Close the overlay and open this view.
+    Open(Target),
+    /// Focus moved; repaint.
+    Moved,
+    Ignored,
 }
 
 impl SidePanel {
@@ -67,13 +117,139 @@ impl SidePanel {
         self.docked() || self.overlay_open()
     }
 
-    /// Ctrl+B: hide or show the docked panel, or open or close the overlay.
+    /// Ctrl+B: hide or show the docked panel, or open or close the overlay. An
+    /// overlay opens with focus on the first row it can act on.
     pub(crate) fn toggle(&mut self) {
         if docks(self.width) {
             self.hidden = !self.hidden;
         } else {
             self.overlay = !self.overlay;
+            self.cursor = None;
+            self.drawn.set(None);
         }
+    }
+
+    /// A key while the overlay is open: Tab and Shift+Tab move between the sections
+    /// that open a view, arrows move within one, Enter opens what is focused, and Esc
+    /// closes the overlay. The docked panel takes no keys, so typing stays with the
+    /// composer.
+    pub(crate) fn key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
+        if key == KeyCode::Esc {
+            return OverlayKey::Close;
+        }
+        let sections = self.sections(state);
+        let Some(cursor) = self.focused(state) else {
+            return OverlayKey::Ignored;
+        };
+        let rows = self.targets(cursor.section, state).len();
+        let position = sections
+            .iter()
+            .position(|section| *section == cursor.section)
+            .expect("a focused section is listed");
+        let moved = match key {
+            KeyCode::Tab => Cursor {
+                section: sections[(position + 1) % sections.len()],
+                row: 0,
+            },
+            KeyCode::BackTab => Cursor {
+                section: sections[(position + sections.len() - 1) % sections.len()],
+                row: 0,
+            },
+            KeyCode::Up => Cursor {
+                row: cursor.row.saturating_sub(1),
+                ..cursor
+            },
+            KeyCode::Down => Cursor {
+                row: (cursor.row + 1).min(rows - 1),
+                ..cursor
+            },
+            KeyCode::Home => Cursor { row: 0, ..cursor },
+            KeyCode::End => Cursor {
+                row: rows - 1,
+                ..cursor
+            },
+            KeyCode::Enter => {
+                let target = self.targets(cursor.section, state).swap_remove(cursor.row);
+                return OverlayKey::Open(target);
+            }
+            _ => return OverlayKey::Ignored,
+        };
+        self.cursor = Some(moved);
+        OverlayKey::Moved
+    }
+
+    /// The sections focus can land on, in the order the panel draws them.
+    fn sections(&self, state: &UiState) -> Vec<Section> {
+        [Section::Queue, Section::Files, Section::Mcp]
+            .into_iter()
+            .filter(|section| !self.targets(*section, state).is_empty())
+            .collect()
+    }
+
+    /// What each of a section's focusable rows opens, one per row the last frame
+    /// drew.
+    fn targets(&self, section: Section, state: &UiState) -> Vec<Target> {
+        let mut targets = self.section_targets(section, state);
+        if let Some(drawn) = self.drawn.get() {
+            targets.truncate(drawn[section.index()]);
+        }
+        targets
+    }
+
+    /// What each of a section's focusable rows opens, one per row it draws when the
+    /// panel has room for all of them.
+    fn section_targets(&self, section: Section, state: &UiState) -> Vec<Target> {
+        match section {
+            // The queue is drawn only while a run is going or waits on a decision.
+            Section::Queue if Focus::of(state) == Focus::Idle => Vec::new(),
+            Section::Queue => {
+                let queued = state.queued_steering() + state.queued_follow_ups();
+                // The listed rows, and the row counting the rest.
+                let rows = queued.min(MAX_QUEUE_ROWS) + usize::from(queued > MAX_QUEUE_ROWS);
+                vec![Target::Queue; rows]
+            }
+            Section::Files => {
+                let Some(summary) = &self.files else {
+                    return Vec::new();
+                };
+                let count = summary.snapshot.files.len();
+                let mut targets: Vec<_> = summary
+                    .rows
+                    .iter()
+                    .map(|row| Target::Diff(Some(row.git_path.clone())))
+                    .collect();
+                // The row counting the rest, or the one saying a partial snapshot
+                // omitted every file, opens /diff where it starts.
+                if count > MAX_FILE_ROWS || (count == 0 && summary.snapshot.truncated) {
+                    targets.push(Target::Diff(None));
+                }
+                targets
+            }
+            Section::Mcp => state
+                .mcp
+                .snapshot
+                .as_ref()
+                .filter(|snapshot| !snapshot.servers.is_empty())
+                .map(|_| vec![Target::Mcp])
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The focused row: the cursor clamped to what the panel shows now, or the first
+    /// row of the first section before focus has moved.
+    fn focused(&self, state: &UiState) -> Option<Cursor> {
+        let sections = self.sections(state);
+        let section = self
+            .cursor
+            .map(|cursor| cursor.section)
+            .filter(|section| sections.contains(section))
+            .or_else(|| sections.first().copied())?;
+        let rows = self.targets(section, state).len();
+        let row = self
+            .cursor
+            .filter(|cursor| cursor.section == section)
+            .map_or(0, |cursor| cursor.row.min(rows - 1));
+        Some(Cursor { section, row })
     }
 
     /// Whether Ctrl+B would open or close the overlay rather than the docked panel.
@@ -162,7 +338,10 @@ struct FileSummary {
 #[derive(Debug)]
 struct FileRow {
     status: char,
+    /// The path as drawn, made safe for the terminal.
     path: String,
+    /// The path as Git reported it, which `/diff` looks the file up by.
+    git_path: String,
     additions: usize,
     deletions: usize,
     /// Whether line counts are known: an untracked file, or one Git could not read,
@@ -192,6 +371,7 @@ impl FileSummary {
                 FileRow {
                     status,
                     path: sanitize_for_terminal(&file.path),
+                    git_path: file.path.clone(),
                     additions,
                     deletions,
                     counted,
@@ -275,12 +455,15 @@ pub(crate) fn render(
 
     let toggle_key = ui::primary_label(bindings, KeyAction::TogglePanel);
     let hint = if overlay {
-        format!("{toggle_key} close · Esc close")
+        "Esc close · Tab sections · Enter open".to_owned()
     } else {
         format!("{toggle_key} hide panel")
     };
     let focus = Focus::of(state);
     let mut sections = vec![header_lines(state, width, palette)];
+    // Where each focusable section sits in `sections`, and the row its focusable
+    // rows start at.
+    let mut focusable: Vec<(Section, usize, usize)> = Vec::new();
     match focus {
         Focus::Idle => {}
         Focus::Running => {
@@ -291,18 +474,25 @@ pub(crate) fn render(
                 width,
                 palette,
             ));
-            sections.extend(queue_lines(state, false, bindings, width, palette));
+            if let Some(queue) = queue_lines(state, false, bindings, width, palette) {
+                focusable.push((Section::Queue, sections.len(), 1));
+                sections.push(queue);
+            }
         }
         Focus::Approval => {
             sections.extend(approval_lines(state, width, palette));
-            sections.extend(queue_lines(state, true, bindings, width, palette));
+            if let Some(queue) = queue_lines(state, true, bindings, width, palette) {
+                focusable.push((Section::Queue, sections.len(), 1));
+                sections.push(queue);
+            }
         }
     }
     sections.extend([
         context_lines(state, width, palette),
         model_lines(state, focus, width, palette),
-        file_lines(state, panel, width, palette),
     ]);
+    focusable.push((Section::Files, sections.len(), 1));
+    sections.push(file_lines(state, panel, width, palette));
     let mcp = mcp_line(state, width, palette);
     let turns = if focus == Focus::Idle {
         // The turn list takes what the other sections leave, keeping its newest turns.
@@ -317,17 +507,42 @@ pub(crate) fn render(
         sections.push(turns);
     }
     if let Some(mcp) = mcp {
+        focusable.push((Section::Mcp, sections.len(), 0));
         sections.push(vec![mcp]);
     }
 
     let mut lines = Vec::new();
+    let mut starts = Vec::with_capacity(sections.len());
     for section in sections {
         if !lines.is_empty() {
             lines.push(Line::default());
         }
+        starts.push(lines.len());
         lines.extend(section);
     }
     lines.truncate(height.saturating_sub(1));
+
+    // Record what fits before marking focus, so the mark and the keys agree on it.
+    let mut drawn = [0; 3];
+    for &(section, index, first_row) in &focusable {
+        let rows = panel.section_targets(section, state).len();
+        drawn[section.index()] = rows.min(lines.len().saturating_sub(starts[index] + first_row));
+    }
+    panel.drawn.set(Some(drawn));
+    // Only the overlay takes keys, so only it marks a focused row.
+    if let Some(cursor) = overlay.then(|| panel.focused(state)).flatten() {
+        if let Some(&(_, index, first_row)) = focusable
+            .iter()
+            .find(|(section, ..)| *section == cursor.section)
+        {
+            mark_focus(
+                &mut lines[starts[index]..],
+                first_row + cursor.row,
+                width,
+                palette,
+            );
+        }
+    }
     let hint_row = Rect {
         y: inner.bottom() - 1,
         height: 1,
@@ -369,6 +584,20 @@ fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
         }
     }
     clipped
+}
+
+/// Highlight the focused row across the panel's `width`, and its section's heading,
+/// the first span of the section's first line.
+fn mark_focus(lines: &mut [Line<'static>], row: usize, width: usize, palette: Palette) {
+    if let Some(heading) = lines.first_mut().and_then(|line| line.spans.first_mut()) {
+        heading.style = heading.style.fg(palette.primary);
+    }
+    if let Some(line) = lines.get_mut(row) {
+        // Pad the row so the highlight spans the panel, as a list selection does.
+        let padding = width.saturating_sub(line.width());
+        line.spans.push(Span::raw(" ".repeat(padding)));
+        *line = std::mem::take(line).patch_style(palette.selection());
+    }
 }
 
 fn heading(title: &str, palette: Palette) -> Span<'static> {
@@ -1481,7 +1710,10 @@ mod tests {
     fn overlay_follows_state() {
         let panel = overlay_text(&running());
         assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
-        assert!(panel.contains("Ctrl+B close · Esc close"), "{panel}");
+        assert!(
+            panel.contains("Esc close · Tab sections · Enter open"),
+            "{panel}"
+        );
         let panel = overlay_text(&approving());
         assert!(
             row_of(&panel, "Needs approval") < row_of(&panel, "Queue"),
@@ -1490,6 +1722,189 @@ mod tests {
         assert!(
             row_of(&panel, "Queue") < row_of(&panel, "Context"),
             "{panel}"
+        );
+    }
+
+    /// The overlay open on `state` at a normal width, its files counted.
+    fn overlay(state: &UiState) -> SidePanel {
+        let mut panel = SidePanel::default();
+        panel.observe_width(140);
+        panel.toggle();
+        panel.sync_files(&state.git_diff);
+        panel
+    }
+
+    #[test]
+    fn tab_cycles_sections() {
+        let mut state = running();
+        queue(&mut state, &["steer"], &["later"]);
+        let mut panel = overlay(&state);
+        let mut press = |key| panel.key(key, &state);
+        // Focus starts on the queue, the first section that opens a view.
+        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Queue));
+        assert_eq!(press(KeyCode::Tab), OverlayKey::Moved);
+        assert_eq!(
+            press(KeyCode::Enter),
+            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
+        );
+        press(KeyCode::Down);
+        press(KeyCode::Down);
+        assert_eq!(
+            press(KeyCode::Enter),
+            OverlayKey::Open(Target::Diff(Some("notes.md".into())))
+        );
+        press(KeyCode::Tab);
+        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Mcp));
+        // Tab wraps, and Shift+Tab goes back.
+        press(KeyCode::Tab);
+        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Queue));
+        press(KeyCode::BackTab);
+        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Mcp));
+        assert_eq!(press(KeyCode::Char('x')), OverlayKey::Ignored);
+        assert_eq!(press(KeyCode::Esc), OverlayKey::Close);
+    }
+
+    #[test]
+    fn focus_skips_empty_sections() {
+        // At idle the queue is not drawn, so focus starts on the changed files.
+        let mut state = session();
+        queue(&mut state, &["steer"], &[]);
+        let mut panel = overlay(&state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
+        );
+        // Focus left on a section that empties moves to the first one still drawn.
+        panel.key(KeyCode::Tab, &state);
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Mcp);
+        state.mcp.snapshot = None;
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Files);
+        // The row counting the rest of a long list opens /diff where it starts.
+        state.git_diff.snapshot = Some(changes(
+            (0..10)
+                .map(|index| file(&format!("f{index}.rs"), "added", "", "x\n"))
+                .collect(),
+        ));
+        let mut panel = overlay(&state);
+        panel.key(KeyCode::End, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Diff(None))
+        );
+    }
+
+    /// The background of the middle of the panel's row that contains `text`.
+    fn row_background(
+        panel: &SidePanel,
+        state: &UiState,
+        width: u16,
+        text: &str,
+    ) -> Option<ratatui::style::Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = if panel.docked() {
+                    split(frame.area()).1
+                } else {
+                    overlay_area(frame.area())
+                };
+                render(
+                    frame,
+                    area,
+                    state,
+                    panel,
+                    &Bindings::default(),
+                    0,
+                    None,
+                    Palette::default(),
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..buffer.area.height)
+            .find(|&y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains(text)
+            })
+            .unwrap_or_else(|| panic!("{text}"));
+        buffer[(width - PANEL_WIDTH / 2, y)].style().bg
+    }
+
+    #[test]
+    fn overflow_rows_take_focus() {
+        let selection = Palette::default().selection().bg;
+        let mut state = running();
+        let follow_ups: Vec<String> = (1..=6).map(|index| format!("later {index}")).collect();
+        let follow_ups: Vec<&str> = follow_ups.iter().map(String::as_str).collect();
+        queue(&mut state, &[], &follow_ups);
+        state.git_diff.snapshot = Some(changes(
+            (0..10)
+                .map(|index| file(&format!("f{index}.rs"), "added", "", "x\n"))
+                .collect(),
+        ));
+        let mut panel = overlay(&state);
+        // The queue's row counting the rest is the last one focus reaches.
+        panel.key(KeyCode::End, &state);
+        assert_eq!(
+            row_background(&panel, &state, 140, "+1 more · /queue"),
+            selection
+        );
+        assert_ne!(row_background(&panel, &state, 140, "later 5"), selection);
+        panel.key(KeyCode::Up, &state);
+        assert_eq!(row_background(&panel, &state, 140, "later 5"), selection);
+        // So is the file list's.
+        panel.key(KeyCode::Tab, &state);
+        panel.key(KeyCode::End, &state);
+        assert_eq!(
+            row_background(&panel, &state, 140, "+2 more · /diff"),
+            selection
+        );
+        // The panel is too short for the MCP line, so Tab skips it.
+        assert_eq!(panel.drawn.get().unwrap()[Section::Mcp.index()], 0);
+        panel.key(KeyCode::Tab, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Queue)
+        );
+    }
+
+    #[test]
+    fn diff_gets_git_path() {
+        let mut state = session();
+        state.git_diff.snapshot = Some(changes(vec![file("a\tb.rs", "modified", "a\n", "b\n")]));
+        let mut panel = overlay(&state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Diff(Some("a\tb.rs".into())))
+        );
+    }
+
+    #[test]
+    fn overlay_marks_focus() {
+        let state = session();
+        let selection = Palette::default().selection().bg;
+        let panel = overlay(&state);
+        assert_eq!(
+            row_background(&panel, &state, 140, "M src/lib.rs"),
+            selection
+        );
+        assert_ne!(row_background(&panel, &state, 140, "? notes.md"), selection);
+        // The MCP line takes focus as a whole.
+        let mut panel = panel;
+        panel.key(KeyCode::Tab, &state);
+        assert_eq!(
+            row_background(&panel, &state, 140, "2/2 connected"),
+            selection
+        );
+        // The docked panel takes no keys, so it marks nothing.
+        let mut docked = SidePanel::default();
+        docked.observe_width(200);
+        docked.sync_files(&state.git_diff);
+        assert_ne!(
+            row_background(&docked, &state, 200, "M src/lib.rs"),
+            selection
         );
     }
 
