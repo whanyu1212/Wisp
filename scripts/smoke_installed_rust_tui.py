@@ -20,11 +20,13 @@ from pathlib import Path
 
 _HISTORY_READY = b"RC2 saved history ready"
 _ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
-# The context snapshot replaces the footer's "ctx ~?" with a token count, such as
-# "ctx ~6.8k/1.0k", "ctx ~1.2m/1.0k", or "ctx ~2.6k/?". Frames repaint only changed
-# cells, so "ctx ~" may never be resent next to the count; match the newly painted
-# count instead.
-_CONTEXT_COUNT = re.compile(rb"[0-9](?:\.[0-9])?[km]?/[0-9?]")
+# The context snapshot replaces the footer's "ctx ~?" with a reading: a meter and
+# percent such as "ctx ▰▰▰▰▱▱▱▱▱▱ ~42%" or "ctx ~811%" when the window is known,
+# otherwise a token count such as "ctx ~2.6k". Frames repaint only changed cells, so
+# "ctx ~" may never be resent next to the reading; match the newly painted percent or
+# abbreviated count instead. Counts below 1k are not matched: a bare number is too
+# ambiguous, and the system prompt alone exceeds 1k tokens.
+_CONTEXT_READING = re.compile(rb"[0-9]%|[0-9](?:\.[0-9])?[km](?![A-Za-z])")
 
 
 def _seed_history(session_dir: Path, count: int) -> int:
@@ -147,7 +149,7 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if startup_redraw_offset is None and _CONTEXT_COUNT.search(
+            if startup_redraw_offset is None and _CONTEXT_READING.search(
                 _ESCAPE_SEQUENCE.sub(b"", output[-65536:])
             ):
                 # The empty-transcript hint can appear before startup metadata
