@@ -530,6 +530,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "rpc.workspace": {"cwd": Path("/workspace"), "git_branch": "main"},
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "session.saved": {"session_id": "session-1", "path": Path("fixture.jsonl")},
     "session.stats": {"command_id": "command-1", "stats": _SESSION_STATS},

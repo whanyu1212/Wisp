@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing
+from tests.tui_e2e.support import rendered_without_spacing, screen_shows
 from tests.tui_e2e.test_readiness import _launch, _write_user_settings
 
 
@@ -51,7 +51,10 @@ def test_diff_opens_refreshes_and_returns_to_composer(tmp_path: Path) -> None:
             lambda out: b"Enter" in rendered_without_spacing(out), failure="composer did not return"
         )
         tui.send(b"after diff")
-        tui.wait_for(b"after diff", failure="diff retained composer focus")
+        tui.wait_until(
+            lambda output: screen_shows(output, "after diff"),
+            failure="diff retained composer focus",
+        )
         tui.quit()
     finally:
         tui.close()

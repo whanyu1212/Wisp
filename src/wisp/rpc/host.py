@@ -49,7 +49,7 @@ from wisp.rpc.execution import (
     RpcCommandExecutor,
     rpc_session_state,
 )
-from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot
+from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
 from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
 from wisp.rpc.handlers.project_files import RpcProjectFiles
 from wisp.runtime.api import WispRuntime
@@ -769,6 +769,7 @@ class RpcHost:
             write_event(event)
         for notice in _broad_root_notices(project_context_root):
             write_event(ErrorEvent(message=notice))
+        write_event(await rpc_workspace_report(cwd))
         return host
 
     async def run_with_streams(

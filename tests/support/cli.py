@@ -346,11 +346,16 @@ async def build_mixed_tool_runtime(**_kwargs: object) -> WispRuntime:
     )
 
 
+# The host reports the workspace at startup and after each prompt run; lifecycle
+# tests compare command sequences without it, and its own tests read raw output.
+_UNSEQUENCED_RECORD_TYPES = frozenset({"rpc.handshake.accepted", "rpc.workspace"})
+
+
 def _jsonl_records(output: str) -> list[dict[str, object]]:
     return [
         record
         for line in output.splitlines()
-        if (record := json.loads(line)).get("type") != "rpc.handshake.accepted"
+        if (record := json.loads(line)).get("type") not in _UNSEQUENCED_RECORD_TYPES
     ]
 
 

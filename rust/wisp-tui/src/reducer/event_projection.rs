@@ -389,6 +389,13 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 text: crate::web_search::search(value),
             },
+            "rpc.workspace" => Self::WorkspaceReported {
+                cwd: string_field(value, &event_type, "cwd")?,
+                git_branch: value
+                    .get("git_branch")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+            },
             "agent.completed" => Self::RunCompleted {
                 outcome: string_field(value, &event_type, "outcome")?,
                 duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,

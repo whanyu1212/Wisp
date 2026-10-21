@@ -271,6 +271,7 @@ pub(super) fn changes_activation_target(action: &UiAction) -> bool {
                 | BackendEvent::SessionStatsReported { .. }
                 | BackendEvent::DeviceCodeProgress { .. }
                 | BackendEvent::RunCompleted { .. }
+                | BackendEvent::WorkspaceReported { .. }
                 | BackendEvent::Other { .. }
         ),
         _ => false,

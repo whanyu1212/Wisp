@@ -3234,10 +3234,13 @@ fn group_preview_items(
         .iter()
         .filter_map(|id| transcript.entry(*id)?.tool_card())
         .filter_map(|card| {
-            let arguments = shown_arguments(card)?;
+            // The same text the member's own row shows, so a closed group and its
+            // open members read alike.
+            shown_arguments(card)?;
+            let arguments = card.display_arguments();
             Some(match kind {
                 CardGroupKey::Explore => format!("{} {arguments}", card.name),
-                _ => arguments.to_owned(),
+                _ => arguments,
             })
         })
         .collect()

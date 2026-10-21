@@ -41,6 +41,7 @@ from wisp.rpc.coordinator import (
 )
 from wisp.rpc.errors import RpcOutputAlreadyReportedError
 from wisp.rpc.handlers.control import RpcTrustResolver
+from wisp.rpc.handlers.inspection import rpc_workspace_report
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.rpc.session.state import updated_rpc_session_state
 from wisp.sessions.entries import MessageSessionEntry
@@ -496,6 +497,9 @@ async def run_rpc_prompt_command(
             operation_context = (
                 tool_context_factory() if tool_context_factory is not None else tool_context
             )
+            # Tools may run outside the session folder (/init works from the project
+            # root), so report where this run's commands run before any tool row.
+            write_event(await rpc_workspace_report((operation_context or agent.tool_context).cwd))
             agent_events = (
                 agent.run(
                     prompt,
@@ -573,10 +577,13 @@ async def run_rpc_prompt_command(
         updated_history = committed_history
         if error is None:
             error = str(exc)
+    # A run may have switched branches; report the current one before it finishes.
+    workspace = await rpc_workspace_report(agent.tool_context.cwd)
     async with send:
         if cancelled:
             assert error is not None
             write_event(ErrorEvent(message=error))
+        write_event(workspace)
         write_event(
             RpcCommandFinished(
                 command_id=command_id,

@@ -100,6 +100,7 @@ from wisp.events.rpc import (
     RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    RpcWorkspaceReported,
     SkillCatalogUpdated,
 )
 from wisp.events.run import (
@@ -280,6 +281,7 @@ __all__ = [
     "RpcSkillInvocationSnapshot",
     "RpcSkillsReported",
     "RpcStateReported",
+    "RpcWorkspaceReported",
     "RpcStateSnapshot",
     "RunOutcome",
     "SessionCostSummary",
@@ -344,6 +346,7 @@ type KnownWispEvent = Annotated[
     | RpcCommandFinished
     | SessionStatsReported
     | RpcStateReported
+    | RpcWorkspaceReported
     | RpcPermissionsReported
     | RpcCommandsReported
     | RpcModelCatalogReported

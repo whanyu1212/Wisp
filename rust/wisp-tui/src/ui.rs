@@ -287,6 +287,7 @@ pub fn render_interactive(
             palette,
             bindings,
             jump_painted.is_some(),
+            false,
         );
         // The jump label is drawn but not clickable: clicks never act while deciding.
         return mouse::Conversation::default();
@@ -327,13 +328,14 @@ pub fn render_interactive(
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
+    let padded = area.height >= 16;
     let editor = render_composer(
         frame,
         chunks[2],
         state,
         composer_layout,
         composer_focused,
-        area.height >= 16,
+        padded,
         palette,
     );
     render_footer(
@@ -345,6 +347,7 @@ pub fn render_interactive(
         palette,
         bindings,
         jump_to_latest.is_some(),
+        composer_framed(state, padded, chunks[2]),
     );
     mouse::Conversation {
         transcript: Rect {
@@ -422,6 +425,54 @@ fn header_identity(state: &UiState) -> Option<String> {
     Some(identity)
 }
 
+/// Folders longer than this show only their last component.
+const WORKSPACE_MAX_COLUMNS: usize = 32;
+
+/// Branch names longer than this end in `…`.
+const BRANCH_MAX_COLUMNS: usize = 32;
+
+/// Shorten `text` to `columns` display columns, ending in `…` when cut.
+fn clip_columns(text: &str, columns: usize) -> String {
+    if text.width() <= columns {
+        return text.to_owned();
+    }
+    let mut clipped = String::new();
+    for character in text.chars() {
+        if clipped.width() + character.to_string().width() + 1 > columns {
+            break;
+        }
+        clipped.push(character);
+    }
+    clipped.push('…');
+    clipped
+}
+
+fn display_workspace(cwd: &str) -> String {
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
+    workspace_label(cwd, home.as_deref())
+}
+
+/// Show a workspace folder compactly: `~` for the home folder, and only the last
+/// component of a long path.
+fn workspace_label(cwd: &str, home: Option<&str>) -> String {
+    let shown = match home {
+        Some(home) if cwd == home => "~".to_owned(),
+        Some(home) => cwd
+            .strip_prefix(home)
+            .filter(|rest| rest.starts_with('/'))
+            .map_or_else(|| cwd.to_owned(), |rest| format!("~{rest}")),
+        None => cwd.to_owned(),
+    };
+    if shown.width() <= WORKSPACE_MAX_COLUMNS {
+        return shown;
+    }
+    let last = shown
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(&shown);
+    format!("…/{last}")
+}
+
 fn footer_leading_parts(state: &UiState) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
@@ -441,9 +492,24 @@ fn footer_leading_parts(state: &UiState) -> Vec<String> {
     parts
 }
 
-fn footer_trailing_parts(state: &UiState) -> Vec<String> {
+/// The footer's closing parts. While the composer's border names the mode and model,
+/// the footer shows where commands run instead; the branch is its own part so it is
+/// the first to go on a narrow row.
+fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    if let Some(identity) = header_identity(state) {
+    if identity_in_composer {
+        // Folder and branch names come from the file system and the repository, so
+        // they are cleaned of terminal controls before they are painted.
+        if let Some(cwd) = state.workspace_cwd.as_deref() {
+            parts.push(display_workspace(&sanitize_for_terminal(cwd)));
+        }
+        if let Some(branch) = state.git_branch.as_deref() {
+            parts.push(clip_columns(
+                &sanitize_for_terminal(branch),
+                BRANCH_MAX_COLUMNS,
+            ));
+        }
+    } else if let Some(identity) = header_identity(state) {
         parts.push(identity);
     }
     if let Some(reason) = state.context.compaction {
@@ -1420,6 +1486,12 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style
 }
 
+/// Whether the composer draws its frame, whose bottom border then names the mode
+/// and model in place of the footer.
+fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
+    editable(state) && padded && area.height >= 3
+}
+
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1433,12 +1505,20 @@ fn render_composer(
         .queued_steering()
         .saturating_add(state.queued_follow_ups());
     let border_style = Style::default().fg(status_color(state, palette));
-    let framed_input = editable(state) && padded && area.height >= 3;
+    let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
-        Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(border_style)
+            .border_style(border_style);
+        match header_identity(state) {
+            Some(identity) => block.title_bottom(
+                Line::from(format!(" {} ", sanitize_for_terminal(&identity)))
+                    .style(Style::default().fg(palette.muted))
+                    .right_aligned(),
+            ),
+            None => block,
+        }
     } else {
         Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
@@ -2336,6 +2416,7 @@ fn render_footer(
     palette: Palette,
     bindings: &Bindings,
     jump_painted: bool,
+    identity_in_composer: bool,
 ) {
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow.
@@ -2367,7 +2448,7 @@ fn render_footer(
         .saturating_sub(if leading_width == 0 { 0 } else { 3 });
     let mut status = leading;
     status.push(crate::context_view::indicator(state, ctx_width));
-    status.extend(footer_trailing_parts(state));
+    status.extend(footer_trailing_parts(state, identity_in_composer));
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
     } else if !jump_painted && viewport.has_unseen_output() {
@@ -4498,6 +4579,83 @@ mod tests {
     }
 
     #[test]
+    fn workspace_label_shortens() {
+        let home = Some("/Users/ana");
+        assert_eq!(workspace_label("/Users/ana", home), "~");
+        assert_eq!(workspace_label("/Users/ana/Wisp", home), "~/Wisp");
+        assert_eq!(
+            workspace_label("/Users/anabel/Wisp", home),
+            "/Users/anabel/Wisp"
+        );
+        assert_eq!(workspace_label("/srv/wisp", None), "/srv/wisp");
+        assert_eq!(
+            workspace_label("/Users/ana/work/organization/team/deeply-nested-repo", home),
+            "…/deeply-nested-repo"
+        );
+    }
+
+    #[test]
+    fn workspace_parts_are_cleaned() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.workspace_cwd = Some("/srv/evil\u{1b}[2Jdir".into());
+        state.git_branch = Some(format!("main\u{202e}{}", "x".repeat(60)));
+        let parts = footer_trailing_parts(&state, true);
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{1b}')),
+            "{parts:?}"
+        );
+        assert!(
+            parts.iter().all(|part| !part.contains('\u{202e}')),
+            "{parts:?}"
+        );
+        assert!(parts[1].width() <= BRANCH_MAX_COLUMNS, "{parts:?}");
+        assert!(parts[1].ends_with('…'), "{parts:?}");
+    }
+
+    #[test]
+    fn framed_composer_moves_identity() {
+        let draw = |height: u16| {
+            let mut state =
+                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+            state.mode_confirmed = true;
+            state.workspace_cwd = Some("/srv/wisp".into());
+            state.git_branch = Some("feat/x".into());
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let row = |y: u16| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            (row(height - 2), row(height - 1))
+        };
+
+        let (border, footer) = draw(20);
+        assert!(border.contains(" fake/model-x · high "), "{border}");
+        assert!(footer.contains("idle · build"), "{footer}");
+        assert!(footer.contains("/srv/wisp · feat/x"), "{footer}");
+        assert!(!footer.contains("model-x"), "{footer}");
+
+        // Too short to frame the composer: the footer keeps the identity.
+        let (_, footer) = draw(12);
+        assert!(footer.contains("fake/model-x · high"), "{footer}");
+        assert!(!footer.contains("/srv/wisp"), "{footer}");
+    }
+
+    #[test]
     fn footer_keys_render_as_keycaps() {
         let state = UiState::new("fake".into(), None, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -4922,7 +5080,8 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("Bash     ▸ 2 commands · cargo fmt, cargo test"),
+            // The preview uses each command's own row text, which names `cargo test`.
+            screen.contains("Bash     ▸ 2 commands · cargo fmt, Rust tests"),
             "{screen}"
         );
         assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
@@ -5099,6 +5258,29 @@ mod tests {
         let narrow = screen(36);
         assert!(narrow.contains("▸ 5 commands"), "{narrow}");
         assert!(!narrow.contains("git status"), "{narrow}");
+    }
+
+    #[test]
+    fn group_preview_is_relative() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("look".into());
+        state.transcript.set_tool_cwd("/repo");
+        for (call_id, path) in [("r1", "/repo/src/a.rs"), ("r2", "/repo/src/b.rs")] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "read".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: json!({"path": path}),
+                });
+            finish_call(&mut state, call_id, "read");
+        }
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("▸ 2 actions · read src/a.rs, read src/b.rs"),
+            "{screen}"
+        );
     }
 
     #[test]

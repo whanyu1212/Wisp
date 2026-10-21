@@ -238,6 +238,8 @@ pub struct ToolCardSnapshot {
     pub structured_detail: DetailAvailability,
     /// Kept as 32 bits, which spans 49 days, so the card stays compact.
     pub duration_ms: Option<u32>,
+    /// The folder this call's run used, which its paths are shown relative to.
+    pub display_base: Option<std::sync::Arc<str>>,
 }
 
 impl ToolCardSnapshot {
@@ -258,6 +260,7 @@ impl ToolCardSnapshot {
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
             duration_ms: None,
+            display_base: None,
         }
     }
 
@@ -533,22 +536,45 @@ impl ToolCardSnapshot {
     }
 
     /// A concise display summary; the original arguments remain in retained detail.
+    /// The arguments as the action line shows them, relative to the folder the call's
+    /// run used. Before the backend has reported one, the TUI's own working directory
+    /// stands in: the launcher starts the TUI and its backend in the same folder.
     pub fn display_arguments(&self) -> String {
-        if self.name == "bash" {
+        let cwd = self.display_base.as_deref().map(str::to_owned).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|root| root.display().to_string())
+        });
+        let Some(cwd) = cwd.as_deref().filter(|cwd| cwd.len() > 1) else {
             return self
                 .command_summary
-                .map(CommandSummary::label)
-                .unwrap_or_else(|| self.action_arguments.clone());
+                .filter(|_| self.name == "bash")
+                .map_or_else(|| self.action_arguments.clone(), CommandSummary::label);
+        };
+        match self.name.as_str() {
+            "bash" => self.command_summary.map_or_else(
+                || workspace_relative_command(&self.action_arguments, cwd),
+                CommandSummary::label,
+            ),
+            "read" | "edit" | "write" | "ls" => match self
+                .action_arguments
+                .strip_prefix(cwd)
+                .and_then(|rest| rest.strip_prefix('/'))
+            {
+                Some("") => ".".to_owned(),
+                Some(relative) => relative.to_owned(),
+                None => self.action_arguments.clone(),
+            },
+            "grep" | "find" => match self.action_arguments.rsplit_once(" in ") {
+                Some((pattern, path)) => match path.strip_prefix(cwd) {
+                    Some("") => format!("{pattern} in ."),
+                    Some(rest) if rest.starts_with('/') => format!("{pattern} in {}", &rest[1..]),
+                    _ => self.action_arguments.clone(),
+                },
+                None => self.action_arguments.clone(),
+            },
+            _ => self.action_arguments.clone(),
         }
-        if matches!(self.name.as_str(), "read" | "edit" | "write" | "ls") {
-            if let Ok(root) = std::env::current_dir() {
-                let prefix = format!("{}/", root.display());
-                if let Some(relative) = self.action_arguments.strip_prefix(&prefix) {
-                    return relative.to_owned();
-                }
-            }
-        }
-        self.action_arguments.clone()
     }
 
     pub fn preview(&self) -> &str {
@@ -1581,6 +1607,64 @@ pub(crate) fn logical_line_count(source: &str) -> u64 {
     .saturating_add(u64::from(!source.ends_with('\n')))
 }
 
+/// A Bash command as its action line shows it when it runs in `cwd`: a leading
+/// `cd <cwd> &&` is a no-op there and is dropped, and `<cwd>/` path prefixes become
+/// relative. Once the command changes folder (`cd`, `pushd`), relative paths would
+/// read against the wrong folder, so the rest is shown as written.
+fn workspace_relative_command(command: &str, cwd: &str) -> String {
+    let (start, rest) = command
+        .strip_prefix("start ")
+        .map_or(("", command), |rest| ("start ", rest));
+    let rest = strip_redundant_cd(rest, cwd).unwrap_or(rest);
+    let changes_folder = rest
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ';' | '&' | '|' | '(')
+        })
+        .any(|word| matches!(word, "cd" | "pushd" | "popd"));
+    if changes_folder {
+        return format!("{start}{rest}");
+    }
+    let prefix = format!("{cwd}/");
+    let mut shown = String::with_capacity(rest.len());
+    let mut remaining = rest;
+    while let Some(index) = remaining.find(&prefix) {
+        // Only a path that starts a word is under `cwd`; `/x/a/b` is not `a/b` when
+        // `cwd` is `/a`.
+        let starts_word = remaining[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|before| before.is_whitespace() || matches!(before, '\'' | '"' | '='));
+        shown.push_str(&remaining[..index]);
+        remaining = &remaining[index + prefix.len()..];
+        if !starts_word {
+            shown.push_str(&prefix);
+        } else if remaining
+            .chars()
+            .next()
+            .is_none_or(|after| after.is_whitespace() || matches!(after, '\'' | '"'))
+        {
+            // The folder itself, written with a trailing slash.
+            shown.push('.');
+        }
+    }
+    shown.push_str(remaining);
+    format!("{start}{shown}")
+}
+
+/// The command after a leading `cd <cwd> && `, when the target is exactly `cwd`
+/// (quoted or with a trailing slash), or None.
+fn strip_redundant_cd<'a>(command: &'a str, cwd: &str) -> Option<&'a str> {
+    let after_cd = command.strip_prefix("cd ")?;
+    let (target, rest) = after_cd.split_once(" && ")?;
+    let target = target.trim();
+    let unquoted = ['\'', '"']
+        .into_iter()
+        .find_map(|quote| target.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(target);
+    let unquoted = unquoted.strip_suffix('/').unwrap_or(unquoted);
+    (unquoted == cwd).then_some(rest)
+}
+
 /// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
 /// Each unit is chosen after rounding, so 9.96 s reads `10s` rather than `10.0s`.
 pub(crate) fn format_duration(milliseconds: u64) -> String {
@@ -1605,6 +1689,81 @@ pub(crate) fn format_duration(milliseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redundant_cd_is_hidden() {
+        let cwd = "/Users/ana/Wisp";
+        let shown = |command: &str| workspace_relative_command(command, cwd);
+        assert_eq!(shown("cd /Users/ana/Wisp && cargo test"), "cargo test");
+        assert_eq!(shown("cd '/Users/ana/Wisp/' && git status"), "git status");
+        assert_eq!(
+            shown("start cd /Users/ana/Wisp && npm run dev"),
+            "start npm run dev"
+        );
+        // A cd that changes folder stays, and paths after it are shown as written.
+        assert_eq!(
+            shown("cd /Users/ana/Wisp/rust && cargo test"),
+            "cd /Users/ana/Wisp/rust && cargo test"
+        );
+        assert_eq!(
+            shown("cd rust && cat /Users/ana/Wisp/README.md"),
+            "cd rust && cat /Users/ana/Wisp/README.md"
+        );
+        assert_eq!(
+            shown("cd /Users/ana/Wisp && cd rust && ls /Users/ana/Wisp/a"),
+            "cd rust && ls /Users/ana/Wisp/a"
+        );
+        assert_eq!(shown("cd .. && ls"), "cd .. && ls");
+        assert_eq!(
+            shown("cd /Users/ana/Wispy && ls"),
+            "cd /Users/ana/Wispy && ls"
+        );
+    }
+
+    #[test]
+    fn search_paths_become_relative() {
+        let cwd = std::env::current_dir().unwrap().display().to_string();
+        let card = |path: String| {
+            ToolCardSnapshot::requested(
+                &ToolCallInput {
+                    call_id: "c".into(),
+                    name: "grep".into(),
+                    arguments: serde_json::json!({"pattern": "todo", "path": path}),
+                    detail_source: ToolDetailSource::None,
+                },
+                ToolStatus::Requested,
+            )
+        };
+        assert_eq!(
+            card(format!("{cwd}/src")).display_arguments(),
+            "/todo/ in src"
+        );
+        assert_eq!(card(cwd.clone()).display_arguments(), "/todo/ in .");
+        assert_eq!(
+            card("/elsewhere".into()).display_arguments(),
+            "/todo/ in /elsewhere"
+        );
+    }
+
+    #[test]
+    fn command_paths_become_relative() {
+        let cwd = "/Users/ana/Wisp";
+        let shown = |command: &str| workspace_relative_command(command, cwd);
+        assert_eq!(
+            shown("cat /Users/ana/Wisp/src/a.rs \"/Users/ana/Wisp/b c\""),
+            "cat src/a.rs \"b c\""
+        );
+        assert_eq!(
+            shown("ls /mnt/Users/ana/Wisp/x"),
+            "ls /mnt/Users/ana/Wisp/x"
+        );
+        assert_eq!(shown("ls /Users/ana/Wisp"), "ls /Users/ana/Wisp");
+        assert_eq!(shown("rm -rf /Users/ana/Wisp/"), "rm -rf .");
+        assert_eq!(
+            shown("make --prefix=/Users/ana/Wisp/ x"),
+            "make --prefix=. x"
+        );
+    }
 
     #[test]
     fn duration_formats_compactly() {

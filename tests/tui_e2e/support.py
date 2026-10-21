@@ -153,6 +153,85 @@ def reap(child_pid: int, terminal_fd: int, *, timeout: float = 10.0) -> None:
     raise AssertionError(f"PTY child {child_pid} did not exit within {timeout}s of SIGKILL")
 
 
+_CSI = re.compile(rb"\x1b\[([0-?]*)[ -/]*([@-~])")
+
+
+def screen_rows(output: bytes | bytearray) -> list[str]:
+    """Replay painted output onto a grid and return its rows as text.
+
+    Incremental frames rewrite only the cells that change, so a word that replaces
+    similar text, such as ``idle`` after ``working``, may never appear whole in the
+    byte stream. Replaying cursor moves and text recovers what the screen shows.
+    Only the sequences the TUI paints with matter: cursor position, clearing the
+    screen or the rest of a line, and text; styles and modes are skipped.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output.
+
+    Returns:
+        list[str]: Screen rows from the top, right-trimmed.
+    """
+    grid: dict[tuple[int, int], str] = {}
+    row = column = 1
+    position = 0
+    while position < len(output):
+        match = _CSI.match(output, position)
+        if match is not None:
+            params, final = match.group(1), match.group(2)
+            if final == b"H":
+                values = [int(value or 1) for value in params.split(b";")] if params else [1, 1]
+                row, column = values[0], values[1] if len(values) > 1 else 1
+            elif final == b"J" and params == b"2":
+                grid.clear()
+            elif final == b"K":
+                for key in [key for key in grid if key[0] == row and key[1] >= column]:
+                    del grid[key]
+            position = match.end()
+            continue
+        if output[position] == 0x1B:
+            position += 1
+            continue
+        end = position + 1
+        while end < len(output) and (output[end] & 0xC0) == 0x80:
+            end += 1
+        character = bytes(output[position:end]).decode("utf-8", errors="replace")
+        position = end
+        if character in ("\r", "\n"):
+            continue
+        grid[(row, column)] = character
+        column += display_width(character) or 1
+    if not grid:
+        return []
+    rows: list[str] = []
+    for current in range(1, max(key[0] for key in grid) + 1):
+        cells = [(key[1], value) for key, value in grid.items() if key[0] == current]
+        text = ""
+        for cell_column, value in sorted(cells):
+            text = text.ljust(cell_column - 1) + value
+        rows.append(text.rstrip())
+    return rows
+
+
+# The label starts a word and is followed by its separator or the end of the row.
+def screen_shows(output: bytes | bytearray, text: str) -> bool:
+    """Return whether the last complete frame's screen shows ``text`` on one row.
+
+    Typed characters read in separate wake-ups paint in separate frames, so a
+    phrase may never appear whole in the byte stream even though it is on screen.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output so far.
+        text (str): Text that must appear within a single screen row.
+
+    Returns:
+        bool: True when a row of the replayed screen contains ``text``.
+    """
+    return any(text in row for row in screen_rows(complete_frames(output)))
+
+
+_STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s·|\s*$)")
+
+
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
     """Return whether complete frames show the fragments and the run back at idle.
 
@@ -167,13 +246,17 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
 
     Returns:
         bool: True when every fragment is in a complete frame after ``offset`` and
-        the last ``idle`` comes after the last ``working``.
+        the first status word on the last complete frame's footer is ``idle``.
     """
     frames = complete_frames(output)
     phase = frames[offset:]
     if not all(fragment in phase for fragment in fragments):
         return False
-    return frames.rfind(b"idle") > frames.rfind(b"working")
+    footer = next((row for row in reversed(screen_rows(frames)) if row.strip()), "")
+    # The status label is the footer's first status word; a branch or folder name
+    # later on the row must not count.
+    label = _STATUS_LABEL.search(footer)
+    return label is not None and label.group(1) == "idle"
 
 
 def welcome_ready(output: bytes | bytearray) -> bool:
