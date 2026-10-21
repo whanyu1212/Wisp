@@ -1,0 +1,23 @@
+---
+import { href } from "../content/paths";
+import "../styles/site.css";
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Page not found · Wisp</title>
+  </head>
+  <body>
+    <main class="not-found">
+      <p class="eyebrow">404</p>
+      <h1>This page could not be found.</h1>
+      <p>
+        <a href={href("index.html")}>Return to Wisp</a> or{" "}
+        <a href={href("guide/index.html")}>browse the guide</a>.
+      </p>
+    </main>
+  </body>
+</html>

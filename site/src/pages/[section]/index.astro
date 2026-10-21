@@ -1,0 +1,14 @@
+---
+import { getCollection } from "astro:content";
+import ContentPage from "../../layouts/ContentPage.astro";
+export async function getStaticPaths() {
+  return (await getCollection("pages"))
+    .filter((entry) => entry.data.route.endsWith("/index.html"))
+    .map((entry) => ({
+      params: { section: entry.data.route.slice(0, -"/index.html".length) },
+      props: { entry },
+    }));
+}
+---
+
+<ContentPage entry={Astro.props.entry} compatibility={false} />
