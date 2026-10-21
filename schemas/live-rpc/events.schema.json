@@ -491,6 +491,49 @@
       "title": "CompactionStarted",
       "type": "object"
     },
+    "ContextBreakdown": {
+      "additionalProperties": false,
+      "description": "Per-source split of a context budget's effective tokens.\n\nEvery source is estimated with the context heuristic and then apportioned so the\nsources, and each source's children, sum exactly to the budget's effective total.\n`scaled` is True when that total is a provider observation rather than an\nestimate. Turns cover the runs since the last compaction; the first listed turn\nalso carries the prompt, tool schemas, and any compaction summary.",
+      "properties": {
+        "largest": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextItem"
+          },
+          "title": "Largest",
+          "type": "array"
+        },
+        "scaled": {
+          "default": false,
+          "title": "Scaled",
+          "type": "boolean"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextSourceUsage"
+          },
+          "title": "Sources",
+          "type": "array"
+        },
+        "turns": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextTurnGrowth"
+          },
+          "title": "Turns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources",
+        "scaled",
+        "turns",
+        "largest"
+      ],
+      "title": "ContextBreakdown",
+      "type": "object"
+    },
     "ContextBudget": {
       "additionalProperties": false,
       "allOf": [
@@ -733,6 +776,33 @@
       "title": "ContextEstimated",
       "type": "object"
     },
+    "ContextItem": {
+      "additionalProperties": false,
+      "description": "One large single message in the active context, such as a tool's output.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "Tokens",
+          "type": "integer"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "Turn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "tokens",
+        "turn"
+      ],
+      "title": "ContextItem",
+      "type": "object"
+    },
     "ContextObservation": {
       "additionalProperties": false,
       "description": "Provider-reported input usage for one exact request-context prefix.",
@@ -925,6 +995,117 @@
         "pressure_ratio"
       ],
       "title": "ContextPressure",
+      "type": "object"
+    },
+    "ContextSourceItem": {
+      "additionalProperties": false,
+      "description": "One named part of a context source, such as an MCP server or instruction file.",
+      "properties": {
+        "count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Count"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "tokens",
+        "count"
+      ],
+      "title": "ContextSourceItem",
+      "type": "object"
+    },
+    "ContextSourceUsage": {
+      "additionalProperties": false,
+      "description": "Tokens one source contributes to the request context, with its parts.",
+      "properties": {
+        "children": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextSourceItem"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Count"
+        },
+        "source": {
+          "enum": [
+            "messages",
+            "built_in_tools",
+            "mcp_tools",
+            "custom_prompt",
+            "system_prompt",
+            "skills",
+            "project_instructions",
+            "project_context"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "tokens",
+        "count",
+        "children"
+      ],
+      "title": "ContextSourceUsage",
+      "type": "object"
+    },
+    "ContextTurnGrowth": {
+      "additionalProperties": false,
+      "description": "Context tokens one run's messages added, counted along the active path.",
+      "properties": {
+        "tokens": {
+          "minimum": 0,
+          "title": "Tokens",
+          "type": "integer"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "Turn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "tokens"
+      ],
+      "title": "ContextTurnGrowth",
       "type": "object"
     },
     "ErrorEvent": {
@@ -5246,6 +5427,17 @@
         "context": {
           "$ref": "#/$defs/ContextBudget"
         },
+        "context_breakdown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "cost": {
           "$ref": "#/$defs/SessionCostSummary"
         },
@@ -5284,7 +5476,8 @@
         "usage",
         "context",
         "compaction",
-        "cost"
+        "cost",
+        "context_breakdown"
       ],
       "title": "SessionStats",
       "type": "object"
@@ -7665,6 +7858,36 @@
           "remaining_tokens": null,
           "reserve_tokens": 0,
           "trailing_estimated_tokens": null
+        },
+        "context_breakdown": {
+          "largest": [
+            {
+              "label": "bash output",
+              "tokens": 1,
+              "turn": 1
+            }
+          ],
+          "scaled": false,
+          "sources": [
+            {
+              "children": [
+                {
+                  "count": 1,
+                  "label": "github",
+                  "tokens": 1
+                }
+              ],
+              "count": 1,
+              "source": "mcp_tools",
+              "tokens": 1
+            }
+          ],
+          "turns": [
+            {
+              "tokens": 1,
+              "turn": 1
+            }
+          ]
         },
         "cost": {
           "complete": true,

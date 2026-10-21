@@ -2,6 +2,8 @@
 
 from .builder import (
     DEFAULT_TOOL_GUIDANCE_MAX_CHARS,
+    assemble_custom_prompt,
+    assemble_prompt,
     build_prompt_messages,
     extend_custom_prompt_messages,
 )
@@ -13,6 +15,7 @@ from .instructions import (
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
 )
+from .parts import AssembledPrompt, PromptPart
 from .project_context import (
     DEFAULT_CONTEXT_FILE_MAX_CHARS,
     DEFAULT_CONTEXT_MAX_CHARS,
@@ -34,6 +37,10 @@ from .repository_status import (
 
 __all__ = [
     "DEFAULT_TOOL_GUIDANCE_MAX_CHARS",
+    "AssembledPrompt",
+    "PromptPart",
+    "assemble_custom_prompt",
+    "assemble_prompt",
     "build_prompt_messages",
     "extend_custom_prompt_messages",
     "DEFAULT_SYSTEM_PROMPT",

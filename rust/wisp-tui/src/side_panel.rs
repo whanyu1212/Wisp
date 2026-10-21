@@ -1327,6 +1327,7 @@ mod tests {
                 priced_record_count: 3,
                 unpriced_record_count: 0,
             },
+            context_breakdown: None,
         }));
         state.permissions.snapshot = Some(Arc::new(PermissionState {
             mode: PermissionMode::Ask,
