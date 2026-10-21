@@ -210,9 +210,13 @@ for line in sys.stdin:
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"steer-via-alt-enter")
                 phase = "steer typed"
-            elif phase == "steer typed" and frame_cursor(output) == (
-                composer_start[0],
-                composer_start[1] + len("steer-via-alt-enter"),
+            elif (
+                phase == "steer typed"
+                # The status line can appear after the cursor was read and move the
+                # composer up a row, so only the column marks the end of the text.
+                and (cursor := frame_cursor(output)) is not None
+                and cursor[1] == composer_start[1] + len("steer-via-alt-enter")
+                and screen_shows(output, "steer-via-alt-enter")
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b\r")
