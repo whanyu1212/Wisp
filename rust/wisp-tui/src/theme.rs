@@ -91,7 +91,7 @@ impl Palette {
             "Read" => Color::Rgb(132, 178, 224),
             "Search" => Color::Rgb(103, 194, 168),
             "List" => Color::Rgb(166, 191, 122),
-            "Explored" => Color::Rgb(115, 196, 213),
+            "Explore" => Color::Rgb(115, 196, 213),
             "Bash" => Color::Rgb(225, 163, 112),
             "Edit" => Color::Rgb(190, 151, 223),
             "Write" => Color::Rgb(218, 146, 172),

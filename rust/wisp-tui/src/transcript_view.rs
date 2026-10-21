@@ -1273,7 +1273,7 @@ impl TranscriptRowCache {
                 _ => ToolStatus::Running,
             });
             let (label, unit) = match &kind {
-                CardGroupKey::Explore => ("Explored".to_owned(), "actions"),
+                CardGroupKey::Explore => ("Explore".to_owned(), "actions"),
                 CardGroupKey::Tool(name) => (
                     entry.tool_card()?.chip_label(),
                     if name == "bash" { "commands" } else { "calls" },
@@ -4513,7 +4513,7 @@ fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAn
 /// What lets adjacent tool cards share one collapsed row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CardGroupKey {
-    /// Reads, searches and listings, mixed freely: `Explored N actions`.
+    /// Reads, searches and listings, mixed freely: `Explore N actions`.
     Explore,
     /// Repeated calls to one MCP server's tool, keyed by the full tool name.
     Mcp(String),
@@ -5084,11 +5084,13 @@ mod tests {
         let collapsed = viewport.visible_rows(&transcript, &mut cache);
         assert!(collapsed.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("Explored   2 actions")
+                && row.plain_text().contains("Explore   2 actions")
                 && row.spans.iter().any(|span| {
-                    span.text == "Explored"
+                    span.text == "Explore"
                         && span.style.inline == crate::markdown::InlineStyle::ToolName
                 })
+                // The arrow shares the column of every other built-in label's rows.
+                && row.fold_arrow.is_some_and(|arrow| arrow.column == 11)
         }));
         assert!(
             !collapsed
@@ -5183,7 +5185,7 @@ mod tests {
         let grouped = viewport.visible_rows(&transcript, &mut cache);
         assert!(grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("Explored   2 actions")
+                && row.plain_text().contains("Explore   2 actions")
         }));
         assert!(!grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
@@ -5221,7 +5223,7 @@ mod tests {
             .iter()
             .find(|row| {
                 row.kind == TranscriptRowKind::CardGroup
-                    && row.plain_text().contains("Explored   2 actions")
+                    && row.plain_text().contains("Explore   2 actions")
             })
             .expect("collapsed explore group");
         assert_eq!(row.tone, TranscriptRowTone::Error);
