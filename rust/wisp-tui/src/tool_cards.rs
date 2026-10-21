@@ -381,6 +381,16 @@ impl ToolCardSnapshot {
             .retained_output
             .source_bytes
             .saturating_sub(u64::try_from(self.retained_output.text.len()).unwrap_or(u64::MAX));
+        // A projected tail already lost its earlier lines; count them from the source
+        // so "(N earlier lines)" names every line above what is shown.
+        self.retained_output.source_lines = self
+            .retained_output
+            .source_lines
+            .max(input.output_source_lines);
+        self.retained_output.dropped_lines = self
+            .retained_output
+            .source_lines
+            .saturating_sub(logical_line_count(&self.retained_output.text));
         if retain_tail {
             self.retained_output.base_offset = self.retained_output.dropped_bytes;
         }

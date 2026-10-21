@@ -26,6 +26,7 @@ use wisp_protocol::commands::QueueKind;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
+/// The framed composer's ceiling; one more than an unframed one, for its identity row.
 const MAX_COMPOSER_HEIGHT: u16 = 9;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
@@ -55,7 +56,11 @@ pub fn decision_context_visible(area: Rect) -> bool {
 }
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
-    let ceiling = area.height.saturating_sub(3).clamp(2, MAX_COMPOSER_HEIGHT);
+    let framed = area.height >= 16;
+    let ceiling = area
+        .height
+        .saturating_sub(3)
+        .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
     if editable(state) {
         let queue_rows = if state.active_prompt_editable() {
             state
@@ -70,7 +75,7 @@ fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>)
                 .map_or(1, |layout| layout.rows.len())
                 .saturating_add(queue_rows)
                 // A framed composer adds its borders and the identity row.
-                .saturating_add(if area.height >= 16 { 3 } else { 0 }),
+                .saturating_add(if framed { 3 } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
@@ -5614,6 +5619,18 @@ mod tests {
             result.name = "bash".into();
             result.exit_code = Some(3);
             result.output_has_exit_status = true;
+            if lines > 500 {
+                // Like the live event: the output and its tail are both cut to 500
+                // lines, while the source counts still describe all of it.
+                let keep = |range: std::ops::Range<usize>| {
+                    range
+                        .map(|line| format!("line {line}"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                result.output = format!("Command exited with code 3: {}", keep(0..500));
+                result.output_tail = Some(keep(lines - 500..lines));
+            }
             state.transcript.observe_tool_result(result);
             let mut cache = TranscriptRowCache::default();
             cache.fold_mut().expand(card);
@@ -5650,6 +5667,10 @@ mod tests {
         assert!(!text.contains("bytes omitted"), "{text}");
         assert!(text.contains("line 39"), "{text}");
         assert!(text.contains("exit 3"), "{text}");
+
+        // Lines the projected tail already dropped still count.
+        let projected = draw(600).to_string();
+        assert!(projected.contains("(592 earlier lines)"), "{projected}");
     }
 
     #[test]

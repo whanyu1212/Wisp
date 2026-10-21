@@ -1098,9 +1098,13 @@ impl TranscriptRowCache {
             self.fold.expand_hint()
         };
         let mut row_width = width;
-        if fold_hint != FoldHint::None && width >= ACTION_COLUMNS_BESIDE_HINT + fold_hint.width() {
+        // Like a card's action row, the hint shows only where its columns are kept.
+        let fold_hint = if width >= ACTION_COLUMNS_BESIDE_HINT + fold_hint.width() {
             row_width -= fold_hint.width();
-        }
+            fold_hint
+        } else {
+            FoldHint::None
+        };
         let trailing = entry
             .thinking_ms()
             .map(|milliseconds| crate::tool_cards::format_duration(u64::from(milliseconds)))
@@ -1512,11 +1516,25 @@ impl TranscriptRowCache {
                 let mut fold_arrow = None;
                 let mut trailing = None;
                 if absolute_offset == 0 {
+                    // The duration takes a right-aligned column, and is the first thing
+                    // a narrow row drops. It is counted before deciding whether the
+                    // action overflows, since the action then has that much less room.
+                    let duration = entry
+                        .tool_card()
+                        .and_then(|card| card.duration_label())
+                        .map(|duration| {
+                            let reserved = duration.width() + TRAILING_GAP;
+                            (duration, reserved)
+                        });
+                    let text_width = duration
+                        .as_ref()
+                        .filter(|(_, reserved)| width >= ACTION_COLUMNS_BESIDE_HINT + reserved)
+                        .map_or(width, |(_, reserved)| width - reserved);
                     let hint = if expanded {
                         self.fold.collapse_hint()
                     } else if (!projection.inline_detail
                         && card_position_after_action(entry, &projection).is_some())
-                        || self.action_columns(&projection.action) > width
+                        || self.action_columns(&projection.action) > text_width
                     {
                         self.fold.expand_hint()
                     } else {
@@ -1533,11 +1551,7 @@ impl TranscriptRowCache {
                         row_width = width - hint.width();
                         fold_hint = hint;
                     }
-                    // The duration takes a right-aligned column, and is the first thing
-                    // a narrow row drops.
-                    if let Some(duration) = entry.tool_card().and_then(|card| card.duration_label())
-                    {
-                        let reserved = duration.width() + TRAILING_GAP;
+                    if let Some((duration, reserved)) = duration {
                         if row_width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
                             row_width -= reserved;
                             trailing = Some(duration);
@@ -4673,6 +4687,38 @@ mod tests {
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
+    }
+
+    #[test]
+    fn cut_rows_keep_their_arrow() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "r1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "/zz/src/some/deeply/nested/module.rs"}),
+        });
+        let mut result = tool_result("r1", "");
+        result.duration_ms = Some(1500);
+        transcript.observe_tool_result(result);
+        // At every width, an action cut short to make room for the duration can
+        // still be expanded to show it whole.
+        for width in 40..80 {
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let action = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap();
+            if action.plain_text().contains('…') {
+                assert!(action.fold_arrow.is_some(), "width {width}: {action:?}");
+            }
+        }
     }
 
     #[test]
