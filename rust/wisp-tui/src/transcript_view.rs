@@ -3959,30 +3959,6 @@ impl TranscriptViewport {
         false
     }
 
-    /// Estimate the visible interval in retained history without laying out offscreen rows.
-    /// Entry order and source offsets provide a stable, bounded-cost approximation;
-    /// wrapped rows, Markdown tables, and folded groups need not have equal heights.
-    pub(crate) fn scrollbar_range(
-        &self,
-        transcript: &Transcript,
-        cache: &mut TranscriptRowCache,
-        rows: &[TranscriptRow],
-    ) -> Option<(f64, f64)> {
-        let top = self.top?;
-        let last = rows.last()?;
-        let count = transcript.entries().len().max(1) as f64;
-        let start = scroll_anchor_rank(transcript, cache, top)? / count;
-        let next = cache
-            .row_at(transcript, last.anchor, self.width)
-            .and_then(|row| row.next);
-        let end = if self.follow_tail || next.is_none() {
-            1.0
-        } else {
-            scroll_anchor_rank(transcript, cache, next?)? / count
-        };
-        (start > 0.0 || end < 1.0).then_some((start.clamp(0.0, 1.0), end.clamp(start, 1.0)))
-    }
-
     fn jump_home(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) {
         let Some(first) = transcript.entries().first() else {
             return;
@@ -4149,65 +4125,6 @@ impl TranscriptViewport {
             after = next;
         }
     }
-}
-
-fn scroll_anchor_rank(
-    transcript: &Transcript,
-    cache: &mut TranscriptRowCache,
-    anchor: RowAnchor,
-) -> Option<f64> {
-    let index = transcript.entry_index(anchor.entry_id)?;
-    let entry = transcript.entry(anchor.entry_id)?;
-    let source_length = entry
-        .display_content()
-        .len()
-        .saturating_add(entry.thinking().len())
-        .max(1);
-    let content_fraction = |offset: usize| {
-        0.05 + 0.9
-            * (entry.thinking().len().saturating_add(offset) as f64 / source_length as f64).min(1.0)
-    };
-    let fraction = match anchor.position {
-        RowPosition::Header => 0.0,
-        RowPosition::Spacer
-        | RowPosition::UserLeadIn
-        | RowPosition::UserLeadOut
-        | RowPosition::RunSummary => 1.0,
-        RowPosition::Thought => 0.025,
-        RowPosition::ThoughtContent(offset) => {
-            0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
-        }
-        RowPosition::Content(offset) => content_fraction(offset),
-        RowPosition::Markdown(position) => content_fraction(position.source_offset),
-        RowPosition::Card(position) => {
-            let card = cache.card_snapshot(entry)?;
-            let total = card
-                .action
-                .len()
-                .saturating_add(card.metadata.len())
-                .saturating_add(card.detail.len())
-                .max(1);
-            let offset = match position.section {
-                CardSection::Action => position.absolute_byte_offset,
-                CardSection::Metadata => card
-                    .action
-                    .len()
-                    .saturating_add(position.absolute_byte_offset),
-                CardSection::Detail => card
-                    .action
-                    .len()
-                    .saturating_add(card.metadata.len())
-                    .saturating_add(
-                        position
-                            .absolute_byte_offset
-                            .saturating_sub(card.detail_base),
-                    ),
-                CardSection::Omission | CardSection::Footer => total,
-            };
-            0.05 + 0.9 * (offset as f64 / total as f64).min(1.0)
-        }
-    };
-    Some(index as f64 + fraction)
 }
 
 fn cached_row_valid(
@@ -5072,36 +4989,6 @@ mod tests {
         assert_eq!(down.consumed_rows, 2);
         assert!(viewport.follows_tail());
         assert_eq!(viewport.visible_rows(&transcript, &mut cache), tail);
-    }
-
-    #[test]
-    fn scrollbar_advances_inside_one_long_reply_and_reaches_both_ends() {
-        let mut transcript = Transcript::default();
-        transcript.complete_message(1, numbered_lines("line", 100));
-        let mut viewport = TranscriptViewport::default();
-        let mut cache = TranscriptRowCache::default();
-        viewport.set_geometry(&transcript, &mut cache, 40, 8);
-        viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
-        let rows = viewport.visible_rows(&transcript, &mut cache);
-        let first = viewport
-            .scrollbar_range(&transcript, &mut cache, &rows)
-            .unwrap();
-        assert_eq!(first.0, 0.0);
-        assert!(first.1 < 1.0);
-        viewport.reduce(TranscriptViewAction::PageDown, &transcript, &mut cache);
-        let rows = viewport.visible_rows(&transcript, &mut cache);
-        let next = viewport
-            .scrollbar_range(&transcript, &mut cache, &rows)
-            .unwrap();
-        assert!(next.0 > first.0);
-        assert!(next.1 > first.1);
-        viewport.reduce(TranscriptViewAction::FollowTail, &transcript, &mut cache);
-        let rows = viewport.visible_rows(&transcript, &mut cache);
-        let tail = viewport
-            .scrollbar_range(&transcript, &mut cache, &rows)
-            .unwrap();
-        assert!(tail.0 > next.0);
-        assert_eq!(tail.1, 1.0);
     }
 
     #[test]
@@ -6907,20 +6794,10 @@ mod tests {
             let mut viewport = TranscriptViewport::default();
             let mut cache = TranscriptRowCache::default();
             viewport.set_geometry(&transcript, &mut cache, 100, 15);
-            let rows = viewport.visible_rows(&transcript, &mut cache);
-            assert!(
-                viewport
-                    .scrollbar_range(&transcript, &mut cache, &rows)
-                    .is_some()
-            );
+            let _ = viewport.visible_rows(&transcript, &mut cache);
             let cold = cache.work();
             cache.reset_work();
-            let rows = viewport.visible_rows(&transcript, &mut cache);
-            assert!(
-                viewport
-                    .scrollbar_range(&transcript, &mut cache, &rows)
-                    .is_some()
-            );
+            let _ = viewport.visible_rows(&transcript, &mut cache);
             (cold, cache.work())
         }
 

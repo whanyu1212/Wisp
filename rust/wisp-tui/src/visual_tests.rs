@@ -636,7 +636,7 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
 }
 
 #[test]
-fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
+fn new_turn_hides_previous_reply_until_scrolled_back() {
     let mut ui = fixture("new-turn");
     let live = draw(&mut ui, 80, 24);
     let text = screen_text(&live);
@@ -644,13 +644,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
     assert!(text.contains("◐ Working"));
-    let thumb = |buffer: &ratatui::buffer::Buffer| {
-        (0..buffer.area.height)
-            .filter(|&y| buffer[(79, y)].symbol() == "┃")
-            .collect::<Vec<_>>()
-    };
-    let live_thumb = thumb(&live);
-    assert!(!live_thumb.is_empty());
+    // The transcript draws no scrollbar on its right edge.
+    assert!((0..live.area.height).all(|y| !matches!(live[(79, y)].symbol(), "│" | "┃")));
     ui.transcript_viewport.reduce(
         TranscriptViewAction::Home,
         &ui.state.transcript,
@@ -658,7 +653,6 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     );
     let history = draw(&mut ui, 80, 24);
     assert!(screen_text(&history).contains("Startup review"));
-    assert!(thumb(&history)[0] < live_thumb[0]);
     ui.transcript_viewport.reduce(
         TranscriptViewAction::FollowTail,
         &ui.state.transcript,

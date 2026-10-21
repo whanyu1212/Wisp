@@ -300,7 +300,7 @@ pub(crate) struct FoldRow {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
-    /// Transcript text cells a drag can select: inside the side padding, so the scrollbar and
+    /// Transcript text cells a drag can select: inside the side padding, so the margins and
     /// gutters are never copied.
     pub selectable: Rect,
     /// The footer's jump-to-latest label, painted only while the transcript is scrolled back.
@@ -668,7 +668,7 @@ mod tests {
         assert!(selection.extend(at(down, 4, 0)));
         assert_eq!(selection.text(&buffer), "c\n  pad\nxy");
 
-        // Clamped to the area: the gutter and the scrollbar column are never copied.
+        // Clamped to the area: the gutter and the margin column are never copied.
         let mut selection = Selection::start(area, at(down, 1, 0)).unwrap();
         selection.extend(at(down, 40, 2));
         assert_eq!(selection.text(&buffer), "ab界c\n  pad\nxyz");

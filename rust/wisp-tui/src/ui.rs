@@ -279,7 +279,6 @@ pub fn render_interactive(
         }
         None => area,
     };
-    let scrollbar_x = column.right().saturating_sub(1);
     let area = conversation_surface(column);
 
     // A pending approval or trust decision docks above the footer in place of the
@@ -310,7 +309,6 @@ pub fn render_interactive(
             palette,
             bindings,
             startup_logo,
-            scrollbar_x,
         );
         render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
         render_footer(
@@ -363,7 +361,6 @@ pub fn render_interactive(
         palette,
         bindings,
         startup_logo,
-        scrollbar_x,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -684,7 +681,6 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
-    scrollbar_x: u16,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -752,7 +748,6 @@ fn render_transcript(
         }
     }
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
-    let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
     if let Some((user_id, mut user_rows)) = pinned {
         let user_index = state.transcript.entry_index(user_id).unwrap_or(usize::MAX);
         rows.retain(|row| {
@@ -905,9 +900,6 @@ fn render_transcript(
                 Rect::new(content.x, y, content.width, 1),
             );
         }
-    }
-    if let Some((start, end)) = scroll {
-        render_scrollbar(frame, rows_area, scrollbar_x, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
     let jump_to_latest = (padding > 0 && !viewport.follows_tail())
@@ -1288,42 +1280,6 @@ pub(crate) fn activity_phase(state: &UiState) -> String {
         "Thinking".into()
     } else {
         "Working".into()
-    }
-}
-
-/// Draw the transcript's scroll marker in column `x`, the conversation's right edge.
-fn render_scrollbar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    x: u16,
-    start: f64,
-    end: f64,
-    palette: Palette,
-) {
-    let height = usize::from(area.height);
-    if height == 0 {
-        return;
-    }
-    // Entry/source ranks locate the viewport but do not measure rendered height.
-    // A proportional thumb would grow over short entries and shrink over long replies,
-    // even while the viewport and history stay unchanged. Use a fixed position marker
-    // until the paged transcript has a global row extent.
-    let travel = height - 1;
-    let position = if end >= 1.0 {
-        travel
-    } else {
-        ((start / (start + 1.0 - end)) * travel as f64).round() as usize
-    }
-    .min(travel);
-    for offset in 0..height {
-        let thumb = offset == position;
-        let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
-        cell.set_symbol(if thumb { "┃" } else { "│" });
-        cell.set_style(palette.base().fg(if thumb {
-            palette.primary
-        } else {
-            palette.muted
-        }));
     }
 }
 
@@ -3717,32 +3673,6 @@ mod tests {
     use ratatui::style::Color;
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
-
-    #[test]
-    fn scrollbar_marker_stays_one_row_across_different_visible_entry_spans() {
-        for height in [1, 8, 40] {
-            for (start, end) in [(0.0, 0.1), (0.2, 0.21), (0.2, 0.8), (0.9, 1.0)] {
-                let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        let x = frame.area().right() - 1;
-                        render_scrollbar(frame, frame.area(), x, start, end, Palette::default());
-                    })
-                    .unwrap();
-                let buffer = terminal.backend().buffer();
-                let marked = (0..height)
-                    .filter(|y| buffer[(9, *y)].symbol() == "┃")
-                    .collect::<Vec<_>>();
-                assert_eq!(marked.len(), 1, "height {height}, range {start}..{end}");
-                if start == 0.0 {
-                    assert_eq!(marked[0], 0);
-                }
-                if end == 1.0 {
-                    assert_eq!(marked[0], height - 1);
-                }
-            }
-        }
-    }
 
     #[derive(Default)]
     struct TestIds(u64);
