@@ -31,6 +31,10 @@ than relying on a server's extension fallback. The frozen baseline lives in
 compatibility decision. The old TUI anchors continue pointing to the intact TUI
 page until HY-274 splits it.
 
+`.github/workflows/astro.yml` runs these checks on pull requests and main-branch
+changes to the site, Markdown sources, migration baseline, tutorial examples, and
+shared assets. It does not deploy; the separate docs workflow still publishes mdBook.
+
 To inspect production output:
 
 ```sh
@@ -70,7 +74,7 @@ mdbook build book
   This avoids a browser-download prerequisite for static builds. The Mermaid runtime
   has a large lazy chunk; future optimization must preserve the conditional loading.
 - `src/content/check-output.ts` validates output, including the compatibility pages
-  for the 16 release records and the SDK audit. Those records still read their original
+  for the 17 release records and the SDK audit. Those records still read their original
   source files; they are hidden from normal navigation and marked `noindex`.
 - `tests/content.test.ts` exercises invalid metadata, include failures, actual Astro
   rendering, source-link resolution and compatibility-validation failures.
@@ -91,6 +95,6 @@ the complete homepage article below the new editorial opening; final content edi
 will remove repetition in HY-277.
 
 HY-316 moves content to `site/src/content/`, transfers metadata into frontmatter,
-updates Python test paths, adds CI/build/deployment coverage and the combined print
+updates Python test paths, switches deployment to Astro and adds the combined print
 view, then retires mdBook. The existing `.github/workflows/docs.yml` is unchanged.
 No search UI is displayed until search actually works.
