@@ -289,8 +289,9 @@ for line in sys.stdin:
     assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
-    # The resize repaints whole frames, where the completed marker sits beside the chip.
-    assert "✓ProcessBackgroundcommand".encode() in rendered_without_spacing(
+    # The resize repaints whole frames, where the completed marker sits beside the chip
+    # and the fold arrow before the task.
+    assert "✓Process▸Backgroundcommand".encode() in rendered_without_spacing(
         output[cards_redraw_offset:]
     )
     assert b"safe" in output

@@ -1711,7 +1711,7 @@ async fn click_opens_a_thought() {
         .transcript
         .complete_message(1, "visible answer".into());
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "thought");
+    let (x, y) = cell_of(&buffer, "Thought");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(ui.transcript_row_cache.fold().is_expanded(thought));
     let opened = draw(&mut ui, 80, 24);
@@ -1733,16 +1733,16 @@ async fn click_toggles_explored_group() {
         );
     }
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "Explored  ▸ 2 actions");
+    let (x, y) = cell_of(&buffer, "Explored ▸ 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let opened = draw(&mut ui, 80, 24);
     assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
-    let (x, y) = cell_of(&opened, "Explored  ▾ 2 actions");
+    let (x, y) = cell_of(&opened, "Explored ▾ 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
-    cell_of(&draw(&mut ui, 80, 24), "Explored  ▸ 2 actions");
+    cell_of(&draw(&mut ui, 80, 24), "Explored ▸ 2 actions");
 }
 
 #[tokio::test]
@@ -1765,7 +1765,7 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
         "clean",
     );
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "Bash     ▸ 2 commands");
+    let (x, y) = cell_of(&buffer, "Bash    ▸ 2 commands");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
@@ -1777,11 +1777,11 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
     assert!(ui.transcript_row_cache.fold().is_expanded(start));
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let detailed = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&detailed, "Bash     ▾ 2 commands");
+    let (x, y) = cell_of(&detailed, "Bash    ▾ 2 commands");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
     let collapsed = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&collapsed, "Bash     ▸ 2 commands");
+    let (x, y) = cell_of(&collapsed, "Bash    ▸ 2 commands");
     // Only the closed header's preview names the commands; their rows are folded away.
     assert!(
         (0..collapsed.area.height)
