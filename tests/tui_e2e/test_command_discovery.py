@@ -205,7 +205,7 @@ for line in sys.stdin:
                     if exc.errno != errno.EIO:
                         raise
             commands = complete_logged_commands(command_log)
-            if phase == "startup" and welcome_ready(output) and b"plan" in output:
+            if phase == "startup" and welcome_ready(output) and b"Plan" in output:
                 os.write(terminal_fd, b"/he")
                 phase = "prefix"
                 output.clear()
@@ -246,7 +246,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x1b")
                 phase = "closing help"
                 output.clear()
-            elif phase == "closing help" and frame_cursor(output) == (22, 6):
+            elif phase == "closing help" and frame_cursor(output) == (21, 6):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
@@ -278,7 +278,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
                 phase = "build ready"
                 output.clear()
-            elif phase == "build ready" and b"3.0k" in output and welcome_ready(output):
+            elif phase == "build ready" and b"30%" in output and welcome_ready(output):
                 # Mode changes are rejected while the post-configure stats refresh
                 # is in flight. Wait for the snapshot before sending /plan.
                 os.write(terminal_fd, b"/plan\r")

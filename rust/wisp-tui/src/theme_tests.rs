@@ -187,7 +187,7 @@ fn chip_fill_reads_everywhere() {
         let palette = theme.palette(false);
         let mut fills = Vec::new();
         for label in [
-            "Read", "Search", "List", "Explored", "Bash", "Edit", "Write", "MCP", "Process",
+            "Read", "Search", "List", "Explore", "Bash", "Edit", "Write", "MCP", "Process",
         ] {
             let chip = palette.chip(label);
             let (Some(fg), Some(bg)) = (chip.fg, chip.bg) else {

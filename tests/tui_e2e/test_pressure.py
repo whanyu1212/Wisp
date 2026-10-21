@@ -489,9 +489,12 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
         assert backend_pid_path.exists()
         offset = len(tui.output)
         tui.send(b"interrupt pressure\r")
-        tui.wait_for(
-            b"SIGNAL-BURST-",
-            since=offset,
+        # Each 1 KiB delta wraps over about ten rows, so the transcript's tail can
+        # show only a delta's padding without its marker.
+        tui.wait_until(
+            lambda output: any(
+                marker in output[offset:] for marker in (b"SIGNAL-BURST-", b"x" * 64)
+            ),
             failure="sustained burst did not begin rendering",
         )
         assert not burst_done.exists(), "backend finished before SIGINT exercised pressure"

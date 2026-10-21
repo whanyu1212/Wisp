@@ -91,7 +91,7 @@ impl Palette {
             "Read" => Color::Rgb(132, 178, 224),
             "Search" => Color::Rgb(103, 194, 168),
             "List" => Color::Rgb(166, 191, 122),
-            "Explored" => Color::Rgb(115, 196, 213),
+            "Explore" => Color::Rgb(115, 196, 213),
             "Bash" => Color::Rgb(225, 163, 112),
             "Edit" => Color::Rgb(190, 151, 223),
             "Write" => Color::Rgb(218, 146, 172),
@@ -239,6 +239,17 @@ impl Palette {
 
     pub fn semantic_fence_body(self) -> Style {
         Style::default().fg(self.secondary)
+    }
+
+    /// Links read in the secondary colour, apart from the accent that marks
+    /// speakers and status, unless a theme's secondary is too close to its body
+    /// text to tell apart.
+    pub fn link(self) -> Color {
+        if contrast_ratio(self.secondary, self.foreground) < 1.5 {
+            self.primary
+        } else {
+            self.secondary
+        }
     }
 
     pub fn composer(self) -> Style {

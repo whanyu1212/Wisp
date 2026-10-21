@@ -236,9 +236,10 @@ fn row_tone(kind: DetailRowKind) -> TranscriptRowTone {
     match kind {
         DetailRowKind::Addition => TranscriptRowTone::DiffAddition,
         DetailRowKind::Deletion => TranscriptRowTone::DiffDeletion,
-        DetailRowKind::Hunk | DetailRowKind::Note => TranscriptRowTone::Muted,
-        DetailRowKind::Omission => TranscriptRowTone::Muted,
-        _ => TranscriptRowTone::Default,
+        DetailRowKind::Hunk | DetailRowKind::Note | DetailRowKind::Omission => {
+            TranscriptRowTone::SurfaceNote
+        }
+        _ => TranscriptRowTone::Surface,
     }
 }
 

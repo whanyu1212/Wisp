@@ -47,8 +47,11 @@ def test_diff_opens_refreshes_and_returns_to_composer(tmp_path: Path) -> None:
             failure="refresh did not discover untracked file",
         )
         tui.send(b"\x1b")
+        # Wait for the overlay to close before typing: the footer's hints were on
+        # screen all along, and a key sent right after Esc can arrive as Alt+key.
         tui.wait_until(
-            lambda out: b"Enter" in rendered_without_spacing(out), failure="composer did not return"
+            lambda out: not screen_shows(out, "wisp /diff") and screen_shows(out, "Ask Wisp"),
+            failure="composer did not return",
         )
         tui.send(b"after diff")
         tui.wait_until(

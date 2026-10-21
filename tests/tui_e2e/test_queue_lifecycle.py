@@ -18,6 +18,7 @@ from tests.tui_e2e.support import (
     complete_logged_commands,
     frame_cursor,
     reap,
+    screen_shows,
     welcome_ready,
 )
 from wisp import __version__
@@ -281,10 +282,15 @@ for line in sys.stdin:
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\r")
                 phase = "history restored"
-            elif phase == "history restored" and all(
-                marker in output[phase_output_offset:]
-                for marker in (b"history exact first", b"needle second")
+            elif (
+                phase == "history restored"
+                and screen_shows(output, "› history exact first")
+                and not screen_shows(output, "Enter restore")
             ):
+                # Differential writes skip cells the popup already held, so read the
+                # restored draft from the replayed screen. The transcript and the
+                # popup's selected entry show the same words before Enter, so wait for
+                # the popup to close with the draft in the composer.
                 # The footer remains visible under history, so closing it need not
                 # repaint the input hint. Wait until restore has consumed Enter before
                 # resizing, which invalidates the popup's activation readiness.

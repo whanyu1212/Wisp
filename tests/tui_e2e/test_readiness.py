@@ -85,10 +85,13 @@ class _TuiProcess:
         self.wait_for(b"ctx", b"~", failure="Rust TUI context status did not render")
         self.resize(width=101)
         offset = len(self.output)
-        self.wait_for(
-            b"Type a prompt or / for commands.",
-            b"fake/fake",
-            since=offset,
+        # The identity line styles model and provider apart, so read it from the
+        # replayed screen rather than the raw bytes.
+        self.wait_until(
+            lambda output: (
+                b"Type a prompt or / for commands." in output[offset:]
+                and screen_shows(output, "fake fake")
+            ),
             failure="Rust TUI did not finish startup hydration",
         )
 
