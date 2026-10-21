@@ -320,7 +320,8 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/compact Keep the constraints\r")
                 phase = "compacting"
                 output.clear()
-            elif phase == "compacting" and b"compacting" in output:
+            # The status line names compaction while it runs.
+            elif phase == "compacting" and b"Compacting" in output:
                 # Escape exercises the same cancellation action without relying
                 # on platform PTY signal handling for the Ctrl-C byte.
                 os.write(terminal_fd, b"\x1b")
@@ -345,7 +346,8 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/skill:review keep running\r")
                 phase = "running"
                 output.clear()
-            elif phase == "running" and b"s:0/l:0" in output:
+            # The composer names the follow-up key only while a run takes input.
+            elif phase == "running" and b"follow-up" in output:
                 stats_before_cached_view = sum(
                     command["type"] == "get_session_stats" for command in commands
                 )
@@ -368,7 +370,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 106, 0, 0))
                 phase = "cached closed"
                 output.clear()
-            elif phase == "cached closed" and b"working" in output and b"/skill:review" in output:
+            elif phase == "cached closed" and b"interrupt" in output and b"/skill:review" in output:
                 assert b"EXPANDED_BODY_MUST_STAY_OUT_OF_THE_TRANSCRIPT" not in output
                 os.write(terminal_fd, b"/mcp\r")
                 phase = "mcp"

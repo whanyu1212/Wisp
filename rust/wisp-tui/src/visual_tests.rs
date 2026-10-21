@@ -517,20 +517,27 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
             .as_ref()
             .unwrap();
         let composer_top = editor.area.y - u16::from(height >= 16);
-        assert!(reply < composer_top);
-        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
+        // The status line sits right above the composer for the whole run, so the
+        // reply streams above it without the transcript changing size.
+        let status = composer_top - 1;
+        assert!(reply < status);
+        let status_text = (0..width)
+            .map(|x| buffer[(x, status)].symbol())
+            .collect::<String>();
+        assert!(status_text.contains("◐ Working"), "{status_text}");
+        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "◐"));
         if height >= 16 {
             for x in 0..width {
                 assert_eq!(buffer[(x, 0)].symbol(), " ");
-                assert_eq!(buffer[(x, composer_top - 1)].symbol(), " ");
-                assert_eq!(buffer[(x, composer_top - 1)].bg, ui.palette().background);
+                assert_eq!(buffer[(x, status - 1)].symbol(), " ");
+                assert_eq!(buffer[(x, status - 1)].bg, ui.palette().background);
             }
         }
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
         assert!(screen_text(&next).contains("wisp"));
-        assert!(!screen_text(&next).contains("Working"));
-        assert!(!screen_text(&next).contains("Esc to interrupt"));
+        assert!(screen_text(&next).contains("◓ Working"));
+        assert_eq!(row_containing(&next, "wisp"), reply);
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
@@ -585,10 +592,10 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
         .await
         .unwrap();
         // Paint the real intermediate state, even if command.finished is delayed
-        // by persistence or transport. Neither a spinner nor a smaller viewport
-        // should briefly replace the finished reply.
+        // by persistence or transport. The run is still going, so the status line
+        // stays and the transcript keeps its size.
         let completed = draw(&mut ui, width, height);
-        assert!(!screen_text(&completed).contains("Working"));
+        assert!(screen_text(&completed).contains("Working"));
         ui.dispatch(
             UiAction::BackendEvent(BackendEvent::CommandFinished {
                 command_id: "visual-next-prompt".into(),
@@ -602,20 +609,19 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
         .await
         .unwrap();
         let idle = draw(&mut ui, width, height);
-        for y in 0..composer_top {
+        // Above the status line, the finished reply looks the same as it streamed.
+        for y in 0..composer_top.saturating_sub(1) {
             for x in 0..width {
                 assert_eq!(
                     streaming[(x, y)],
                     completed[(x, y)],
                     "{width}x{height} at {x},{y}"
                 );
-                assert_eq!(
-                    completed[(x, y)],
-                    idle[(x, y)],
-                    "{width}x{height} at {x},{y}"
-                );
             }
         }
+        // At idle the status line gives its row back to the transcript.
+        assert!(!screen_text(&idle).contains("Working"));
+        assert!(screen_text(&idle).contains("Response line 39."));
     }
 }
 
@@ -627,7 +633,7 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     assert!(text.contains("Now check the remaining edge cases."));
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
-    assert!(text.contains("⠋ Working"));
+    assert!(text.contains("◐ Working"));
     let thumb = |buffer: &ratatui::buffer::Buffer| {
         (0..buffer.area.height)
             .filter(|&y| buffer[(79, y)].symbol() == "┃")
@@ -654,8 +660,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
     assert!(streaming.contains("wisp"));
-    assert!(!streaming.contains("Working"));
-    assert!(!streaming.contains("Esc to interrupt"));
+    // The status line stays while the reply streams.
+    assert!(streaming.contains("◐ Working"));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript
@@ -675,7 +681,7 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
         .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '▎'))
         .collect();
     assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
-    assert!(text.contains("⠋ Working"), "{text}");
+    assert!(text.contains("◐ Working"), "{text}");
     assert!(!text.contains("Startup review"));
 }
 

@@ -450,9 +450,10 @@ async fn skill_browser_inserts_without_submitting_and_catalog_changes_require_a_
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();
-    let steer = sent.await.unwrap();
-    assert_eq!(steer["type"], "steer");
-    assert_eq!(steer["content"], "/skill:review keep my draft");
+    // Enter during a run queues the invocation as a follow-up.
+    let queued = sent.await.unwrap();
+    assert_eq!(queued["type"], "follow_up");
+    assert_eq!(queued["content"], "/skill:review keep my draft");
 }
 
 #[tokio::test]

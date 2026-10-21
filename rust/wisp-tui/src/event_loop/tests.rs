@@ -1240,7 +1240,7 @@ async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
         ui.activity_frame >= 2,
         "silent activity timer did not advance"
     );
-    assert!(terminal.backend().to_string().contains("working"));
+    assert!(terminal.backend().to_string().contains("Working"));
 
     ui.state.view_status = ViewStatus::Idle;
     ui.state.interaction_status = InteractionStatus::Idle;

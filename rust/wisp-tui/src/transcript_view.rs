@@ -221,7 +221,13 @@ pub struct TranscriptRow {
     /// Right-aligned muted text, such as how long a call ran. The projection keeps
     /// its columns clear of `spans`; it is not part of the copied text.
     pub trailing: Option<String>,
+    /// A call still in progress keeps the trailing columns for a live timer, which
+    /// the renderer paints each frame so the cached row never goes stale.
+    pub live_timer: bool,
 }
+
+/// Columns a live timer keeps, enough for `59m 59s`.
+pub(crate) const LIVE_TIMER_COLUMNS: usize = 7;
 
 /// Where a foldable row draws its arrow, in columns from the start of its text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,6 +296,7 @@ impl TranscriptRow {
             fold_hint: FoldHint::None,
             fold_arrow: None,
             trailing: None,
+            live_timer: false,
         }
     }
 }
@@ -1515,6 +1522,7 @@ impl TranscriptRowCache {
                 let mut fold_hint = FoldHint::None;
                 let mut fold_arrow = None;
                 let mut trailing = None;
+                let mut live_timer = false;
                 if absolute_offset == 0 {
                     // The duration takes a right-aligned column, and is the first thing
                     // a narrow row drops. It is counted before deciding whether the
@@ -1556,6 +1564,13 @@ impl TranscriptRowCache {
                             row_width -= reserved;
                             trailing = Some(duration);
                         }
+                    } else if entry.tool_card().is_some_and(|card| {
+                        matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
+                    }) && row_width
+                        >= ACTION_COLUMNS_BESIDE_HINT + LIVE_TIMER_COLUMNS + TRAILING_GAP
+                    {
+                        row_width -= LIVE_TIMER_COLUMNS + TRAILING_GAP;
+                        live_timer = true;
                     }
                 }
                 if absolute_offset == 0 && !expanded {
@@ -1571,6 +1586,7 @@ impl TranscriptRowCache {
                         projected.row.fold_hint = fold_hint;
                         projected.row.fold_arrow = fold_arrow;
                         projected.row.trailing = trailing;
+                        projected.row.live_timer = live_timer;
                         return Some(projected);
                     }
                 }
@@ -1590,6 +1606,7 @@ impl TranscriptRowCache {
                 projected.row.fold_hint = fold_hint;
                 projected.row.fold_arrow = fold_arrow;
                 projected.row.trailing = trailing;
+                projected.row.live_timer = live_timer;
                 Some(projected)
             }
             CardSection::Metadata if !projection.metadata.is_empty() => {
@@ -2459,6 +2476,7 @@ impl TranscriptRowCache {
                 fold_hint: FoldHint::None,
                 fold_arrow: None,
                 trailing: None,
+                live_timer: false,
             },
             next,
         }

@@ -263,9 +263,9 @@ async fn queued_recall_waits_for_backend_acceptance_and_failure_preempts_the_bro
         assert_eq!(
             kind,
             if modifiers == KeyModifiers::ALT {
-                "follow_up"
-            } else {
                 "steer"
+            } else {
+                "follow_up"
             }
         );
         assert!(

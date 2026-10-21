@@ -109,6 +109,10 @@ pub struct TranscriptEntry {
     /// How long the reply reasoned before answering. Live replies only: reasoning is
     /// not kept in session history.
     thinking_ms: Option<u32>,
+    /// When this live call started running: when it was called, or when its approval
+    /// was granted, so time spent waiting for the user is left out. Drives the live
+    /// timer of a call still in progress.
+    running_since: Option<Instant>,
     searches: Vec<String>,
     cost: Option<String>,
     /// Display-only summary closing the last reply of a finished run.
@@ -199,6 +203,12 @@ impl TranscriptEntry {
 
     pub(crate) fn thinking_ms(&self) -> Option<u32> {
         self.thinking_ms
+    }
+
+    /// How long this live call has run so far, or `None` for history and calls that
+    /// never started.
+    pub(crate) fn running_elapsed(&self) -> Option<std::time::Duration> {
+        self.running_since.map(|started| started.elapsed())
     }
 
     /// Stop the reasoning clock once answer text arrives or the reply completes.
@@ -642,6 +652,7 @@ impl Transcript {
             .is_some_and(|binding| !binding.resolved)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_unresolved_tool_calls(&self) -> bool {
         self.call_entries.values().any(|binding| !binding.resolved)
     }
@@ -669,6 +680,10 @@ impl Transcript {
         source: ToolCallSource,
     ) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested, source);
+        if source == ToolCallSource::Live {
+            let entry = self.entry_mut(entry_id);
+            entry.running_since.get_or_insert_with(Instant::now);
+        }
         self.update_pending_detail_tracking(entry_id);
         entry_id
     }
@@ -732,6 +747,9 @@ impl Transcript {
             }
         };
         if changed {
+            if approved {
+                self.entry_mut(binding.entry_id).running_since = Some(Instant::now());
+            }
             self.bump_card(binding.entry_id);
         }
         self.update_pending_detail_tracking(binding.entry_id);
@@ -929,14 +947,6 @@ impl Transcript {
         if let Some(entry_id) = entry_id {
             self.set_entry_state(entry_id, TranscriptEntryState::Complete);
         }
-    }
-
-    pub(crate) fn has_visible_response(&self) -> bool {
-        self.active_response
-            .map(|(_, entry_id)| entry_id)
-            .or(self.completed_response)
-            .and_then(|entry_id| self.entry(entry_id))
-            .is_some_and(|entry| !entry.content.is_empty())
     }
 
     pub fn is_streaming_text(&self) -> bool {
@@ -1639,6 +1649,7 @@ impl Transcript {
                 cost: None,
                 run_summary: None,
                 thinking_started: None,
+                running_since: None,
                 thinking_ms: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
@@ -2331,6 +2342,7 @@ impl Transcript {
             cost: None,
             run_summary: None,
             thinking_started: None,
+            running_since: None,
             thinking_ms: None,
             decorated_content: None,
             state,
@@ -2426,6 +2438,7 @@ impl Transcript {
             cost: None,
             run_summary: None,
             thinking_started: None,
+            running_since: None,
             thinking_ms: None,
             decorated_content: None,
             state,

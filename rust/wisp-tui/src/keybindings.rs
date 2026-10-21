@@ -69,8 +69,8 @@ impl Action {
 
     pub(crate) const fn description(self) -> &'static str {
         match self {
-            Self::Submit => "Send prompt or steer an active run",
-            Self::AlternateSubmit => "Insert a newline or queue a follow-up",
+            Self::Submit => "Send prompt or queue a follow-up",
+            Self::AlternateSubmit => "Insert a newline or steer an active run",
             Self::Newline => "Insert a newline",
             Self::RestoreQueue => "Restore the newest queued prompt",
             Self::ManageQueue => "Inspect and manage queues (/queue)",
