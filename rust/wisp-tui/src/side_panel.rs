@@ -9,6 +9,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::context_split::{self, SPARK_TURNS, Split, abbreviated};
 use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
 use crate::reducer::{UiState, ViewStatus};
@@ -23,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::McpServerStatus;
+use wisp_protocol::events::{ContextBreakdown, ContextSource, McpServerStatus};
 
 /// The panel's width, its border included.
 pub(crate) const PANEL_WIDTH: u16 = 56;
@@ -487,19 +488,36 @@ pub(crate) fn render(
             }
         }
     }
+    let context_detail = match focus {
+        Focus::Idle if overlay => ContextDetail::Overlay,
+        Focus::Idle => ContextDetail::Full,
+        Focus::Running | Focus::Approval => ContextDetail::Compact,
+    };
+    let context_index = sections.len();
     sections.extend([
-        context_lines(state, width, palette),
+        context_lines(state, context_detail, width, palette),
         model_lines(state, focus, width, palette),
     ]);
     focusable.push((Section::Files, sections.len(), 1));
     sections.push(file_lines(state, panel, width, palette));
     let mcp = mcp_line(state, width, palette);
+    let fixed = |sections: &[Vec<Line<'static>>]| {
+        sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
+            + mcp.as_ref().map_or(0, |_| 2)
+            + 1
+    };
+    if context_detail != ContextDetail::Compact && fixed(&sections) + 1 > height {
+        // Too short for the split's rows: keep the changed files and MCP in view.
+        sections[context_index] = context_lines(state, ContextDetail::Compact, width, palette);
+    }
     let turns = if focus == Focus::Idle {
         // The turn list takes what the other sections leave, keeping its newest turns.
-        let fixed: usize = sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
-            + mcp.as_ref().map_or(0, |_| 2)
-            + 1;
-        turn_lines(state, width, height.saturating_sub(fixed + 1), palette)
+        turn_lines(
+            state,
+            width,
+            height.saturating_sub(fixed(&sections) + 1),
+            palette,
+        )
     } else {
         folded_turn_lines(state, focus, width, palette)
     };
@@ -557,7 +575,11 @@ pub(crate) fn render(
 
 /// A row with `left` at the start and `right` against the end; the left side is
 /// clipped to leave room for the right.
-fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+pub(crate) fn spread(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: usize,
+) -> Line<'static> {
     let right_width: usize = right.iter().map(|span| span.content.width()).sum();
     let room = width.saturating_sub(right_width + usize::from(right_width > 0));
     let mut spans = clip_spans(left, room);
@@ -569,7 +591,8 @@ fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> 
     Line::from(spans)
 }
 
-fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+/// `spans` cut to `width` columns, clipping the span that crosses it.
+pub(crate) fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
     let mut used = 0;
     let mut clipped = Vec::new();
     for span in spans {
@@ -873,10 +896,29 @@ fn approval_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec
     Some(lines)
 }
 
-/// `Context  198.8k / 272.0k 73%` over a bar of the window's fill.
-fn context_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+/// How much of the context split the panel shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextDetail {
+    /// Every row, the sparkline, and the footnote: the docked panel at idle.
+    Full,
+    /// Every row without the sparkline or footnote: the Ctrl+B overlay.
+    Overlay,
+    /// The bar and one line about the turn: while a run goes, or when the panel is
+    /// too short for the rows.
+    Compact,
+}
+
+/// `Context  198.8k / 272.0k 73%` over the window split by source, with the
+/// compaction reserve hatched after its marker, then as much of the split as
+/// `detail` allows.
+fn context_lines(
+    state: &UiState,
+    detail: ContextDetail,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
-    let Some(usage) = crate::context_view::usage(state) else {
+    let Some(split) = Split::of(state) else {
         let reading = if state.context.loading() {
             "reading…"
         } else {
@@ -888,50 +930,238 @@ fn context_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
             width,
         )];
     };
-    let prefix = if usage.approximate { "~" } else { "" };
-    let used = crate::context_view::abbreviated(usage.tokens);
-    let Some(window) = usage.window else {
+    let prefix = if split.approximate { "~" } else { "" };
+    let used = abbreviated(split.total);
+    let Some(window) = split.window else {
         return vec![spread(
             vec![heading("Context", palette)],
             vec![Span::raw(format!("{prefix}{used}"))],
             width,
         )];
     };
-    let fill = usage.tokens as f64 / window as f64;
-    let pressured = fill >= ui::CONTEXT_WARNING_FILL;
-    let level = if pressured {
+    let fill = split.total as f64 / window as f64;
+    let level = if fill >= ui::CONTEXT_WARNING_FILL {
         Style::default().fg(palette.warning)
     } else {
         muted
     };
-    let mut lines = vec![spread(
-        vec![heading("Context", palette)],
-        vec![
-            Span::raw(format!("{prefix}{used}")),
-            Span::styled(
-                format!(" / {} ", crate::context_view::abbreviated(window)),
-                muted,
-            ),
-            Span::styled(format!("{prefix}{:.0}%", fill * 100.0), level),
-        ],
-        width,
-    )];
-    let filled = ((fill * width as f64).round() as usize).min(width);
-    lines.push(Line::from(vec![
-        Span::styled(
-            "━".repeat(filled),
-            Style::default().fg(if pressured {
-                palette.warning
-            } else {
-                palette.secondary
-            }),
+    let mut lines = vec![
+        spread(
+            vec![heading("Context", palette)],
+            vec![
+                Span::raw(format!("{prefix}{used}")),
+                Span::styled(format!(" / {} ", abbreviated(window)), muted),
+                Span::styled(format!("{prefix}{:.0}%", fill * 100.0), level),
+            ],
+            width,
         ),
-        Span::styled(
-            "━".repeat(width - filled),
-            Style::default().fg(palette.panel),
-        ),
-    ]));
+        context_split::bar(&split, width, palette),
+    ];
+    let Some(breakdown) = split.breakdown else {
+        return lines;
+    };
+    if detail == ContextDetail::Compact {
+        lines.extend(compact_turn_line(state, &split, width, palette));
+        return lines;
+    }
+    lines.extend(source_rows(&split, breakdown, width, palette));
+    let threshold = threshold_label(&split, palette);
+    if detail == ContextDetail::Full && !breakdown.turns.is_empty() {
+        lines.push(spread(sparkline(breakdown, palette), threshold, width));
+    } else if !threshold.is_empty() {
+        lines.push(spread(Vec::new(), threshold, width));
+    }
+    lines.extend(finished_turn_line(&split, breakdown, width, palette));
+    if detail == ContextDetail::Full {
+        let note = if breakdown.scaled {
+            "~ estimated split, scaled to provider total"
+        } else {
+            "~ estimated split"
+        };
+        lines.push(spread(
+            vec![Span::styled(note, Style::default().fg(palette.rail()))],
+            vec![Span::styled("/context", muted)],
+            width,
+        ));
+    }
     lines
+}
+
+/// A row per source with its share, the Messages parts under it, then the
+/// compaction reserve and free space.
+fn source_rows(
+    split: &Split<'_>,
+    breakdown: &ContextBreakdown,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let dim = Style::default().fg(palette.rail());
+    let percent = |tokens: u64| {
+        split
+            .percent(tokens)
+            .map_or_else(String::new, |percent| format!("{percent:.1}%"))
+    };
+    let row = |swatch: Span<'static>, label: Vec<Span<'static>>, tokens: String, share: String| {
+        let mut left = vec![swatch, Span::raw(" ")];
+        left.extend(label);
+        spread(
+            left,
+            vec![
+                Span::styled(format!("{tokens:>8}"), dim),
+                Span::styled(format!("{share:>7}"), muted),
+            ],
+            width,
+        )
+    };
+    let mut lines = Vec::new();
+    for (usage, (source, tokens)) in breakdown.sources.iter().zip(split.sources()) {
+        let mut label = vec![Span::styled(context_split::source_label(source), muted)];
+        if source == ContextSource::McpTools && !usage.children.is_empty() {
+            let servers = usage.children.len();
+            label.push(Span::styled(
+                format!(" {servers} server{}", if servers == 1 { "" } else { "s" }),
+                dim,
+            ));
+        }
+        lines.push(row(
+            Span::styled(
+                "■",
+                Style::default().fg(context_split::source_color(source, palette)),
+            ),
+            label,
+            context_split::estimated(tokens),
+            percent(tokens),
+        ));
+        if source == ContextSource::Messages && !usage.children.is_empty() {
+            let mut parts: Vec<_> = usage.children.iter().collect();
+            parts.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+            let text = parts
+                .iter()
+                .map(|part| {
+                    format!(
+                        "{} {}",
+                        sanitize_for_terminal(&part.label),
+                        abbreviated(part.tokens)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            lines.push(Line::styled(
+                ui::clip_columns(&format!("  {text}"), width),
+                dim,
+            ));
+        }
+    }
+    if let Some(free) = split.free() {
+        lines.push(row(
+            Span::styled("╱", muted),
+            vec![Span::styled("Compaction reserve", dim)],
+            abbreviated(split.reserve),
+            percent(split.reserve),
+        ));
+        lines.push(row(
+            Span::styled("■", Style::default().fg(palette.panel)),
+            vec![Span::styled("Free space", dim)],
+            abbreviated(free),
+            percent(free),
+        ));
+    }
+    lines
+}
+
+/// `▏compacts at 85%`, or nothing when the reserve leaves no threshold.
+fn threshold_label(split: &Split<'_>, palette: Palette) -> Vec<Span<'static>> {
+    split
+        .threshold()
+        .and_then(|threshold| split.percent(threshold))
+        .map(|percent| {
+            vec![
+                Span::styled("▏", Style::default().fg(palette.error)),
+                Span::styled(
+                    format!("compacts at {percent:.0}%"),
+                    Style::default().fg(palette.rail()),
+                ),
+            ]
+        })
+        .unwrap_or_default()
+}
+
+/// `per turn ▂▅▁█▃▄`: the newest turns' growth, the latest in the warning colour.
+fn sparkline(breakdown: &ContextBreakdown, palette: Palette) -> Vec<Span<'static>> {
+    let turns = &breakdown.turns[breakdown.turns.len().saturating_sub(SPARK_TURNS)..];
+    let tokens: Vec<u64> = turns.iter().map(|turn| turn.tokens).collect();
+    let blocks = context_split::spark(&tokens);
+    let mut spans = vec![Span::styled(
+        "per turn ",
+        Style::default().fg(palette.muted),
+    )];
+    for (index, block) in blocks.iter().enumerate() {
+        let color = if index + 1 == blocks.len() {
+            palette.warning
+        } else {
+            palette.secondary
+        };
+        spans.push(Span::styled(*block, Style::default().fg(color)));
+    }
+    spans
+}
+
+/// `turn 6 +38.2k · largest: gh pr checks output 21.4k`, clipping the label
+/// rather than the size.
+fn finished_turn_line(
+    split: &Split<'_>,
+    breakdown: &ContextBreakdown,
+    width: usize,
+    palette: Palette,
+) -> Option<Line<'static>> {
+    let (turn, growth) = split.finished_turn()?;
+    let dim = Style::default().fg(palette.rail());
+    let mut spans = turn_growth(turn, growth, palette);
+    if let Some(largest) = breakdown.largest.first() {
+        let size = format!(" {}", abbreviated(largest.tokens));
+        let used: usize = spans.iter().map(|span| span.content.width()).sum();
+        let label = format!(" · largest: {}", sanitize_for_terminal(&largest.label));
+        let room = width.saturating_sub(used + size.width());
+        spans.push(Span::styled(ui::clip_columns(&label, room), dim));
+        spans.push(Span::styled(size, dim));
+    }
+    Some(Line::from(clip_spans(spans, width)))
+}
+
+/// The compact layout's line: what the run in progress has added, or the newest
+/// turn at idle. A compaction is not a turn, so it shows neither.
+fn compact_turn_line(
+    state: &UiState,
+    split: &Split<'_>,
+    width: usize,
+    palette: Palette,
+) -> Option<Line<'static>> {
+    let compacting = state.context.compaction.is_some()
+        || state.current_command.as_ref().is_some_and(|command| {
+            command.command_type == crate::reducer::ActiveCommandType::Compact
+        });
+    if compacting {
+        return None;
+    }
+    if !ui::run_in_status_line(state) {
+        let breakdown = split.breakdown?;
+        return finished_turn_line(split, breakdown, width, palette);
+    }
+    let (turn, growth) = split.running_turn()?;
+    let mut spans = turn_growth(turn, growth, palette);
+    spans.push(Span::styled(" so far", Style::default().fg(palette.muted)));
+    Some(Line::from(clip_spans(spans, width)))
+}
+
+fn turn_growth(turn: u64, growth: u64, palette: Palette) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(format!("turn {turn} "), Style::default().fg(palette.muted)),
+        Span::styled(
+            format!("+{}", abbreviated(growth)),
+            Style::default().fg(palette.warning),
+        ),
+    ]
 }
 
 /// The model, its effort, the session's and this turn's cost, and the permission
@@ -1261,7 +1491,8 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wisp_protocol::events::{
-        ContextAccountingMethod, ContextBudget, ContextEstimate, McpServerSnapshot,
+        ContextAccountingMethod, ContextBreakdown, ContextBudget, ContextEstimate, ContextItem,
+        ContextSourceItem, ContextSourceUsage, ContextTurnGrowth, McpServerSnapshot,
         McpStatusSnapshot, PermissionState, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
 
@@ -1375,9 +1606,18 @@ mod tests {
     }
 
     fn screen(state: &UiState, panel: &mut SidePanel, width: u16) -> Vec<String> {
+        screen_of_height(state, panel, width, 40)
+    }
+
+    fn screen_of_height(
+        state: &UiState,
+        panel: &mut SidePanel,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
         panel.observe_width(width);
         panel.sync_files(&state.git_diff);
-        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
                 ui::render_interactive(
@@ -1588,11 +1828,166 @@ mod tests {
         state
     }
 
+    /// The mocks' split: 198.8k of 272.0k, compacting at 85%.
+    fn breakdown() -> ContextBreakdown {
+        let item = |label: &str, tokens: u64, count: Option<u64>| ContextSourceItem {
+            label: label.into(),
+            tokens,
+            count,
+        };
+        let source = |source, tokens, count, children| ContextSourceUsage {
+            source,
+            tokens,
+            count,
+            children,
+        };
+        ContextBreakdown {
+            sources: vec![
+                source(
+                    ContextSource::Messages,
+                    152_600,
+                    Some(55),
+                    vec![
+                        item("user", 16_400, Some(8)),
+                        item("assistant", 41_000, Some(6)),
+                        item("tool output", 95_200, Some(41)),
+                    ],
+                ),
+                source(ContextSource::BuiltInTools, 9_800, Some(12), Vec::new()),
+                source(
+                    ContextSource::McpTools,
+                    14_100,
+                    Some(38),
+                    vec![
+                        item("github", 7_900, Some(21)),
+                        item("linear", 3_600, Some(11)),
+                        item("deepwiki", 1_400, Some(3)),
+                        item("docs-langchain", 1_200, Some(3)),
+                    ],
+                ),
+                source(ContextSource::SystemPrompt, 6_200, None, Vec::new()),
+                source(ContextSource::Skills, 2_400, None, Vec::new()),
+                source(
+                    ContextSource::ProjectInstructions,
+                    8_700,
+                    Some(2),
+                    vec![
+                        item("AGENTS.md", 7_900, None),
+                        item("rust/AGENTS.md", 800, None),
+                    ],
+                ),
+                source(ContextSource::ProjectContext, 5_000, None, Vec::new()),
+            ],
+            scaled: true,
+            turns: [22_100, 41_300, 12_000, 55_600, 29_600, 38_200]
+                .into_iter()
+                .zip(1..)
+                .map(|(tokens, turn)| ContextTurnGrowth { turn, tokens })
+                .collect(),
+            largest: vec![ContextItem {
+                label: "gh pr checks 766 output".into(),
+                tokens: 21_400,
+                turn: 6,
+            }],
+        }
+    }
+
+    /// `state` with the mocks' split and a reserve that compacts at 85%.
+    fn with_split(mut state: UiState) -> UiState {
+        let mut budget = budget();
+        budget.reserve_tokens = 40_800;
+        state.context.budget = Some(budget.clone());
+        let stats = state.context.stats.as_mut().unwrap();
+        stats.context = budget;
+        stats.context_breakdown = Some(breakdown());
+        state
+    }
+
     fn row_of(panel: &str, text: &str) -> usize {
         panel
             .lines()
             .position(|line| line.contains(text))
             .unwrap_or_else(|| panic!("{text}\n{panel}"))
+    }
+
+    #[test]
+    fn idle_context_split_rows() {
+        let panel = panel_text(
+            &screen(&with_split(session()), &mut SidePanel::default(), 200),
+            200,
+        );
+        let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
+        let bar = bar.trim_start_matches(['│', ' ']);
+        // 85% of the 52-column bar: the marker, then the hatched reserve.
+        assert_eq!(bar.chars().position(|c| c == '┃'), Some(44), "{panel}");
+        assert!(bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        let mut previous = row_of(&panel, "Context");
+        for expected in [
+            "■ Messages                            ~152.6k  56.1%",
+            "tool output 95.2k · assistant 41.0k · user 16.4k",
+            "■ MCP tools 4 servers                  ~14.1k   5.2%",
+            "■ Project context                       ~5.0k   1.8%",
+            "╱ Compaction reserve                    40.8k  15.0%",
+            "■ Free space                            32.4k  11.9%",
+            "per turn ▄▆▂█▅▆                     ▏compacts at 85%",
+            "turn 6 +38.2k · largest: gh pr checks 766 out… 21.4k",
+            "~ estimated split, scaled to provider total /context",
+        ] {
+            let row = row_of(&panel, expected);
+            assert!(row > previous, "{expected}\n{panel}");
+            previous = row;
+        }
+    }
+
+    #[test]
+    fn overlay_context_drops_sparkline() {
+        let panel = overlay_text(&with_split(session()));
+        assert!(panel.contains("■ Skills"), "{panel}");
+        assert!(panel.contains("turn 6 +38.2k"), "{panel}");
+        assert!(!panel.contains("per turn"), "{panel}");
+        assert!(!panel.contains("/context"), "{panel}");
+    }
+
+    #[test]
+    fn running_context_is_compact() {
+        let mut state = with_split(running());
+        let budget = state.context.budget.as_mut().unwrap();
+        budget.observed_tokens = Some(210_000);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("210.0k / 272.0k 77%"), "{panel}");
+        assert!(panel.contains("turn 7 +11.2k so far"), "{panel}");
+        assert!(!panel.contains("Messages"), "{panel}");
+    }
+
+    #[test]
+    fn short_panel_compacts_context() {
+        let rows = screen_of_height(&with_split(session()), &mut SidePanel::default(), 200, 30);
+        let panel = panel_text(&rows, 200);
+        // Too short for every source row: the bar and the newest turn keep the
+        // changed files in view.
+        assert!(!panel.contains("■ Messages"), "{panel}");
+        assert!(panel.contains("turn 6 +38.2k"), "{panel}");
+        assert!(panel.contains("M src/lib.rs"), "{panel}");
+    }
+
+    #[test]
+    fn compaction_is_not_a_turn() {
+        let mut state = with_split(running());
+        state.context.compaction = Some(wisp_protocol::events::CompactionReason::Manual);
+        let split = Split::of(&state).unwrap();
+        assert!(compact_turn_line(&state, &split, 52, Palette::default()).is_none());
+    }
+
+    #[test]
+    fn context_without_split() {
+        let mut state = with_split(session());
+        state.context.stats.as_mut().unwrap().context_breakdown = None;
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        // Older statistics have no split: one run, the reserve after its marker.
+        let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
+        let bar = bar.trim_start_matches(['│', ' ']);
+        assert!(bar.starts_with('━') && bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        assert!(!panel.contains("Messages"), "{panel}");
     }
 
     #[test]
