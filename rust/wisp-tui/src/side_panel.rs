@@ -1314,22 +1314,30 @@ mod tests {
         }
     }
 
-    fn queue(state: &mut UiState, steering: &[&str], follow_up: &[&str]) {
-        struct Ids;
-        impl crate::reducer::CommandIdSource for Ids {
-            fn next_id(&mut self, kind: crate::reducer::CommandKind) -> String {
-                format!("{}-1", kind.prefix())
-            }
+    struct Ids;
+    impl crate::reducer::CommandIdSource for Ids {
+        fn next_id(&mut self, kind: crate::reducer::CommandKind) -> String {
+            format!("{}-1", kind.prefix())
         }
+    }
+
+    fn backend(state: &mut UiState, event: crate::reducer::BackendEvent) {
         crate::reducer::reduce(
             state,
-            crate::reducer::UiAction::BackendEvent(crate::reducer::BackendEvent::QueueUpdated {
-                steering: steering.iter().map(|&text| text.into()).collect(),
-                follow_up: follow_up.iter().map(|&text| text.into()).collect(),
-            }),
+            crate::reducer::UiAction::BackendEvent(event),
             &mut Ids,
         )
         .unwrap();
+    }
+
+    fn queue(state: &mut UiState, steering: &[&str], follow_up: &[&str]) {
+        backend(
+            state,
+            crate::reducer::BackendEvent::QueueUpdated {
+                steering: steering.iter().map(|&text| text.into()).collect(),
+                follow_up: follow_up.iter().map(|&text| text.into()).collect(),
+            },
+        );
     }
 
     /// The running session waiting to approve its push, with a follow-up queued.
@@ -1523,6 +1531,43 @@ mod tests {
             crate::context_view::turn_cost(&state).as_deref(),
             Some("$0.020")
         );
+    }
+
+    #[test]
+    fn steered_run_keeps_total() {
+        let priced = |nano_usd| {
+            Some(crate::web_search::MessageCost {
+                label: String::new(),
+                nano_usd: Some(nano_usd),
+                lower_bound: false,
+            })
+        };
+        let mut state = session();
+        let prompt = state.transcript.append_prompt("push it".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 3 });
+        state
+            .transcript
+            .complete_message_with_cost(3, "Pushing.".into(), priced(210_000_000));
+        // A steer the run took in reads as a prompt of its own.
+        state.transcript.append_prompt("also open the PR".into());
+        state
+            .transcript
+            .complete_message_with_cost(4, "Opened.".into(), priced(100_000_000));
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::RunCompleted {
+                outcome: "completed".into(),
+                duration_ms: Some(9_000),
+                tool_calls: 2,
+                output_tokens: None,
+                model_ms: None,
+            },
+        );
+        let cost = |state: &UiState| crate::context_view::turn_cost(state);
+        assert_eq!(cost(&state).as_deref(), Some("$0.310"));
+        // A history sync replaces the transcript; the run keeps its total.
+        state.transcript = Default::default();
+        assert_eq!(cost(&state).as_deref(), Some("$0.310"));
     }
 
     #[test]

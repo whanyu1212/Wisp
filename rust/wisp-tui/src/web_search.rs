@@ -78,6 +78,34 @@ pub struct MessageCost {
     pub lower_bound: bool,
 }
 
+/// Replies' costs added up, as a run's total.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CostTotal {
+    pub nano_usd: u64,
+    /// Whether any reply was priced; a total of no priced replies shows nothing.
+    pub priced: bool,
+    /// A reply searched the web, or had text that could not be priced, so the total
+    /// is a floor.
+    pub floor: bool,
+}
+
+impl CostTotal {
+    pub(crate) fn of<'a>(costs: impl IntoIterator<Item = &'a MessageCost>) -> Self {
+        let mut total = Self::default();
+        for cost in costs {
+            match cost.nano_usd {
+                Some(amount) => {
+                    total.nano_usd = total.nano_usd.saturating_add(amount);
+                    total.priced = true;
+                }
+                None => total.floor = true,
+            }
+            total.floor |= cost.lower_bound;
+        }
+        total
+    }
+}
+
 fn cost(value: &Value, show_unknown: bool) -> Option<MessageCost> {
     if value.is_null() {
         return None;

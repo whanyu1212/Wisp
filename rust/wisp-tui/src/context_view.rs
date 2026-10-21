@@ -3,6 +3,7 @@
 use crate::reducer::UiState;
 use crate::theme::Palette;
 use crate::ui::sanitize_for_terminal;
+use crate::web_search::CostTotal;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -71,47 +72,40 @@ pub(crate) fn session_cost(state: &UiState) -> Option<String> {
     Some(format!("{}{amount}", if cost.complete { "" } else { "≥" }))
 }
 
-/// What the latest run's replies cost so far, from the estimate each reply carries.
-/// `None` until a reply in it is priced. A reply that searched the web, or one with
-/// text that could not be priced, makes the total a floor (`≥$0.31`); an unpriced
-/// reply that only called tools carries no cost and is not counted.
+/// What the latest run's replies cost, from the estimate each reply carries. `None`
+/// until a reply in it is priced. A reply that searched the web, or one with text that
+/// could not be priced, makes the total a floor (`≥$0.31`); an unpriced reply that
+/// only called tools carries no cost and is not counted.
 pub(crate) fn turn_cost(state: &UiState) -> Option<String> {
-    // A run in progress spans its steers and follow-ups. Once it ends, the turn is
-    // what follows the latest prompt: a history sync or a session switch replaces
-    // the transcript, so the finished run's prompt id no longer names an entry in it.
-    // `/compact` runs no turn of its own, so it leaves the finished run's id in place.
+    // `/compact` runs no turn of its own, so the finished run's total stays shown.
     let running = state
         .current_command
         .as_ref()
         .is_some_and(|command| command.command_type != crate::reducer::ActiveCommandType::Compact);
-    let turn = if running {
-        crate::ui::current_turn(state)
+    let total = if running {
+        // A run in progress spans the steers and follow-ups it takes in.
+        CostTotal::of(
+            crate::ui::current_turn(state)
+                .iter()
+                .filter_map(|entry| entry.cost()),
+        )
+    } else if let Some(total) = state.finished_run_cost {
+        total
     } else {
+        // A session opened from history: its last run's steers are prompts like any
+        // other, so the turn is what follows the latest one.
         let entries = state.transcript.entries();
         let start = entries
             .iter()
             .rposition(|entry| entry.role == crate::transcript::TranscriptRole::User)
             .map_or(0, |index| index + 1);
-        &entries[start..]
+        CostTotal::of(entries[start..].iter().filter_map(|entry| entry.cost()))
     };
-    let mut nano_usd = 0u64;
-    let mut priced = false;
-    let mut floor = false;
-    for cost in turn.iter().filter_map(|entry| entry.cost()) {
-        match cost.nano_usd {
-            Some(amount) => {
-                nano_usd = nano_usd.saturating_add(amount);
-                priced = true;
-            }
-            None => floor = true,
-        }
-        floor |= cost.lower_bound;
-    }
-    priced.then(|| {
+    total.priced.then(|| {
         format!(
             "{}{}",
-            if floor { "≥" } else { "" },
-            format_usd(nano_usd as f64 / 1e9)
+            if total.floor { "≥" } else { "" },
+            format_usd(total.nano_usd as f64 / 1e9)
         )
     })
 }
