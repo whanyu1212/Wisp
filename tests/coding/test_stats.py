@@ -20,6 +20,7 @@ from wisp.events import (
     ContextEstimate,
     ContextEstimated,
     MessageCompleted,
+    MessageStarted,
     SessionStatsReported,
     TokenUsage,
     ToolResultReady,
@@ -749,6 +750,7 @@ def test_stats_use_branch_count_but_lifetime_usage() -> None:
 def test_run_stats_totals() -> None:
     stats = RunStats()
     usage = TokenUsage(input_tokens=5, output_tokens=7, total_tokens=12)
+    stats.observe(MessageStarted(turn=1))
     stats.observe(MessageCompleted(turn=1, content="a", finish_reason="tool_calls", usage=usage))
     stats.observe(ToolResultReady(call_id="c", name="read", output="x", is_error=False))
     stats.observe(MessageCompleted(turn=2, content="b", finish_reason="stop"))
@@ -766,9 +768,31 @@ def test_run_stats_totals() -> None:
     assert (completed.tool_calls, completed.output_tokens) == (1, 10)
     assert completed.duration_ms is not None
     assert completed.duration_ms >= 0
+    # Only the response that started was timed.
+    assert completed.model_ms is not None
+    assert 0 <= completed.model_ms <= completed.duration_ms
+
+
+def test_run_stats_times_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = iter([10.0, 12.5, 20.0, 21.0, 22.0, 30.0])
+    monkeypatch.setattr("wisp.coding.stats.time.monotonic", lambda: next(clock))
+    usage = TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+    stats = RunStats(started=0.0)
+    stats.observe(MessageStarted(turn=1))
+    stats.observe(MessageCompleted(turn=1, content="a", finish_reason="tool_calls", usage=usage))
+    # Tool time between responses is left out.
+    stats.observe(MessageStarted(turn=2))
+    stats.observe(MessageCompleted(turn=2, content="b", finish_reason="stop", usage=usage))
+    # A failed response reports no usage, so its time is left out too.
+    stats.observe(MessageStarted(turn=3))
+    stats.observe(MessageCompleted(turn=3, content="", finish_reason="error"))
+
+    completed = stats.completed(session_id="s", turns=3, outcome="completed")
+
+    assert (completed.model_ms, completed.duration_ms) == (3500, 30000)
 
 
 def test_run_stats_without_usage() -> None:
     completed = RunStats().completed(session_id="s", turns=0, outcome="failed")
 
-    assert (completed.tool_calls, completed.output_tokens) == (0, None)
+    assert (completed.tool_calls, completed.output_tokens, completed.model_ms) == (0, None, None)

@@ -399,7 +399,7 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         offset = len(tui.output)
         tui.send(b"\r")
         # Do not require a fresh "idle" after the submit: the fake reply can finish before
-        # "working" is painted, and an unchanged footer is never redrawn. With the reply
+        # the running footer is painted, and an unchanged footer is never redrawn. With the reply
         # painted, run_settled's last-idle-after-last-working check proves the run ended.
         tui.wait_until(
             lambda output: run_settled(output, offset, b"END", *marker_fragments),

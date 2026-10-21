@@ -16,6 +16,19 @@
           "default": null,
           "title": "Duration Ms"
         },
+        "model_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Ms"
+        },
         "outcome": {
           "enum": [
             "completed",
@@ -72,7 +85,8 @@
         "outcome",
         "duration_ms",
         "tool_calls",
-        "output_tokens"
+        "output_tokens",
+        "model_ms"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -7131,6 +7145,7 @@
   "x-wisp-conformance-fixtures": {
     "agent.completed": {
       "duration_ms": null,
+      "model_ms": null,
       "outcome": "completed",
       "output_tokens": null,
       "session_id": "session-1",

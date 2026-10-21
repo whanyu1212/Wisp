@@ -252,6 +252,18 @@ impl Palette {
         }
     }
 
+    /// The rail of a finished turn: a border tone, quieter than muted text, so it
+    /// frames the turn without reading as content.
+    pub fn rail(self) -> Color {
+        mix(self.muted, self.background, 0.4)
+    }
+
+    /// The rail of a turn still running: the running colour, quieted toward the
+    /// background so it frames the turn without competing with its text.
+    pub fn running_rail(self) -> Color {
+        mix(self.secondary, self.background, 0.55)
+    }
+
     pub fn composer(self) -> Style {
         self.base().bg(self.surface)
     }

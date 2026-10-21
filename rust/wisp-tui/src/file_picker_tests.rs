@@ -284,7 +284,7 @@ async fn oversized_valid_reports_fail_recoverably_without_retaining_paths() {
 }
 
 #[tokio::test]
-async fn picker_works_during_a_run_and_preserves_modified_follow_up_submission() {
+async fn picker_works_during_a_run() {
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = LiveUi {
         editor: editor("active prompt"),
@@ -347,7 +347,7 @@ async fn picker_works_during_a_run_and_preserves_modified_follow_up_submission()
     .await
     .unwrap();
     let command = write.await.unwrap();
-    assert_eq!(command["type"], "follow_up");
+    assert_eq!(command["type"], "steer");
     assert_eq!(command["content"], "inspect @file.rs ");
     assert_eq!(ui.state.current_command, active);
     assert!(!ui.file_picker.is_open());

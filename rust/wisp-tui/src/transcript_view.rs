@@ -59,6 +59,9 @@ pub enum RowPosition {
     /// A plain gap below a prompt's highlighted surface, before the reply or card that follows.
     /// The prompt owns it, after its `Spacer`, which is the surface's bottom padding.
     UserLeadOut,
+    /// The run's totals, closing the turn's rail. The turn's last entry owns it, after its
+    /// body and before its `Spacer`.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -126,6 +129,8 @@ pub enum TranscriptRowKind {
     /// The gap between back-to-back collapsed cards, drawn as a thin rule. Like a spacer it
     /// holds no text, so a copied selection gets an empty line.
     Rule,
+    /// The muted totals that end a finished turn's rail.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,7 +226,13 @@ pub struct TranscriptRow {
     /// Right-aligned muted text, such as how long a call ran. The projection keeps
     /// its columns clear of `spans`; it is not part of the copied text.
     pub trailing: Option<String>,
+    /// A call still in progress keeps the trailing columns for a live timer, which
+    /// the renderer paints each frame so the cached row never goes stale.
+    pub live_timer: bool,
 }
+
+/// Columns a live timer keeps, enough for `59m 59s`.
+pub(crate) const LIVE_TIMER_COLUMNS: usize = 7;
 
 /// Where a foldable row draws its arrow, in columns from the start of its text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -290,13 +301,16 @@ impl TranscriptRow {
             fold_hint: FoldHint::None,
             fold_arrow: None,
             trailing: None,
+            live_timer: false,
         }
     }
 }
 
 fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
     match kind {
-        TranscriptRowKind::Placeholder | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
+        TranscriptRowKind::Placeholder
+        | TranscriptRowKind::Thought
+        | TranscriptRowKind::RunSummary => TranscriptRowTone::Muted,
         TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
@@ -993,6 +1007,26 @@ impl TranscriptRowCache {
                     position.absolute_byte_offset,
                     width,
                 )?,
+            RowPosition::RunSummary => {
+                // Model and effort names come from providers: keep terminal controls
+                // inert and the row to one line.
+                let summary = entry
+                    .run_summary()?
+                    .graphemes(true)
+                    .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                    .collect::<String>();
+                let summary = self.clip_to_columns(&summary, width);
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        TranscriptRowKind::RunSummary,
+                        summary,
+                        entry.display_content().len(),
+                    ),
+                    next: spacer_after(transcript, entry),
+                }
+            }
             RowPosition::Spacer if next_entry().is_some() => {
                 let rule = transcript
                     .entry_after(entry.id)
@@ -1515,6 +1549,7 @@ impl TranscriptRowCache {
                 let mut fold_hint = FoldHint::None;
                 let mut fold_arrow = None;
                 let mut trailing = None;
+                let mut live_timer = false;
                 if absolute_offset == 0 {
                     // The duration takes a right-aligned column, and is the first thing
                     // a narrow row drops. It is counted before deciding whether the
@@ -1526,10 +1561,25 @@ impl TranscriptRowCache {
                             let reserved = duration.width() + TRAILING_GAP;
                             (duration, reserved)
                         });
-                    let text_width = duration
-                        .as_ref()
-                        .filter(|(_, reserved)| width >= ACTION_COLUMNS_BESIDE_HINT + reserved)
-                        .map_or(width, |(_, reserved)| width - reserved);
+                    // A call still running keeps the same columns for its live timer.
+                    let in_progress = duration.is_none()
+                        && entry.tool_card().is_some_and(|card| {
+                            matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
+                        });
+                    let reserved = duration.as_ref().map_or(
+                        if in_progress {
+                            LIVE_TIMER_COLUMNS + TRAILING_GAP
+                        } else {
+                            0
+                        },
+                        |(_, reserved)| *reserved,
+                    );
+                    let text_width =
+                        if reserved > 0 && width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
+                            width - reserved
+                        } else {
+                            width
+                        };
                     let hint = if expanded {
                         self.fold.collapse_hint()
                     } else if (!projection.inline_detail
@@ -1556,6 +1606,12 @@ impl TranscriptRowCache {
                             row_width -= reserved;
                             trailing = Some(duration);
                         }
+                    } else if in_progress
+                        && row_width
+                            >= ACTION_COLUMNS_BESIDE_HINT + LIVE_TIMER_COLUMNS + TRAILING_GAP
+                    {
+                        row_width -= LIVE_TIMER_COLUMNS + TRAILING_GAP;
+                        live_timer = true;
                     }
                 }
                 if absolute_offset == 0 && !expanded {
@@ -1571,6 +1627,7 @@ impl TranscriptRowCache {
                         projected.row.fold_hint = fold_hint;
                         projected.row.fold_arrow = fold_arrow;
                         projected.row.trailing = trailing;
+                        projected.row.live_timer = live_timer;
                         return Some(projected);
                     }
                 }
@@ -1590,6 +1647,7 @@ impl TranscriptRowCache {
                 projected.row.fold_hint = fold_hint;
                 projected.row.fold_arrow = fold_arrow;
                 projected.row.trailing = trailing;
+                projected.row.live_timer = live_timer;
                 Some(projected)
             }
             CardSection::Metadata if !projection.metadata.is_empty() => {
@@ -2100,7 +2158,7 @@ impl TranscriptRowCache {
             let old_bytes = cached.retained_bytes;
             let build = (cached.entry_revision != Some(entry.revision())).then(|| {
                 cached.state.build(
-                    &entry.markdown_source()[start..],
+                    &entry.content[start..],
                     start,
                     entry.layout_epoch(),
                     entry.state == TranscriptEntryState::Complete,
@@ -2459,6 +2517,7 @@ impl TranscriptRowCache {
                 fold_hint: FoldHint::None,
                 fold_arrow: None,
                 trailing: None,
+                live_timer: false,
             },
             next,
         }
@@ -2512,7 +2571,11 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
             }),
-            RowPosition::Spacer => {
+            RowPosition::Spacer if entry.run_summary().is_some() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            }),
+            RowPosition::Spacer | RowPosition::RunSummary => {
                 if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
                     Some(RowAnchor {
                         entry_id: start,
@@ -2523,6 +2586,22 @@ impl TranscriptRowCache {
                 }
             }
         }
+    }
+
+    /// An entry's final row: its run summary when it closes a turn, else its body's last row.
+    fn end_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
+        if entry.run_summary().is_some() {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            };
+        }
+        self.last_anchor(transcript, entry, width)
     }
 
     /// Whether `entry` is a card showing result rows, expanded or as an inline diff preview.
@@ -2578,7 +2657,9 @@ impl TranscriptRowCache {
                 }
                 Some(offset) if offset == target => return Some(anchor),
                 Some(_) => return Some(anchor),
-                None if next.position == RowPosition::Spacer => return Some(anchor),
+                None if matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary) => {
+                    return Some(anchor);
+                }
                 None => return Some(previous),
             }
         }
@@ -2605,7 +2686,9 @@ impl TranscriptRowCache {
             if next == target {
                 return Some(current);
             }
-            if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+            if next.entry_id != entry.id
+                || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+            {
                 return Some(current);
             }
             current = next;
@@ -2696,7 +2779,9 @@ impl TranscriptRowCache {
                 let Some(next) = cached.next else {
                     return current;
                 };
-                if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+                if next.entry_id != entry.id
+                    || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+                {
                     return current;
                 }
                 current = next;
@@ -2785,6 +2870,7 @@ impl TranscriptRowCache {
                             RowPosition::Spacer
                                 | RowPosition::UserLeadIn
                                 | RowPosition::UserLeadOut
+                                | RowPosition::RunSummary
                         )
                 })
         });
@@ -4008,7 +4094,7 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
         let entry = transcript.entries().last()?;
-        let mut top = cache.last_anchor(transcript, entry, self.width);
+        let mut top = cache.end_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
@@ -4067,7 +4153,10 @@ fn scroll_anchor_rank(
     };
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
-        RowPosition::Spacer | RowPosition::UserLeadIn | RowPosition::UserLeadOut => 1.0,
+        RowPosition::Spacer
+        | RowPosition::UserLeadIn
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => 1.0,
         RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
@@ -4129,7 +4218,23 @@ fn cached_row_valid(
     if cached.entry_revision == entry.revision() {
         return true;
     }
+    // The body's last row leads to the run summary once one is attached, so a row that
+    // ended the entry must still lead where the entry now ends.
+    let ended_body = cached.next.is_none_or(|next| {
+        next.entry_id == entry.id
+            && matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+    });
+    if ended_body
+        && !matches!(
+            cached.row.kind,
+            TranscriptRowKind::Spacer | TranscriptRowKind::Rule | TranscriptRowKind::RunSummary
+        )
+        && cached.next != separator_after(transcript, entry)
+    {
+        return false;
+    }
     match cached.row.kind {
+        TranscriptRowKind::RunSummary => false,
         TranscriptRowKind::Header if entry.role == TranscriptRole::Assistant => false,
         TranscriptRowKind::Header => {
             let expected = RowPosition::Content(0);
@@ -4378,13 +4483,20 @@ fn normalize_anchor(
             }
             Some(match separator_after(transcript, entry) {
                 Some(spacer) => spacer,
-                None => cache.last_anchor(transcript, entry, width),
+                None => cache.end_anchor(transcript, entry, width),
             })
         }
         // The lead-out likewise needs its prompt to still be followed by a reply or card; the
         // prompt's own surface padding is the nearest row that exists either way.
         RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => {
             Some(match separator_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.end_anchor(transcript, entry, width),
+            })
+        }
+        // A summary that is no longer shown resumes at the entry's own gap or last row.
+        RowPosition::RunSummary if entry.run_summary().is_none() => {
+            Some(match spacer_after(transcript, entry) {
                 Some(spacer) => spacer,
                 None => cache.last_anchor(transcript, entry, width),
             })
@@ -4407,7 +4519,8 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Card(_)
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
-        | RowPosition::UserLeadOut => None,
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => None,
     }
 }
 
@@ -4456,7 +4569,20 @@ fn push_styled_span(
 
 /// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed
 /// cards.
+/// What follows an entry's body: the run summary when the entry ends its turn, then the
+/// gap before the next entry.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    if entry.run_summary().is_some() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::RunSummary,
+        });
+    }
+    spacer_after(transcript, entry)
+}
+
+/// The gap before the entry that follows, if any.
+fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
@@ -4687,6 +4813,101 @@ mod tests {
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
+    }
+
+    #[test]
+    fn summary_row_ends_the_turn() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        let reply = transcript.append_message_delta(1, "done");
+        transcript.complete_message(1, "done".into());
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 60, 20);
+        // Rows cached before the run completes still lead to its summary after.
+        viewport.visible_rows(&transcript, &mut cache);
+        assert!(transcript.attach_run_summary("4.0s · 1 tool".into()));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        // Following the tail, the summary is the last row.
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let last = rows.last().unwrap();
+        assert_eq!(last.kind, TranscriptRowKind::RunSummary);
+        assert_eq!(last.plain_text(), "4.0s · 1 tool");
+
+        transcript.append_prompt("second".into());
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let summary = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::RunSummary,
+        };
+        let spacer = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Spacer,
+        };
+        // Walking back from the gap passes the summary, then the reply's text.
+        assert_eq!(
+            cache.previous_anchor(&transcript, spacer, 60),
+            Some(summary)
+        );
+        let before = cache.previous_anchor(&transcript, summary, 60).unwrap();
+        assert_eq!(before.entry_id, reply);
+        assert!(matches!(
+            before.position,
+            RowPosition::Markdown(_) | RowPosition::Content(_)
+        ));
+        assert_eq!(
+            cache.row_at(&transcript, before, 60).unwrap().next,
+            Some(summary)
+        );
+    }
+
+    #[test]
+    fn summary_row_is_inert() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        transcript.complete_message(1, "done".into());
+        assert!(transcript.attach_run_summary(format!("evil\u{1b}[2J{}", "x".repeat(200))));
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 40, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let summary = rows.last().unwrap().plain_text();
+        // Provider-named text cannot reach the terminal as a control sequence, and the
+        // row stays one line.
+        assert!(!summary.contains('\u{1b}'), "{summary:?}");
+        assert!(
+            summary.width() <= 40 && summary.ends_with('…'),
+            "{summary:?}"
+        );
+    }
+
+    #[test]
+    fn running_rows_keep_their_arrow() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("read".into());
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "r1".into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": "/zz/src/some/deeply/nested/module.rs"}),
+        });
+        // While the call runs, its live timer takes the right columns; an action cut
+        // short to make room can still be expanded.
+        for width in 40..80 {
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            let action = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap();
+            if action.plain_text().contains('…') {
+                assert!(action.fold_arrow.is_some(), "width {width}: {action:?}");
+            }
+        }
     }
 
     #[test]

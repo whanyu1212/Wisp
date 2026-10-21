@@ -4412,17 +4412,19 @@ impl LiveUi {
                         let content = self.editor.text().to_owned();
                         let alternate =
                             self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
+                        // Enter queues a follow-up, so a stray Enter waits for the run
+                        // instead of redirecting it; Alt+Enter steers the run now.
                         let action = match (alternate, self.editor.has_folds()) {
-                            (true, true) => UiAction::FollowUpPresented {
+                            (false, true) => UiAction::FollowUpPresented {
                                 content,
                                 presentation: self.editor.compact_text(),
                             },
-                            (false, true) => UiAction::SteerPresented {
+                            (true, true) => UiAction::SteerPresented {
                                 content,
                                 presentation: self.editor.compact_text(),
                             },
-                            (true, false) => UiAction::FollowUp(content),
-                            (false, false) => UiAction::Steer(content),
+                            (false, false) => UiAction::FollowUp(content),
+                            (true, false) => UiAction::Steer(content),
                         };
                         self.dispatch_queue_action(action, writer, limit).await
                     }
@@ -7140,10 +7142,11 @@ mod tests {
             ..LiveUi::default()
         };
 
+        // Alt+Enter steers the run now; Enter queues a follow-up.
         live_ui.editor.insert_paste("steer now");
         live_ui
             .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
             )
@@ -7161,7 +7164,7 @@ mod tests {
         live_ui.editor.insert_paste("later please");
         live_ui
             .handle_input(
-                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
             )

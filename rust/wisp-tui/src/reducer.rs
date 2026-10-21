@@ -702,6 +702,15 @@ impl QueueSubmissionPreflightError {
     }
 }
 
+/// The run in progress, as the status line counts it: the prompt that started it and
+/// the agent turn it has reached. Steers and follow-ups injected mid-run join the run
+/// rather than starting a new one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RunProgress {
+    pub prompt: crate::transcript::TranscriptEntryId,
+    pub turn: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -743,6 +752,7 @@ pub struct UiState {
     /// Queue streamed reply text for the live terminal to reveal at an even pace instead
     /// of showing each delta as it arrives. Off by default, so reductions stay immediate.
     pub(crate) stream_pacing: bool,
+    pub(crate) run_progress: Option<RunProgress>,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
@@ -820,6 +830,7 @@ impl UiState {
             exit_requested: false,
             transcript: SharedTranscript::default(),
             stream_pacing: false,
+            run_progress: None,
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
@@ -1147,6 +1158,8 @@ pub enum BackendEvent {
         duration_ms: Option<u64>,
         tool_calls: u64,
         output_tokens: Option<u64>,
+        /// Time the run's model responses spent streaming, which throughput uses.
+        model_ms: Option<u64>,
     },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
@@ -1668,9 +1681,10 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state
+    let prompt = state
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
@@ -1702,7 +1716,8 @@ fn init_project(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    state.transcript.append_prompt("/init".into());
+    let prompt = state.transcript.append_prompt("/init".into());
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -4531,6 +4546,9 @@ fn handle_backend_event(
             Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
         }
         BackendEvent::MessageStarted { turn } => {
+            if let Some(run) = state.run_progress.as_mut() {
+                run.turn = run.turn.max(turn);
+            }
             state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
         }
@@ -4582,9 +4600,18 @@ fn handle_backend_event(
             duration_ms,
             tool_calls,
             output_tokens,
+            model_ms,
         } => {
-            let summary = run_summary_line(state, &outcome, duration_ms, tool_calls, output_tokens);
-            if state.transcript.attach_run_summary(summary) {
+            let summary = run_summary_line(
+                state,
+                &outcome,
+                duration_ms,
+                tool_calls,
+                output_tokens,
+                model_ms,
+            );
+            // A run that reported nothing to total keeps no summary row.
+            if !summary.is_empty() && state.transcript.attach_run_summary(summary) {
                 Ok(vec![UiEffect::RequestRender])
             } else {
                 Ok(Vec::new())
@@ -4835,6 +4862,7 @@ fn run_summary_line(
     duration_ms: Option<u64>,
     tool_calls: u64,
     output_tokens: Option<u64>,
+    model_ms: Option<u64>,
 ) -> String {
     let mut parts = Vec::new();
     if state.mode_confirmed {
@@ -4862,32 +4890,28 @@ fn run_summary_line(
         1 => parts.push("1 tool".to_owned()),
         count => parts.push(format!("{count} tools")),
     }
-    if let Some(tokens) = output_tokens.filter(|tokens| *tokens > 0) {
-        parts.push(format!("{} tokens", abbreviated_count(tokens)));
+    // Throughput over the time the model streamed, so tool time does not dilute it.
+    if let (Some(tokens), Some(model_ms)) = (
+        output_tokens.filter(|tokens| *tokens > 0),
+        model_ms.filter(|milliseconds| *milliseconds > 0),
+    ) {
+        parts.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
     }
     if outcome != "completed" {
         parts.push(outcome.to_owned());
     }
-    format!("╰ {}", parts.join(" · "))
+    // The turn's rail draws the closing `╰`.
+    parts.join(" · ")
 }
 
-/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit. Each unit is chosen after
-/// rounding, so 999.6k reads `1.0m`.
-fn abbreviated_count(count: u64) -> String {
-    if count < 1_000 {
-        return count.to_string();
+/// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
+fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
+    let rate = tokens as f64 * 1000.0 / model_ms as f64;
+    if rate < 10.0 {
+        format!("{rate:.1}")
+    } else {
+        format!("{rate:.0}")
     }
-    for (unit, size) in [("k", 1_000_u64), ("m", 1_000_000)] {
-        let tenths = count.saturating_add(size / 20) / (size / 10);
-        if tenths < 100 {
-            return format!("{}.{}{unit}", tenths / 10, tenths % 10);
-        }
-        let whole = count.saturating_add(size / 2) / size;
-        if whole < 1_000 || unit == "m" {
-            return format!("{whole}{unit}");
-        }
-    }
-    unreachable!("the last unit always returns")
 }
 
 #[cfg(test)]
@@ -6151,22 +6175,13 @@ mod tests {
     }
 
     #[test]
-    fn counts_round_before_units() {
-        let cases = [
-            (999, "999"),
-            (1_234, "1.2k"),
-            (9_960, "10k"),
-            (31_400, "31k"),
-            (999_600, "1.0m"),
-            (12_300_000, "12m"),
-        ];
-        for (count, label) in cases {
-            assert_eq!(abbreviated_count(count), label);
-        }
+    fn throughput_keeps_a_digit() {
+        assert_eq!(tokens_per_second(1_234, 40_000), "31");
+        assert_eq!(tokens_per_second(42, 5_000), "8.4");
     }
 
     #[test]
-    fn cancelled_run_keeps_card_last() {
+    fn cancelled_run_closes_on_card() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
         state.transcript.append_prompt("test".into());
@@ -6186,31 +6201,44 @@ mod tests {
                 duration_ms: Some(4_000),
                 tool_calls: 1,
                 output_tokens: None,
+                model_ms: None,
             }),
             &mut ids,
         )
         .unwrap();
 
-        assert!(effects.is_empty());
+        // The turn ends on the card, so the card carries the totals; the reply keeps
+        // its text.
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
         let reply = &state.transcript.entries()[1];
         assert_eq!(reply.display_content(), "Running the tests.");
+        assert_eq!(reply.run_summary(), None);
+        let card = state.transcript.entries().last().unwrap();
+        assert_eq!(card.run_summary(), Some("4.0s · 1 tool · cancelled"));
+    }
 
-        state.transcript.complete_message(2, "Stopped.".into());
-        reduce(
+    #[test]
+    fn empty_run_keeps_no_summary() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hi".into());
+        state.transcript.complete_message(1, "hello".into());
+        let effects = reduce(
             &mut state,
             UiAction::BackendEvent(BackendEvent::RunCompleted {
-                outcome: "cancelled".into(),
-                duration_ms: Some(4_000),
-                tool_calls: 1,
+                outcome: "completed".into(),
+                duration_ms: None,
+                tool_calls: 0,
                 output_tokens: None,
+                model_ms: None,
             }),
             &mut ids,
         )
         .unwrap();
-        let last = state.transcript.entries().last().unwrap();
+        assert!(effects.is_empty());
         assert_eq!(
-            last.display_content(),
-            "Stopped.\n\n╰ 4.0s · 1 tool · cancelled"
+            state.transcript.entries().last().unwrap().run_summary(),
+            None
         );
     }
 
@@ -6230,7 +6258,8 @@ mod tests {
             "outcome": "completed",
             "duration_ms": 252_000,
             "tool_calls": 3,
-            "output_tokens": 1_234
+            "output_tokens": 1_234,
+            "model_ms": 40_000
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let completed = BackendEvent::from_live(&live).unwrap();
@@ -6248,10 +6277,10 @@ mod tests {
         reduce(&mut state, UiAction::BackendEvent(completed), &mut ids).unwrap();
         let reply = state.transcript.entries().last().unwrap();
         assert_eq!(
-            reply.display_content(),
-            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 1.2k tokens"
+            reply.run_summary(),
+            Some("Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s")
         );
-        assert_eq!(reply.content, "Done.");
+        assert_eq!(reply.display_content(), "Done.");
     }
 
     #[test]

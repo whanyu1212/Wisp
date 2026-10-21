@@ -46,8 +46,8 @@ from wisp.events import QueueItemsRemoved, QueueUpdated, RpcCommandFinished, Rpc
 
 command_log = Path(sys.argv[1])
 active_prompt_id = None
-steering_content = "steer-via-enter"
-follow_up_content = "follow-up-via-alt-enter"
+steering_content = "steer-via-alt-enter"
+follow_up_content = "follow-up-via-enter"
 queue_revision = 0
 queue_token = None
 
@@ -199,36 +199,34 @@ for line in sys.stdin:
             elif (
                 phase == "prompt sent"
                 and "prompt" in command_types
-                and b"s:0/l:0" in output[phase_output_offset:]
-            ):
-                phase_output_offset = len(output)
-                os.write(terminal_fd, b"steer-via-enter\r")
-                phase = "steer sent"
-            elif phase == "steer sent" and "steer" in command_types:
-                # Queue previews can reuse cells from the submitted draft. Request
-                # a complete frame before checking text in differential PTY output.
-                phase_output_offset = len(output)
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
-                phase = "steer frame"
-            elif (
-                phase == "steer frame"
-                and b"steer: steer-via-enter" in output[phase_output_offset:]
+                # The composer names the follow-up key once the run takes input.
+                and b"follow-up" in output[phase_output_offset:]
                 and (cursor := frame_cursor(output)) is not None
             ):
-                # The resize forces a full frame with the cursor at the start of the
-                # empty composer. Typed text can be painted across several frames
-                # with other cells in between, so wait for the cursor to reach the
-                # end of the text instead of matching it in the raw output.
+                # Typed text can be painted across several frames with other cells in
+                # between, so wait for the cursor to reach the end of the text before
+                # sending Alt+Enter.
                 composer_start = cursor
                 phase_output_offset = len(output)
-                os.write(terminal_fd, b"follow-up-via-alt-enter")
-                phase = "follow-up typed"
-            elif phase == "follow-up typed" and frame_cursor(output) == (
+                os.write(terminal_fd, b"steer-via-alt-enter")
+                phase = "steer typed"
+            elif phase == "steer typed" and frame_cursor(output) == (
                 composer_start[0],
-                composer_start[1] + len("follow-up-via-alt-enter"),
+                composer_start[1] + len("steer-via-alt-enter"),
             ):
                 phase_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b\r")
+                phase = "steer sent"
+            elif phase == "steer sent" and "steer" in command_types:
+                # The queue count can reuse cells from an earlier frame. Request a
+                # complete frame before checking text in differential PTY output.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                phase = "steer frame"
+            elif phase == "steer frame" and b"1 queued" in output[phase_output_offset:]:
+                # The status line counts the queued steer; Enter queues a follow-up.
+                phase_output_offset = len(output)
+                os.write(terminal_fd, b"follow-up-via-enter\r")
                 phase = "follow-up sent"
             elif phase == "follow-up sent" and "follow_up" in command_types:
                 restore_output_offset = len(output)
@@ -244,7 +242,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x03")
                 phase = "cancel sent"
             elif (
-                # The steer-frame resize painted "working" during this run, so idle is redrawn.
+                # The steer-frame resize painted the running footer, so idle is redrawn.
                 phase == "cancel sent"
                 and "cancel" in command_types
                 and idle_output_offset is not None
@@ -315,7 +313,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x03")
                 phase = "second cancel sent"
             elif phase == "second cancel sent" and command_types.count("cancel") == 2:
-                # The cancel can finish before "working" is painted for this run, and
+                # The cancel can finish before the running footer is painted for this run, and
                 # an unchanged idle footer is never redrawn. A resize forces a full frame.
                 phase_output_offset = len(output)
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
@@ -370,8 +368,8 @@ for line in sys.stdin:
     assert prompt["prompt"] == "history exact first\nneedle second"
     assert recalled["prompt"] == "history exact first\nneedle second edited"
     assert second_cancel["target_id"] == recalled["id"]
-    assert steer["content"] == "steer-via-enter"
-    assert follow_up["content"] == "follow-up-via-alt-enter"
+    assert steer["content"] == "steer-via-alt-enter"
+    assert follow_up["content"] == "follow-up-via-enter"
     assert pop_queue["kind"] == "follow_up"
     assert cancel["target_id"] == prompt["id"]
     assert restore_output_offset is not None

@@ -22,7 +22,6 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::QueueKind;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
@@ -57,23 +56,15 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
+    // The footer, the transcript's two rows, and the status line while running.
     let ceiling = area
         .height
-        .saturating_sub(3)
+        .saturating_sub(3 + status_line_height(state))
         .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
     if editable(state) {
-        let queue_rows = if state.active_prompt_editable() {
-            state
-                .queued_steering()
-                .saturating_add(state.queued_follow_ups())
-                .min(3)
-        } else {
-            0
-        };
         u16::try_from(
             layout
                 .map_or(1, |layout| layout.rows.len())
-                .saturating_add(queue_rows)
                 // A framed composer adds its borders and the identity row.
                 .saturating_add(if framed { 3 } else { 0 }),
         )
@@ -122,7 +113,7 @@ pub(crate) fn file_picker_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(composer, state, layout) + 1)
+        .saturating_sub(composer_height(composer, state, layout) + status_line_height(state) + 1)
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -150,7 +141,7 @@ pub(crate) fn docked_popup_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = surface
         .bottom()
-        .saturating_sub(composer_height(surface, state, layout) + 1)
+        .saturating_sub(composer_height(surface, state, layout) + status_line_height(state) + 1)
         .max(surface.y + 4);
     let height = (bottom - surface.y).min(height);
     Some(Rect::new(surface.x, bottom - height, surface.width, height))
@@ -278,7 +269,6 @@ pub fn render_interactive(
             browse_selected,
             connection,
             activity_frame,
-            activity_elapsed,
             palette,
             bindings,
             startup_logo,
@@ -303,14 +293,19 @@ pub fn render_interactive(
     let composer_layout =
         editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
     let composer_height = composer_height(area, state, composer_layout);
+    let status_height = status_line_height(state);
     let completion_height = completion.map_or(0, |view| {
-        (view.items.len().min(5) as u16).min(area.height.saturating_sub(composer_height + 3))
+        (view.items.len().min(5) as u16).min(
+            area.height
+                .saturating_sub(composer_height + status_height + 3),
+        )
     });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(if completion_height > 0 { 0 } else { 2 }),
             Constraint::Length(completion_height),
+            Constraint::Length(status_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -325,7 +320,6 @@ pub fn render_interactive(
         browse_selected,
         connection,
         activity_frame,
-        activity_elapsed,
         palette,
         bindings,
         startup_logo,
@@ -334,26 +328,37 @@ pub fn render_interactive(
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
+    if status_height > 0 {
+        render_status_line(
+            frame,
+            content_area(chunks[2]),
+            state,
+            activity_frame,
+            activity_elapsed,
+            palette,
+        );
+    }
     let padded = area.height >= 16;
     let editor = render_composer(
         frame,
-        chunks[2],
+        chunks[3],
         state,
         composer_layout,
         composer_focused,
         padded,
         palette,
+        bindings,
     );
     render_footer(
         frame,
-        content_area(chunks[3]),
+        content_area(chunks[4]),
         state,
         viewport,
         notice,
         palette,
         bindings,
         jump_to_latest.is_some(),
-        composer_framed(state, padded, chunks[2]),
+        composer_framed(state, padded, chunks[3]),
     );
     mouse::Conversation {
         transcript: Rect {
@@ -477,6 +482,14 @@ fn workspace_label(cwd: &str, home: Option<&str>) -> String {
         .find(|part| !part.is_empty())
         .unwrap_or(&shown);
     format!("…/{last}")
+}
+
+/// Whether a run is going, so the status line above the composer replaces the
+/// footer's status and the transcript's working row.
+fn run_in_status_line(state: &UiState) -> bool {
+    !state.configuration_active()
+        && (state.view_status == ViewStatus::Running
+            || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
 }
 
 fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
@@ -625,7 +638,6 @@ fn render_transcript(
     browse_selected: Option<BrowseTarget>,
     connection: &ConnectionInfo,
     activity_frame: u8,
-    activity_elapsed: Option<std::time::Duration>,
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
@@ -653,22 +665,8 @@ fn render_transcript(
     let conversation = area;
     let active_reply = active_reply(state);
     let status_width = usize::from(content_area(conversation).width);
-    // The working row while waiting for output, or why the last prompt failed.
-    let status_lines: Vec<Line<'static>> = match waiting_for_output(state)
-        .then(|| {
-            activity_label(
-                state,
-                activity_frame,
-                activity_elapsed,
-                status_width,
-                palette,
-            )
-        })
-        .flatten()
-    {
-        Some(activity) => vec![activity],
-        None => failure_lines(state, status_width, palette),
-    };
+    // Why the last prompt failed; a run in progress shows in the status line.
+    let status_lines = failure_lines(state, status_width, palette);
     let activity_height = if status_lines.is_empty() {
         0
     } else {
@@ -784,6 +782,14 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
+        let prompts = TurnBounds {
+            first: state
+                .transcript
+                .entries()
+                .iter()
+                .position(|entry| entry.role == TranscriptRole::User),
+            latest: run_prompt_index(state),
+        };
         for (offset, row) in rows.iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
@@ -813,11 +819,22 @@ fn render_transcript(
                     Block::default().style(palette.user_text()),
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
+                // The prompt's bar runs the full height of its surface, padding included.
+                if content_area(area).x > area.x {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("▎", palette.user_text().fg(palette.primary))),
+                        Rect::new(area.x, area.y - 1, 1, 1),
+                    );
+                }
             }
             let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
                 && row_tool_in_progress(state, row))
             .then_some(activity_frame);
+            let live_elapsed = pulse
+                .filter(|_| row.live_timer)
+                .and_then(|_| state.transcript.entry(row.anchor.entry_id))
+                .and_then(TranscriptEntry::running_elapsed);
             render_transcript_row(
                 frame,
                 area,
@@ -826,6 +843,8 @@ fn render_transcript(
                 user_surface,
                 palette,
                 pulse,
+                live_elapsed,
+                turn_rail(state, row, prompts, palette),
             );
         }
     }
@@ -915,19 +934,6 @@ fn active_reply(state: &UiState) -> Option<TranscriptEntryId> {
         .map(|entry| entry.id)
 }
 
-fn waiting_for_output(state: &UiState) -> bool {
-    if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
-        return true;
-    }
-    if state.configuration_active() || state.view_status != ViewStatus::Running {
-        return false;
-    }
-    // message.completed can be painted before command.finished. Keep the reply
-    // visible without briefly inserting a working row and shrinking its viewport.
-    // Response/tool boundaries, not card order, restore the between-steps indicator.
-    !state.transcript.has_visible_response() && !state.transcript.has_unresolved_tool_calls()
-}
-
 fn tool_in_progress(entry: &TranscriptEntry) -> bool {
     entry
         .tool_card()
@@ -974,47 +980,208 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
     }
 }
 
-/// The working row: a spinner, what the agent is doing, how long the current command
-/// has run, and how to interrupt it. The spinner is one column wide, so only the
-/// elapsed time changes the row's width. When `width` is short, the interrupt hint
-/// goes first and then the elapsed time, rather than clipping mid-word.
-fn activity_label(
+/// One row above the composer while a run is going, so it never takes a row at idle.
+fn status_line_height(state: &UiState) -> u16 {
+    u16::from(run_in_status_line(state))
+}
+
+/// The run's status line: what is running and for how long, the session turn, and
+/// the run's tool count and time on the left; queued messages and the context on the
+/// right. The running item's text is clipped first, then the turn details drop.
+fn render_status_line(
+    frame: &mut Frame<'_>,
+    area: Rect,
     state: &UiState,
     activity_frame: u8,
-    elapsed: Option<std::time::Duration>,
-    width: usize,
+    run_elapsed: Option<std::time::Duration>,
     palette: Palette,
-) -> Option<Line<'static>> {
-    if state.configuration_active()
-        || !(state.view_status == ViewStatus::Running
-            || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
-    {
-        return None;
+) {
+    let width = usize::from(area.width);
+    let running = Style::default().fg(palette.secondary);
+    let muted = Style::default().fg(palette.muted);
+    let dim = muted.add_modifier(Modifier::DIM);
+
+    let mut right = Vec::new();
+    let queued = state
+        .queued_steering()
+        .saturating_add(state.queued_follow_ups());
+    if queued > 0 {
+        right.push(Span::styled(format!("{queued} queued"), running));
+        right.push(Span::styled(" · ", dim));
     }
-    let lead = format!(
-        "{} {}",
-        spinner_frame(activity_frame),
-        activity_phase(state)
-    );
-    let mut details: Vec<String> = elapsed.map(format_elapsed).into_iter().collect();
-    // Once Esc has requested cancellation, another Esc cannot start one; the footer
-    // already says the prompt is cancelling.
-    if !state.cancel_requested {
-        details.push("Esc to interrupt".to_owned());
+    let context = crate::context_view::indicator(state, 0);
+    let pressured =
+        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    right.push(Span::styled("ctx ", muted));
+    right.push(Span::styled(
+        context.strip_prefix("ctx ").unwrap_or(&context).to_owned(),
+        if pressured {
+            Style::default().fg(palette.warning)
+        } else {
+            muted
+        },
+    ));
+    let right = Line::from(right);
+
+    let turn = current_turn(state);
+    let mut lead = vec![Span::styled(
+        format!("{} ", spinner_frame(activity_frame)),
+        running,
+    )];
+    let mut detail = String::new();
+    let mut timer = None;
+    // Only calls after the latest reply name the run: once the model answers again, a
+    // background process started earlier no longer says what is happening. Cancelling
+    // outranks everything, since that is what the user is waiting on.
+    let item = turn
+        .iter()
+        .rev()
+        .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
+        .find_map(running_item)
+        .filter(|_| !state.cancel_requested);
+    match item {
+        Some(item) => {
+            lead.push(Span::styled(
+                format!(" {} ", item.label),
+                palette.chip(&item.label),
+            ));
+            lead.push(Span::raw(" "));
+            detail = item.detail;
+            timer = item.elapsed.map(|elapsed| {
+                crate::tool_cards::format_duration(
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                )
+            });
+        }
+        None => lead.push(Span::styled(activity_phase(state), running)),
     }
-    while !details.is_empty()
-        && lead.width() + details.iter().map(|part| part.width() + 3).sum::<usize>() > width
-    {
-        details.pop();
-    }
-    let mut spans = vec![Span::styled(lead, Style::default().fg(palette.primary))];
-    if !details.is_empty() {
-        spans.push(Span::styled(
-            format!(" · {}", details.join(" · ")),
-            Style::default().fg(palette.muted),
+    let turn_number = state.run_progress.map_or(0, |run| run.turn);
+    let tools = turn
+        .iter()
+        .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
+        .count();
+    let mut totals = format!("{tools} tool{}", if tools == 1 { "" } else { "s" });
+    if let Some(elapsed) = run_elapsed {
+        totals.push_str(" · ");
+        totals.push_str(&crate::tool_cards::format_duration(
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         ));
     }
-    Some(Line::from(spans))
+    let mut tail = vec![Span::styled(" · ", dim)];
+    if turn_number > 0 {
+        tail.push(Span::styled(format!("turn {turn_number} "), muted));
+    }
+    tail.push(Span::styled(totals, dim));
+
+    // Fit the left side beside the right one, keeping at least a little of the
+    // running item's text before the turn details are shown.
+    const MIN_DETAIL_COLUMNS: usize = 8;
+    let right_width = right.width();
+    let mut budget = width.saturating_sub(right_width + 2);
+    let lead_width = Line::from(lead.clone()).width();
+    let show_right = lead_width <= budget;
+    if !show_right {
+        budget = width;
+    }
+    let timer_width = timer.as_ref().map_or(0, |timer| timer.width() + 1);
+    let tail_width = Line::from(tail.clone()).width();
+    let detail_floor = if detail.is_empty() {
+        0
+    } else {
+        detail.width().min(MIN_DETAIL_COLUMNS)
+    };
+    // The queue and context outrank the turn details, which show only beside them.
+    let show_tail = show_right && lead_width + detail_floor + timer_width + tail_width <= budget;
+    let detail_room = budget
+        .saturating_sub(lead_width + timer_width)
+        .saturating_sub(if show_tail { tail_width } else { 0 });
+    let mut left = lead;
+    if !detail.is_empty() && detail_room > 0 {
+        left.push(Span::styled(
+            clip_columns(&detail, detail_room),
+            Style::default().fg(palette.foreground),
+        ));
+    }
+    if let Some(timer) = timer.filter(|_| lead_width + timer_width <= budget) {
+        left.push(Span::raw(" "));
+        left.push(Span::styled(timer, running));
+    }
+    if show_tail {
+        left.extend(tail);
+    }
+    frame.render_widget(Paragraph::new(Line::from(left)), area);
+    if show_right {
+        let columns = u16::try_from(right_width)
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        frame.render_widget(
+            Paragraph::new(right),
+            Rect {
+                x: area.right() - columns,
+                width: columns,
+                ..area
+            },
+        );
+    }
+}
+
+/// The entries of the run in progress: everything after the prompt that started it,
+/// including steers and follow-ups it took in, or after the latest prompt otherwise.
+fn current_turn(state: &UiState) -> &[TranscriptEntry] {
+    let entries = state.transcript.entries();
+    let start = run_prompt_index(state)
+        .map_or(0, |index| index + 1)
+        .min(entries.len());
+    &entries[start..]
+}
+
+/// Where the prompt that started the run in progress sits, or the latest prompt.
+fn run_prompt_index(state: &UiState) -> Option<usize> {
+    state
+        .run_progress
+        .and_then(|run| state.transcript.entry_index(run.prompt))
+        .or_else(|| {
+            state
+                .transcript
+                .entries()
+                .iter()
+                .rposition(|entry| entry.role == TranscriptRole::User)
+        })
+}
+
+/// A call still in progress, as the status line names it.
+struct RunningItem {
+    label: String,
+    detail: String,
+    elapsed: Option<std::time::Duration>,
+}
+
+fn running_item(entry: &TranscriptEntry) -> Option<RunningItem> {
+    let (label, detail) = if let Some(card) = entry.tool_card() {
+        if !matches!(card.status, ToolStatus::Requested | ToolStatus::Running) {
+            return None;
+        }
+        (card.action_label(), card.display_arguments())
+    } else {
+        let card = entry.process_card()?;
+        if !matches!(
+            card.display_state,
+            ProcessDisplayState::Running | ProcessDisplayState::Polling
+        ) {
+            return None;
+        }
+        (
+            "Process".to_owned(),
+            card.task_label
+                .clone()
+                .unwrap_or_else(|| "Background command".to_owned()),
+        )
+    };
+    Some(RunningItem {
+        label: sanitize_for_terminal(&label),
+        detail: sanitize_for_terminal(&detail.split_whitespace().collect::<Vec<_>>().join(" ")),
+        elapsed: entry.running_elapsed(),
+    })
 }
 
 /// Why the last prompt failed, as up to three rows starting with `✗`, while nothing is
@@ -1033,10 +1200,14 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
         .collect()
 }
 
-/// What the agent is waiting on while no reply text or tool card shows progress.
+/// What the run is doing when no call names it: compacting, cancelling, thinking, or
+/// otherwise working.
 fn activity_phase(state: &UiState) -> String {
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
         return "Compacting context".into();
+    }
+    if state.cancel_requested {
+        return "Cancelling".into();
     }
     let thinking = state
         .transcript
@@ -1049,42 +1220,11 @@ fn activity_phase(state: &UiState) -> String {
                 && entry.state == crate::transcript::TranscriptEntryState::Streaming
                 && !entry.thinking().is_empty()
         });
-    if !thinking {
-        if let Some(card) = state
-            .transcript
-            .entries()
-            .iter()
-            .rev()
-            .take_while(|entry| entry.role != TranscriptRole::User)
-            .find_map(|entry| {
-                let card = entry.process_card()?;
-                matches!(
-                    card.display_state,
-                    ProcessDisplayState::Running | ProcessDisplayState::Polling
-                )
-                .then_some(card)
-            })
-        {
-            return format!(
-                "Running {}",
-                card.task_label.as_deref().unwrap_or("background command")
-            );
-        }
-    }
+    // A call or background process still running is named by the status line itself.
     if thinking {
         "Thinking".into()
     } else {
         "Working".into()
-    }
-}
-
-/// `9s`, `1m 05s` or `1h 02m`.
-fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let seconds = elapsed.as_secs();
-    match seconds {
-        0..60 => format!("{seconds}s"),
-        60..3600 => format!("{}m {:02}s", seconds / 60, seconds % 60),
-        _ => format!("{}h {:02}m", seconds / 3600, seconds / 60 % 60),
     }
 }
 
@@ -1135,6 +1275,64 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
     }
 }
 
+/// Where the transcript's first prompt and the running turn's prompt sit, found once
+/// per frame.
+#[derive(Clone, Copy)]
+struct TurnBounds {
+    first: Option<usize>,
+    latest: Option<usize>,
+}
+
+/// The rail beside a transcript row. A prompt keeps its accent bar; every row of the
+/// turn after it, replies included, shares one line that takes the running colour
+/// while the turn runs and ends in `╰` at its summary. The gap under a prompt and the
+/// gap after a finished turn stay bare.
+fn turn_rail(
+    state: &UiState,
+    row: &TranscriptRow,
+    prompts: TurnBounds,
+    palette: Palette,
+) -> Option<(&'static str, Color)> {
+    if row.role == TranscriptRole::User {
+        return Some(("▎", palette.primary));
+    }
+    let index = state.transcript.entry_index(row.anchor.entry_id)?;
+    let entry = &state.transcript.entries()[index];
+    if entry.role == TranscriptRole::User {
+        return None;
+    }
+    if row.kind == TranscriptRowKind::RunSummary {
+        return Some(("╰", palette.rail()));
+    }
+    // The gap that ends a turn, after its summary or before the next prompt, is bare.
+    if matches!(
+        row.kind,
+        TranscriptRowKind::Spacer | TranscriptRowKind::Rule
+    ) && (entry.run_summary().is_some()
+        || state
+            .transcript
+            .entry_after(entry.id)
+            .is_some_and(|next| next.role == TranscriptRole::User))
+    {
+        return None;
+    }
+    // Rows before the first prompt, such as a resumed session's notes, belong to no turn.
+    if prompts.first.is_none_or(|first| index < first) {
+        return None;
+    }
+    let running = state.view_status == ViewStatus::Running
+        && prompts.latest.is_some_and(|prompt| index > prompt);
+    Some((
+        "│",
+        if running {
+            palette.running_rail()
+        } else {
+            palette.rail()
+        },
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_transcript_row(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1143,6 +1341,8 @@ fn render_transcript_row(
     user_surface: bool,
     palette: Palette,
     pulse: Option<u8>,
+    live_elapsed: Option<std::time::Duration>,
+    rail: Option<(&'static str, Color)>,
 ) {
     // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
@@ -1159,14 +1359,10 @@ fn render_transcript_row(
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
     // Use the existing inset: decoration must not shift wrapping, copied text, or
-    // mouse hit targets. Tool spacers keep consecutive activities connected.
-    if content.x > area.x && (user || row.role == TranscriptRole::Tool) {
-        let rail = if user { "▎" } else { "│" };
+    // mouse hit targets.
+    if let Some((glyph, color)) = rail.filter(|_| content.x > area.x) {
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                rail,
-                base.fg(if user { palette.primary } else { palette.muted }),
-            )),
+            Paragraph::new(Span::styled(glyph, base.fg(color))),
             Rect::new(area.x, area.y, 1, 1),
         );
     }
@@ -1281,12 +1477,21 @@ fn render_transcript_row(
                 .set_fg(palette.muted);
         }
     }
-    if let Some(trailing) = row.trailing.as_deref() {
-        let columns = u16::try_from(trailing.width())
+    // A finished call's time is muted; a running call's ticks in the running colour.
+    let live = live_elapsed.map(|elapsed| {
+        crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    });
+    let trailing = match (row.trailing.as_deref(), live.as_deref()) {
+        (Some(trailing), _) => Some((trailing, palette.muted)),
+        (None, Some(live)) => Some((live, palette.secondary)),
+        (None, None) => None,
+    };
+    if let Some((text, color)) = trailing {
+        let columns = u16::try_from(text.width())
             .unwrap_or(u16::MAX)
             .min(content.width);
         frame.render_widget(
-            Paragraph::new(Span::styled(trailing.to_owned(), base.fg(palette.muted))),
+            Paragraph::new(Span::styled(text.to_owned(), base.fg(color))),
             Rect::new(content.right() - columns, content.y, columns, 1),
         );
     }
@@ -1339,7 +1544,8 @@ fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style, pa
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
-pub(crate) const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A turning half circle marks work in progress, by shape rather than brightness.
+pub(crate) const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 pub(crate) fn spinner_frame(frame: u8) -> &'static str {
     SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
@@ -1585,17 +1791,55 @@ fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Paint the composer's left border as a thick accent bar between its corners.
-/// The rest of the border keeps the status colour.
+/// The framed composer's last row: its identity on the left and, during a run, the
+/// keys that follow up or steer on the right when both fit.
+fn render_composer_identity_row(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    bindings: &Bindings,
+    palette: Palette,
+) {
+    let identity = composer_identity_line(state, palette);
+    frame.render_widget(Paragraph::new(identity.clone()), area);
+    if !state.active_prompt_editable() {
+        return;
+    }
+    let keys = keycap_hints(
+        &format!(
+            "{} follow-up · {} steer",
+            primary_label(bindings, KeyAction::Submit),
+            primary_label(bindings, KeyAction::AlternateSubmit)
+        ),
+        palette,
+    )
+    .style(Style::default().fg(palette.muted));
+    let keys_width = u16::try_from(keys.width()).unwrap_or(u16::MAX);
+    let identity_width = u16::try_from(identity.width()).unwrap_or(u16::MAX);
+    if identity_width.saturating_add(2).saturating_add(keys_width) <= area.width {
+        frame.render_widget(
+            Paragraph::new(keys),
+            Rect {
+                x: area.right() - keys_width,
+                width: keys_width,
+                ..area
+            },
+        );
+    }
+}
+
+/// Colour the composer's whole left side, corners included, as its accent. It keeps
+/// the border's own glyphs and weight, so the corners join in any terminal font.
 fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
     let buffer = frame.buffer_mut();
-    for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
+    for y in area.y..area.bottom() {
         if let Some(cell) = buffer.cell_mut((area.x, y)) {
-            cell.set_symbol("┃").set_fg(color);
+            cell.set_fg(color);
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_composer(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -1604,11 +1848,13 @@ fn render_composer(
     focused: bool,
     padded: bool,
     palette: Palette,
+    bindings: &Bindings,
 ) -> Option<mouse::Editor> {
-    let queued_total = state
-        .queued_steering()
-        .saturating_add(state.queued_follow_ups());
-    let border_style = Style::default().fg(status_color(state, palette));
+    // The border stays quiet while idle or running and takes the waiting or error
+    // colour; the accent bar carries the run's state.
+    let status = status_color(state, palette);
+    let alerting = status == palette.warning || status == palette.error;
+    let border_style = Style::default().fg(if alerting { status } else { palette.muted });
     let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
         Block::default()
@@ -1623,11 +1869,12 @@ fn render_composer(
     if editable(state) {
         frame.render_widget(block, area);
         if framed_input {
-            // Waiting and error colours win; otherwise the bar keeps the accent
-            // while the border dims at idle.
-            let status = status_color(state, palette);
-            let accent = if status == palette.warning || status == palette.error {
+            // Waiting and error colours win; a run shows the running colour, and an
+            // idle composer keeps the accent.
+            let accent = if alerting {
                 status
+            } else if state.active_prompt_editable() {
+                palette.secondary
             } else {
                 palette.accent
             };
@@ -1635,45 +1882,23 @@ fn render_composer(
             inner.height = inner.height.saturating_sub(1);
             // Indented past the prompt prefix so it lines up with the draft.
             let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
-            frame.render_widget(
-                Paragraph::new(composer_identity_line(state, palette)),
+            render_composer_identity_row(
+                frame,
                 Rect {
                     x: inner.x.saturating_add(prefix_width).min(inner.right()),
                     y: inner.bottom(),
                     width: inner.width.saturating_sub(prefix_width),
                     height: 1,
                 },
-            );
-        }
-        let preview_rows = if state.active_prompt_editable() {
-            queued_total
-                .min(3)
-                .min(usize::from(inner.height.saturating_sub(1)))
-        } else {
-            0
-        };
-        if preview_rows > 0 {
-            let preview_area = Rect {
-                x: inner.x,
-                y: inner.y,
-                width: inner.width,
-                height: u16::try_from(preview_rows).unwrap_or(inner.height),
-            };
-            frame.render_widget(
-                Paragraph::new(Text::from(queue_preview_lines(
-                    state,
-                    preview_rows,
-                    usize::from(inner.width),
-                ))),
-                preview_area,
+                state,
+                bindings,
+                palette,
             );
         }
         let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
         let prefix_area = Rect {
             x: inner.x,
-            y: inner
-                .y
-                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            y: inner.y,
             width: prefix_width.min(inner.width),
             height: 1,
         };
@@ -1685,13 +1910,9 @@ fn render_composer(
         }
         let editor_area = Rect {
             x: inner.x.saturating_add(prefix_width).min(inner.right()),
-            y: inner
-                .y
-                .saturating_add(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            y: inner.y,
             width: inner.width.saturating_sub(prefix_width),
-            height: inner
-                .height
-                .saturating_sub(u16::try_from(preview_rows).unwrap_or(inner.height)),
+            height: inner.height,
         };
         let layout = layout.expect("editable composer requires a visual layout");
         let vertical_scroll = layout
@@ -1705,11 +1926,11 @@ fn render_composer(
             .collect::<Vec<_>>();
         if layout.is_empty {
             let placeholder = if state.active_prompt_editable() {
-                let hint = "Steer Wisp, or queue a follow-up…";
+                let hint = "Message to steer or follow up…";
                 if hint.width() <= usize::from(editor_area.width) {
                     hint
                 } else {
-                    "Steer Wisp…"
+                    "Steer or follow up…"
                 }
             } else {
                 "Ask Wisp anything…"
@@ -1799,44 +2020,6 @@ fn render_composer(
         area,
     );
     None
-}
-
-fn queue_preview_lines(state: &UiState, max_rows: usize, width: usize) -> Vec<Line<'static>> {
-    state
-        .queue_items()
-        .take(max_rows)
-        .map(|(kind, _, content)| {
-            let label = match kind {
-                QueueKind::Steering => "steer",
-                QueueKind::FollowUp => "later",
-            };
-            Line::from(bounded_queue_preview(
-                &format!("{label}: {}", bounded_decision_preview(content)),
-                width,
-            ))
-        })
-        .collect()
-}
-
-fn bounded_queue_preview(content: &str, width: usize) -> String {
-    if content.width() <= width {
-        return content.into();
-    }
-    if width <= 1 {
-        return "…".chars().take(width).collect();
-    }
-    let mut preview = String::new();
-    let mut used = 0_usize;
-    for grapheme in content.graphemes(true) {
-        let grapheme_width = grapheme.width();
-        if used.saturating_add(grapheme_width) > width - 1 {
-            break;
-        }
-        preview.push_str(grapheme);
-        used = used.saturating_add(grapheme_width);
-    }
-    preview.push('…');
-    preview
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2492,26 +2675,13 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
         ]
     } else if matches!(state.view_status, ViewStatus::WaitingForTrust) {
         vec!["y trust".into(), "n deny".into(), "Ctrl+G help".into()]
-    } else if state.active_prompt_editable() {
-        vec![
-            format!("{} steer", primary_label(bindings, KeyAction::Submit)),
-            format!(
-                "{} later",
-                primary_label(bindings, KeyAction::AlternateSubmit)
-            ),
-            "Ctrl+G help".into(),
-            browse_hint(state, bindings),
-        ]
     } else if state.cancel_requested {
         vec!["Ctrl+G help".into()]
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
-        vec![
-            "Esc/Ctrl-C cancels".into(),
-            "Ctrl+G help".into(),
-            browse_hint(state, bindings),
-        ]
+        // The composer names the keys that follow up or steer.
+        vec!["Esc interrupt".into(), browse_hint(state, bindings)]
     } else {
         vec![
             format!("{} send", primary_label(bindings, KeyAction::Submit)),
@@ -2563,14 +2733,19 @@ fn render_footer(
 
     // Right: the status the footer always keeps, label first since it carries the
     // status colour, then the hints that still fit.
-    let leading = footer_leading_parts(state, identity_in_composer);
-    let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
-    let ctx_width = status_budget
-        .saturating_sub(leading_width)
-        .saturating_sub(if leading_width == 0 { 0 } else { 3 });
-    let mut status = leading;
-    status.push(crate::context_view::indicator(state, ctx_width));
-    status.extend(footer_trailing_parts(state, identity_in_composer));
+    // While a run is going, the status line above the composer names the run, the
+    // queue, and the context, so the footer keeps only scroll markers and hints.
+    let mut status = Vec::new();
+    if !run_in_status_line(state) {
+        let leading = footer_leading_parts(state, identity_in_composer);
+        let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
+        let ctx_width = status_budget
+            .saturating_sub(leading_width)
+            .saturating_sub(if leading_width == 0 { 0 } else { 3 });
+        status = leading;
+        status.push(crate::context_view::indicator(state, ctx_width));
+        status.extend(footer_trailing_parts(state, identity_in_composer));
+    }
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
     } else if !jump_painted && viewport.has_unseen_output() {
@@ -2630,9 +2805,15 @@ fn render_footer(
     };
     let left_width = left.width().min(beside_status);
 
-    let mut right = status_spans(state, &status_line, palette);
+    let mut right = if status_line.is_empty() {
+        Vec::new()
+    } else {
+        status_spans(state, &status_line, palette)
+    };
     if !hints.is_empty() {
-        right.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        if !right.is_empty() {
+            right.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        }
         right.extend(keycap_hints(&hints, palette).spans);
     }
     let right = Line::from(right).style(Style::default().fg(palette.muted));
@@ -3870,10 +4051,13 @@ mod tests {
             session_path: "/sessions/demo.jsonl".into(),
             session_name: Some("demo-session".into()),
         });
+        // While running, the status line above the composer carries the context.
         let running = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(running.contains("s:0/l:0"), "{running}");
-        assert!(running.contains("ctx"), "{running}");
-        assert!(running.contains('~') || running.contains('%'), "{running}");
+        let status = running
+            .lines()
+            .find(|line| line.contains("◐"))
+            .unwrap_or_else(|| panic!("status line: {running}"));
+        assert!(status.contains("ctx ~40%"), "{running}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -4017,58 +4201,230 @@ mod tests {
             command_type: ActiveCommandType::Prompt,
         });
         let running = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(running.contains("Enter steer"));
-        assert!(running.contains("Alt+Enter later"));
-        assert!(running.contains("working"));
-        assert!(!running.contains("running"));
+        assert!(
+            running.contains("Enter follow-up · Alt+Enter steer"),
+            "{running}"
+        );
+        assert!(running.contains("Esc interrupt"), "{running}");
+        assert!(!running.contains("working"), "{running}");
 
         state.current_command = None;
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string(80, 18, &state, &PromptEditor::default());
-        assert!(compacting.contains("Esc/Ctrl-C cancels"));
-        assert!(compacting.contains("compacting"));
-        assert!(!compacting.contains("Enter send"));
+        assert!(compacting.contains("Esc interrupt"), "{compacting}");
+        assert!(compacting.contains("Compacting context"), "{compacting}");
+        assert!(!compacting.contains("Enter send"), "{compacting}");
+    }
+
+    fn status_row(state: &UiState, width: u16, elapsed: Option<u64>) -> (String, TestBackend) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_status_line(
+                    frame,
+                    frame.area(),
+                    state,
+                    0,
+                    elapsed.map(std::time::Duration::from_secs),
+                    Palette::default(),
+                );
+            })
+            .unwrap();
+        let backend = terminal.backend().clone();
+        let text = (0..width)
+            .map(|x| backend.buffer()[(x, 0)].symbol().to_owned())
+            .collect::<String>();
+        (text, backend)
+    }
+
+    fn running_state() -> UiState {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.transcript.append_prompt("first".into());
+        state.transcript.complete_message(1, "done".into());
+        let prompt = state.transcript.append_prompt("check ci".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
+        state
     }
 
     #[test]
-    fn working_row_shows_phase_elapsed_time_and_fits_narrow_rows() {
-        let mut state = UiState::unconfigured();
-        state.view_status = ViewStatus::Running;
-        state.interaction_status = InteractionStatus::Running;
-        let text = |state: &UiState, frame, elapsed, width| {
-            activity_label(state, frame, elapsed, width, Palette::default())
-                .unwrap()
-                .to_string()
-        };
-        let twelve = Some(std::time::Duration::from_secs(12));
-        assert_eq!(
-            text(&state, 0, twelve, 80),
-            "⠋ Working · 12s · Esc to interrupt"
+    fn status_line_names_the_run() {
+        let mut state = running_state();
+        // Between steps the phase stands in for a running call.
+        let (idle_step, _) = status_row(&state, 100, Some(151));
+        assert!(
+            idle_step.starts_with("◐ Working · turn 6 0 tools · 2m 31s"),
+            "{idle_step}"
         );
-        // The spinner is one column, so the row never jitters between frames.
-        let widths: std::collections::HashSet<_> = (0..20)
-            .map(|frame| text(&state, frame, twelve, 80).width())
-            .collect();
-        assert_eq!(widths.len(), 1);
-        // Short rows drop the hint, then the elapsed time, but never clip mid-word.
-        assert_eq!(text(&state, 0, twelve, 20), "⠋ Working · 12s");
-        assert_eq!(text(&state, 0, twelve, 12), "⠋ Working");
+
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "gh pr checks 766 --watch"}),
+            });
+        let (text, backend) = status_row(&state, 100, Some(151));
+        assert!(
+            text.starts_with("◐  Bash  gh pr checks 766 --watch "),
+            "{text}"
+        );
+        assert!(text.contains(" · turn 6 1 tool · 2m 31s"), "{text}");
+        assert!(text.trim_end().ends_with("ctx ~?"), "{text}");
+        let palette = Palette::default();
+        assert_eq!(style_at_text(&backend, "◐").unwrap().0, palette.secondary);
+        assert_eq!(
+            style_at_text(&backend, "Bash").map(|style| (Some(style.0), Some(style.1))),
+            Some((palette.chip("Bash").fg, palette.chip("Bash").bg))
+        );
+
+        // A short row clips the command, then drops the turn details, and keeps
+        // the context on the right.
+        let (narrow, _) = status_row(&state, 40, Some(151));
+        assert!(narrow.contains('…'), "{narrow}");
+        assert!(!narrow.contains("turn 6"), "{narrow}");
+        assert!(narrow.trim_end().ends_with("ctx ~?"), "{narrow}");
+
+        // Cancelling outranks the call still running.
         state.cancel_requested = true;
-        assert_eq!(text(&state, 0, twelve, 80), "⠋ Working · 12s");
+        let (cancelling, _) = status_row(&state, 100, None);
+        assert!(
+            cancelling.starts_with("◐ Cancelling · turn 6 1 tool"),
+            "{cancelling}"
+        );
         state.cancel_requested = false;
 
-        state.transcript.append_prompt("think".into());
-        state.transcript.append_thinking_delta(1, "considering");
-        assert!(text(&state, 0, None, 80).starts_with("⠋ Thinking"));
-        state.interaction_status = InteractionStatus::Compacting;
-        assert!(text(&state, 0, None, 80).starts_with("⠋ Compacting context"));
+        // A follow-up the run takes in joins it, so the tool count carries on.
+        state.transcript.observe_tool_result({
+            let mut result = tool_result("b1", "ok");
+            result.name = "bash".into();
+            result
+        });
+        state.transcript.append_prompt("follow-up".into());
+        let (joined, _) = status_row(&state, 100, None);
+        assert!(joined.contains("turn 6 1 tool"), "{joined}");
+    }
 
-        assert_eq!(format_elapsed(std::time::Duration::from_secs(9)), "9s");
-        assert_eq!(format_elapsed(std::time::Duration::from_secs(65)), "1m 05s");
-        assert_eq!(
-            format_elapsed(std::time::Duration::from_secs(3720)),
-            "1h 02m"
+    #[test]
+    fn running_card_shows_live_timer() {
+        let mut state = running_state();
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "sleep 5"}),
+            });
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                    None,
+                );
+            })
+            .unwrap();
+        let backend = terminal.backend();
+        let buffer = backend.buffer();
+        let row = (0..buffer.area.height)
+            .find(|&y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("sleep 5")
+            })
+            .expect("card row");
+        let text = (0..buffer.area.width)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect::<String>();
+        // The card's own clock ticks at the right edge in the running colour.
+        let end = (0..buffer.area.width)
+            .rev()
+            .find(|&x| buffer[(x, row)].symbol() == "s")
+            .expect("timer");
+        assert!(
+            usize::from(end) > text.find("sleep 5").unwrap() + 10,
+            "{text}"
         );
+        assert_eq!(
+            buffer[(end, row)].fg,
+            Palette::default().secondary,
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_line_fits_short_screens() {
+        let state = running_state();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"line\n".repeat(20));
+        let mut cache = ComposerLayoutCache::default();
+        for height in 8..20 {
+            let area = Rect::new(0, 0, 60, height);
+            let layout = cache.layout(&editor, composer_editor_width(area.width));
+            // The transcript keeps two rows beside the status line and the footer.
+            assert!(
+                composer_height(area, &state, Some(layout)) + status_line_height(&state) + 3
+                    <= height,
+                "height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn status_line_shows_queue_and_pressure() {
+        let mut state = running_state();
+        let mut ids = TestIds::default();
+        reduce(
+            &mut state,
+            crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
+                steering: vec!["steer".into()],
+                follow_up: vec!["later".into()],
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate {
+                total_tokens: 7_100,
+            },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        });
+        let (text, backend) = status_row(&state, 100, None);
+        assert!(text.trim_end().ends_with("2 queued · ctx ~71%"), "{text}");
+        let palette = Palette::default();
+        assert_eq!(
+            style_at_text(&backend, "2 queued").unwrap().0,
+            palette.secondary
+        );
+        assert_eq!(style_at_text(&backend, "~71%").unwrap().0, palette.warning);
     }
 
     #[test]
@@ -4078,12 +4434,12 @@ mod tests {
         state.interaction_status = InteractionStatus::Running;
         let first = render_to_string_with_activity(80, 18, &state, 0);
         let second = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(first.contains("⠋ Working · Esc to interrupt"), "{first}");
-        assert!(second.contains("⠙ Working"), "{second}");
+        assert!(first.contains("◐ Working"), "{first}");
+        assert!(second.contains("◓ Working"), "{second}");
 
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(compacting.contains("⠹ Compacting context"), "{compacting}");
+        assert!(compacting.contains("◑ Compacting context"), "{compacting}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -4099,8 +4455,8 @@ mod tests {
         state.view_status = ViewStatus::Running;
         for width in [30, 60] {
             for (interaction, label) in [
-                (InteractionStatus::Running, "⠋ Working"),
-                (InteractionStatus::Compacting, "⠋ Compacting context"),
+                (InteractionStatus::Running, "◐ Working"),
+                (InteractionStatus::Compacting, "◐ Compacting context"),
             ] {
                 state.interaction_status = interaction;
                 let rendered = render_to_string_with_notice(
@@ -4149,46 +4505,43 @@ mod tests {
     }
 
     #[test]
-    fn active_queue_editor_renders_bounded_sanitized_previews_and_counts() {
-        let mut state = UiState::new("fake".into(), None, None);
-        state.view_status = ViewStatus::Running;
-        state.interaction_status = InteractionStatus::Running;
-        state.current_command = Some(ActiveCommand {
-            id: "prompt-1".into(),
-            command_type: ActiveCommandType::Prompt,
-        });
+    fn running_composer_names_its_keys() {
+        let mut state = running_state();
         let mut ids = TestIds::default();
         reduce(
             &mut state,
             crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
-                steering: vec![
-                    "first\u{1b}[2J\u{202e}spoof".into(),
-                    format!("{}TAIL", "x".repeat(500)),
-                ],
-                follow_up: vec!["later one".into(), "later omitted".into()],
+                steering: vec!["first\u{1b}[2J\u{202e}spoof".into()],
+                follow_up: vec!["later one".into()],
             }),
             &mut ids,
         )
         .unwrap();
+
+        let empty = render_to_string(100, 20, &state, &PromptEditor::default());
+        assert!(empty.contains("Message to steer or follow up…"), "{empty}");
+        assert!(
+            empty.contains("Enter follow-up · Alt+Enter steer"),
+            "{empty}"
+        );
+        // The status line counts the queue; the composer no longer lists it.
+        assert!(empty.contains("2 queued"), "{empty}");
+        assert!(!empty.contains("spoof"), "{empty}");
+        assert!(!empty.contains("later one"), "{empty}");
+        // The footer keeps the hints a run needs and leaves status to the line above.
+        assert!(empty.contains("Esc interrupt"), "{empty}");
+        assert!(!empty.contains("working"), "{empty}");
+
         let mut editor = PromptEditor::default();
         editor.insert_paste("new steering");
+        let drafted = render_to_string(100, 20, &state, &editor);
+        assert!(drafted.contains("new steering"), "{drafted}");
 
-        let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("new steering"));
-        assert!(rendered.contains("s:2/l:2"));
-        assert!(rendered.contains("+1"));
-        assert!(rendered.contains("steer: first�[2J�spoof"));
-        assert!(rendered.contains("later: later one"));
-        assert!(!rendered.contains("TAIL"));
-        assert!(!rendered.contains("steering arrives"));
-        assert!(rendered.contains("Enter steer"));
-        assert!(rendered.contains("Alt+Enter later"));
-        assert!(!rendered.contains('\u{1b}'));
-        assert!(!rendered.contains('\u{202e}'));
-
+        // Too narrow for the queue beside the phase: what is running stays.
         let tiny = render_to_string(30, 8, &state, &editor);
-        assert!(!tiny.contains("terminal too"));
-        assert!(tiny.contains("s:2/l:2") || tiny.contains("steer:2"));
+        assert!(!tiny.contains("terminal too"), "{tiny}");
+        assert!(tiny.contains("◐ Working"), "{tiny}");
+        assert!(!tiny.contains("turn 6"), "{tiny}");
     }
 
     #[test]
@@ -4822,7 +5175,7 @@ mod tests {
         assert!(
             identity
                 .trim_start()
-                .starts_with("┃  Build · model-x fake · high"),
+                .starts_with("│  Build · model-x fake · high"),
             "{identity}"
         );
         assert!(
@@ -4952,8 +5305,11 @@ mod tests {
         });
         let idle = border(&state);
         // The border dims at idle while the accent bar and effort stay lit.
-        assert_eq!(color(&idle, "╭"), palette.muted);
-        assert_eq!(color(&idle, "┃"), palette.accent);
+        assert_eq!(color(&idle, "╮"), palette.muted);
+        // The accent runs the composer's full height, corners included.
+        assert_eq!(color(&idle, "╭"), palette.accent);
+        assert_eq!(color(&idle, "╰"), palette.accent);
+        assert_eq!(color(&idle, "│›"), palette.accent);
         assert_eq!(color(&idle, "high"), palette.warning);
         // An 80% full window turns the meter amber.
         assert_eq!(color(&idle, "▰"), palette.warning);
@@ -4964,8 +5320,14 @@ mod tests {
             command_type: ActiveCommandType::Prompt,
         });
         assert!(state.editor_editable());
-        assert_eq!(color(&border(&state), "╭"), palette.primary);
+        // A run keeps the border quiet and shows its colour on the accent bar.
+        let running = border(&state);
+        assert_eq!(color(&running, "╮"), palette.muted);
+        assert_eq!(color(&running, "╭"), palette.secondary);
 
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
         state.context.budget.as_mut().unwrap().estimate.total_tokens = 2000;
         assert_eq!(color(&border(&state), "▰"), palette.muted);
     }
@@ -5740,33 +6102,142 @@ mod tests {
     }
 
     #[test]
-    fn run_summary_renders_italic() {
-        let mut state = UiState::unconfigured();
-        state.transcript.append_prompt("hello".into());
-        state.transcript.complete_message(1, "Done.".into());
+    fn turn_summary_closes_the_rail() {
+        let draw = |state: &UiState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let rail_at = |backend: &TestBackend, text: &str| {
+            let buffer = backend.buffer();
+            let y = (0..buffer.area.height)
+                .find(|&y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(text)
+                })
+                .unwrap_or_else(|| panic!("missing {text:?}"));
+            let x = (0..buffer.area.width)
+                .find(|&x| !buffer[(x, y)].symbol().trim().is_empty())
+                .unwrap();
+            let cell = &buffer[(x, y)];
+            (cell.symbol().to_owned(), cell.fg)
+        };
+        let palette = Palette::default();
+        let mut state = running_state();
+        state.transcript.complete_message(2, "Done.".into());
+        // While the turn runs, its rail takes the running colour through the reply.
+        let running = draw(&state);
+        assert_eq!(
+            rail_at(&running, "Done."),
+            ("│".to_owned(), palette.running_rail())
+        );
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
         assert!(
             state
                 .transcript
-                .attach_run_summary("╰ Build · gpt_x · 4m 12s".into())
+                .attach_run_summary("Build · gpt_x · 4m 12s · 31 tok/s".into())
         );
-        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    &state,
-                    &mut TranscriptViewport::default(),
-                    &mut TranscriptRowCache::default(),
-                    &PromptEditor::default(),
-                    &connection(),
-                    None,
-                );
-            })
-            .unwrap();
-        let screen = terminal.backend().to_string();
-        let summary = style_at_text(terminal.backend(), "╰ Build · gpt_x · 4m 12s");
-        assert!(summary.is_some(), "{screen}");
-        assert!(summary.unwrap().2.contains(Modifier::ITALIC));
+        let finished = draw(&state);
+        let screen = finished.to_string();
+        // The rail settles to grey and ends in `╰` at the totals, which follow the tail.
+        assert_eq!(
+            rail_at(&finished, "Done."),
+            ("│".to_owned(), palette.rail())
+        );
+        assert_eq!(
+            rail_at(&finished, "Build · gpt_x · 4m 12s · 31 tok/s"),
+            ("╰".to_owned(), palette.rail())
+        );
+        assert_eq!(
+            style_at_text(&finished, "Build · gpt_x").map(|style| style.0),
+            Some(palette.muted),
+            "{screen}"
+        );
+        // The earlier turn's gap before the next prompt has no rail.
+        let earlier = state.transcript.entries()[1].id;
+        let gap = TranscriptRow {
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Spacer,
+            },
+            role: TranscriptRole::Assistant,
+            kind: TranscriptRowKind::Spacer,
+            tone: TranscriptRowTone::Default,
+            spans: Vec::new(),
+            gutter: RowGutter::None,
+            fold_hint: crate::transcript_view::FoldHint::None,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
+        };
+        let prompts = TurnBounds {
+            first: Some(0),
+            latest: Some(2),
+        };
+        assert_eq!(turn_rail(&state, &gap, prompts, palette), None, "{screen}");
+        let reply = TranscriptRow {
+            kind: TranscriptRowKind::Content,
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Content(0),
+            },
+            ..gap
+        };
+        assert_eq!(
+            turn_rail(&state, &reply, prompts, palette),
+            Some(("│", palette.rail()))
+        );
+    }
+
+    #[test]
+    fn summary_closes_a_cancelled_turn() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        // The turn ends on the card, which carries the totals.
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("4.0s · 1 tool · cancelled".into())
+        );
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let lines = screen.lines().collect::<Vec<_>>();
+        let card = lines
+            .iter()
+            .position(|line| line.contains("Bash"))
+            .expect("card row");
+        let summary = lines
+            .iter()
+            .position(|line| line.contains("╰4.0s · 1 tool · cancelled"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(summary > card, "{screen}");
     }
 
     #[test]
@@ -6366,6 +6837,7 @@ mod tests {
             fold_hint,
             fold_arrow: None,
             trailing: None,
+            live_timer: false,
         };
         let action = row(
             TranscriptRowKind::CardAction,
@@ -6390,7 +6862,17 @@ mod tests {
                 .draw(|frame| {
                     for (y, row) in [&action, &detail].into_iter().enumerate() {
                         let area = Rect::new(0, y as u16, 40, 1);
-                        render_transcript_row(frame, area, row.clone(), None, false, palette, None);
+                        render_transcript_row(
+                            frame,
+                            area,
+                            row.clone(),
+                            None,
+                            false,
+                            palette,
+                            None,
+                            None,
+                            None,
+                        );
                     }
                     let selected = Some(action.anchor);
                     let area = Rect::new(0, 2, 40, 1);
@@ -6401,6 +6883,8 @@ mod tests {
                         selected,
                         false,
                         palette,
+                        None,
+                        None,
                         None,
                     );
                 })
@@ -6458,6 +6942,7 @@ mod tests {
                 fold_hint: crate::transcript_view::FoldHint::None,
                 fold_arrow: None,
                 trailing: None,
+                live_timer: false,
             };
             // Browse marks a selection only with a fold hint; this row has none, so the
             // selected and unselected renders match cell for cell.
@@ -6472,6 +6957,8 @@ mod tests {
                             selected,
                             false,
                             palette,
+                            None,
+                            None,
                             None,
                         );
                     }
@@ -6986,8 +7473,7 @@ mod tests {
         running.transcript.append_prompt("hello".into());
         assert!(running.active_prompt_editable());
         let hints = footer_hints(&running, &Bindings::default(), 200);
-        assert!(hints.contains("steer"), "{hints}");
-        assert!(hints.contains("F6 browse"), "{hints}");
+        assert_eq!(hints, "Esc interrupt · F6 browse");
     }
 
     #[test]
@@ -7054,6 +7540,31 @@ mod tests {
                 .unwrap();
             terminal.backend().buffer().clone()
         };
+        // Spinner cells that turn between two ticks. Live timers read the wall clock and
+        // may also tick, but nothing else may change.
+        let spinning = |first: &ratatui::buffer::Buffer, later: &ratatui::buffer::Buffer| {
+            let spinner = |cell: &ratatui::buffer::Cell| SPINNER_FRAMES.contains(&cell.symbol());
+            let timer = |cell: &ratatui::buffer::Cell| {
+                cell.symbol()
+                    .chars()
+                    .all(|character| character.is_ascii_digit() || "<.ms ".contains(character))
+            };
+            let changed = first
+                .content
+                .iter()
+                .zip(&later.content)
+                .filter(|(a, b)| a != b)
+                .collect::<Vec<_>>();
+            assert!(
+                changed
+                    .iter()
+                    .all(|(a, b)| (spinner(a) && spinner(b)) || (timer(a) && timer(b)))
+            );
+            changed
+                .iter()
+                .filter(|(a, b)| spinner(a) && spinner(b))
+                .count()
+        };
         for palette in [Palette::default(), crate::theme::themes()[0].palette(true)] {
             for tool in ["bash", "read"] {
                 for outcome in ["success", "error", "denied", "cancelled"] {
@@ -7078,15 +7589,23 @@ mod tests {
                         arguments: json!({"command": "cargo test"}),
                         detail_source: crate::tool_detail::ToolDetailSource::None,
                     };
+                    // The card's marker and the status line both turn while the call runs.
                     state.transcript.observe_tool_call(call.clone());
-                    assert_ne!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None)
+                    assert_eq!(
+                        spinning(
+                            &draw(&state, 0, palette, None),
+                            &draw(&state, 1, palette, None)
+                        ),
+                        2
                     );
+                    // Awaiting approval, the card's `?` holds still.
                     state.transcript.observe_approval_requested(call);
                     assert_eq!(
-                        draw(&state, 0, palette, None),
-                        draw(&state, 4, palette, None)
+                        spinning(
+                            &draw(&state, 0, palette, None),
+                            &draw(&state, 1, palette, None)
+                        ),
+                        1
                     );
                     if outcome == "denied" {
                         state
@@ -7097,31 +7616,23 @@ mod tests {
                             .transcript
                             .observe_approval_resolved("pulse", true, None);
                         let first = draw(&state, 0, palette, None);
-                        let later = draw(&state, 4, palette, None);
-                        assert_ne!(first, later);
+                        let later = draw(&state, 1, palette, None);
                         let selected = state
                             .transcript
                             .entries()
                             .iter()
                             .find(|entry| entry.tool_card().is_some())
                             .map(|entry| BrowseTarget::Entry(entry.id));
-                        assert_ne!(
-                            draw(&state, 0, palette, selected),
-                            draw(&state, 4, palette, selected)
+                        assert_eq!(
+                            spinning(
+                                &draw(&state, 0, palette, selected),
+                                &draw(&state, 1, palette, selected)
+                            ),
+                            2
                         );
-                        // Only the marker changes between ticks, and it changes shape, so
-                        // the activity also reads in monochrome.
-                        let changed: Vec<_> = first
-                            .content
-                            .iter()
-                            .zip(&later.content)
-                            .filter(|(a, b)| a != b)
-                            .collect();
-                        assert_eq!(changed.len(), 1, "{outcome}");
-                        let (a, b) = changed[0];
-                        assert!(SPINNER_FRAMES.contains(&a.symbol()));
-                        assert!(SPINNER_FRAMES.contains(&b.symbol()));
-                        assert_ne!(a.symbol(), b.symbol());
+                        // Only the markers change between ticks, and they change shape,
+                        // so the activity also reads in monochrome.
+                        assert_eq!(spinning(&first, &later), 2, "{outcome}");
                         let mut result = tool_result("pulse", "finished");
                         result.is_error = outcome == "error";
                         if outcome == "cancelled" {
@@ -7129,10 +7640,13 @@ mod tests {
                         }
                         state.transcript.observe_tool_result(result);
                     }
-                    // The working row may return once the tool settles; ticks 0 and 10
-                    // show the same spinner frame, so only the card marker is compared.
+                    // Once the call settles, only the status line keeps turning.
                     let settled = draw(&state, 0, palette, None);
-                    assert_eq!(settled, draw(&state, 10, palette, None), "{outcome}");
+                    assert_eq!(
+                        spinning(&settled, &draw(&state, 1, palette, None)),
+                        1,
+                        "{outcome}"
+                    );
                     let marker = match outcome {
                         "success" => "✓",
                         "error" => "✗",
@@ -7148,24 +7662,31 @@ mod tests {
     }
 
     #[test]
-    fn working_spinner_stops_for_visible_progress_and_returns_between_steps() {
+    fn status_line_follows_the_run() {
+        let status = |rendered: &str| {
+            // The status line is the last spinning row; running cards spin above it.
+            rendered
+                .lines()
+                .rev()
+                .find(|line| SPINNER_FRAMES.iter().any(|frame| line.contains(frame)))
+                .unwrap_or_else(|| panic!("status line: {rendered}"))
+                .to_owned()
+        };
         let mut state = UiState::new("fake".into(), None, None);
         state.view_status = ViewStatus::Running;
         state.interaction_status = crate::reducer::InteractionStatus::Running;
         state.transcript.append_prompt("check this".into());
         let waiting = render_to_string_with_activity(80, 18, &state, 0);
-        assert!(waiting.contains("⠋ Working"));
+        assert!(status(&waiting).contains("◐ Working"), "{waiting}");
         state
             .transcript
             .append_message_delta(1, "I will check that.");
         state
             .transcript
             .complete_message(1, "I will check that.".into());
-        let completed = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(!completed.contains("Working"), "{completed}");
         state.transcript.append_thinking_delta(2, "Next step");
         let thinking = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(thinking.contains("⠙ Thinking"), "{thinking}");
+        assert!(status(&thinking).contains("◓ Thinking"), "{thinking}");
         for index in 0..20 {
             state
                 .transcript
@@ -7176,11 +7697,14 @@ mod tests {
                     detail_source: crate::tool_detail::ToolDetailSource::None,
                 });
         }
+        // The latest call in progress names the run, at every size.
         for (width, height) in [(80, 18), (30, 8)] {
             let running = render_to_string_with_activity(width, height, &state, 1);
-            assert!(running.contains("check 19"), "{running}");
-            assert!(!running.contains("Working"), "{running}");
-            assert!(!running.contains("Esc to interrupt"), "{running}");
+            let line = status(&running);
+            // A narrow row clips the command.
+            assert!(line.contains(" Bash  c"), "{running}");
+            assert!(width < 80 || line.contains(" Bash  check 19"), "{running}");
+            assert!(!line.contains("Working"), "{running}");
         }
         for index in 0..20 {
             state
@@ -7188,7 +7712,14 @@ mod tests {
                 .observe_tool_result(tool_result(&format!("tool-{index}"), "done"));
         }
         let between_steps = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(between_steps.contains("⠹ Working"), "{between_steps}");
+        assert!(
+            status(&between_steps).contains("◑ Working"),
+            "{between_steps}"
+        );
+        assert!(
+            status(&between_steps).contains("20 tools"),
+            "{between_steps}"
+        );
 
         state
             .transcript
@@ -7198,47 +7729,20 @@ mod tests {
                 arguments: json!({"operation": "poll", "process_id": "process-1"}),
                 detail_source: crate::tool_detail::ToolDetailSource::None,
             });
-        let polling = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(!polling.contains("Working"), "{polling}");
         let mut process_result = tool_result("process-poll", "still running");
         process_result.name = "bash".into();
         process_result.process_id = Some("process-1".into());
         process_result.process_state = Some("running".into());
         state.transcript.observe_tool_result(process_result);
-        let process_between_steps = render_to_string_with_activity(80, 18, &state, 3);
+        let process = render_to_string_with_activity(80, 18, &state, 3);
         assert!(
-            process_between_steps.contains("Process ▸ Background command"),
-            "{process_between_steps}"
+            status(&process).contains(" Process  Background command"),
+            "{process}"
         );
-        assert!(
-            process_between_steps.contains("⠸ Running background command"),
-            "{process_between_steps}"
-        );
-
-        // Polling the same process updates its earlier card in place. A reply
-        // after that card must not hide activity once the later poll settles.
+        // Once the model answers again, the background process no longer names the run.
         state.transcript.append_message_delta(3, "Checking again.");
-        state
-            .transcript
-            .complete_message(3, "Checking again.".into());
-        state
-            .transcript
-            .observe_tool_call(crate::tool_cards::ToolCallInput {
-                call_id: "process-poll-again".into(),
-                name: "bash".into(),
-                arguments: json!({"operation": "poll", "process_id": "process-1"}),
-                detail_source: crate::tool_detail::ToolDetailSource::None,
-            });
-        let mut result = tool_result("process-poll-again", "still running");
-        result.name = "bash".into();
-        result.process_id = Some("process-1".into());
-        result.process_state = Some("running".into());
-        state.transcript.observe_tool_result(result);
-        let after_poll = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(
-            after_poll.contains("⠸ Running background command"),
-            "{after_poll}"
-        );
+        let answering = render_to_string_with_activity(80, 18, &state, 3);
+        assert!(status(&answering).contains("◒ Working"), "{answering}");
 
         for status in [
             ViewStatus::Idle,

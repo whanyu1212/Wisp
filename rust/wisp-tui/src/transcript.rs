@@ -109,6 +109,10 @@ pub struct TranscriptEntry {
     /// How long the reply reasoned before answering. Live replies only: reasoning is
     /// not kept in session history.
     thinking_ms: Option<u32>,
+    /// When this live call started running: when it was called, or when its approval
+    /// was granted, so time spent waiting for the user is left out. Drives the live
+    /// timer of a call still in progress.
+    running_since: Option<Instant>,
     searches: Vec<String>,
     cost: Option<String>,
     /// Display-only summary closing the last reply of a finished run.
@@ -134,10 +138,9 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Compose display-only search evidence, cost, and the run summary without
-    /// changing model text.
+    /// Compose display-only search evidence and cost without changing model text.
     fn decorate(&mut self) {
-        if self.searches.is_empty() && self.cost.is_none() && self.run_summary.is_none() {
+        if self.searches.is_empty() && self.cost.is_none() {
             return;
         }
         let mut text = self.searches.join("\n\n");
@@ -148,13 +151,6 @@ impl TranscriptEntry {
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
             text.push_str(&format!("\n\n{cost}"));
-        }
-        if let Some(summary) = self
-            .run_summary
-            .as_ref()
-            .filter(|_| self.unrevealed.is_empty())
-        {
-            text.push_str(&format!("\n\n{summary}"));
         }
         self.decorated_content = Some(text);
     }
@@ -179,18 +175,12 @@ impl TranscriptEntry {
             .unwrap_or(&self.content)
     }
 
-    /// The Markdown a reply renders: its text, closed by the run summary once the
-    /// whole reply is shown. The summary only follows the text, so offsets into
-    /// [`Self::content`] stay valid in the rendered source.
-    pub(crate) fn markdown_source(&self) -> std::borrow::Cow<'_, str> {
-        match self
-            .run_summary
-            .as_ref()
+    /// The totals that close this entry's turn, once the entry is fully shown. The
+    /// transcript view draws them as the row that ends the turn's rail.
+    pub(crate) fn run_summary(&self) -> Option<&str> {
+        self.run_summary
+            .as_deref()
             .filter(|_| self.unrevealed.is_empty())
-        {
-            Some(summary) => format!("{}\n\n*{}*", self.content, escape_markdown(summary)).into(),
-            None => self.content.as_str().into(),
-        }
     }
 
     pub fn thinking(&self) -> &str {
@@ -199,6 +189,12 @@ impl TranscriptEntry {
 
     pub(crate) fn thinking_ms(&self) -> Option<u32> {
         self.thinking_ms
+    }
+
+    /// How long this live call has run so far, or `None` for history and calls that
+    /// never started.
+    pub(crate) fn running_elapsed(&self) -> Option<std::time::Duration> {
+        self.running_since.map(|started| started.elapsed())
     }
 
     /// Stop the reasoning clock once answer text arrives or the reply completes.
@@ -524,9 +520,9 @@ impl Transcript {
         self.tool_cwd = Some(Arc::from(cwd));
     }
 
-    /// Close the run with its summary line under its last reply. The run must end on
-    /// that reply: when a tool or process card follows it, as after a cancelled call,
-    /// the line would sit mid-run, so the run keeps none.
+    /// Close the run with its summary on the turn's last entry, whether a reply or a
+    /// card, as after a cancelled call. Returns false when the turn shows nothing to
+    /// close.
     pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
         let prompt = self.latest_user_entry();
         let last = self
@@ -539,25 +535,15 @@ impl Transcript {
                     && matches!(entry.kind, TranscriptEntryKind::Message)
                     && entry.content.is_empty()
                     && entry.unrevealed.is_empty())
-            });
-        let Some(id) = last
-            .filter(|entry| {
-                entry.role == TranscriptRole::Assistant
-                    && matches!(entry.kind, TranscriptEntryKind::Message)
             })
-            .map(|entry| entry.id)
-        else {
+            .filter(|entry| entry.role != TranscriptRole::User)
+            .map(|entry| entry.id);
+        let Some(id) = last else {
             return false;
         };
         let entry = self.entry_mut(id);
         entry.run_summary = Some(summary);
-        // Reparse the whole reply with its new ending, so the line renders the same
-        // whether or not the reply was already laid out.
-        entry.layout_epoch = entry
-            .layout_epoch
-            .checked_add(1)
-            .expect("transcript layout epoch exhausted");
-        entry.decorate();
+        // The entry's last row now leads to the summary row, so cached rows rebuild.
         Self::bump_revision(entry);
         true
     }
@@ -642,6 +628,7 @@ impl Transcript {
             .is_some_and(|binding| !binding.resolved)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_unresolved_tool_calls(&self) -> bool {
         self.call_entries.values().any(|binding| !binding.resolved)
     }
@@ -669,6 +656,10 @@ impl Transcript {
         source: ToolCallSource,
     ) -> TranscriptEntryId {
         let entry_id = self.ensure_tool_entry(&input, ToolStatus::Requested, source);
+        if source == ToolCallSource::Live {
+            let entry = self.entry_mut(entry_id);
+            entry.running_since.get_or_insert_with(Instant::now);
+        }
         self.update_pending_detail_tracking(entry_id);
         entry_id
     }
@@ -732,6 +723,9 @@ impl Transcript {
             }
         };
         if changed {
+            if approved {
+                self.entry_mut(binding.entry_id).running_since = Some(Instant::now());
+            }
             self.bump_card(binding.entry_id);
         }
         self.update_pending_detail_tracking(binding.entry_id);
@@ -929,14 +923,6 @@ impl Transcript {
         if let Some(entry_id) = entry_id {
             self.set_entry_state(entry_id, TranscriptEntryState::Complete);
         }
-    }
-
-    pub(crate) fn has_visible_response(&self) -> bool {
-        self.active_response
-            .map(|(_, entry_id)| entry_id)
-            .or(self.completed_response)
-            .and_then(|entry_id| self.entry(entry_id))
-            .is_some_and(|entry| !entry.content.is_empty())
     }
 
     pub fn is_streaming_text(&self) -> bool {
@@ -1639,6 +1625,7 @@ impl Transcript {
                 cost: None,
                 run_summary: None,
                 thinking_started: None,
+                running_since: None,
                 thinking_ms: None,
                 decorated_content: None,
                 state: TranscriptEntryState::Complete,
@@ -2331,6 +2318,7 @@ impl Transcript {
             cost: None,
             run_summary: None,
             thinking_started: None,
+            running_since: None,
             thinking_ms: None,
             decorated_content: None,
             state,
@@ -2426,6 +2414,7 @@ impl Transcript {
             cost: None,
             run_summary: None,
             thinking_started: None,
+            running_since: None,
             thinking_ms: None,
             decorated_content: None,
             state,
@@ -2537,21 +2526,6 @@ impl Transcript {
             .checked_add(1)
             .expect("transcript generation exhausted");
     }
-}
-
-/// Backslash-escape Markdown punctuation so names render literally.
-fn escape_markdown(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if matches!(
-            character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
-        ) {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
 }
 
 #[cfg(test)]

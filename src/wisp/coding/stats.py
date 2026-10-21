@@ -22,6 +22,7 @@ from wisp.events import (
     ContextBudget,
     ContextObservation,
     MessageCompleted,
+    MessageStarted,
     RunOutcome,
     SessionStats,
     TokenUsage,
@@ -51,17 +52,30 @@ class RunStats:
     started: float = field(default_factory=time.monotonic)
     tool_calls: int = 0
     output_tokens: int | None = None
+    model_seconds: float | None = None
+    _response_started: float | None = None
 
     def observe(self, event: WispEvent) -> None:
-        """Count a published tool result or a response's output tokens.
+        """Count a published tool result, a response's output tokens, and its time.
+
+        A response is timed from its `MessageStarted` to its `MessageCompleted`. Only
+        responses that report usage count, so time spent on a failed or partial response
+        does not dilute throughput; one that never completes adds nothing.
 
         Args:
             event (WispEvent): Event the run just published.
         """
         if isinstance(event, ToolResultReady):
             self.tool_calls += 1
-        elif isinstance(event, MessageCompleted) and event.usage is not None:
-            self.output_tokens = (self.output_tokens or 0) + event.usage.output_tokens
+        elif isinstance(event, MessageStarted):
+            self._response_started = time.monotonic()
+        elif isinstance(event, MessageCompleted):
+            started, self._response_started = self._response_started, None
+            if event.usage is not None:
+                self.output_tokens = (self.output_tokens or 0) + event.usage.output_tokens
+                if started is not None:
+                    elapsed = time.monotonic() - started
+                    self.model_seconds = (self.model_seconds or 0.0) + elapsed
 
     def completed(self, *, session_id: str, turns: int, outcome: RunOutcome) -> AgentCompleted:
         """Build the run's terminal event with its totals.
@@ -72,8 +86,8 @@ class RunStats:
             outcome (RunOutcome): How the run ended.
 
         Returns:
-            AgentCompleted: Terminal event carrying the run's duration, tool count, and
-                output tokens.
+            AgentCompleted: Terminal event carrying the run's duration, tool count,
+                output tokens, and model streaming time.
         """
         return AgentCompleted(
             session_id=session_id,
@@ -82,6 +96,9 @@ class RunStats:
             duration_ms=max(0, round((time.monotonic() - self.started) * 1000)),
             tool_calls=self.tool_calls,
             output_tokens=self.output_tokens,
+            model_ms=(
+                None if self.model_seconds is None else max(0, round(self.model_seconds * 1000))
+            ),
         )
 
 

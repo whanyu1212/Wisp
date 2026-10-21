@@ -113,7 +113,7 @@ SKILL_EXPANSION_MARKER
                 output.clear()
             elif phase == "submitted" and b"SKILL_EXPANSION_MARKER" in output:
                 # FakeProvider echoes its expanded input as assistant output. The reply can
-                # finish before "working" is painted, leaving the idle footer unchanged and
+                # finish before the running footer is painted, leaving the idle footer unchanged and
                 # never redrawn. A resize repaints the whole frame.
                 browser_width += 1
                 fcntl.ioctl(
@@ -280,7 +280,7 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
                 for path in session_dir.glob("*.jsonl")
                 for entry in complete_logged_commands(path)
             ):
-                # The fake reply can finish before "working" is painted, leaving the idle
+                # The fake reply can finish before the running footer is painted, leaving the idle
                 # footer unchanged and never redrawn. A resize repaints the whole frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 122, 0, 0))
                 phase = "settling"
