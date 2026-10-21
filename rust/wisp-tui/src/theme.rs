@@ -241,6 +241,17 @@ impl Palette {
         Style::default().fg(self.secondary)
     }
 
+    /// Links read in the secondary colour, apart from the accent that marks
+    /// speakers and status, unless a theme's secondary is too close to its body
+    /// text to tell apart.
+    pub fn link(self) -> Color {
+        if contrast_ratio(self.secondary, self.foreground) < 1.5 {
+            self.primary
+        } else {
+            self.secondary
+        }
+    }
+
     pub fn composer(self) -> Style {
         self.base().bg(self.surface)
     }

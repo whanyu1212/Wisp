@@ -1480,7 +1480,7 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style = match semantic.inline {
         InlineStyle::Normal => style,
         InlineStyle::Code => style.patch(palette.semantic_inline_code()),
-        InlineStyle::Link => style.fg(palette.primary).add_modifier(Modifier::UNDERLINED),
+        InlineStyle::Link => style.fg(palette.link()).add_modifier(Modifier::UNDERLINED),
         InlineStyle::QuoteMarker => style.fg(palette.muted),
         InlineStyle::ListMarker => style.patch(palette.semantic_list_marker()),
         InlineStyle::TableBorder => style.fg(palette.muted),
@@ -6729,6 +6729,11 @@ mod tests {
             palette,
         );
         assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(link.fg, Some(palette.secondary));
+        // A theme whose secondary matches its body text keeps links in the accent.
+        let mut flat = palette;
+        flat.secondary = palette.foreground;
+        assert_eq!(flat.link(), flat.primary);
 
         let tool_command = markdown_span_style(
             Style::default().fg(palette.muted),
