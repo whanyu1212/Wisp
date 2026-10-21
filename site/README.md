@@ -1,7 +1,7 @@
 # Wisp documentation in Astro
 
-This is the HY-313 foundation for the approved editorial design. It builds a static
-site under `/Wisp/` while the production workflow continues to deploy mdBook.
+This implements the HY-313 foundation and HY-314 shared editorial layouts. It builds
+a static site under `/Wisp/` while the production workflow continues to deploy mdBook.
 Markdown stays authoritative in `../book/src/`; tutorial code stays in
 `../examples/crafting_agents/`. No content copies or new frontend framework are needed.
 
@@ -21,7 +21,16 @@ npm run check
 npm test
 npm run build
 npm run format:check
+npm exec playwright install chromium
+npm run test:browser
 ```
+
+Browser tests use the built `dist/` output (run `build` first), served by an isolated
+Astro preview on port 4322. They check desktop, tablet, and mobile layouts, keyboard
+and no-JavaScript navigation, local code/table scrolling, clipboard success/failure,
+Mermaid redraws, and theme persistence/system changes. Chromium is a development-only
+test dependency; on Linux use `npm exec playwright install -- --with-deps chromium`.
+Failure traces are saved in ignored `test-results/`.
 
 `build` renders the complete corpus and then checks the actual files in `dist/`:
 all canonical/legacy routes, the 358 captured heading IDs, directory index aliases,
@@ -33,14 +42,14 @@ page until HY-274 splits it.
 
 `.github/workflows/astro.yml` runs these checks on pull requests and main-branch
 changes to the site, Markdown sources, migration baseline, tutorial examples, and
-shared assets. It does not deploy; the separate docs workflow still publishes mdBook.
+shared assets, including built-site Chromium checks. It does not deploy; the separate
+docs workflow still publishes mdBook.
 
 To inspect production output:
 
 ```sh
 npm run preview -- --port 4321
-# Astro 7 starts a background preview; stop it when finished:
-npm exec astro preview stop
+# Stop with Ctrl+C (or `npm exec astro preview stop` if started with --background).
 ```
 
 From the repository root, retain the existing content and example checks:
@@ -65,12 +74,27 @@ mdbook build book
   malformed directives and paths escaping the repository fail the build.
 - `src/content/render.ts` preserves mdBook heading IDs (including `{#explicit-id}`),
   rewrites source links and shared branding, renders alerts/tables, and prepares Mermaid.
-- `src/layouts/` holds the editorial shell and page/compatibility rendering. The
-  section `index.astro` route and Astro's `preserve` build format produce actual
+  Highlighting uses GitHub's high-contrast light theme on the paper surface so even
+  comments and variable names meet normal-text contrast; browser checks pin this.
+- `src/layouts/` holds the editorial shell and page/compatibility rendering. Home,
+  documentation, and course pages share the header/footer; course pages add chapter
+  typography, case-study grouping, and checkpoint cards without duplicating prose.
+  `src/content/navigation.ts` projects sibling hierarchy, breadcrumbs, and section-local
+  previous/next links from collection metadata. Native mobile navigation/TOC disclosures
+  work without JavaScript; Escape dismisses an open disclosure and restores focus.
+  The section `index.astro` route and Astro's `preserve` build format produce actual
   `section/index.html` files alongside normal `article.html` files.
+- `src/components/Theme.astro` resolves an explicit light/dark override before paint;
+  otherwise CSS follows the system, even without JavaScript or storage access. The
+  labeled System/Light/Dark select persists overrides and can reset to system mode.
+  Theme changes redraw diagrams serially, including live system preference changes.
+- `src/components/CodeBlocks.astro` progressively adds copy buttons when the Clipboard
+  API is available, with live success/failure feedback. Code/table scroll areas are
+  keyboard-focusable in static output. Static articles are not hydrated.
 - `src/components/Diagrams.astro` imports Mermaid only on pages with diagrams.
   All seven existing diagrams retain readable source without JavaScript; successful
-  rendering collapses that fallback into a disclosure. Failures leave it open.
+  rendering collapses that fallback into a disclosure. Failures leave it open. Wide
+  diagrams keep their natural text size in a keyboard-scrollable region.
   This avoids a browser-download prerequisite for static builds. The Mermaid runtime
   has a large lazy chunk; future optimization must preserve the conditional loading.
 - `src/content/check-output.ts` validates output, including the compatibility pages
@@ -88,7 +112,8 @@ remains `run_agent_loop`.
 
 ## Follow-up scope
 
-HY-314 owns the full responsive/accessibility design pass; HY-315 owns Pagefind.
+HY-315 owns Pagefind. HY-314 provides the shared responsive layouts, navigation,
+light/dark/system themes, focus handling, and built-site browser coverage.
 HY-269/HY-270/HY-274/HY-276/HY-277 own final navigation/content restructuring, the
 changelog, TUI splits, SDK prose and real homepage imagery. The foundation preserves
 the complete homepage article below the new editorial opening; final content editing

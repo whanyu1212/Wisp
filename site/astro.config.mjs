@@ -18,6 +18,8 @@ export default defineConfig({
   markdown: {
     processor: unified(),
     syntaxHighlight: { type: "shiki", excludeLangs: ["mermaid"] },
-    shikiConfig: { themes: { light: "github-light", dark: "github-dark" } },
+    shikiConfig: {
+      themes: { light: "github-light-high-contrast", dark: "github-dark" },
+    },
   },
 });

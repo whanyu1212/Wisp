@@ -1,0 +1,38 @@
+---
+import type { Heading } from "../content/render";
+interface Props {
+  headings: Heading[];
+  mobile?: boolean;
+}
+const { headings, mobile = false } = Astro.props;
+---
+
+{mobile ? (
+  <details class="mobile-toc" data-navigation>
+    <summary>On this page</summary>
+    <nav aria-label="Page outline">
+      {headings.map((heading) => (
+        <a
+          href={`#${heading.slug}`}
+          class:list={{ "toc-child": heading.depth === 3 }}
+        >
+          {heading.text}
+        </a>
+      ))}
+    </nav>
+  </details>
+) : (
+  <aside class="toc">
+    <nav aria-label="On this page">
+      <strong>On this page</strong>
+      {headings.map((heading) => (
+        <a
+          href={`#${heading.slug}`}
+          class:list={{ "toc-child": heading.depth === 3 }}
+        >
+          {heading.text}
+        </a>
+      ))}
+    </nav>
+  </aside>
+)}

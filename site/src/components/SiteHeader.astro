@@ -1,0 +1,107 @@
+---
+import { href } from "../content/paths";
+import type { NavigationGroup } from "../content/navigation";
+import type { PageMetadata } from "../content/metadata";
+
+interface Props {
+  groups: NavigationGroup[];
+  page: PageMetadata;
+}
+const { groups, page } = Astro.props;
+---
+
+<header class="site-header">
+  <a class="brand" href={href("index.html")} aria-label="Wisp home">
+    wisp<span>.</span>
+  </a>
+  <nav aria-label="Primary">
+    {groups.map(
+      (group) =>
+        group.pages[0] && (
+          <a
+            href={href(group.pages[0].route)}
+            aria-current={
+              group.key === page.section && page.layout !== "home"
+                ? "true"
+                : undefined
+            }
+          >
+            {group.title}
+          </a>
+        ),
+    )}
+  </nav>
+  <label class="theme-control" for="theme-select">
+    <span>Theme</span>
+    <select id="theme-select" disabled>
+      <option value="system">System</option>
+      <option value="light">Light</option>
+      <option value="dark">Dark</option>
+    </select>
+  </label>
+  <a class="github" href="https://github.com/whanyu1212/Wisp">
+    GitHub ↗
+  </a>
+</header>
+<details class="mobile-navigation" data-navigation>
+  <summary>Browse documentation</summary>
+  <nav aria-label="Mobile documentation">
+    {groups.map((group) => (
+      <section>
+        <strong>{group.title}</strong>
+        {group.pages.map((item) => (
+          <a
+            href={href(item.route)}
+            style={`--nav-depth: ${item.depth}`}
+            aria-current={item.source === page.source ? "page" : undefined}
+          >
+            {item.navTitle ?? item.title}
+          </a>
+        ))}
+      </section>
+    ))}
+  </nav>
+</details>
+<script>
+  // Focus the destination as well as scrolling, including when a disclosure closes.
+  document.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.altKey ||
+      event.button !== 0
+    )
+      return;
+    const link =
+      event.target instanceof Element
+        ? event.target.closest<HTMLAnchorElement>('a[href^="#"]')
+        : null;
+    if (!link) return;
+    const target = document.getElementById(
+      decodeURIComponent(link.hash.slice(1)),
+    );
+    if (target) {
+      target.tabIndex = -1;
+      target.focus({ preventScroll: true });
+    }
+  });
+  // Native disclosures stay usable without JS. Escape returns focus to the opener.
+  document
+    .querySelectorAll<HTMLDetailsElement>("[data-navigation]")
+    .forEach((menu) => {
+      const summary = menu.querySelector("summary");
+      menu.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && menu.open) {
+          menu.open = false;
+          summary?.focus();
+          event.stopPropagation();
+        }
+      });
+      menu.addEventListener("click", (event) => {
+        if (event.target instanceof Element && event.target.closest("a"))
+          menu.open = false;
+      });
+    });
+</script>

@@ -1,0 +1,32 @@
+<script>
+  // Static code and native scrolling remain available when clipboard access is absent.
+  if (navigator.clipboard?.writeText) {
+    document.querySelectorAll<HTMLElement>("article pre").forEach((pre) => {
+      if (pre.closest(".diagram-source")) return;
+      const code = pre.querySelector("code");
+      if (!code) return;
+      const wrapper = document.createElement("div");
+      wrapper.className = "code-block";
+      pre.before(wrapper);
+      wrapper.append(pre);
+      const tools = document.createElement("div");
+      tools.className = "code-tools";
+      tools.dataset.pagefindIgnore = "";
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "Copy code";
+      button.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(code.textContent ?? "");
+          status.textContent = "Copied";
+        } catch {
+          status.textContent = "Could not copy. Select the code to copy it.";
+        }
+      });
+      tools.append(status, button);
+      wrapper.prepend(tools);
+    });
+  }
+</script>

@@ -183,6 +183,20 @@ test("mdBook explicit heading attributes become IDs, not visible text", () => {
   assert.ok(!result.html.includes("{#"));
 });
 
+test("code and table scroll areas are keyboard accessible without JavaScript", () => {
+  const result = finishHtml(
+    '<h1 id="start">Start</h1><pre><code>long code</code></pre><table><caption>Options</caption><tr><td>value</td></tr></table><table><tr><td>other</td></tr></table>',
+    page,
+    [page],
+  );
+  assert.match(result.html, /<pre tabindex="0" aria-label="Code listing">/);
+  assert.match(
+    result.html,
+    /class="table-scroll" tabindex="0" role="region" aria-label="Options"/,
+  );
+  assert.match(result.html, /aria-label="Table 2"/);
+});
+
 test("malformed includes fail even outside code fences", () => {
   assert.throws(
     () => expandIncludes("{{#include }}", "/tmp/page.md"),
@@ -252,7 +266,9 @@ test("actual Astro Markdown output supports Mermaid and dual-theme highlighting"
   const { createMarkdownProcessor } = await import("@astrojs/markdown-remark");
   const renderer = await createMarkdownProcessor({
     syntaxHighlight: { type: "shiki", excludeLangs: ["mermaid"] },
-    shikiConfig: { themes: { light: "github-light", dark: "github-dark" } },
+    shikiConfig: {
+      themes: { light: "github-light-high-contrast", dark: "github-dark" },
+    },
   });
   const result = await renderer.render(
     '# Start\n\n```mermaid\ngraph TD\nA-->B\n```\n\n```python\nprint("hello")\n```',

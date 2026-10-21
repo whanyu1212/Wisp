@@ -1,35 +1,55 @@
 <script>
   const diagrams = document.querySelectorAll<HTMLElement>(".mermaid");
   if (diagrams.length) {
-    const { default: mermaid } = await import("mermaid");
-    const draw = async () => {
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: "strict",
-        theme:
-          document.documentElement.dataset.theme === "dark"
-            ? "dark"
-            : "default",
-      });
-      for (const [index, diagram] of [...diagrams].entries()) {
-        try {
-          const { svg } = await mermaid.render(
-            `diagram-${index}`,
-            diagram.dataset.source ?? "",
-          );
-          diagram.innerHTML = svg;
-          const fallback = diagram.parentElement?.querySelector("details");
-          if (fallback) fallback.open = false;
-        } catch (error) {
-          console.warn("Could not render documentation diagram", error);
-          diagram.textContent =
-            "Diagram unavailable. The source is shown below.";
-          const fallback = diagram.parentElement?.querySelector("details");
-          if (fallback) fallback.open = true;
+    try {
+      const { default: mermaid } = await import("mermaid");
+      const draw = async () => {
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme:
+            getComputedStyle(document.documentElement).colorScheme === "dark"
+              ? "dark"
+              : "default",
+          fontFamily: "system-ui, sans-serif",
+        });
+        for (const [index, diagram] of [...diagrams].entries()) {
+          try {
+            const { svg } = await mermaid.render(
+              `diagram-${index}`,
+              diagram.dataset.source ?? "",
+            );
+            diagram.innerHTML = svg;
+            // Preserve the renderer's text size; wide diagrams scroll locally instead
+            // of shrinking their labels to fit a narrow article or mobile viewport.
+            const rendered = diagram.querySelector("svg");
+            if (rendered)
+              rendered.style.minWidth = `${rendered.viewBox.baseVal.width}px`;
+            const fallback = diagram.parentElement?.querySelector("details");
+            if (fallback) fallback.open = false;
+          } catch (error) {
+            console.warn("Could not render documentation diagram", error);
+            diagram.textContent =
+              "Diagram unavailable. The source is shown below.";
+            const fallback = diagram.parentElement?.querySelector("details");
+            if (fallback) fallback.open = true;
+          }
         }
-      }
-    };
-    await draw();
-    document.addEventListener("wisp-theme", draw);
+      };
+      // Mermaid shares renderer state. Serialize redraws when themes change quickly.
+      let pending = Promise.resolve();
+      const redraw = () => {
+        pending = pending.then(draw).catch((error) => {
+          console.warn("Could not update documentation diagrams", error);
+        });
+      };
+      document.addEventListener("wisp-theme", redraw);
+      redraw();
+    } catch (error) {
+      console.warn(
+        "Could not load documentation diagrams; the source remains available",
+        error,
+      );
+    }
   }
 </script>
