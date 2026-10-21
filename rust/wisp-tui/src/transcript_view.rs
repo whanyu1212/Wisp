@@ -497,14 +497,21 @@ impl CardRowStyle<'_> {
         gutters: &[],
     };
 
-    fn inline_at(&self, kind: TranscriptRowKind, offset: usize) -> crate::markdown::InlineStyle {
+    /// The inline style of the grapheme of `len` bytes at `offset`.
+    fn inline_at(
+        &self,
+        kind: TranscriptRowKind,
+        offset: usize,
+        len: usize,
+    ) -> crate::markdown::InlineStyle {
         use crate::markdown::InlineStyle;
         if !matches!(
             kind,
             TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
         ) {
             if let Some(range) = self.gutters.iter().find(|range| range.contains(&offset)) {
-                return if offset + 2 >= range.end {
+                // A gutter ends with its sign and one space; `−` is three bytes.
+                return if offset + len + 1 >= range.end {
                     InlineStyle::DiffSign
                 } else {
                     InlineStyle::DiffGutter
@@ -1946,7 +1953,7 @@ impl TranscriptRowCache {
             column += UnicodeWidthStr::width(safe.as_str());
             push(
                 &safe,
-                style.inline_at(kind, offset),
+                style.inline_at(kind, offset, grapheme.len()),
                 offset,
                 offset + grapheme.len(),
             );
@@ -2008,14 +2015,16 @@ impl TranscriptRowCache {
                 .gutters
                 .iter()
                 .find(|range| range.start == logical_start)
-                .map_or(0, |range| range.len())
+                // Columns, not bytes: the removed-line sign `−` is one column wide.
+                .and_then(|range| source.get(range.clone()))
+                .map_or(0, UnicodeWidthStr::width)
         } else {
             0
         };
         let indent = if width > indent + 4 { indent } else { 0 };
         let mut column = indent;
         if indent > 0 {
-            let prefix = format!("{}↪ ", " ".repeat(indent.saturating_sub(2)));
+            let prefix = format!("{}↳ ", " ".repeat(indent.saturating_sub(2)));
             text.push_str(&prefix);
             action_spans.push(TranscriptSpan {
                 text: prefix,
@@ -2052,7 +2061,7 @@ impl TranscriptRowCache {
                 || !style.syntax.is_empty()
                 || !style.gutters.is_empty()
             {
-                let inline = style.inline_at(kind, relative);
+                let inline = style.inline_at(kind, relative, grapheme.len());
                 let syntax = style
                     .syntax
                     .iter()
@@ -3051,7 +3060,8 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 });
             }
             let tail_preview = card.status == ToolStatus::Error
-                || (card.status == ToolStatus::Done && card.name == "bash");
+                || (matches!(card.status, ToolStatus::Done | ToolStatus::Running)
+                    && card.name == "bash");
             let retained_preview = if tail_preview {
                 card.retained_output.preview_tail()
             } else {
@@ -3074,15 +3084,21 @@ fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
                 .retained_output
                 .source_bytes
                 .saturating_sub(shown_output_bytes);
-            // Finished shell output reads as a framed block: what scrolled away above,
-            // the tail, and the exit status below.
+            // Shell output reads as a framed block: what scrolled away above, the
+            // tail, and the exit status below once it finishes. While the command
+            // runs, the note says the tail is still moving.
             let framed = tail_preview && card.name == "bash";
             let omission = match retained_preview.dropped_lines {
                 lines if framed && lines > 0 => Some(format!(
-                    "({lines} earlier line{}{})",
+                    "({lines} earlier line{}{}){}",
                     if lines == 1 { "" } else { "s" },
                     if card.backend_truncated {
                         "; tool reported truncation"
+                    } else {
+                        ""
+                    },
+                    if card.status == ToolStatus::Running {
+                        " · live"
                     } else {
                         ""
                     }
@@ -5840,6 +5856,39 @@ mod tests {
                 .ends_with("earlier lines)"),
             "shell tails count the lines above them"
         );
+    }
+
+    #[test]
+    fn running_bash_tails_live() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("watch".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-live".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "cargo watch"}),
+        });
+        let mut completed = tool_result(
+            "call-live",
+            &format!("{}LATEST LINE", "compiling\n".repeat(100)),
+        );
+        completed.name = "bash".into();
+        transcript.observe_tool_result(completed);
+        // No event streams foreground output yet, so retained output stands in.
+        let mut entry = transcript.entry(card_id).unwrap().clone();
+        let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+            panic!("tool card");
+        };
+        card.status = ToolStatus::Running;
+        card.exit_code = None;
+
+        let projection = card_projection(&entry).unwrap();
+        assert!(projection.framed);
+        assert!(projection.omission_before_detail);
+        assert!(projection.detail.ends_with("LATEST LINE"));
+        assert!(projection.footer.is_none());
+        let omission = projection.omission.unwrap();
+        assert!(omission.ends_with("earlier lines) · live"), "{omission}");
     }
 
     #[test]

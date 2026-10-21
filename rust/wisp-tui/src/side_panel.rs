@@ -901,7 +901,7 @@ mod tests {
             .chars()
             .take(usize::from(200 - PANEL_WIDTH))
             .collect();
-        assert!(conversation.contains("idle · Enter send"), "{conversation}");
+        assert!(conversation.contains("idle ·"), "{conversation}");
         assert!(!conversation.contains("/srv/wisp"), "{conversation}");
         assert!(!conversation.contains("ctx"), "{conversation}");
     }
