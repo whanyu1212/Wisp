@@ -781,6 +781,15 @@ fn render_transcript(
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
+        let entries = state.transcript.entries();
+        let prompts = TurnBounds {
+            first: entries
+                .iter()
+                .position(|entry| entry.role == TranscriptRole::User),
+            latest: entries
+                .iter()
+                .rposition(|entry| entry.role == TranscriptRole::User),
+        };
         for (offset, row) in rows.iter().enumerate() {
             let area = Rect::new(
                 conversation.x,
@@ -828,6 +837,7 @@ fn render_transcript(
                 palette,
                 pulse,
                 live_elapsed,
+                turn_rail(state, row, prompts, palette),
             );
         }
     }
@@ -1263,6 +1273,62 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
     }
 }
 
+/// Where the transcript's first and latest prompts sit, found once per frame.
+#[derive(Clone, Copy)]
+struct TurnBounds {
+    first: Option<usize>,
+    latest: Option<usize>,
+}
+
+/// The rail beside a transcript row. A prompt keeps its accent bar; every row of the
+/// turn after it, replies included, shares one line that takes the running colour
+/// while the turn runs and ends in `╰` at its summary. The gap under a prompt and the
+/// gap after a finished turn stay bare.
+fn turn_rail(
+    state: &UiState,
+    row: &TranscriptRow,
+    prompts: TurnBounds,
+    palette: Palette,
+) -> Option<(&'static str, Color)> {
+    if row.role == TranscriptRole::User {
+        return Some(("▎", palette.primary));
+    }
+    let index = state.transcript.entry_index(row.anchor.entry_id)?;
+    let entry = &state.transcript.entries()[index];
+    if entry.role == TranscriptRole::User {
+        return None;
+    }
+    if row.kind == TranscriptRowKind::RunSummary {
+        return Some(("╰", palette.muted));
+    }
+    // The gap that ends a turn, after its summary or before the next prompt, is bare.
+    if matches!(
+        row.kind,
+        TranscriptRowKind::Spacer | TranscriptRowKind::Rule
+    ) && (entry.run_summary().is_some()
+        || state
+            .transcript
+            .entry_after(entry.id)
+            .is_some_and(|next| next.role == TranscriptRole::User))
+    {
+        return None;
+    }
+    // Rows before the first prompt, such as a resumed session's notes, belong to no turn.
+    if prompts.first.is_none_or(|first| index < first) {
+        return None;
+    }
+    let running = state.view_status == ViewStatus::Running
+        && prompts.latest.is_some_and(|prompt| index > prompt);
+    Some((
+        "│",
+        if running {
+            palette.running_rail()
+        } else {
+            palette.muted
+        },
+    ))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transcript_row(
     frame: &mut Frame<'_>,
@@ -1273,6 +1339,7 @@ fn render_transcript_row(
     palette: Palette,
     pulse: Option<u8>,
     live_elapsed: Option<std::time::Duration>,
+    rail: Option<(&'static str, Color)>,
 ) {
     // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
@@ -1289,14 +1356,10 @@ fn render_transcript_row(
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
     // Use the existing inset: decoration must not shift wrapping, copied text, or
-    // mouse hit targets. Tool spacers keep consecutive activities connected.
-    if content.x > area.x && (user || row.role == TranscriptRole::Tool) {
-        let rail = if user { "▎" } else { "│" };
+    // mouse hit targets.
+    if let Some((glyph, color)) = rail.filter(|_| content.x > area.x) {
         frame.render_widget(
-            Paragraph::new(Span::styled(
-                rail,
-                base.fg(if user { palette.primary } else { palette.muted }),
-            )),
+            Paragraph::new(Span::styled(glyph, base.fg(color))),
             Rect::new(area.x, area.y, 1, 1),
         );
     }
@@ -6007,33 +6070,139 @@ mod tests {
     }
 
     #[test]
-    fn run_summary_renders_italic() {
-        let mut state = UiState::unconfigured();
-        state.transcript.append_prompt("hello".into());
-        state.transcript.complete_message(1, "Done.".into());
+    fn turn_summary_closes_the_rail() {
+        let draw = |state: &UiState| {
+            let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            terminal.backend().clone()
+        };
+        let rail_at = |backend: &TestBackend, text: &str| {
+            let buffer = backend.buffer();
+            let y = (0..buffer.area.height)
+                .find(|&y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains(text)
+                })
+                .unwrap_or_else(|| panic!("missing {text:?}"));
+            let x = (0..buffer.area.width)
+                .find(|&x| !buffer[(x, y)].symbol().trim().is_empty())
+                .unwrap();
+            let cell = &buffer[(x, y)];
+            (cell.symbol().to_owned(), cell.fg)
+        };
+        let palette = Palette::default();
+        let mut state = running_state();
+        state.transcript.complete_message(2, "Done.".into());
+        // While the turn runs, its rail takes the running colour through the reply.
+        let running = draw(&state);
+        assert_eq!(
+            rail_at(&running, "Done."),
+            ("│".to_owned(), palette.running_rail())
+        );
+
+        state.view_status = ViewStatus::Idle;
+        state.interaction_status = InteractionStatus::Idle;
+        state.current_command = None;
         assert!(
             state
                 .transcript
-                .attach_run_summary("╰ Build · gpt_x · 4m 12s".into())
+                .attach_run_summary("Build · gpt_x · 4m 12s · 31 tok/s".into())
         );
-        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
-        terminal
-            .draw(|frame| {
-                render(
-                    frame,
-                    &state,
-                    &mut TranscriptViewport::default(),
-                    &mut TranscriptRowCache::default(),
-                    &PromptEditor::default(),
-                    &connection(),
-                    None,
-                );
-            })
-            .unwrap();
-        let screen = terminal.backend().to_string();
-        let summary = style_at_text(terminal.backend(), "╰ Build · gpt_x · 4m 12s");
-        assert!(summary.is_some(), "{screen}");
-        assert!(summary.unwrap().2.contains(Modifier::ITALIC));
+        let finished = draw(&state);
+        let screen = finished.to_string();
+        // The rail settles to grey and ends in `╰` at the totals, which follow the tail.
+        assert_eq!(rail_at(&finished, "Done."), ("│".to_owned(), palette.muted));
+        assert_eq!(
+            rail_at(&finished, "Build · gpt_x · 4m 12s · 31 tok/s"),
+            ("╰".to_owned(), palette.muted)
+        );
+        assert_eq!(
+            style_at_text(&finished, "Build · gpt_x").map(|style| style.0),
+            Some(palette.muted),
+            "{screen}"
+        );
+        // The earlier turn's gap before the next prompt has no rail.
+        let earlier = state.transcript.entries()[1].id;
+        let gap = TranscriptRow {
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Spacer,
+            },
+            role: TranscriptRole::Assistant,
+            kind: TranscriptRowKind::Spacer,
+            tone: TranscriptRowTone::Default,
+            spans: Vec::new(),
+            gutter: RowGutter::None,
+            fold_hint: crate::transcript_view::FoldHint::None,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
+        };
+        let prompts = TurnBounds {
+            first: Some(0),
+            latest: Some(2),
+        };
+        assert_eq!(turn_rail(&state, &gap, prompts, palette), None, "{screen}");
+        let reply = TranscriptRow {
+            kind: TranscriptRowKind::Content,
+            anchor: RowAnchor {
+                entry_id: earlier,
+                position: RowPosition::Content(0),
+            },
+            ..gap
+        };
+        assert_eq!(
+            turn_rail(&state, &reply, prompts, palette),
+            Some(("│", palette.muted))
+        );
+    }
+
+    #[test]
+    fn summary_closes_a_cancelled_turn() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("test".into());
+        state
+            .transcript
+            .complete_message(1, "Running the tests.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        // The turn ends on the card, which carries the totals.
+        assert!(
+            state
+                .transcript
+                .attach_run_summary("4.0s · 1 tool · cancelled".into())
+        );
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let lines = screen.lines().collect::<Vec<_>>();
+        let card = lines
+            .iter()
+            .position(|line| line.contains("Bash"))
+            .expect("card row");
+        let summary = lines
+            .iter()
+            .position(|line| line.contains("╰4.0s · 1 tool · cancelled"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(summary > card, "{screen}");
     }
 
     #[test]
@@ -6667,6 +6836,7 @@ mod tests {
                             palette,
                             None,
                             None,
+                            None,
                         );
                     }
                     let selected = Some(action.anchor);
@@ -6678,6 +6848,7 @@ mod tests {
                         selected,
                         false,
                         palette,
+                        None,
                         None,
                         None,
                     );
@@ -6751,6 +6922,7 @@ mod tests {
                             selected,
                             false,
                             palette,
+                            None,
                             None,
                             None,
                         );

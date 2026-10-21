@@ -138,10 +138,9 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Compose display-only search evidence, cost, and the run summary without
-    /// changing model text.
+    /// Compose display-only search evidence and cost without changing model text.
     fn decorate(&mut self) {
-        if self.searches.is_empty() && self.cost.is_none() && self.run_summary.is_none() {
+        if self.searches.is_empty() && self.cost.is_none() {
             return;
         }
         let mut text = self.searches.join("\n\n");
@@ -152,13 +151,6 @@ impl TranscriptEntry {
         // The cost closes the reply, so it waits until the whole reply is shown.
         if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
             text.push_str(&format!("\n\n{cost}"));
-        }
-        if let Some(summary) = self
-            .run_summary
-            .as_ref()
-            .filter(|_| self.unrevealed.is_empty())
-        {
-            text.push_str(&format!("\n\n{summary}"));
         }
         self.decorated_content = Some(text);
     }
@@ -183,18 +175,12 @@ impl TranscriptEntry {
             .unwrap_or(&self.content)
     }
 
-    /// The Markdown a reply renders: its text, closed by the run summary once the
-    /// whole reply is shown. The summary only follows the text, so offsets into
-    /// [`Self::content`] stay valid in the rendered source.
-    pub(crate) fn markdown_source(&self) -> std::borrow::Cow<'_, str> {
-        match self
-            .run_summary
-            .as_ref()
+    /// The totals that close this entry's turn, once the entry is fully shown. The
+    /// transcript view draws them as the row that ends the turn's rail.
+    pub(crate) fn run_summary(&self) -> Option<&str> {
+        self.run_summary
+            .as_deref()
             .filter(|_| self.unrevealed.is_empty())
-        {
-            Some(summary) => format!("{}\n\n*{}*", self.content, escape_markdown(summary)).into(),
-            None => self.content.as_str().into(),
-        }
     }
 
     pub fn thinking(&self) -> &str {
@@ -534,9 +520,9 @@ impl Transcript {
         self.tool_cwd = Some(Arc::from(cwd));
     }
 
-    /// Close the run with its summary line under its last reply. The run must end on
-    /// that reply: when a tool or process card follows it, as after a cancelled call,
-    /// the line would sit mid-run, so the run keeps none.
+    /// Close the run with its summary on the turn's last entry, whether a reply or a
+    /// card, as after a cancelled call. Returns false when the turn shows nothing to
+    /// close.
     pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
         let prompt = self.latest_user_entry();
         let last = self
@@ -549,25 +535,15 @@ impl Transcript {
                     && matches!(entry.kind, TranscriptEntryKind::Message)
                     && entry.content.is_empty()
                     && entry.unrevealed.is_empty())
-            });
-        let Some(id) = last
-            .filter(|entry| {
-                entry.role == TranscriptRole::Assistant
-                    && matches!(entry.kind, TranscriptEntryKind::Message)
             })
-            .map(|entry| entry.id)
-        else {
+            .filter(|entry| entry.role != TranscriptRole::User)
+            .map(|entry| entry.id);
+        let Some(id) = last else {
             return false;
         };
         let entry = self.entry_mut(id);
         entry.run_summary = Some(summary);
-        // Reparse the whole reply with its new ending, so the line renders the same
-        // whether or not the reply was already laid out.
-        entry.layout_epoch = entry
-            .layout_epoch
-            .checked_add(1)
-            .expect("transcript layout epoch exhausted");
-        entry.decorate();
+        // The entry's last row now leads to the summary row, so cached rows rebuild.
         Self::bump_revision(entry);
         true
     }
@@ -2550,21 +2526,6 @@ impl Transcript {
             .checked_add(1)
             .expect("transcript generation exhausted");
     }
-}
-
-/// Backslash-escape Markdown punctuation so names render literally.
-fn escape_markdown(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if matches!(
-            character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '|' | '~' | '!'
-        ) {
-            escaped.push('\\');
-        }
-        escaped.push(character);
-    }
-    escaped
 }
 
 #[cfg(test)]

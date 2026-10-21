@@ -59,6 +59,9 @@ pub enum RowPosition {
     /// A plain gap below a prompt's highlighted surface, before the reply or card that follows.
     /// The prompt owns it, after its `Spacer`, which is the surface's bottom padding.
     UserLeadOut,
+    /// The run's totals, closing the turn's rail. The turn's last entry owns it, after its
+    /// body and before its `Spacer`.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -126,6 +129,8 @@ pub enum TranscriptRowKind {
     /// The gap between back-to-back collapsed cards, drawn as a thin rule. Like a spacer it
     /// holds no text, so a copied selection gets an empty line.
     Rule,
+    /// The muted totals that end a finished turn's rail.
+    RunSummary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -303,7 +308,9 @@ impl TranscriptRow {
 
 fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> TranscriptRowTone {
     match kind {
-        TranscriptRowKind::Placeholder | TranscriptRowKind::Thought => TranscriptRowTone::Muted,
+        TranscriptRowKind::Placeholder
+        | TranscriptRowKind::Thought
+        | TranscriptRowKind::RunSummary => TranscriptRowTone::Muted,
         TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
@@ -1000,6 +1007,19 @@ impl TranscriptRowCache {
                     position.absolute_byte_offset,
                     width,
                 )?,
+            RowPosition::RunSummary => {
+                let summary = entry.run_summary()?;
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        TranscriptRowKind::RunSummary,
+                        summary.to_owned(),
+                        entry.display_content().len(),
+                    ),
+                    next: spacer_after(transcript, entry),
+                }
+            }
             RowPosition::Spacer if next_entry().is_some() => {
                 let rule = transcript
                     .entry_after(entry.id)
@@ -2117,7 +2137,7 @@ impl TranscriptRowCache {
             let old_bytes = cached.retained_bytes;
             let build = (cached.entry_revision != Some(entry.revision())).then(|| {
                 cached.state.build(
-                    &entry.markdown_source()[start..],
+                    &entry.content[start..],
                     start,
                     entry.layout_epoch(),
                     entry.state == TranscriptEntryState::Complete,
@@ -2530,7 +2550,11 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
             }),
-            RowPosition::Spacer => {
+            RowPosition::Spacer if entry.run_summary().is_some() => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            }),
+            RowPosition::Spacer | RowPosition::RunSummary => {
                 if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
                     Some(RowAnchor {
                         entry_id: start,
@@ -2541,6 +2565,22 @@ impl TranscriptRowCache {
                 }
             }
         }
+    }
+
+    /// An entry's final row: its run summary when it closes a turn, else its body's last row.
+    fn end_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
+        if entry.run_summary().is_some() {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::RunSummary,
+            };
+        }
+        self.last_anchor(transcript, entry, width)
     }
 
     /// Whether `entry` is a card showing result rows, expanded or as an inline diff preview.
@@ -2596,7 +2636,9 @@ impl TranscriptRowCache {
                 }
                 Some(offset) if offset == target => return Some(anchor),
                 Some(_) => return Some(anchor),
-                None if next.position == RowPosition::Spacer => return Some(anchor),
+                None if matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary) => {
+                    return Some(anchor);
+                }
                 None => return Some(previous),
             }
         }
@@ -2623,7 +2665,9 @@ impl TranscriptRowCache {
             if next == target {
                 return Some(current);
             }
-            if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+            if next.entry_id != entry.id
+                || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+            {
                 return Some(current);
             }
             current = next;
@@ -2714,7 +2758,9 @@ impl TranscriptRowCache {
                 let Some(next) = cached.next else {
                     return current;
                 };
-                if next.entry_id != entry.id || next.position == RowPosition::Spacer {
+                if next.entry_id != entry.id
+                    || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+                {
                     return current;
                 }
                 current = next;
@@ -2803,6 +2849,7 @@ impl TranscriptRowCache {
                             RowPosition::Spacer
                                 | RowPosition::UserLeadIn
                                 | RowPosition::UserLeadOut
+                                | RowPosition::RunSummary
                         )
                 })
         });
@@ -4026,7 +4073,7 @@ impl TranscriptViewport {
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
         let entry = transcript.entries().last()?;
-        let mut top = cache.last_anchor(transcript, entry, self.width);
+        let mut top = cache.end_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
                 break;
@@ -4085,7 +4132,10 @@ fn scroll_anchor_rank(
     };
     let fraction = match anchor.position {
         RowPosition::Header => 0.0,
-        RowPosition::Spacer | RowPosition::UserLeadIn | RowPosition::UserLeadOut => 1.0,
+        RowPosition::Spacer
+        | RowPosition::UserLeadIn
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => 1.0,
         RowPosition::Thought => 0.025,
         RowPosition::ThoughtContent(offset) => {
             0.05 + 0.9 * (offset as f64 / source_length as f64).min(1.0)
@@ -4147,7 +4197,23 @@ fn cached_row_valid(
     if cached.entry_revision == entry.revision() {
         return true;
     }
+    // The body's last row leads to the run summary once one is attached, so a row that
+    // ended the entry must still lead where the entry now ends.
+    let ended_body = cached.next.is_none_or(|next| {
+        next.entry_id == entry.id
+            && matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+    });
+    if ended_body
+        && !matches!(
+            cached.row.kind,
+            TranscriptRowKind::Spacer | TranscriptRowKind::Rule | TranscriptRowKind::RunSummary
+        )
+        && cached.next != separator_after(transcript, entry)
+    {
+        return false;
+    }
     match cached.row.kind {
+        TranscriptRowKind::RunSummary => false,
         TranscriptRowKind::Header if entry.role == TranscriptRole::Assistant => false,
         TranscriptRowKind::Header => {
             let expected = RowPosition::Content(0);
@@ -4396,13 +4462,20 @@ fn normalize_anchor(
             }
             Some(match separator_after(transcript, entry) {
                 Some(spacer) => spacer,
-                None => cache.last_anchor(transcript, entry, width),
+                None => cache.end_anchor(transcript, entry, width),
             })
         }
         // The lead-out likewise needs its prompt to still be followed by a reply or card; the
         // prompt's own surface padding is the nearest row that exists either way.
         RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => {
             Some(match separator_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.end_anchor(transcript, entry, width),
+            })
+        }
+        // A summary that is no longer shown resumes at the entry's own gap or last row.
+        RowPosition::RunSummary if entry.run_summary().is_none() => {
+            Some(match spacer_after(transcript, entry) {
                 Some(spacer) => spacer,
                 None => cache.last_anchor(transcript, entry, width),
             })
@@ -4425,7 +4498,8 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Card(_)
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
-        | RowPosition::UserLeadOut => None,
+        | RowPosition::UserLeadOut
+        | RowPosition::RunSummary => None,
     }
 }
 
@@ -4474,7 +4548,20 @@ fn push_styled_span(
 
 /// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed
 /// cards.
+/// What follows an entry's body: the run summary when the entry ends its turn, then the
+/// gap before the next entry.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    if entry.run_summary().is_some() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::RunSummary,
+        });
+    }
+    spacer_after(transcript, entry)
+}
+
+/// The gap before the entry that follows, if any.
+fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     transcript.entry_after(entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
@@ -4705,6 +4792,52 @@ mod tests {
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&cell)), "{rows:#?}");
+    }
+
+    #[test]
+    fn summary_row_ends_the_turn() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        let reply = transcript.append_message_delta(1, "done");
+        transcript.complete_message(1, "done".into());
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 60, 20);
+        // Rows cached before the run completes still lead to its summary after.
+        viewport.visible_rows(&transcript, &mut cache);
+        assert!(transcript.attach_run_summary("4.0s · 1 tool".into()));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        // Following the tail, the summary is the last row.
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let last = rows.last().unwrap();
+        assert_eq!(last.kind, TranscriptRowKind::RunSummary);
+        assert_eq!(last.plain_text(), "4.0s · 1 tool");
+
+        transcript.append_prompt("second".into());
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let summary = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::RunSummary,
+        };
+        let spacer = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Spacer,
+        };
+        // Walking back from the gap passes the summary, then the reply's text.
+        assert_eq!(
+            cache.previous_anchor(&transcript, spacer, 60),
+            Some(summary)
+        );
+        let before = cache.previous_anchor(&transcript, summary, 60).unwrap();
+        assert_eq!(before.entry_id, reply);
+        assert!(matches!(
+            before.position,
+            RowPosition::Markdown(_) | RowPosition::Content(_)
+        ));
+        assert_eq!(
+            cache.row_at(&transcript, before, 60).unwrap().next,
+            Some(summary)
+        );
     }
 
     #[test]

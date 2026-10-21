@@ -4883,7 +4883,8 @@ fn run_summary_line(
     if outcome != "completed" {
         parts.push(outcome.to_owned());
     }
-    format!("╰ {}", parts.join(" · "))
+    // The turn's rail draws the closing `╰`.
+    parts.join(" · ")
 }
 
 /// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
@@ -6163,7 +6164,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_run_keeps_card_last() {
+    fn cancelled_run_closes_on_card() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
         state.transcript.append_prompt("test".into());
@@ -6189,28 +6190,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(effects.is_empty());
+        // The turn ends on the card, so the card carries the totals; the reply keeps
+        // its text.
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
         let reply = &state.transcript.entries()[1];
         assert_eq!(reply.display_content(), "Running the tests.");
-
-        state.transcript.complete_message(2, "Stopped.".into());
-        reduce(
-            &mut state,
-            UiAction::BackendEvent(BackendEvent::RunCompleted {
-                outcome: "cancelled".into(),
-                duration_ms: Some(4_000),
-                tool_calls: 1,
-                output_tokens: None,
-                model_ms: None,
-            }),
-            &mut ids,
-        )
-        .unwrap();
-        let last = state.transcript.entries().last().unwrap();
-        assert_eq!(
-            last.display_content(),
-            "Stopped.\n\n╰ 4.0s · 1 tool · cancelled"
-        );
+        assert_eq!(reply.run_summary(), None);
+        let card = state.transcript.entries().last().unwrap();
+        assert_eq!(card.run_summary(), Some("4.0s · 1 tool · cancelled"));
     }
 
     #[test]
@@ -6248,10 +6235,10 @@ mod tests {
         reduce(&mut state, UiAction::BackendEvent(completed), &mut ids).unwrap();
         let reply = state.transcript.entries().last().unwrap();
         assert_eq!(
-            reply.display_content(),
-            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s"
+            reply.run_summary(),
+            Some("Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s")
         );
-        assert_eq!(reply.content, "Done.");
+        assert_eq!(reply.display_content(), "Done.");
     }
 
     #[test]

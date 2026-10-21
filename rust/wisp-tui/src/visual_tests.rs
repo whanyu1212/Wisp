@@ -361,7 +361,10 @@ fn scrolling_up_from_the_live_view_keeps_the_prompt_until_it_is_reached() {
         (0..buffer.area.height)
             .filter_map(|y| {
                 let row = screen_row(buffer, y);
+                // Replies sit beside the turn's rail.
                 row.trim()
+                    .trim_start_matches('│')
+                    .trim_start()
                     .strip_prefix("reply line ")?
                     .split_whitespace()
                     .next()?
