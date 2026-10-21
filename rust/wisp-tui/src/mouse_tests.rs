@@ -1473,7 +1473,7 @@ async fn clicking_the_jump_label_above_the_composer_returns_to_the_latest_output
         let buffer = draw(&mut ui, width, 24);
         let (x, y) = cell_of(&buffer, label.trim());
         // It sits on the blank row right above the composer, not in the footer.
-        assert!(row_text(&buffer, y + 1).contains('╭'), "{width}");
+        assert!(row_text(&buffer, y + 1).contains('┍'), "{width}");
         assert!(!row_text(&buffer, 23).contains("scrolled"));
         let frame = &ui.mouse_frame.as_ref().unwrap().conversation;
         assert!(

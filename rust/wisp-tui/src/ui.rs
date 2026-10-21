@@ -819,6 +819,13 @@ fn render_transcript(
                     Block::default().style(palette.user_text()),
                     Rect::new(area.x, area.y - 1, area.width, 1),
                 );
+                // The prompt's bar runs the full height of its surface, padding included.
+                if content_area(area).x > area.x {
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("▎", palette.user_text().fg(palette.primary))),
+                        Rect::new(area.x, area.y - 1, 1, 1),
+                    );
+                }
             }
             let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
@@ -1295,7 +1302,7 @@ fn turn_rail(
         return None;
     }
     if row.kind == TranscriptRowKind::RunSummary {
-        return Some(("╰", palette.muted));
+        return Some(("╰", palette.rail()));
     }
     // The gap that ends a turn, after its summary or before the next prompt, is bare.
     if matches!(
@@ -1320,7 +1327,7 @@ fn turn_rail(
         if running {
             palette.running_rail()
         } else {
-            palette.muted
+            palette.rail()
         },
     ))
 }
@@ -1821,13 +1828,21 @@ fn render_composer_identity_row(
     }
 }
 
-/// Paint the composer's left border as a thick accent bar between its corners.
-/// The rest of the border keeps the status colour.
+/// Paint the composer's left border as a thick accent bar from top to bottom. Its
+/// corners square off into the thin top and bottom borders, which keep their colour.
 fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
     let buffer = frame.buffer_mut();
-    for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
+    let last = area.bottom().saturating_sub(1);
+    for y in area.y..area.bottom() {
+        let symbol = if y == area.y {
+            "┍"
+        } else if y == last {
+            "┕"
+        } else {
+            "┃"
+        };
         if let Some(cell) = buffer.cell_mut((area.x, y)) {
-            cell.set_symbol("┃").set_fg(color);
+            cell.set_symbol(symbol).set_fg(color);
         }
     }
 }
@@ -5298,7 +5313,10 @@ mod tests {
         });
         let idle = border(&state);
         // The border dims at idle while the accent bar and effort stay lit.
-        assert_eq!(color(&idle, "╭"), palette.muted);
+        assert_eq!(color(&idle, "╮"), palette.muted);
+        // The accent bar runs the composer's full height.
+        assert_eq!(color(&idle, "┍"), palette.accent);
+        assert_eq!(color(&idle, "┕"), palette.accent);
         assert_eq!(color(&idle, "┃"), palette.accent);
         assert_eq!(color(&idle, "high"), palette.warning);
         // An 80% full window turns the meter amber.
@@ -5312,7 +5330,7 @@ mod tests {
         assert!(state.editor_editable());
         // A run keeps the border quiet and shows its colour on the accent bar.
         let running = border(&state);
-        assert_eq!(color(&running, "╭"), palette.muted);
+        assert_eq!(color(&running, "╮"), palette.muted);
         assert_eq!(color(&running, "┃"), palette.secondary);
 
         state.view_status = ViewStatus::Idle;
@@ -6147,10 +6165,13 @@ mod tests {
         let finished = draw(&state);
         let screen = finished.to_string();
         // The rail settles to grey and ends in `╰` at the totals, which follow the tail.
-        assert_eq!(rail_at(&finished, "Done."), ("│".to_owned(), palette.muted));
+        assert_eq!(
+            rail_at(&finished, "Done."),
+            ("│".to_owned(), palette.rail())
+        );
         assert_eq!(
             rail_at(&finished, "Build · gpt_x · 4m 12s · 31 tok/s"),
-            ("╰".to_owned(), palette.muted)
+            ("╰".to_owned(), palette.rail())
         );
         assert_eq!(
             style_at_text(&finished, "Build · gpt_x").map(|style| style.0),
@@ -6189,7 +6210,7 @@ mod tests {
         };
         assert_eq!(
             turn_rail(&state, &reply, prompts, palette),
-            Some(("│", palette.muted))
+            Some(("│", palette.rail()))
         );
     }
 

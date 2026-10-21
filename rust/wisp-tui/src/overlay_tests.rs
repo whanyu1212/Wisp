@@ -901,7 +901,7 @@ async fn api_key_entry_docks_above_the_composer_and_shows_its_cursor() {
         .expect("API key panel");
     let composer = rows
         .iter()
-        .rposition(|row| row.contains('╭'))
+        .rposition(|row| row.contains('┍'))
         .expect("composer border");
     // Docked: the panel's bottom border sits directly above the composer.
     assert_eq!(

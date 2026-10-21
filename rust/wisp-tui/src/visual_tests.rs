@@ -273,6 +273,8 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             let user = row_containing(&buffer, "Review the startup");
             let label = row_containing(&buffer, "you");
             assert_eq!(buffer[(3, label - 1)].symbol(), " ");
+            // The prompt's bar covers its top padding too.
+            assert_eq!(buffer[(2, label - 1)].symbol(), buffer[(2, label)].symbol());
             assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
             assert_eq!(buffer[(97, label - 1)].bg, palette.panel);
             assert_eq!(buffer[(3, label - 2)].bg, canvas);
@@ -430,7 +432,8 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         let bottom_padding = if height >= 16 { 2 } else { 0 };
         assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
         if bottom_padding > 0 {
-            assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
+            // The accent bar squares off the top-left corner.
+            assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "┍");
             assert_eq!(buffer[(editor.area.x, editor.area.y - 1)].symbol(), "─");
             assert_eq!(
                 buffer[(editor.area.x, editor.area.y - 1)].bg,
