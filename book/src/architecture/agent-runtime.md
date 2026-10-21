@@ -87,18 +87,18 @@ assistant messages and tool results into its transcript as events arrive.
 sequenceDiagram
   participant Session as CodingSession
   participant Harness as AgentHarness
-  participant Loop as run_agent_loop
+  participant AgentLoop as run_agent_loop
 
-  Harness->>Loop: Start with normalized provider history
-  Loop-->>Harness: Stream message and tool events
+  Harness->>AgentLoop: Start with normalized provider history
+  AgentLoop-->>Harness: Stream message and tool events
   Harness->>Harness: Append completed transcript rows
-  Loop-->>Harness: TurnCompleted
+  AgentLoop-->>Harness: TurnCompleted
   Harness->>Harness: Drain an eligible queue and arm the boundary
-  Loop->>Harness: Request the next-boundary decision
+  AgentLoop->>Harness: Request the next-boundary decision
   Harness->>Session: Ask for session policy when configured
   Session-->>Harness: Stop, continue, replace, or rebase
-  Harness-->>Loop: Return the decision
-  Loop-->>Harness: Start the next turn
+  Harness-->>AgentLoop: Return the decision
+  AgentLoop-->>Harness: Start the next turn
   Harness->>Harness: Apply any accepted transcript transition
 ```
 

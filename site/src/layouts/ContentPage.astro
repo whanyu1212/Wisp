@@ -1,0 +1,91 @@
+---
+import { render, type CollectionEntry } from "astro:content";
+import Document from "./Document.astro";
+import { href, base } from "../content/paths";
+import type { Heading } from "../content/render";
+
+interface Props {
+  entry: CollectionEntry<"pages"> | CollectionEntry<"maintainerRecords">;
+  compatibility: boolean;
+}
+const { entry, compatibility } = Astro.props;
+const { Content, headings } = await render(entry);
+const target = href(entry.data.route);
+---
+
+<Document
+  page={entry.data}
+  headings={compatibility ? [] : (headings as Heading[])}
+  compatibility={compatibility}
+>
+  {compatibility ? (
+    <>
+      <h1>{entry.data.title} has moved</h1>
+      <p>
+        <a id="destination" href={target}>
+          Continue to {entry.data.title} →
+        </a>
+      </p>
+      <p>If automatic navigation is unavailable, choose a section below.</p>
+      <ul>
+        {headings.map((heading) => (
+          <li id={heading.slug}>
+            <a href={`${target}#${heading.slug}`}>{heading.text}</a>
+          </li>
+        ))}
+      </ul>
+      <script is:inline define:vars={{ target, base }}>
+        const destination = target + location.search + location.hash;
+        document.getElementById("destination").href = destination;
+        if (target.startsWith(base)) location.replace(destination);
+      </script>
+    </>
+  ) : entry.data.layout === "home" ? (
+    <>
+      <div class="home-intro">
+        <div>
+          <div class="eyebrow">A coding agent you can steer</div>
+          <p class="display-title">
+            A little wisp.
+            <br />A clearer way
+            <br />
+            through code.
+          </p>
+          <p class="lede">
+            Redirect Wisp while it works, approve changes before they happen,
+            and inspect the transcript afterward.
+          </p>
+          <a class="primary" href={href("guide/quickstart.html")}>
+            Start using Wisp →
+          </a>
+        </div>
+        <img
+          class="hero-image"
+          src={href("assets/wisp-banner-v2.png")}
+          alt="Wisp, a coding agent that stays in sync with you"
+          width="2400"
+          height="600"
+        />
+      </div>
+      <div class="starting-points">
+        {[
+          ["01 / Use", "Start with your repository", "guide/quickstart.html"],
+          ["02 / Reference", "Find the exact contract", "reference/index.html"],
+          ["03 / Learn", "Build a coding agent", "crafting-agents/index.html"],
+        ].map(([label, title, route]) => (
+          <a href={href(route!)}>
+            <span class="eyebrow">{label}</span>
+            <strong>{title} →</strong>
+          </a>
+        ))}
+      </div>
+      <article class="home-content">
+        <Content />
+      </article>
+    </>
+  ) : (
+    <article>
+      <Content />
+    </article>
+  )}
+</Document>

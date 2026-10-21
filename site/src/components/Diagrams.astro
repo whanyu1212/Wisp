@@ -1,0 +1,35 @@
+<script>
+  const diagrams = document.querySelectorAll<HTMLElement>(".mermaid");
+  if (diagrams.length) {
+    const { default: mermaid } = await import("mermaid");
+    const draw = async () => {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme:
+          document.documentElement.dataset.theme === "dark"
+            ? "dark"
+            : "default",
+      });
+      for (const [index, diagram] of [...diagrams].entries()) {
+        try {
+          const { svg } = await mermaid.render(
+            `diagram-${index}`,
+            diagram.dataset.source ?? "",
+          );
+          diagram.innerHTML = svg;
+          const fallback = diagram.parentElement?.querySelector("details");
+          if (fallback) fallback.open = false;
+        } catch (error) {
+          console.warn("Could not render documentation diagram", error);
+          diagram.textContent =
+            "Diagram unavailable. The source is shown below.";
+          const fallback = diagram.parentElement?.querySelector("details");
+          if (fallback) fallback.open = true;
+        }
+      }
+    };
+    await draw();
+    document.addEventListener("wisp-theme", draw);
+  }
+</script>
