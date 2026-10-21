@@ -390,6 +390,7 @@ the entire default keymap; other valid user settings still apply.
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
 | `theme.toggle` | Ctrl+T | Toggle Paper / last dark theme |
+| `panel.toggle` | Ctrl+B | Show or hide the side panel |
 | `transcript.browse` | F6 | Select transcript cards |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
 | `transcript.home`, `transcript.tail` | Ctrl+Home, Ctrl+End | Oldest content / live tail |
@@ -636,6 +637,7 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
+| `Ctrl+B` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
@@ -710,6 +712,16 @@ commands first, then skills, and typing `/skill:` narrows it to skills; `Tab` or
 suggestion, then `Enter` submits. `/mcp` shows server status, registered tools and connection
 errors. In both browsers `r` refreshes and `Esc` or `Ctrl+C` closes; both stay available while a
 prompt is running.
+
+### Side panel
+
+On a terminal at least 160 columns wide, a side panel beside the transcript summarizes the session:
+its name (or first prompt) and status, the folder and branch, context use, the model and effort,
+the session's cost, the permission mode, Git's changed files with line counts, each prompt's run
+time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
+and model to the panel. `Ctrl+B` hides or shows it. On a narrower terminal, `Ctrl+B` opens the same
+panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
+when the panel appears and after each run, but not while `/diff` is open.
 
 ## Modes
 

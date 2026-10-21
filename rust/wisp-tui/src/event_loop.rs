@@ -467,6 +467,11 @@ async fn run_with_interrupts<B: FrameBackend>(
                 ui.draw(terminal, connection)?;
             }
             next_paint = now + FRAME_INTERVAL;
+            // A frame learns the terminal's width, which decides whether the panel
+            // is on screen; the reducer hears of a change before the loop waits.
+            if !eof {
+                ui.sync_side_panel(writer, limit).await?;
+            }
         }
         if eof && sources.ready_event.is_none() && sources.events.is_empty() {
             return Ok(Exit::Eof);
