@@ -1828,21 +1828,13 @@ fn render_composer_identity_row(
     }
 }
 
-/// Paint the composer's left border as a thick accent bar from top to bottom. Its
-/// corners square off into the thin top and bottom borders, which keep their colour.
+/// Colour the composer's whole left side, corners included, as its accent. It keeps
+/// the border's own glyphs and weight, so the corners join in any terminal font.
 fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
     let buffer = frame.buffer_mut();
-    let last = area.bottom().saturating_sub(1);
     for y in area.y..area.bottom() {
-        let symbol = if y == area.y {
-            "┍"
-        } else if y == last {
-            "┕"
-        } else {
-            "┃"
-        };
         if let Some(cell) = buffer.cell_mut((area.x, y)) {
-            cell.set_symbol(symbol).set_fg(color);
+            cell.set_fg(color);
         }
     }
 }
@@ -5183,7 +5175,7 @@ mod tests {
         assert!(
             identity
                 .trim_start()
-                .starts_with("┃  Build · model-x fake · high"),
+                .starts_with("│  Build · model-x fake · high"),
             "{identity}"
         );
         assert!(
@@ -5314,10 +5306,10 @@ mod tests {
         let idle = border(&state);
         // The border dims at idle while the accent bar and effort stay lit.
         assert_eq!(color(&idle, "╮"), palette.muted);
-        // The accent bar runs the composer's full height.
-        assert_eq!(color(&idle, "┍"), palette.accent);
-        assert_eq!(color(&idle, "┕"), palette.accent);
-        assert_eq!(color(&idle, "┃"), palette.accent);
+        // The accent runs the composer's full height, corners included.
+        assert_eq!(color(&idle, "╭"), palette.accent);
+        assert_eq!(color(&idle, "╰"), palette.accent);
+        assert_eq!(color(&idle, "│›"), palette.accent);
         assert_eq!(color(&idle, "high"), palette.warning);
         // An 80% full window turns the meter amber.
         assert_eq!(color(&idle, "▰"), palette.warning);
@@ -5331,7 +5323,7 @@ mod tests {
         // A run keeps the border quiet and shows its colour on the accent bar.
         let running = border(&state);
         assert_eq!(color(&running, "╮"), palette.muted);
-        assert_eq!(color(&running, "┃"), palette.secondary);
+        assert_eq!(color(&running, "╭"), palette.secondary);
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
