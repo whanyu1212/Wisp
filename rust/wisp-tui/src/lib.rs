@@ -8,6 +8,7 @@ mod clipboard;
 mod command_tests;
 mod commands;
 mod connection_panel;
+mod context_split;
 mod context_view;
 mod detail_view;
 mod diff_card;
@@ -4280,7 +4281,7 @@ impl LiveUi {
                     self.context_view
                         .as_mut()
                         .expect("open context")
-                        .scroll(key.code);
+                        .key(key.code);
                 }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
