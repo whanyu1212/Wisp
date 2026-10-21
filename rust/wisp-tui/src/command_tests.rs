@@ -89,12 +89,13 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
         .find(|row| row.contains("2  YOLO"))
         .expect("YOLO choice");
     assert!(yolo.contains("current"), "{painted}");
-    // Docked: the panel's bottom border sits just above the composer and footer.
+    // Docked: the panel's bottom border sits just above the composer (with its blank
+    // row at 24 rows) and footer.
     let bottom = rows
         .iter()
         .position(|row| row.contains("Enter apply"))
         .expect("panel hint");
-    assert!(bottom >= rows.len() - 6, "{painted}");
+    assert!(bottom >= rows.len() - 7, "{painted}");
 
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await

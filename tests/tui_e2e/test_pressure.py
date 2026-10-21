@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import complete_frames, rendered_without_spacing, run_settled
+from tests.tui_e2e.support import (
+    complete_frames,
+    rendered_without_spacing,
+    run_settled,
+    screen_shows,
+)
 from wisp import __version__
 
 _PRESSURE_BACKEND = r"""
@@ -365,9 +370,11 @@ def test_finite_burst_beyond_event_queue_capacity_drains_in_order(tmp_path: Path
         tui.send(b"pressure burst\r")
         tui.wait_until(
             # Ctrl+C below quits only when idle; while the run is working it cancels.
-            # Ratatui may reuse an already painted BURST- prefix. The completion-only
-            # suffixes must arrive, but need not be emitted beside that reused prefix.
-            lambda output: run_settled(output, offset, b"FIRST", b"LAST"),
+            # An incremental frame rewrites only the cells that change, so the final
+            # reply is read off the replayed screen rather than the byte stream.
+            lambda output: (
+                run_settled(output, offset) and screen_shows(output, "BURST-FIRST BURST-LAST")
+            ),
             failure="bounded burst did not reach its final event",
         )
         assert b"frontend cannot keep up" not in tui.output
@@ -513,7 +520,8 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
             lambda output: (
                 burst_done.exists()
                 and cancel_received.exists()
-                and run_settled(output, signal_offset, b"LAST")
+                and run_settled(output, signal_offset)
+                and screen_shows(output, "BURST-LAST")
             ),
             failure="finite burst did not settle after cancellation",
         )

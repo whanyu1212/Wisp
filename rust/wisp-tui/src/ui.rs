@@ -26,8 +26,13 @@ use unicode_width::UnicodeWidthStr;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-/// The framed composer's ceiling; one more than an unframed one, for its identity row.
-const MAX_COMPOSER_HEIGHT: u16 = 9;
+/// The composer's ceiling with its frame and blank row. A framed composer without the
+/// blank row stops one row lower, and an unframed one two rows lower, so neither
+/// spends the rows they leave out on more draft.
+const MAX_COMPOSER_HEIGHT: u16 = 10;
+/// From this conversation height the framed composer leaves a blank row between the
+/// draft and its identity; a shorter screen keeps that row for the transcript.
+const COMPOSER_GAP_MIN_HEIGHT: u16 = 24;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
@@ -57,23 +62,33 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
+    let gap = composer_gap(area);
     // The footer, the transcript's two rows, and the status line while running.
     let ceiling = area
         .height
         .saturating_sub(3 + status_line_height(state))
-        .clamp(2, MAX_COMPOSER_HEIGHT - u16::from(!framed));
+        .clamp(
+            2,
+            MAX_COMPOSER_HEIGHT - u16::from(!framed) - u16::from(!(framed && gap)),
+        );
     if editable(state) {
         u16::try_from(
             layout
                 .map_or(1, |layout| layout.rows.len())
-                // A framed composer adds its borders and the identity row.
-                .saturating_add(if framed { 3 } else { 0 }),
+                // A framed composer adds its borders and the identity row, and on a
+                // tall screen a blank row between the draft and the identity.
+                .saturating_add(if framed { 3 + usize::from(gap) } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
     } else {
         2
     }
+}
+
+/// Whether a conversation this tall gives the framed composer its blank row.
+fn composer_gap(area: Rect) -> bool {
+    area.height >= COMPOSER_GAP_MIN_HEIGHT
 }
 
 fn conversation_surface(area: Rect) -> Rect {
@@ -264,7 +279,6 @@ pub fn render_interactive(
         }
         None => area,
     };
-    let scrollbar_x = column.right().saturating_sub(1);
     let area = conversation_surface(column);
 
     // A pending approval or trust decision docks above the footer in place of the
@@ -295,7 +309,6 @@ pub fn render_interactive(
             palette,
             bindings,
             startup_logo,
-            scrollbar_x,
         );
         render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
         render_footer(
@@ -348,7 +361,6 @@ pub fn render_interactive(
         palette,
         bindings,
         startup_logo,
-        scrollbar_x,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -372,6 +384,7 @@ pub fn render_interactive(
         composer_layout,
         composer_focused,
         padded,
+        composer_gap(area),
         palette,
         bindings,
     );
@@ -668,7 +681,6 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
-    scrollbar_x: u16,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -736,7 +748,6 @@ fn render_transcript(
         }
     }
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
-    let scroll = viewport.scrollbar_range(&state.transcript, row_cache, &rows);
     if let Some((user_id, mut user_rows)) = pinned {
         let user_index = state.transcript.entry_index(user_id).unwrap_or(usize::MAX);
         rows.retain(|row| {
@@ -889,9 +900,6 @@ fn render_transcript(
                 Rect::new(content.x, y, content.width, 1),
             );
         }
-    }
-    if let Some((start, end)) = scroll {
-        render_scrollbar(frame, rows_area, scrollbar_x, start, end, palette);
     }
     // Scrolled back, the blank row above the composer offers the jump to the latest output.
     let jump_to_latest = (padding > 0 && !viewport.follows_tail())
@@ -1272,42 +1280,6 @@ pub(crate) fn activity_phase(state: &UiState) -> String {
         "Thinking".into()
     } else {
         "Working".into()
-    }
-}
-
-/// Draw the transcript's scroll marker in column `x`, the conversation's right edge.
-fn render_scrollbar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    x: u16,
-    start: f64,
-    end: f64,
-    palette: Palette,
-) {
-    let height = usize::from(area.height);
-    if height == 0 {
-        return;
-    }
-    // Entry/source ranks locate the viewport but do not measure rendered height.
-    // A proportional thumb would grow over short entries and shrink over long replies,
-    // even while the viewport and history stay unchanged. Use a fixed position marker
-    // until the paged transcript has a global row extent.
-    let travel = height - 1;
-    let position = if end >= 1.0 {
-        travel
-    } else {
-        ((start / (start + 1.0 - end)) * travel as f64).round() as usize
-    }
-    .min(travel);
-    for offset in 0..height {
-        let thumb = offset == position;
-        let cell = &mut frame.buffer_mut()[(x, area.y + offset as u16)];
-        cell.set_symbol(if thumb { "┃" } else { "│" });
-        cell.set_style(palette.base().fg(if thumb {
-            palette.primary
-        } else {
-            palette.muted
-        }));
     }
 }
 
@@ -1903,6 +1875,7 @@ fn render_composer(
     layout: Option<&ComposerLayout>,
     focused: bool,
     padded: bool,
+    gap: bool,
     palette: Palette,
     bindings: &Bindings,
 ) -> Option<mouse::Editor> {
@@ -1935,14 +1908,17 @@ fn render_composer(
                 palette.accent
             };
             paint_composer_accent(frame, area, accent);
-            inner.height = inner.height.saturating_sub(1);
+            // On a tall screen a blank row separates the draft from the identity,
+            // when the composer has room for both and one draft row.
+            let gap = u16::from(gap && inner.height >= 3);
+            inner.height = inner.height.saturating_sub(1 + gap);
             // Indented past the prompt prefix so it lines up with the draft.
             let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
             render_composer_identity_row(
                 frame,
                 Rect {
                     x: inner.x.saturating_add(prefix_width).min(inner.right()),
-                    y: inner.bottom(),
+                    y: inner.bottom() + gap,
                     width: inner.width.saturating_sub(prefix_width),
                     height: 1,
                 },
@@ -3698,32 +3674,6 @@ mod tests {
     use serde_json::json;
     use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
 
-    #[test]
-    fn scrollbar_marker_stays_one_row_across_different_visible_entry_spans() {
-        for height in [1, 8, 40] {
-            for (start, end) in [(0.0, 0.1), (0.2, 0.21), (0.2, 0.8), (0.9, 1.0)] {
-                let mut terminal = Terminal::new(TestBackend::new(10, height)).unwrap();
-                terminal
-                    .draw(|frame| {
-                        let x = frame.area().right() - 1;
-                        render_scrollbar(frame, frame.area(), x, start, end, Palette::default());
-                    })
-                    .unwrap();
-                let buffer = terminal.backend().buffer();
-                let marked = (0..height)
-                    .filter(|y| buffer[(9, *y)].symbol() == "┃")
-                    .collect::<Vec<_>>();
-                assert_eq!(marked.len(), 1, "height {height}, range {start}..{end}");
-                if start == 0.0 {
-                    assert_eq!(marked[0], 0);
-                }
-                if end == 1.0 {
-                    assert_eq!(marked[0], height - 1);
-                }
-            }
-        }
-    }
-
     #[derive(Default)]
     struct TestIds(u64);
 
@@ -4468,6 +4418,24 @@ mod tests {
             Palette::default().secondary,
             "{text}"
         );
+    }
+
+    #[test]
+    fn composer_cap_follows_gap() {
+        let state = UiState::new("fake".into(), None, None);
+        let mut editor = PromptEditor::default();
+        editor.insert_paste(&"line\n".repeat(20));
+        let mut cache = ComposerLayoutCache::default();
+        let mut height = |rows: u16| {
+            let area = Rect::new(0, 0, 60, rows);
+            let layout = cache.layout(&editor, composer_editor_width(area.width));
+            composer_height(area, &state, Some(layout))
+        };
+        // A framed composer shows six rows of a long draft with or without the blank
+        // row, which is the only row the higher ceiling adds.
+        assert_eq!(height(14), 8);
+        assert_eq!(height(20), 9);
+        assert_eq!(height(30), 10);
     }
 
     #[test]
@@ -5234,6 +5202,58 @@ mod tests {
         );
         assert!(parts[1].width() <= BRANCH_MAX_COLUMNS, "{parts:?}");
         assert!(parts[1].ends_with('…'), "{parts:?}");
+    }
+
+    #[test]
+    fn tall_composer_spaces_identity() {
+        let rows = |height: u16| {
+            let mut state =
+                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+            state.mode_confirmed = true;
+            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        // From 24 rows a blank row sits between the draft and the identity.
+        let tall = rows(30);
+        assert!(tall[25].contains("› Ask Wisp anything"), "{}", tall[25]);
+        let gap = tall[26].trim();
+        assert!(
+            gap.starts_with('│') && gap.trim_matches('│').trim().is_empty(),
+            "{gap}"
+        );
+        assert!(
+            tall[27].contains("Build · model-x fake · high"),
+            "{}",
+            tall[27]
+        );
+        // A shorter screen keeps that row for the transcript.
+        let short = rows(20);
+        assert!(short[16].contains("› Ask Wisp anything"), "{}", short[16]);
+        assert!(
+            short[17].contains("Build · model-x fake · high"),
+            "{}",
+            short[17]
+        );
     }
 
     #[test]
@@ -6646,7 +6666,8 @@ mod tests {
         completed.before_text = before_text.map(str::to_owned);
         completed.created = created;
         state.transcript.observe_tool_result(completed);
-        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        // 25 rows: a 24-row screen's transcript plus the composer's blank row.
+        let mut terminal = Terminal::new(TestBackend::new(width, 25)).unwrap();
         terminal
             .draw(|frame| {
                 render_interactive(

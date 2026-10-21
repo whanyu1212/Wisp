@@ -428,8 +428,13 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         );
         assert_eq!(buffer[(margin + 1, editor.area.y)].symbol(), "›");
         assert_eq!(buffer[(editor.area.x, editor.area.y)].symbol(), "a");
-        // A framed composer ends with its identity row and bottom border.
-        let bottom_padding = if height >= 16 { 2 } else { 0 };
+        // A framed composer ends with its identity row and bottom border, and from
+        // 24 rows a blank row between the draft and the identity.
+        let bottom_padding = match height {
+            24.. => 3,
+            16.. => 2,
+            _ => 0,
+        };
         assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
         if bottom_padding > 0 {
             assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
@@ -631,7 +636,7 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
 }
 
 #[test]
-fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
+fn new_turn_hides_previous_reply_until_scrolled_back() {
     let mut ui = fixture("new-turn");
     let live = draw(&mut ui, 80, 24);
     let text = screen_text(&live);
@@ -639,13 +644,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
     assert!(text.contains("◐ Working"));
-    let thumb = |buffer: &ratatui::buffer::Buffer| {
-        (0..buffer.area.height)
-            .filter(|&y| buffer[(79, y)].symbol() == "┃")
-            .collect::<Vec<_>>()
-    };
-    let live_thumb = thumb(&live);
-    assert!(!live_thumb.is_empty());
+    // The transcript draws no scrollbar on its right edge.
+    assert!((0..live.area.height).all(|y| !matches!(live[(79, y)].symbol(), "│" | "┃")));
     ui.transcript_viewport.reduce(
         TranscriptViewAction::Home,
         &ui.state.transcript,
@@ -653,7 +653,6 @@ fn new_turn_hides_previous_reply_until_scrolled_back_and_moves_scrollbar() {
     );
     let history = draw(&mut ui, 80, 24);
     assert!(screen_text(&history).contains("Startup review"));
-    assert!(thumb(&history)[0] < live_thumb[0]);
     ui.transcript_viewport.reduce(
         TranscriptViewAction::FollowTail,
         &ui.state.transcript,

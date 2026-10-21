@@ -93,16 +93,16 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
                 output.clear()
             elif phase == "draft" and b"draft" in output:
                 # SGR is one-based. The padded composer has its editor at
-                # column 6, row 21, after the outer margin, rail, and `> `; the
-                # identity row and bottom border sit below it.
-                os.write(terminal_fd, b"\x1b[<0;6;21M\x1b[<0;6;21m")
+                # column 6, row 20, after the outer margin, rail, and `> `; a
+                # blank row, the identity row and the bottom border sit below it.
+                os.write(terminal_fd, b"\x1b[<0;6;20M\x1b[<0;6;20m")
                 output.clear()
                 if mouse_enabled:
                     phase = "cursor moved"
                 else:
                     os.write(terminal_fd, b"X\r")
                     phase = "submitted"
-            elif phase == "cursor moved" and b"\x1b[21;6H" in output:
+            elif phase == "cursor moved" and b"\x1b[20;6H" in output:
                 os.write(terminal_fd, b"X\r")
                 phase = "submitted"
                 output.clear()
