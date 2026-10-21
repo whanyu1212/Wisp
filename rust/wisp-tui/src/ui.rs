@@ -1832,7 +1832,9 @@ fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
             spans.push(separator());
             spans.push(Span::styled(
                 sanitize_for_terminal(effort),
-                Style::default().fg(palette.warning),
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
             ));
         }
         if state.model_selection_stale {
@@ -2719,7 +2721,17 @@ fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
 }
 
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
-    let parts = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
+    join_hints(footer_hint_parts(state, bindings, None), width)
+}
+
+/// The footer's key hints in order. An offered `panel` hint goes beside the interrupt
+/// key during a run, and last otherwise.
+fn footer_hint_parts(
+    state: &UiState,
+    bindings: &Bindings,
+    mut panel: Option<String>,
+) -> Vec<String> {
+    let mut parts: Vec<String> = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
             "y once".into(),
             "t tool".into(),
@@ -2735,18 +2747,16 @@ fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
         // The composer names the keys that follow up or steer.
-        vec!["Esc interrupt".into(), browse_hint(state, bindings)]
+        let mut parts = vec!["Esc interrupt".into()];
+        parts.extend(panel.take());
+        parts.push(browse_hint(state, bindings));
+        parts
     } else {
-        vec![
-            format!("{} send", primary_label(bindings, KeyAction::Submit)),
-            "/ commands".into(),
-            "Ctrl+G help".into(),
-            // Ahead of `@ files` so it still fits the 56-column cap of narrower
-            // terminals once there is something to browse.
-            browse_hint(state, bindings),
-        ]
+        // Help lists the remaining keys, sending included.
+        vec!["Ctrl+G help".into(), browse_hint(state, bindings)]
     };
-    join_hints(parts, width)
+    parts.extend(panel);
+    parts
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2877,10 +2887,8 @@ fn render_footer(
         hints
     } else {
         let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
-        let offer = format!(
-            "{hints} · {} panel",
-            primary_label(bindings, KeyAction::TogglePanel)
-        );
+        let panel = format!("{} panel", primary_label(bindings, KeyAction::TogglePanel));
+        let offer = join_hints(footer_hint_parts(state, bindings, Some(panel)), usize::MAX);
         if offer.width() + 3 <= hint_cap(room) {
             offer
         } else {
@@ -3918,8 +3926,9 @@ mod tests {
         let rendered = render_to_string(80, 18, &state, &editor);
         assert!(rendered.contains("model-x fake"));
         assert!(rendered.contains("hello"));
-        assert!(rendered.contains("Enter send"));
-        assert!(rendered.contains("/ commands"));
+        assert!(rendered.contains("Ctrl+G help"), "{rendered}");
+        assert!(!rendered.contains("Enter send"), "{rendered}");
+        assert!(!rendered.contains("/ commands"), "{rendered}");
         // Narrow footers drop optional hints; help remains available on Ctrl+G.
         assert!(!rendered.contains("rpc v"));
         assert!(!rendered.contains("events v"));
@@ -4259,7 +4268,6 @@ mod tests {
             None,
             &bindings,
         );
-        assert!(rendered.contains("Ctrl+Enter send"));
         let welcome_action = rendered
             .lines()
             .find(|line| line.contains("Ask Wisp anything"))
@@ -5466,8 +5474,8 @@ mod tests {
         let palette = Palette::default();
         assert_eq!(heading.0, palette.primary);
         assert!(heading.2.contains(Modifier::BOLD));
-        assert_eq!(marker.0, palette.primary);
-        assert!(marker.2.contains(Modifier::BOLD));
+        assert_eq!(marker.0, palette.muted);
+        assert!(!marker.2.contains(Modifier::BOLD));
         assert_eq!(inline.0, palette.foreground);
         assert_eq!(inline.1, palette.panel);
         assert_eq!(fence.0, palette.secondary);
@@ -6044,7 +6052,7 @@ mod tests {
             "{screen}"
         );
         assert_eq!(
-            style_at_text(&backend, "- old 0").map(|style| style.1),
+            style_at_text(&backend, "− old 0").map(|style| style.1),
             Some(palette.deletion_background),
             "{screen}"
         );
@@ -6686,7 +6694,7 @@ mod tests {
             rendered.contains("Edit      src/wisp/providers/google.py  +3 -3"),
             "{rendered}"
         );
-        assert!(rendered.contains("- retain portable"), "{rendered}");
+        assert!(rendered.contains("− retain portable"), "{rendered}");
         assert!(rendered.contains("+ so they cannot"), "{rendered}");
         assert!(
             rendered.contains("⋯"),
@@ -6699,6 +6707,29 @@ mod tests {
         assert!(!unchanged.contains(Modifier::UNDERLINED));
         let (_, _, changed_number) = style_at_text(&backend, "30").unwrap();
         assert!(changed_number.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn wrapped_deletion_aligns_continuation() {
+        let (rendered, _) = render_edit_card(
+            json!({
+                "path": "notes.txt",
+                "edits": [{"oldText": "alpha beta gamma delta epsilon zeta eta theta iota", "newText": "x"}]
+            }),
+            40,
+        );
+        let lines: Vec<&str> = rendered.lines().collect();
+        let sign = lines
+            .iter()
+            .position(|line| line.contains("− alpha"))
+            .unwrap_or_else(|| panic!("{rendered}"));
+        let column = |line: &str, text: &str| line.find(text).map(|at| line[..at].chars().count());
+        assert_eq!(
+            column(lines[sign + 1], "↳ "),
+            column(lines[sign], "− alpha"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains('↪'), "{rendered}");
     }
 
     #[test]
@@ -6727,7 +6758,7 @@ mod tests {
             false,
             100,
         );
-        assert!(rendered.contains("   2      - b"), "{rendered}");
+        assert!(rendered.contains("   2      − b"), "{rendered}");
         assert!(rendered.contains("      2 + B"), "{rendered}");
         assert!(
             rendered.contains("⏎ trailing newline removed"),
@@ -6799,7 +6830,7 @@ mod tests {
         assert!(!collapsed.contains("M file.txt"));
         assert!(!collapsed.contains("@@"));
         assert!(!collapsed.contains("No newline"));
-        assert!(collapsed.contains("- old�[2J"));
+        assert!(collapsed.contains("− old�[2J"));
         assert!(collapsed.contains("+ new value"));
         // The browse hint lives once in the footer, not under each card.
         assert!(!collapsed.contains("Enter details"), "{collapsed}");
@@ -6848,7 +6879,7 @@ mod tests {
         let (added_fg, added_background, _) =
             style_at_text(browse_terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, deleted_background, _) =
-            style_at_text(browse_terminal.backend(), "- old�[2J").unwrap();
+            style_at_text(browse_terminal.backend(), "− old�[2J").unwrap();
         assert_eq!(added_fg, Palette::default().success);
         assert_eq!(added_background, Palette::default().addition_background);
         assert_eq!(deleted_fg, Palette::default().error);
@@ -7568,6 +7599,48 @@ mod tests {
         assert!(running.active_prompt_editable());
         let hints = footer_hints(&running, &Bindings::default(), 200);
         assert_eq!(hints, "Esc interrupt · F6 browse");
+    }
+
+    #[test]
+    fn running_footer_orders_panel_hint() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        state.transcript.append_prompt("hello".into());
+        let footer = |width| {
+            render_to_string(width, 18, &state, &PromptEditor::default())
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned()
+        };
+        let wide = footer(140);
+        assert!(
+            wide.contains("Esc interrupt · Ctrl+B panel · F6 browse"),
+            "{wide}"
+        );
+        // A narrow row drops the panel hint before the others.
+        let narrow = footer(40);
+        assert!(narrow.contains("Esc interrupt · F6 browse"), "{narrow}");
+        assert!(!narrow.contains("panel"), "{narrow}");
+    }
+
+    #[test]
+    fn composer_effort_is_bold_warning() {
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+        state.effort = Some("high".into());
+        let line = composer_identity_line(&state, Palette::default());
+        let effort = line
+            .spans
+            .iter()
+            .find(|span| span.content == "high")
+            .unwrap();
+        assert_eq!(effort.style.fg, Some(Palette::default().warning));
+        assert!(effort.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

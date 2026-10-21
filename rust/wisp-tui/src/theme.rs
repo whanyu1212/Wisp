@@ -211,9 +211,8 @@ impl Palette {
     }
 
     pub fn semantic_list_marker(self) -> Style {
-        Style::default()
-            .fg(self.primary)
-            .add_modifier(Modifier::BOLD)
+        // Muted, since the accent colour is reserved for speaker labels and chips.
+        Style::default().fg(self.muted)
     }
 
     pub fn semantic_inline_code(self) -> Style {
