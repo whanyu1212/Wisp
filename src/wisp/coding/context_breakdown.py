@@ -58,6 +58,16 @@ _LARGEST_ITEM_COUNT = 3
 _MAX_LABEL_CHARS = 60
 
 
+@dataclass(frozen=True, slots=True)
+class _HistoryRow:
+    """One active-context message with the turn it counts toward."""
+
+    turn: int
+    message: Message
+    # A compaction's summary, which stands in for the runs it replaced.
+    summary: bool = False
+
+
 @dataclass(slots=True)
 class _Child:
     """Raw estimate for one part of a source, before apportioning."""
@@ -103,16 +113,11 @@ def build_context_breakdown(
     # providers without native tool history fold each tool result into an
     # assistant envelope, which would hide tool output. Apportioning absorbs the
     # small size difference.
-    turn_numbers = _turn_numbers(replay, entries)
-    history = [
-        (turn_numbers.get(row.entry_id), row.message)
-        for row in replay.rows
-        if row.message.role != "system"
-    ]
+    history = _history_rows(replay, entries)
     raw = _raw_source_children(
         prompt_messages,
         prompt_parts,
-        [message for _turn, message in history],
+        [row.message for row in history],
         tools,
     )
     sources = [source for source in _SOURCE_ORDER if source in _STANDARD_SOURCES or raw[source]]
@@ -201,6 +206,22 @@ def _source_usage(
     return ContextSourceUsage(source=source, tokens=tokens, count=count, children=items)
 
 
+def _history_rows(replay: SessionReplay, entries: Sequence[SessionEntry]) -> list[_HistoryRow]:
+    """Number each active message's run; a compaction summary joins the first run left."""
+
+    numbers = _turn_numbers(replay, entries)
+    rows = [row for row in replay.rows if row.message.role != "system"]
+    first_turn = next((numbers[row.entry_id] for row in rows if row.entry_id in numbers), 1)
+    return [
+        _HistoryRow(
+            turn=numbers.get(row.entry_id, first_turn),
+            message=row.message,
+            summary=row.source_kind == "compaction",
+        )
+        for row in rows
+    ]
+
+
 def _turn_numbers(replay: SessionReplay, entries: Sequence[SessionEntry]) -> dict[str, int]:
     """Number the runs along the active path, counting runs a compaction replaced.
 
@@ -231,19 +252,23 @@ def _turn_numbers(replay: SessionReplay, entries: Sequence[SessionEntry]) -> dic
 
 
 def _turn_growth(
-    history: Sequence[tuple[int | None, Message]],
+    history: Sequence[_HistoryRow],
     *,
     fixed_raw: int,
     total: int,
 ) -> tuple[ContextTurnGrowth, ...]:
-    """Apportion the total across turns; the first turn also carries the fixed context."""
+    """Apportion the total across turns; the first turn also carries the fixed context.
 
+    A session with no messages yet has no turns, rather than one holding only the
+    prompt and tools.
+    """
+
+    if not history:
+        return ()
     raw: dict[int, int] = {}
-    first_turn = next((turn for turn, _message in history if turn is not None), 1)
-    for turn, message in history:
-        key = turn if turn is not None else first_turn
-        raw[key] = raw.get(key, 0) + message_tokens(message)
-    raw[first_turn] = raw.get(first_turn, 0) + fixed_raw
+    for row in history:
+        raw[row.turn] = raw.get(row.turn, 0) + message_tokens(row.message)
+    raw[history[0].turn] += fixed_raw
     turns = sorted(raw)
     tokens = _apportion([raw[turn] for turn in turns], total)
     return tuple(
@@ -253,36 +278,31 @@ def _turn_growth(
 
 
 def _largest_items(
-    history: Sequence[tuple[int | None, Message]],
+    history: Sequence[_HistoryRow],
     *,
     scale: float,
 ) -> tuple[ContextItem, ...]:
-    calls = {call.call_id: call for _turn, message in history for call in message.tool_calls or ()}
+    calls = {call.call_id: call for row in history for call in row.message.tool_calls or ()}
     sized = sorted(
-        (
-            (message_tokens(message), index)
-            for index, (turn, message) in enumerate(history)
-            if turn is not None
-        ),
+        ((message_tokens(row.message), index) for index, row in enumerate(history)),
         reverse=True,
     )
-    items = []
-    for raw_tokens, index in sized[:_LARGEST_ITEM_COUNT]:
-        turn, message = history[index]
-        assert turn is not None
-        items.append(
-            ContextItem(
-                label=_item_label(message, calls),
-                tokens=round(raw_tokens * scale),
-                turn=turn,
-            )
+    return tuple(
+        ContextItem(
+            label=_item_label(history[index], calls),
+            tokens=round(raw_tokens * scale),
+            turn=history[index].turn,
         )
-    return tuple(items)
+        for raw_tokens, index in sized[:_LARGEST_ITEM_COUNT]
+    )
 
 
-def _item_label(message: Message, calls: Mapping[str, ToolCallSnapshot]) -> str:
+def _item_label(row: _HistoryRow, calls: Mapping[str, ToolCallSnapshot]) -> str:
     """Name a message by its tool and leading argument, or by its role."""
 
+    message = row.message
+    if row.summary:
+        return "compaction summary"
     if message.role != "tool":
         return "user prompt" if message.role == "user" else "assistant reply"
     name = message.tool_name or "tool"

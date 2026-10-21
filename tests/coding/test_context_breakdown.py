@@ -301,7 +301,7 @@ def test_turns_after_compaction(tmp_path: Path) -> None:
     compaction = CompactionSessionEntry(
         session_id="s",
         compaction=CompactionRecord(
-            summary="Earlier work",
+            summary="Earlier work. " * 500,
             replaced_entry_ids=tuple(
                 entry.id for entry in history if entry.operation_id == "run-1"
             ),
@@ -314,7 +314,21 @@ def test_turns_after_compaction(tmp_path: Path) -> None:
 
     # Run 1 was summarized; its summary counts toward the first turn left, run 2.
     _assert_sums(stats)
-    assert [turn.turn for turn in _breakdown(stats).turns] == [2]
+    breakdown = _breakdown(stats)
+    assert [turn.turn for turn in breakdown.turns] == [2]
+    labels = {item.label: item.turn for item in breakdown.largest}
+    assert labels["compaction summary"] == 2
+
+
+def test_empty_session_turns(tmp_path: Path) -> None:
+    messages, parts = _prompt(tmp_path)
+
+    stats = _stats((), messages, parts)
+
+    breakdown = _breakdown(stats)
+    assert breakdown.turns == ()
+    assert breakdown.largest == ()
+    assert sum(usage.tokens for usage in breakdown.sources) == stats.context.effective_tokens
 
 
 def test_turns_without_operations(tmp_path: Path) -> None:

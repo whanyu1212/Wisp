@@ -228,8 +228,9 @@ class ContextBreakdown(BaseModel):
     Every source is estimated with the context heuristic and then apportioned so the
     sources, and each source's children, sum exactly to the budget's effective total.
     `scaled` is True when that total is a provider observation rather than an
-    estimate. Turns cover the runs since the last compaction; the first listed turn
-    also carries the prompt, tool schemas, and any compaction summary.
+    estimate. Turns cover the runs since the last compaction and sum to the same
+    total; the first listed turn also carries the prompt, tool schemas, and any
+    compaction summary. A session with no messages yet lists no turns.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

@@ -493,7 +493,7 @@
     },
     "ContextBreakdown": {
       "additionalProperties": false,
-      "description": "Per-source split of a context budget's effective tokens.\n\nEvery source is estimated with the context heuristic and then apportioned so the\nsources, and each source's children, sum exactly to the budget's effective total.\n`scaled` is True when that total is a provider observation rather than an\nestimate. Turns cover the runs since the last compaction; the first listed turn\nalso carries the prompt, tool schemas, and any compaction summary.",
+      "description": "Per-source split of a context budget's effective tokens.\n\nEvery source is estimated with the context heuristic and then apportioned so the\nsources, and each source's children, sum exactly to the budget's effective total.\n`scaled` is True when that total is a provider observation rather than an\nestimate. Turns cover the runs since the last compaction and sum to the same\ntotal; the first listed turn also carries the prompt, tool schemas, and any\ncompaction summary. A session with no messages yet lists no turns.",
       "properties": {
         "largest": {
           "default": [],
