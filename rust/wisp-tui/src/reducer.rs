@@ -1147,6 +1147,8 @@ pub enum BackendEvent {
         duration_ms: Option<u64>,
         tool_calls: u64,
         output_tokens: Option<u64>,
+        /// Time the run's model responses spent streaming, which throughput uses.
+        model_ms: Option<u64>,
     },
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
@@ -4582,8 +4584,16 @@ fn handle_backend_event(
             duration_ms,
             tool_calls,
             output_tokens,
+            model_ms,
         } => {
-            let summary = run_summary_line(state, &outcome, duration_ms, tool_calls, output_tokens);
+            let summary = run_summary_line(
+                state,
+                &outcome,
+                duration_ms,
+                tool_calls,
+                output_tokens,
+                model_ms,
+            );
             if state.transcript.attach_run_summary(summary) {
                 Ok(vec![UiEffect::RequestRender])
             } else {
@@ -4835,6 +4845,7 @@ fn run_summary_line(
     duration_ms: Option<u64>,
     tool_calls: u64,
     output_tokens: Option<u64>,
+    model_ms: Option<u64>,
 ) -> String {
     let mut parts = Vec::new();
     if state.mode_confirmed {
@@ -4862,8 +4873,12 @@ fn run_summary_line(
         1 => parts.push("1 tool".to_owned()),
         count => parts.push(format!("{count} tools")),
     }
-    if let Some(tokens) = output_tokens.filter(|tokens| *tokens > 0) {
-        parts.push(format!("{} tokens", abbreviated_count(tokens)));
+    // Throughput over the time the model streamed, so tool time does not dilute it.
+    if let (Some(tokens), Some(model_ms)) = (
+        output_tokens.filter(|tokens| *tokens > 0),
+        model_ms.filter(|milliseconds| *milliseconds > 0),
+    ) {
+        parts.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
     }
     if outcome != "completed" {
         parts.push(outcome.to_owned());
@@ -4871,23 +4886,14 @@ fn run_summary_line(
     format!("╰ {}", parts.join(" · "))
 }
 
-/// `1.2k`, `31k`, `1.4m`: one decimal below ten of a unit. Each unit is chosen after
-/// rounding, so 999.6k reads `1.0m`.
-fn abbreviated_count(count: u64) -> String {
-    if count < 1_000 {
-        return count.to_string();
+/// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
+fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
+    let rate = tokens as f64 * 1000.0 / model_ms as f64;
+    if rate < 10.0 {
+        format!("{rate:.1}")
+    } else {
+        format!("{rate:.0}")
     }
-    for (unit, size) in [("k", 1_000_u64), ("m", 1_000_000)] {
-        let tenths = count.saturating_add(size / 20) / (size / 10);
-        if tenths < 100 {
-            return format!("{}.{}{unit}", tenths / 10, tenths % 10);
-        }
-        let whole = count.saturating_add(size / 2) / size;
-        if whole < 1_000 || unit == "m" {
-            return format!("{whole}{unit}");
-        }
-    }
-    unreachable!("the last unit always returns")
 }
 
 #[cfg(test)]
@@ -6151,18 +6157,9 @@ mod tests {
     }
 
     #[test]
-    fn counts_round_before_units() {
-        let cases = [
-            (999, "999"),
-            (1_234, "1.2k"),
-            (9_960, "10k"),
-            (31_400, "31k"),
-            (999_600, "1.0m"),
-            (12_300_000, "12m"),
-        ];
-        for (count, label) in cases {
-            assert_eq!(abbreviated_count(count), label);
-        }
+    fn throughput_keeps_a_digit() {
+        assert_eq!(tokens_per_second(1_234, 40_000), "31");
+        assert_eq!(tokens_per_second(42, 5_000), "8.4");
     }
 
     #[test]
@@ -6186,6 +6183,7 @@ mod tests {
                 duration_ms: Some(4_000),
                 tool_calls: 1,
                 output_tokens: None,
+                model_ms: None,
             }),
             &mut ids,
         )
@@ -6203,6 +6201,7 @@ mod tests {
                 duration_ms: Some(4_000),
                 tool_calls: 1,
                 output_tokens: None,
+                model_ms: None,
             }),
             &mut ids,
         )
@@ -6230,7 +6229,8 @@ mod tests {
             "outcome": "completed",
             "duration_ms": 252_000,
             "tool_calls": 3,
-            "output_tokens": 1_234
+            "output_tokens": 1_234,
+            "model_ms": 40_000
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let completed = BackendEvent::from_live(&live).unwrap();
@@ -6249,7 +6249,7 @@ mod tests {
         let reply = state.transcript.entries().last().unwrap();
         assert_eq!(
             reply.display_content(),
-            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 1.2k tokens"
+            "Done.\n\n╰ Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s"
         );
         assert_eq!(reply.content, "Done.");
     }

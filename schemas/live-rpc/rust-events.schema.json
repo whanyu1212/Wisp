@@ -16,6 +16,19 @@
           "default": null,
           "title": "AgentCompletedDurationMs"
         },
+        "model_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedModelMs"
+        },
         "outcome": {
           "enum": [
             "completed",
@@ -72,7 +85,8 @@
         "outcome",
         "duration_ms",
         "tool_calls",
-        "output_tokens"
+        "output_tokens",
+        "model_ms"
       ],
       "title": "AgentCompleted",
       "type": "object"
