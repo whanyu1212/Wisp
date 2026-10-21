@@ -3213,6 +3213,33 @@ impl LiveUi {
         }
     }
 
+    /// Open the view a side panel row summarizes, as its slash command would, without
+    /// clearing a draft from the composer.
+    async fn open_from_panel(
+        &mut self,
+        target: side_panel::Target,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match target {
+            side_panel::Target::Diff(path) => {
+                self.git_diff_view = Some(git_diff_view::GitDiffView::opened_at(path));
+                self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
+                    .await
+            }
+            side_panel::Target::Queue => {
+                self.queue_view = Some(queue_view::QueueView::default());
+                self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+            }
+            side_panel::Target::Mcp => {
+                self.discovery_view = Some(DiscoveryView::mcp());
+                self.notice = None;
+                self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
+            }
+        }
+    }
+
     async fn poll_session_catalog(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
@@ -4078,7 +4105,8 @@ impl LiveUi {
                     | OverlayKind::Logo
                     | OverlayKind::Session
                     | OverlayKind::PromptHistory
-                    | OverlayKind::Queue => key.code == KeyCode::Enter,
+                    | OverlayKind::Queue
+                    | OverlayKind::SidePanel => key.code == KeyCode::Enter,
                     OverlayKind::Discovery => self
                         .discovery_view
                         .as_ref()
@@ -4296,13 +4324,29 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            // The overlaid panel only reads: Esc or Ctrl+C closes it, like /diff, so
-            // this comes before Ctrl+C's interrupt.
+            // Esc or Ctrl+C closes the overlaid panel, like /diff, so this comes before
+            // Ctrl+C's interrupt. Enter opens the focused row's view in its place,
+            // keeping any draft in the composer.
             Input::Key(key) if overlay == Some(OverlayKind::SidePanel) => {
-                if is_escape(key) || is_ctrl_c(key) {
+                if is_ctrl_c(key) {
                     self.side_panel.close_overlay();
                     self.render_pending = true;
+                    return Ok(LoopControl::Continue);
                 }
+                if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
+                    return Ok(LoopControl::Continue);
+                }
+                match self.side_panel.key(key.code, &self.state) {
+                    side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
+                    side_panel::OverlayKey::Open(target) => {
+                        self.side_panel.close_overlay();
+                        self.render_pending = true;
+                        return self.open_from_panel(target, writer, limit).await;
+                    }
+                    side_panel::OverlayKey::Moved => {}
+                    side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
+                }
+                self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Input::Paste(_) if overlay == Some(OverlayKind::SidePanel) => Ok(LoopControl::Continue),

@@ -950,7 +950,10 @@ async fn ctrl_b_follows_width() {
     draw(&mut ui, &mut terminal);
     let screen = text(terminal.backend().buffer());
     assert!(screen.contains("Context"), "{screen}");
-    assert!(screen.contains("Ctrl+B close · Esc close"), "{screen}");
+    assert!(
+        screen.contains("Esc close · Tab sections · Enter open"),
+        "{screen}"
+    );
     assert!(screen.contains("keep this"), "{screen}");
     ui.handle_input(key(KeyCode::Esc), &writer, 8192)
         .await
@@ -973,6 +976,50 @@ async fn ctrl_b_follows_width() {
     draw(&mut ui, &mut wide);
     assert_eq!(ui.active_overlay(), None);
     assert!(text(wide.backend().buffer()).contains("Ctrl+B hide panel"));
+}
+
+#[tokio::test]
+async fn panel_enter_opens_diff() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(std::sync::Arc::new(reducer::git_diff::GitDiffSnapshot {
+        generation: 1,
+        head: "abc".into(),
+        truncated: false,
+        files: vec![reducer::git_diff::GitDiffFile {
+            path: "src/lib.rs".into(),
+            status: "modified".into(),
+            before: "a\n".into(),
+            after: "b\n".into(),
+            notice: String::new(),
+        }],
+    }));
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    draw(&mut ui, &mut terminal);
+    // Typed keys go to the panel, not the composer.
+    ui.handle_input(key(KeyCode::Char('x')), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    // Enter acts only on a focus the user has seen drawn.
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    // Focus starts on the changed file; Enter opens /diff and keeps the draft.
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(!ui.side_panel.overlay_open());
+    assert!(
+        ui.editor.text().starts_with("keep this"),
+        "{}",
+        ui.editor.text()
+    );
 }
 
 #[tokio::test]

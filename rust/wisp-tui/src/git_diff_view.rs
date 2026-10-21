@@ -26,9 +26,20 @@ pub(crate) struct GitDiffView {
     active: usize,
     tree_focus: bool,
     review: DiffReview,
+    /// The file to select when a snapshot arrives, until the user moves. Opening
+    /// `/diff` reads a fresh snapshot, so the file is found again in that one.
+    opened_at: Option<String>,
 }
 
 impl GitDiffView {
+    /// `/diff` with `path` selected in the tree, when the snapshot has it.
+    pub(crate) fn opened_at(path: Option<String>) -> Self {
+        Self {
+            opened_at: path,
+            ..Self::default()
+        }
+    }
+
     fn sync(&mut self, state: &GitDiff) {
         let changed = match (&self.snapshot, &state.snapshot) {
             (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
@@ -54,6 +65,16 @@ impl GitDiffView {
         self.tree_focus = true;
         self.review.reset();
         self.rebuild();
+        if let Some(path) = &self.opened_at {
+            if let Some(position) = self
+                .rows
+                .iter()
+                .position(|(row, index)| index.is_some() && row == path)
+            {
+                self.selected = position;
+                self.active = self.rows[position].1.expect("a file row");
+            }
+        }
     }
 
     fn rebuild(&mut self) {
@@ -93,6 +114,7 @@ impl GitDiffView {
     }
 
     pub fn key(&mut self, key: KeyCode) {
+        self.opened_at = None;
         match key {
             KeyCode::Tab | KeyCode::BackTab => self.tree_focus = !self.tree_focus,
             KeyCode::Char('s') => self.review.split = !self.review.split,
@@ -349,6 +371,42 @@ mod tests {
     use super::*;
     use crate::reducer::git_diff::GitDiffFile;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn opened_file_survives_refresh() {
+        let snapshot = |generation| {
+            Some(Arc::new(GitDiffSnapshot {
+                generation,
+                head: "abc".into(),
+                truncated: false,
+                files: ["a.rs", "b.rs", "c.rs"]
+                    .into_iter()
+                    .map(|path| GitDiffFile {
+                        path: path.into(),
+                        status: "modified".into(),
+                        before: "old\n".into(),
+                        after: "new\n".into(),
+                        notice: String::new(),
+                    })
+                    .collect(),
+            }))
+        };
+        let mut state = GitDiff::default();
+        let mut view = GitDiffView::opened_at(Some("b.rs".into()));
+        state.snapshot = snapshot(1);
+        view.sync(&state);
+        assert_eq!(view.rows[view.selected].0, "b.rs");
+        assert_eq!(view.active, 1);
+        // Opening /diff reads a fresh snapshot; the file stays selected in it.
+        state.snapshot = snapshot(2);
+        view.sync(&state);
+        assert_eq!(view.rows[view.selected].0, "b.rs");
+        // Once the user moves, a later snapshot no longer pulls the selection back.
+        view.key(KeyCode::Down);
+        state.snapshot = snapshot(3);
+        view.sync(&state);
+        assert_eq!(view.selected, 0);
+    }
 
     #[test]
     fn tree_collapses_and_review_renders_at_narrow_and_wide_sizes() {
