@@ -416,6 +416,49 @@
       "title": "CompactionStarted",
       "type": "object"
     },
+    "ContextBreakdown": {
+      "additionalProperties": false,
+      "description": "Per-source split of a context budget's effective tokens.\n\nEvery source is estimated with the context heuristic and then apportioned so the\nsources, and each source's children, sum exactly to the budget's effective total.\n`scaled` is True when that total is a provider observation rather than an\nestimate. Turns cover the runs since the last compaction and sum to the same\ntotal; the first listed turn also carries the prompt, tool schemas, and any\ncompaction summary. A session with no messages yet lists no turns.",
+      "properties": {
+        "largest": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextItem"
+          },
+          "title": "ContextBreakdownLargest",
+          "type": "array"
+        },
+        "scaled": {
+          "default": false,
+          "title": "ContextBreakdownScaled",
+          "type": "boolean"
+        },
+        "sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextSourceUsage"
+          },
+          "title": "ContextBreakdownSources",
+          "type": "array"
+        },
+        "turns": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextTurnGrowth"
+          },
+          "title": "ContextBreakdownTurns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources",
+        "scaled",
+        "turns",
+        "largest"
+      ],
+      "title": "ContextBreakdown",
+      "type": "object"
+    },
     "ContextBudget": {
       "additionalProperties": false,
       "description": "Current estimate, latest observation, and model-window budget.",
@@ -641,6 +684,33 @@
       "title": "ContextEstimated",
       "type": "object"
     },
+    "ContextItem": {
+      "additionalProperties": false,
+      "description": "One large single message in the active context, such as a tool's output.",
+      "properties": {
+        "label": {
+          "title": "ContextItemLabel",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "ContextItemTokens",
+          "type": "integer"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "ContextItemTurn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "tokens",
+        "turn"
+      ],
+      "title": "ContextItem",
+      "type": "object"
+    },
     "ContextObservation": {
       "additionalProperties": false,
       "description": "Provider-reported input usage for one exact request-context prefix.",
@@ -833,6 +903,117 @@
         "pressure_ratio"
       ],
       "title": "ContextPressure",
+      "type": "object"
+    },
+    "ContextSourceItem": {
+      "additionalProperties": false,
+      "description": "One named part of a context source, such as an MCP server or instruction file.",
+      "properties": {
+        "count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ContextSourceItemCount"
+        },
+        "label": {
+          "title": "ContextSourceItemLabel",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "ContextSourceItemTokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "tokens",
+        "count"
+      ],
+      "title": "ContextSourceItem",
+      "type": "object"
+    },
+    "ContextSourceUsage": {
+      "additionalProperties": false,
+      "description": "Tokens one source contributes to the request context, with its parts.",
+      "properties": {
+        "children": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContextSourceItem"
+          },
+          "title": "ContextSourceUsageChildren",
+          "type": "array"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ContextSourceUsageCount"
+        },
+        "source": {
+          "enum": [
+            "messages",
+            "built_in_tools",
+            "mcp_tools",
+            "custom_prompt",
+            "system_prompt",
+            "skills",
+            "project_instructions",
+            "project_context"
+          ],
+          "title": "ContextSourceUsageSource",
+          "type": "string"
+        },
+        "tokens": {
+          "minimum": 0,
+          "title": "ContextSourceUsageTokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "tokens",
+        "count",
+        "children"
+      ],
+      "title": "ContextSourceUsage",
+      "type": "object"
+    },
+    "ContextTurnGrowth": {
+      "additionalProperties": false,
+      "description": "Context tokens one run's messages added, counted along the active path.",
+      "properties": {
+        "tokens": {
+          "minimum": 0,
+          "title": "ContextTurnGrowthTokens",
+          "type": "integer"
+        },
+        "turn": {
+          "minimum": 1,
+          "title": "ContextTurnGrowthTurn",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "turn",
+        "tokens"
+      ],
+      "title": "ContextTurnGrowth",
       "type": "object"
     },
     "ErrorEvent": {
@@ -4837,6 +5018,18 @@
           "$ref": "#/$defs/ContextBudget",
           "title": "SessionStatsContext"
         },
+        "context_breakdown": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SessionStatsContextBreakdown"
+        },
         "cost": {
           "$ref": "#/$defs/SessionCostSummary",
           "title": "SessionStatsCost"
@@ -4877,7 +5070,8 @@
         "usage",
         "context",
         "compaction",
-        "cost"
+        "cost",
+        "context_breakdown"
       ],
       "title": "SessionStats",
       "type": "object"

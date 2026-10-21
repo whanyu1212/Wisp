@@ -11,6 +11,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
 
 from .git import git_deadline
+from .parts import PromptPart
 from .project_root import (
     PROJECT_CONTEXT_FILE_CANDIDATES,
     PROJECT_FILE_CANDIDATES,
@@ -62,6 +63,39 @@ def build_project_context(
         unavailable status; the shared deadline is restored on exit.
     """
 
+    text, _parts = assemble_project_context(
+        cwd=cwd,
+        tools=tools,
+        max_chars=max_chars,
+        max_context_file_chars=max_context_file_chars,
+        trusted_context_root=trusted_context_root,
+        protected_paths=protected_paths,
+        repository_status=repository_status,
+    )
+    return text
+
+
+def assemble_project_context(
+    *,
+    cwd: Path,
+    tools: Sequence[ToolSpec] = (),
+    max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+    max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
+    trusted_context_root: Path | None = None,
+    protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
+    repository_status: str | None = None,
+) -> tuple[str, tuple[PromptPart, ...]]:
+    """Build the project-context block and record the labelled parts it contains.
+
+    Takes the same arguments as `build_project_context`.
+
+    Returns:
+        tuple[str, tuple[PromptPart, ...]]: The block `build_project_context` returns,
+        and its parts in order: working directory, Git status, project files, and tool
+        summary as project context, then one project-instructions part per trusted
+        instruction file.
+    """
+
     with git_deadline():
         resolved_cwd = cwd.resolve(strict=False)
         project_root = resolve_project_context_root(resolved_cwd)
@@ -71,21 +105,30 @@ def build_project_context(
             else project_root
         )
         root_section = f"project root: {project_root}" if project_root != resolved_cwd else ""
+        status = (
+            repository_status
+            if repository_status is not None
+            else read_repository_status(resolved_cwd)
+        )
+        files_summary = _project_files_summary(project_root)
+        tool_summary = _tool_summary(tools)
         sections = [
             PROJECT_CONTEXT_HEADER,
             f"cwd: {resolved_cwd}",
             root_section,
-            (
-                repository_status
-                if repository_status is not None
-                else read_repository_status(resolved_cwd)
-            ),
-            _project_files_summary(project_root),
-            _tool_summary(tools),
+            status,
+            files_summary,
+            tool_summary,
+        ]
+        parts = [
+            PromptPart("project_context", "cwd", "\n".join(sections[:3])),
+            PromptPart("project_context", "git status", status),
+            PromptPart("project_context", "project files", files_summary),
+            PromptPart("project_context", "tool summary", tool_summary),
         ]
 
         base_context = "\n".join(section for section in sections if section)
-        context_file_section = _project_context_files_section(
+        context_file_section, file_parts = _project_context_files_section(
             project_root=project_root,
             cwd=resolved_cwd,
             trusted_context_root=resolved_trusted_context_root,
@@ -96,7 +139,8 @@ def build_project_context(
         )
         if context_file_section:
             sections.append(context_file_section)
-        return _truncate_context("\n".join(section for section in sections if section), max_chars)
+        text = _truncate_context("\n".join(section for section in sections if section), max_chars)
+        return text, (*parts, *file_parts)
 
 
 def build_untrusted_project_context(
@@ -114,12 +158,35 @@ def build_untrusted_project_context(
         str: A bounded block stating that project context was skipped.
     """
 
-    sections = [
-        PROJECT_CONTEXT_HEADER,
-        "project context: skipped because this project is not trusted",
-        _tool_summary(tools),
-    ]
-    return _truncate_context("\n".join(sections), max_chars)
+    text, _parts = assemble_untrusted_project_context(tools=tools, max_chars=max_chars)
+    return text
+
+
+def assemble_untrusted_project_context(
+    *,
+    tools: Sequence[ToolSpec] = (),
+    max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+) -> tuple[str, tuple[PromptPart, ...]]:
+    """Build the untrusted block and record its parts, as `assemble_project_context` does.
+
+    Args:
+        tools (Sequence[ToolSpec]): Tools exposed to the model.
+        max_chars (int): Maximum length of the returned block.
+
+    Returns:
+        tuple[str, tuple[PromptPart, ...]]: The block `build_untrusted_project_context`
+        returns, and its skipped-context notice and tool summary as project context.
+    """
+
+    notice = (
+        f"{PROJECT_CONTEXT_HEADER}\nproject context: skipped because this project is not trusted"
+    )
+    tool_summary = _tool_summary(tools)
+    parts = (
+        PromptPart("project_context", "cwd", notice),
+        PromptPart("project_context", "tool summary", tool_summary),
+    )
+    return _truncate_context(f"{notice}\n{tool_summary}", max_chars), parts
 
 
 def _project_files_summary(cwd: Path) -> str:
@@ -139,12 +206,13 @@ def _project_context_files_section(
     trusted_context_root: Path,
     protected_paths: tuple[str, ...],
     max_chars: int,
-) -> str:
+) -> tuple[str, tuple[PromptPart, ...]]:
     if max_chars < 1:
-        return ""
+        return "", ()
 
     section_prefix = "project instructions:\n"
     blocks: list[str] = []
+    parts: list[PromptPart] = []
     for directory in _project_directory_chain(
         project_root=project_root,
         cwd=cwd,
@@ -164,11 +232,13 @@ def _project_context_files_section(
         body_budget = max_chars - used_chars - len(separator) - len(block_header)
         if body_budget < 1:
             break
-        blocks.append(f"{block_header}{_read_context_file(path, max_chars=body_budget)}")
+        block = f"{block_header}{_read_context_file(path, max_chars=body_budget)}"
+        blocks.append(block)
+        parts.append(PromptPart("project_instructions", relative_path, block))
 
     if not blocks:
-        return ""
-    return _truncate_context(section_prefix + "\n\n".join(blocks), max_chars)
+        return "", ()
+    return _truncate_context(section_prefix + "\n\n".join(blocks), max_chars), tuple(parts)
 
 
 def _project_context_file_from_dir(

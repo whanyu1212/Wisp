@@ -38,14 +38,7 @@ def estimate_context(
         }
         for result in tool_results
     )
-    tool_payloads = [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "input_schema": tool.input_schema,
-        }
-        for tool in tools
-    ]
+    tool_payloads = [_tool_payload(tool) for tool in tools]
     system_tokens = _payload_tokens(system_payloads)
     message_tokens = _payload_tokens(message_payloads)
     tool_schema_tokens = _payload_tokens(tool_payloads)
@@ -181,14 +174,7 @@ def context_fingerprint(
 
     payload = {
         "messages": [_message_payload(message) for message in messages],
-        "tools": [
-            {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-            }
-            for tool in tools
-        ],
+        "tools": [_tool_payload(tool) for tool in tools],
     }
     text = json.dumps(
         payload,
@@ -197,6 +183,54 @@ def context_fingerprint(
         sort_keys=True,
     )
     return sha256(_utf8_bytes(text)).hexdigest()
+
+
+def message_tokens(message: Message) -> int:
+    """Estimate one message alone, with the heuristic `estimate_context` uses.
+
+    Args:
+        message (Message): Message to measure.
+
+    Returns:
+        int: Estimated tokens. Summing these over messages slightly overcounts a
+        joint estimate, which rounds once.
+    """
+
+    return _payload_tokens(_message_payload(message))
+
+
+def tool_schema_tokens(tool: ToolSpec) -> int:
+    """Estimate one tool's schema alone, with the heuristic `estimate_context` uses.
+
+    Args:
+        tool (ToolSpec): Tool whose name, description, and input schema to measure.
+
+    Returns:
+        int: Estimated tokens.
+    """
+
+    return _payload_tokens(_tool_payload(tool))
+
+
+def text_tokens(text: str) -> int:
+    """Estimate plain text with the UTF-8-bytes-per-token heuristic.
+
+    Args:
+        text (str): Text to measure, without JSON quoting.
+
+    Returns:
+        int: Estimated tokens; 0 for empty text.
+    """
+
+    return math.ceil(len(_utf8_bytes(text)) / 4)
+
+
+def _tool_payload(tool: ToolSpec) -> dict[str, object]:
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "input_schema": tool.input_schema,
+    }
 
 
 def _message_payload(message: Message) -> dict[str, object]:
@@ -235,6 +269,9 @@ __all__ = [
     "context_fingerprint",
     "estimate_context",
     "estimate_context_budget",
+    "message_tokens",
     "observe_context",
+    "text_tokens",
+    "tool_schema_tokens",
     "trailing_context_estimate",
 ]

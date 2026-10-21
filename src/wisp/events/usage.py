@@ -165,6 +165,82 @@ class ContextBudget(BaseModel):
         return self
 
 
+# Where context tokens come from, in the order a breakdown lists them. A session
+# with a caller-supplied prompt reports it as `custom_prompt` instead of Wisp's own
+# instructions, project context, and tool guidance.
+ContextSource = Literal[
+    "messages",
+    "built_in_tools",
+    "mcp_tools",
+    "custom_prompt",
+    "system_prompt",
+    "skills",
+    "project_instructions",
+    "project_context",
+]
+
+
+class ContextSourceItem(BaseModel):
+    """One named part of a context source, such as an MCP server or instruction file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str
+    tokens: int = Field(ge=0)
+    # Messages or tools the part holds, when it holds more than one kind of thing.
+    count: int | None = Field(default=None, ge=0)
+
+
+class ContextSourceUsage(BaseModel):
+    """Tokens one source contributes to the request context, with its parts."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: ContextSource
+    tokens: int = Field(ge=0)
+    # Messages, tools, or files the source holds; None when it has no countable items.
+    count: int | None = Field(default=None, ge=0)
+    children: tuple[ContextSourceItem, ...] = ()
+
+
+class ContextItem(BaseModel):
+    """One large single message in the active context, such as a tool's output."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    label: str
+    tokens: int = Field(ge=0)
+    turn: int = Field(ge=1)
+
+
+class ContextTurnGrowth(BaseModel):
+    """Context tokens one run's messages added, counted along the active path."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    turn: int = Field(ge=1)
+    tokens: int = Field(ge=0)
+
+
+class ContextBreakdown(BaseModel):
+    """Per-source split of a context budget's effective tokens.
+
+    Every source is estimated with the context heuristic and then apportioned so the
+    sources, and each source's children, sum exactly to the budget's effective total.
+    `scaled` is True when that total is a provider observation rather than an
+    estimate. Turns cover the runs since the last compaction and sum to the same
+    total; the first listed turn also carries the prompt, tool schemas, and any
+    compaction summary. A session with no messages yet lists no turns.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    sources: tuple[ContextSourceUsage, ...] = ()
+    scaled: bool = False
+    turns: tuple[ContextTurnGrowth, ...] = ()
+    largest: tuple[ContextItem, ...] = ()
+
+
 class CompactionPolicyStatus(BaseModel):
     """Current automatic-compaction policy and threshold eligibility."""
 
@@ -190,6 +266,7 @@ class SessionStats(BaseModel):
     context: ContextBudget
     compaction: CompactionPolicyStatus | None = None
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
+    context_breakdown: ContextBreakdown | None = None
 
 
 class ContextPressure(WispEvent):

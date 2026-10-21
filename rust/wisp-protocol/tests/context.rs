@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use wisp_protocol::{
     commands::WispTypedClientRpcCommands,
-    events::{self, CompactionOutcome},
+    events::{self, CompactionOutcome, ContextSource},
 };
 
 fn fixture(kind: &str) -> Value {
@@ -37,6 +37,36 @@ fn projects_python_context_and_compaction_events_without_losing_cost_or_outcome(
     assert_eq!(completed.outcome, CompactionOutcome::Completed);
     assert!(!completed.will_retry);
     assert_eq!(completed.error.as_deref(), Some("Retry setup failed"));
+}
+
+#[test]
+fn decodes_context_breakdown() {
+    let stats = events::deserialize(fixture("session.stats"))
+        .unwrap()
+        .session_stats("stats-1")
+        .unwrap();
+    let breakdown = stats.context_breakdown.unwrap();
+    let total: u64 = breakdown.sources.iter().map(|usage| usage.tokens).sum();
+    assert_eq!(Some(total), stats.context.effective_tokens);
+    assert_eq!(breakdown.sources[2].source, ContextSource::McpTools);
+    assert_eq!(breakdown.sources[2].children[0].count, Some(3));
+    assert_eq!(breakdown.turns.last().unwrap().turn, 2);
+    assert_eq!(breakdown.largest[0].label, "bash gh pr checks 766 output");
+
+    // Older stats without a breakdown still decode.
+    let mut stats = fixture("session.stats");
+    stats["stats"]
+        .as_object_mut()
+        .unwrap()
+        .remove("context_breakdown");
+    let stats = events::deserialize(stats)
+        .unwrap()
+        .session_stats("stats-1")
+        .unwrap();
+    assert!(stats.context_breakdown.is_none());
+    let mut stats = fixture("session.stats");
+    stats["stats"]["context_breakdown"]["sources"][0]["source"] = json!("deferred_tools");
+    assert!(events::deserialize(stats).is_err());
 }
 
 #[test]

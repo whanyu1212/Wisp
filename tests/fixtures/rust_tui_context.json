@@ -48,6 +48,121 @@
         "complete": false,
         "priced_record_count": 1,
         "unpriced_record_count": 1
+      },
+      "context_breakdown": {
+        "sources": [
+          {
+            "source": "messages",
+            "tokens": 2400,
+            "count": 4,
+            "children": [
+              {
+                "label": "tool output",
+                "tokens": 1600,
+                "count": 1
+              },
+              {
+                "label": "assistant",
+                "tokens": 500,
+                "count": 2
+              },
+              {
+                "label": "user",
+                "tokens": 300,
+                "count": 1
+              }
+            ]
+          },
+          {
+            "source": "built_in_tools",
+            "tokens": 200,
+            "count": 2,
+            "children": [
+              {
+                "label": "read",
+                "tokens": 80,
+                "count": null
+              },
+              {
+                "label": "bash",
+                "tokens": 120,
+                "count": null
+              }
+            ]
+          },
+          {
+            "source": "mcp_tools",
+            "tokens": 150,
+            "count": 3,
+            "children": [
+              {
+                "label": "github",
+                "tokens": 150,
+                "count": 3
+              }
+            ]
+          },
+          {
+            "source": "system_prompt",
+            "tokens": 120,
+            "count": null,
+            "children": [
+              {
+                "label": "core instructions",
+                "tokens": 120,
+                "count": null
+              }
+            ]
+          },
+          {
+            "source": "skills",
+            "tokens": 30,
+            "count": null,
+            "children": []
+          },
+          {
+            "source": "project_instructions",
+            "tokens": 60,
+            "count": 1,
+            "children": [
+              {
+                "label": "AGENTS.md",
+                "tokens": 60,
+                "count": null
+              }
+            ]
+          },
+          {
+            "source": "project_context",
+            "tokens": 40,
+            "count": null,
+            "children": [
+              {
+                "label": "cwd",
+                "tokens": 40,
+                "count": null
+              }
+            ]
+          }
+        ],
+        "scaled": false,
+        "turns": [
+          {
+            "turn": 1,
+            "tokens": 1400
+          },
+          {
+            "turn": 2,
+            "tokens": 1600
+          }
+        ],
+        "largest": [
+          {
+            "label": "bash gh pr checks 766 output",
+            "tokens": 1600,
+            "turn": 2
+          }
+        ]
       }
     }
   },

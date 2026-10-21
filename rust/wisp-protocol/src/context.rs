@@ -52,6 +52,61 @@ pub struct CompactionPolicyStatus {
     pub overflow_recovery_enabled: bool,
 }
 
+/// Where context tokens come from, in the order a breakdown lists them.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSource {
+    Messages,
+    BuiltInTools,
+    McpTools,
+    CustomPrompt,
+    SystemPrompt,
+    Skills,
+    ProjectInstructions,
+    ProjectContext,
+}
+
+/// One named part of a source, such as an MCP server or an instruction file.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ContextSourceItem {
+    pub label: String,
+    pub tokens: u64,
+    pub count: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ContextSourceUsage {
+    pub source: ContextSource,
+    pub tokens: u64,
+    pub count: Option<u64>,
+    pub children: Vec<ContextSourceItem>,
+}
+
+/// One large single message in the active context.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ContextItem {
+    pub label: String,
+    pub tokens: u64,
+    pub turn: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ContextTurnGrowth {
+    pub turn: u64,
+    pub tokens: u64,
+}
+
+/// Per-source split of the budget's effective tokens. The sources, each source's
+/// children, and the turns each sum exactly to that total; `scaled` marks a total
+/// the provider observed rather than one the backend estimated.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct ContextBreakdown {
+    pub sources: Vec<ContextSourceUsage>,
+    pub scaled: bool,
+    pub turns: Vec<ContextTurnGrowth>,
+    pub largest: Vec<ContextItem>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct SessionStats {
     pub session_id: Option<String>,
@@ -61,6 +116,7 @@ pub struct SessionStats {
     pub context: ContextBudget,
     pub compaction: Option<CompactionPolicyStatus>,
     pub cost: SessionCostSummary,
+    pub context_breakdown: Option<ContextBreakdown>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

@@ -15,7 +15,9 @@ from wisp.agent.context_budget import (
     estimate_context_budget,
 )
 from wisp.coding.compaction import NothingToCompactError, plan_manual_compaction
+from wisp.coding.context_breakdown import build_context_breakdown
 from wisp.coding.costs import aggregate_session_cost
+from wisp.coding.prompt import PromptPart
 from wisp.events import (
     AgentCompleted,
     CompactionPolicyStatus,
@@ -115,6 +117,7 @@ def build_session_stats(
     model: str | None = None,
     observed_tokens: int | None = None,
     auto_compaction_enabled: bool = True,
+    prompt_parts: Sequence[Sequence[PromptPart]] | None = None,
 ) -> SessionStats:
     """Derive one consistent statistics snapshot from durable session state.
 
@@ -122,6 +125,9 @@ def build_session_stats(
     active path after the last compaction. Without one, the budget is estimated and
     ``observed_tokens`` (the session's in-memory observation, if any) is reported as
     stale because it no longer describes the active context.
+
+    When ``prompt_parts`` labels the leading system messages of ``provider_messages``,
+    the snapshot also splits the budget's effective tokens by source.
     """
 
     usage_records = tuple(_usage_records(entries))
@@ -146,6 +152,19 @@ def build_session_stats(
             observed_tokens=observed_tokens,
             observed_is_current=False,
         )
+    breakdown = (
+        build_context_breakdown(
+            prompt_messages=provider_messages[: len(prompt_parts)],
+            prompt_parts=prompt_parts,
+            tools=tools,
+            replay=replay,
+            entries=entries,
+            effective_tokens=context.effective_tokens or 0,
+            scaled=context.accounting_method != "fully_estimated",
+        )
+        if prompt_parts is not None
+        else None
+    )
     return SessionStats(
         session_id=session_id,
         entry_count=len(entries),
@@ -160,6 +179,7 @@ def build_session_stats(
             context=context,
             auto_compaction_enabled=auto_compaction_enabled,
         ),
+        context_breakdown=breakdown,
     )
 
 

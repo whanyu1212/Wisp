@@ -13,7 +13,7 @@ import wisp.coding.session as session_module
 from tests.coding.session_support import (
     CapturingProvider,
 )
-from wisp.coding.prompt import build_prompt_messages
+from wisp.coding.prompt import AssembledPrompt, assemble_prompt
 from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
@@ -54,15 +54,15 @@ def test_builds_trusted_prompt_off_event_loop(
     worker_started = threading.Event()
     worker_release = threading.Event()
     worker_threads: list[int] = []
-    original_build = build_prompt_messages
+    original_build = assemble_prompt
 
-    def blocking_build(**kwargs: object) -> tuple[Message, ...]:
+    def blocking_build(**kwargs: object) -> AssembledPrompt:
         worker_threads.append(threading.get_ident())
         worker_started.set()
         worker_release.wait(timeout=2)
         return original_build(**kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(session_module, "build_prompt_messages", blocking_build)
+    monkeypatch.setattr(session_module, "assemble_prompt", blocking_build)
 
     async def scenario() -> tuple[bool, int]:
         agent = CodingSession(
@@ -100,12 +100,12 @@ def test_prompt_construction_is_abandoned_on_cancel(
     worker_started = threading.Event()
     worker_release = threading.Event()
 
-    def blocking_build(**_kwargs: object) -> tuple[Message, ...]:
+    def blocking_build(**_kwargs: object) -> AssembledPrompt:
         worker_started.set()
         worker_release.wait(timeout=2)
-        return ()
+        return AssembledPrompt(messages=(), parts=())
 
-    monkeypatch.setattr(session_module, "build_prompt_messages", blocking_build)
+    monkeypatch.setattr(session_module, "assemble_prompt", blocking_build)
 
     async def scenario() -> None:
         agent = CodingSession(

@@ -3300,6 +3300,15 @@
    "operation": "remove",
    "path": [
     "stats",
+    "context_breakdown"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
     "cost"
    ],
    "accepted": true
@@ -3529,6 +3538,251 @@
     "stats",
     "context",
     "estimate"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "largest"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "scaled"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "turns"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context_breakdown"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "largest",
+    0,
+    "label"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "largest",
+    0,
+    "tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "largest",
+    0,
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "largest",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "children"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "count"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "source"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "children",
+    0,
+    "count"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "children",
+    0,
+    "label"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "children",
+    0,
+    "tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "sources",
+    0,
+    "children",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "turns",
+    0,
+    "tokens"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "turns",
+    0,
+    "turn"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "context_breakdown",
+    "turns",
+    0
    ],
    "accepted": false
   },

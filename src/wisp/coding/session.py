@@ -57,8 +57,9 @@ from wisp.coding.prompt import (
     PROJECT_CONTEXT_HEADER,
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
-    build_prompt_messages,
-    extend_custom_prompt_messages,
+    PromptPart,
+    assemble_custom_prompt,
+    assemble_prompt,
     read_repository_status,
 )
 from wisp.coding.stats import RunStats, build_session_stats
@@ -155,11 +156,14 @@ class _SessionPrompt:
     """System messages for one run, and the Git snapshot their project context used.
 
     The snapshot is saved with the project-context message so a resumed session
-    can send the same prompt again (see `_persisted_repository_status`).
+    can send the same prompt again (see `_persisted_repository_status`). The parts
+    label each message's text by context source for the context breakdown; they
+    are never persisted.
     """
 
     messages: tuple[Message, ...]
     repository_status: RepositoryStatusSnapshot | None = None
+    parts: tuple[tuple[PromptPart, ...], ...] = ()
 
 
 def _is_project_context(message: Message) -> bool:
@@ -1563,15 +1567,11 @@ class CodingSession:
                 )
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
-            provider_messages = (
-                *(
-                    await self._prompt_messages_async(
-                        session_id=session.session_id if session is not None else None,
-                        session=session,
-                    )
-                ).messages,
-                *self._normalize_provider_messages(history),
+            prompt = await self._prompt_messages_async(
+                session_id=session.session_id if session is not None else None,
+                session=session,
             )
+            provider_messages = (*prompt.messages, *self._normalize_provider_messages(history))
             observation = self._context_observations.get(
                 session.session_id if session is not None else ""
             )
@@ -1588,6 +1588,7 @@ class CodingSession:
                 model=self.model or self.provider.default_model,
                 observed_tokens=observed_tokens,
                 auto_compaction_enabled=self.auto_compaction_enabled,
+                prompt_parts=prompt.parts,
             )
 
     def _web_search_guidance(self) -> str:
@@ -1657,21 +1658,23 @@ class CodingSession:
             else ""
         )
         # Both prompt paths add the same host guidance, in this order.
-        additional_guidance = (skill_index, self._web_search_guidance())
+        additional_guidance = (
+            PromptPart("skills", "skill index", skill_index),
+            PromptPart("project_context", "web search", self._web_search_guidance()),
+        )
         if self.prompt_messages is not None:
-            return _SessionPrompt(
-                messages=extend_custom_prompt_messages(
-                    self.prompt_messages,
-                    additional_guidance=additional_guidance,
-                    mode=self.mode,
-                )
+            custom = assemble_custom_prompt(
+                self.prompt_messages,
+                additional_guidance=additional_guidance,
+                mode=self.mode,
             )
+            return _SessionPrompt(messages=custom.messages, parts=custom.parts)
         repository_status = (
             self._repository_status_snapshot(session_id, operation_context.cwd, session=session)
             if self.trusted and session_id is not None
             else None
         )
-        messages = build_prompt_messages(
+        prompt = assemble_prompt(
             cwd=operation_context.cwd,
             tools=effective_tools,
             tool_prompt_metadata=effective_registry.prompt_metadata(
@@ -1688,7 +1691,8 @@ class CodingSession:
             repository_status=repository_status,
         )
         return _SessionPrompt(
-            messages=messages,
+            messages=prompt.messages,
+            parts=prompt.parts,
             repository_status=(
                 RepositoryStatusSnapshot(
                     cwd=str(operation_context.cwd.resolve(strict=False)),

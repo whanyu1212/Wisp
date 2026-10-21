@@ -319,6 +319,18 @@ _SESSION_STATS = {
     "usage_record_count": 0,
     "usage": _TOKEN_USAGE,
     "context": _CONTEXT_BUDGET,
+    "context_breakdown": {
+        "sources": [
+            {
+                "source": "mcp_tools",
+                "tokens": 1,
+                "count": 1,
+                "children": [{"label": "github", "tokens": 1, "count": 1}],
+            }
+        ],
+        "turns": [{"turn": 1, "tokens": 1}],
+        "largest": [{"label": "bash output", "tokens": 1, "turn": 1}],
+    },
 }
 _RPC_STATE = {
     "provider": "fixture",

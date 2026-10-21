@@ -16,11 +16,12 @@ from .instructions import (
     INSTRUCTION_BOUNDARY_SYSTEM_PROMPT,
     PLAN_MODE_SYSTEM_PROMPT,
 )
+from .parts import AssembledPrompt, PromptPart
 from .project_context import (
     DEFAULT_CONTEXT_FILE_MAX_CHARS,
     DEFAULT_CONTEXT_MAX_CHARS,
-    build_project_context,
-    build_untrusted_project_context,
+    assemble_project_context,
+    assemble_untrusted_project_context,
 )
 from .text_budget import truncate_text
 
@@ -71,8 +72,55 @@ def build_prompt_messages(
         True
     """
 
-    context = (
-        build_project_context(
+    return assemble_prompt(
+        cwd=cwd,
+        tools=tools,
+        tool_prompt_metadata=tool_prompt_metadata,
+        additional_guidance=_host_guidance(additional_guidance),
+        mode=mode,
+        max_context_chars=max_context_chars,
+        max_context_file_chars=max_context_file_chars,
+        include_project_context=include_project_context,
+        protected_paths=protected_paths,
+        trusted_context_root=trusted_context_root,
+        repository_status=repository_status,
+    ).messages
+
+
+def assemble_prompt(
+    *,
+    cwd: Path,
+    tools: Sequence[ToolSpec] = (),
+    tool_prompt_metadata: Sequence[ToolPromptMetadata] = (),
+    additional_guidance: Sequence[PromptPart] = (),
+    mode: AgentMode = DEFAULT_AGENT_MODE,
+    max_context_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
+    max_context_file_chars: int = DEFAULT_CONTEXT_FILE_MAX_CHARS,
+    include_project_context: bool = True,
+    protected_paths: tuple[str, ...] = DEFAULT_PROTECTED_PATHS,
+    trusted_context_root: Path | None = None,
+    repository_status: str | None = None,
+) -> AssembledPrompt:
+    """Assemble the prompt `build_prompt_messages` returns, with each message's parts.
+
+    Takes the same arguments as `build_prompt_messages`, except that each piece of
+    `additional_guidance` is a `PromptPart` naming the context source it counts
+    toward, such as the skill index or web-search guidance.
+
+    Returns:
+        AssembledPrompt: The messages `build_prompt_messages` returns. Core
+        instructions, tool guidance, the instruction boundary, and plan restrictions
+        are system-prompt parts; the project-context message carries its own parts;
+        each guidance message is its one `additional_guidance` part.
+
+    Examples:
+        >>> prompt = assemble_prompt(cwd=Path("."), include_project_context=False)
+        >>> [[part.label for part in parts] for parts in prompt.parts]
+        [['core instructions'], ['cwd', 'tool summary'], ['instruction boundary']]
+    """
+
+    context, context_parts = (
+        assemble_project_context(
             cwd=cwd,
             tools=tools,
             max_chars=max_context_chars,
@@ -82,22 +130,39 @@ def build_prompt_messages(
             repository_status=repository_status,
         )
         if include_project_context
-        else build_untrusted_project_context(tools=tools, max_chars=max_context_chars)
+        else assemble_untrusted_project_context(tools=tools, max_chars=max_context_chars)
     )
     messages = [
-        Message(
-            role="system",
-            content=DEFAULT_SYSTEM_PROMPT,
-            prompt_cache_boundary=True,
+        (
+            Message(
+                role="system",
+                content=DEFAULT_SYSTEM_PROMPT,
+                prompt_cache_boundary=True,
+            ),
+            (PromptPart("system_prompt", "core instructions", DEFAULT_SYSTEM_PROMPT),),
         ),
-        Message(role="system", content=context),
+        (Message(role="system", content=context), context_parts),
     ]
     if tool_guidance := _tool_guidance(tool_prompt_metadata):
-        messages.append(Message(role="system", content=tool_guidance))
+        messages.append(
+            (
+                Message(role="system", content=tool_guidance),
+                (PromptPart("system_prompt", "tool guidance", tool_guidance),),
+            )
+        )
     messages.extend(_guidance_messages(additional_guidance))
-    messages.append(Message(role="system", content=INSTRUCTION_BOUNDARY_SYSTEM_PROMPT))
+    messages.append(
+        (
+            Message(role="system", content=INSTRUCTION_BOUNDARY_SYSTEM_PROMPT),
+            (
+                PromptPart(
+                    "system_prompt", "instruction boundary", INSTRUCTION_BOUNDARY_SYSTEM_PROMPT
+                ),
+            ),
+        )
+    )
     messages.extend(_mode_messages(mode))
-    return tuple(messages)
+    return _assembled(messages)
 
 
 def extend_custom_prompt_messages(
@@ -133,24 +198,75 @@ def extend_custom_prompt_messages(
         True
     """
 
-    return (
-        *prompt_messages,
-        *_guidance_messages(additional_guidance),
-        *_mode_messages(mode),
+    return assemble_custom_prompt(
+        prompt_messages, additional_guidance=_host_guidance(additional_guidance), mode=mode
+    ).messages
+
+
+def assemble_custom_prompt(
+    prompt_messages: Sequence[Message],
+    *,
+    additional_guidance: Sequence[PromptPart] = (),
+    mode: AgentMode = DEFAULT_AGENT_MODE,
+) -> AssembledPrompt:
+    """Extend a custom prompt as `extend_custom_prompt_messages` does, with its parts.
+
+    Args:
+        prompt_messages (Sequence[Message]): The caller's replacement prompt.
+        additional_guidance (Sequence[PromptPart]): Host-provided guidance, in order,
+            each naming the context source it counts toward.
+        mode (AgentMode): Whether to append the plan-mode restrictions.
+
+    Returns:
+        AssembledPrompt: The messages `extend_custom_prompt_messages` returns. Each
+        caller message is one custom-prompt part; guidance and plan restrictions are
+        labelled as `assemble_prompt` labels them.
+    """
+
+    return _assembled(
+        [
+            *(
+                (message, (PromptPart("custom_prompt", "custom prompt", message.content),))
+                for message in prompt_messages
+            ),
+            *_guidance_messages(additional_guidance),
+            *_mode_messages(mode),
+        ]
     )
 
 
-def _guidance_messages(additional_guidance: Sequence[str]) -> tuple[Message, ...]:
+_LabelledMessage = tuple[Message, tuple[PromptPart, ...]]
+
+
+def _assembled(messages: Sequence[_LabelledMessage]) -> AssembledPrompt:
+    return AssembledPrompt(
+        messages=tuple(message for message, _parts in messages),
+        parts=tuple(parts for _message, parts in messages),
+    )
+
+
+def _host_guidance(guidance: Sequence[str]) -> tuple[PromptPart, ...]:
+    """Label unlabelled guidance from callers that do not report a breakdown."""
+
+    return tuple(PromptPart("system_prompt", "host guidance", text) for text in guidance)
+
+
+def _guidance_messages(additional_guidance: Sequence[PromptPart]) -> tuple[_LabelledMessage, ...]:
     return tuple(
-        Message(role="system", content=guidance)
+        (Message(role="system", content=guidance.text), (guidance,))
         for guidance in additional_guidance
-        if guidance.strip()
+        if guidance.text.strip()
     )
 
 
-def _mode_messages(mode: AgentMode) -> tuple[Message, ...]:
+def _mode_messages(mode: AgentMode) -> tuple[_LabelledMessage, ...]:
     if mode == "plan":
-        return (Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT),)
+        return (
+            (
+                Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT),
+                (PromptPart("system_prompt", "plan mode", PLAN_MODE_SYSTEM_PROMPT),),
+            ),
+        )
     return ()
 
 

@@ -1257,8 +1257,9 @@ pub mod events {
 
     pub use crate::context::{
         CompactionCompleted, CompactionOutcome, CompactionPolicyStatus, CompactionReason,
-        CompactionStarted, ContextAccountingMethod, ContextBudget, ContextEstimate,
-        ContextEstimated, SessionCostSummary, SessionStats, SessionTokenUsage,
+        CompactionStarted, ContextAccountingMethod, ContextBreakdown, ContextBudget,
+        ContextEstimate, ContextEstimated, ContextItem, ContextSource, ContextSourceItem,
+        ContextSourceUsage, ContextTurnGrowth, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
     pub use crate::discovery::{
         McpHeaderFrom, McpServerLaunch, McpServerPreview, McpServerSnapshot, McpServerStatus,
