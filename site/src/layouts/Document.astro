@@ -1,10 +1,14 @@
 ---
 import { getCollection } from "astro:content";
 import { href } from "../content/paths";
-import { navigation } from "../content/navigation";
+import { ancestors, navigation } from "../content/navigation";
 import type { PageMetadata } from "../content/metadata";
 import type { Heading } from "../content/render";
 import Diagrams from "../components/Diagrams.astro";
+import SiteHeader from "../components/SiteHeader.astro";
+import TableOfContents from "../components/TableOfContents.astro";
+import Theme from "../components/Theme.astro";
+import CodeBlocks from "../components/CodeBlocks.astro";
 import "../styles/site.css";
 interface Props {
   page: PageMetadata;
@@ -17,11 +21,23 @@ const groups = navigation(pages);
 const current = groups.find((group) => group.key === page.section);
 const siblings = current?.pages ?? [];
 const index = siblings.findIndex((item) => item.source === page.source);
-const previous = siblings[index - 1],
-  next = siblings[index + 1];
+const previous = index > 0 ? siblings[index - 1] : undefined;
+const next = index >= 0 ? siblings[index + 1] : undefined;
+const root = siblings[0];
+const breadcrumbs = ancestors(page, pages);
+if (
+  root &&
+  root.source !== page.source &&
+  !breadcrumbs.some((item) => item.source === root.source)
+)
+  breadcrumbs.unshift(root);
 const toc = headings.filter(
   (heading) => heading.depth > 1 && heading.depth < 4,
 );
+const course = page.layout === "course";
+const firstCase = course
+  ? siblings.find((item) => !item.chapter && item.source !== root?.source)
+  : undefined;
 ---
 
 <!doctype html>
@@ -36,163 +52,136 @@ const toc = headings.filter(
       <meta name="robots" content="noindex" />
     )}
     <link rel="icon" href={href("assets/favicon.png")} />
-    <script is:inline>
-      try {
-        document.documentElement.dataset.theme =
-          localStorage.getItem("wisp-theme") ||
-          (matchMedia("(prefers-color-scheme: dark)").matches
-            ? "dark"
-            : "light");
-      } catch {
-        document.documentElement.dataset.theme = matchMedia(
-          "(prefers-color-scheme: dark)",
-        ).matches
-          ? "dark"
-          : "light";
-      }
-    </script>
+    <Theme />
   </head>
   <body>
     <a class="skip" href="#main">
       Skip to content
     </a>
-    <header class="site-header">
-      <a class="brand" href={href("index.html")}>
-        wisp<span>.</span>
-      </a>
-      <nav aria-label="Primary">
-        {groups.map(
-          (group) =>
-            group.pages[0] && (
-              <a
-                href={href(group.pages[0].route)}
-                aria-current={
-                  group.key === page.section && page.layout !== "home"
-                    ? "true"
-                    : undefined
-                }
-              >
-                {group.title}
-              </a>
-            ),
-        )}
-      </nav>
-      <button id="theme-toggle" type="button" aria-label="Switch color theme">
-        Theme
-      </button>
-      <a class="github" href="https://github.com/whanyu1212/Wisp">
-        GitHub ↗
-      </a>
-    </header>
-    <details class="mobile-navigation">
-      <summary>Browse documentation</summary>
-      <nav aria-label="Mobile documentation">
-        {groups.map((group) => (
-          <section>
-            <strong>{group.title}</strong>
-            {group.pages.map((item) => (
-              <a
-                href={href(item.route)}
-                aria-current={item.source === page.source ? "page" : undefined}
-              >
-                {item.navTitle ?? item.title}
-              </a>
-            ))}
-          </section>
-        ))}
-      </nav>
-    </details>
-    <div class:list={["page", { home: page.layout === "home" }]}>
+    <SiteHeader groups={groups} page={page} />
+    <div class:list={["page", { home: page.layout === "home", course }]}>
       {page.layout !== "home" && (
         <aside class="sidebar">
-          <nav aria-label={current?.title ?? "Archive"}>
-            <strong>{current?.title ?? "Maintainer archive"}</strong>
+          <nav
+            aria-label={
+              course ? "Course chapters" : (current?.title ?? "Archive")
+            }
+          >
+            <strong>
+              {course
+                ? "Crafting Coding Agents"
+                : (current?.title ?? "Maintainer archive")}
+            </strong>
             {siblings.map((item) => (
-              <a
-                href={href(item.route)}
-                aria-current={item.source === page.source ? "page" : undefined}
-              >
-                {item.navTitle ?? item.title}
-              </a>
+              <>
+                {item.source === firstCase?.source && (
+                  <strong class="nav-group">Case studies</strong>
+                )}
+                <a
+                  href={href(item.route)}
+                  style={`--nav-depth: ${item.depth}`}
+                  aria-current={
+                    item.source === page.source ? "page" : undefined
+                  }
+                >
+                  {item.navTitle ?? item.title}
+                </a>
+              </>
             ))}
           </nav>
         </aside>
       )}
       <main
         id="main"
+        tabindex="-1"
         data-pagefind-body={page.searchable && !compatibility ? "" : undefined}
       >
         {page.layout !== "home" && (
-          <div class="eyebrow">
-            {page.layout === "archive"
-              ? "Maintainer archive · historical record"
-              : current?.title}
-            {page.chapter && ` / Chapter ${page.chapter}`}
-          </div>
+          <>
+            <nav
+              class="breadcrumbs"
+              aria-label="Breadcrumb"
+              data-pagefind-ignore
+            >
+              <ol>
+                <li>
+                  <a href={href("index.html")}>Home</a>
+                </li>
+                {breadcrumbs.map((item) => (
+                  <li>
+                    <a href={href(item.route)}>{item.navTitle ?? item.title}</a>
+                  </li>
+                ))}
+                <li>
+                  <span aria-current="page">{page.navTitle ?? page.title}</span>
+                </li>
+              </ol>
+            </nav>
+            <div class="eyebrow">
+              {page.layout === "archive"
+                ? "Maintainer archive · historical record"
+                : current?.title}
+              {page.chapter
+                ? ` / Chapter ${page.chapter}`
+                : firstCase && page.source !== root?.source
+                  ? " / Case study"
+                  : ""}
+            </div>
+          </>
         )}
         {toc.length > 0 && page.layout !== "home" && (
-          <details class="mobile-toc">
-            <summary>On this page</summary>
-            {toc.map((h) => (
-              <a href={`#${h.slug}`}>{h.text}</a>
-            ))}
-          </details>
+          <TableOfContents headings={toc} mobile />
         )}
         <slot />
         {page.checkpoint && (
-          <p class="checkpoint">
-            <a
-              href={`https://github.com/whanyu1212/Wisp/blob/main/${page.checkpoint}`}
-            >
-              Runnable checkpoint source ↗
-            </a>
-          </p>
+          <aside class="checkpoint" aria-label="Runnable checkpoint">
+            <span class="eyebrow">Keep building</span>
+            <p>
+              <a
+                href={`https://github.com/whanyu1212/Wisp/blob/main/${page.checkpoint}`}
+              >
+                Runnable checkpoint source ↗
+              </a>
+            </p>
+            <code>{page.checkpoint}</code>
+          </aside>
         )}
-        {page.layout !== "home" && !compatibility && (
-          <nav class="previous-next" aria-label="Adjacent pages">
+        {page.layout !== "home" && !compatibility && (previous || next) && (
+          <nav
+            class="previous-next"
+            aria-label="Adjacent pages"
+            data-pagefind-ignore
+          >
             {previous ? (
-              <a href={href(previous.route)}>
-                ← {previous.navTitle ?? previous.title}
+              <a href={href(previous.route)} rel="prev">
+                <span>← Previous</span>
+                {previous.navTitle ?? previous.title}
               </a>
             ) : (
               <span />
             )}
             {next && (
-              <a href={href(next.route)}>{next.navTitle ?? next.title} →</a>
+              <a href={href(next.route)} rel="next">
+                <span>Next →</span>
+                {next.navTitle ?? next.title}
+              </a>
             )}
           </nav>
         )}
       </main>
-      {page.layout !== "home" && (
-        <aside class="toc">
-          <strong>On this page</strong>
-          {toc.map((h) => (
-            <a href={`#${h.slug}`}>{h.text}</a>
-          ))}
-        </aside>
+      {toc.length > 0 && page.layout !== "home" && (
+        <TableOfContents headings={toc} />
       )}
     </div>
-    <footer>
-      One shared runtime. TUI · CLI · RPC · Python SDK.{" "}
+    <footer class="site-footer">
+      <span>One shared runtime. TUI · CLI · RPC · Python SDK.</span>
       <a
         href={`https://github.com/whanyu1212/Wisp/edit/main/book/src/${page.source}`}
       >
         Edit this page
       </a>
     </footer>
+    <CodeBlocks />
     <Diagrams />
-    <script>
-      document.getElementById("theme-toggle")?.addEventListener("click", () => {
-        const theme =
-          document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-        document.documentElement.dataset.theme = theme;
-        try {
-          localStorage.setItem("wisp-theme", theme);
-        } catch {
-          /* Reading works without storage. */
-        }
-        document.dispatchEvent(new Event("wisp-theme"));
-      });
-    </script>
   </body>
 </html>

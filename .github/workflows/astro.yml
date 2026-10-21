@@ -62,5 +62,19 @@ jobs:
       - name: Build and validate routes, anchors, links, and assets
         run: npm run build
 
+      - name: Install Chromium for built-site checks
+        run: npm exec playwright install -- --with-deps chromium
+
+      - name: Check built-site layouts and keyboard behavior
+        run: npm run test:browser
+
+      - name: Upload browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: astro-browser-traces
+          path: site/test-results/
+          if-no-files-found: ignore
+
       - name: Check formatting
         run: npm run format:check

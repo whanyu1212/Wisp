@@ -123,10 +123,9 @@ export function finishHtml(
       const source = $(element).text();
       const figure = $('<figure class="diagram"></figure>');
       figure.append(
-        $('<div class="mermaid" aria-label="Diagram"></div>').attr(
-          "data-source",
-          source,
-        ),
+        $(
+          '<div class="mermaid" tabindex="0" role="region" aria-label="Diagram"></div>',
+        ).attr("data-source", source),
       );
       const fallback = $(
         '<details class="diagram-source" open><summary>Diagram source</summary></details>',
@@ -136,6 +135,17 @@ export function finishHtml(
       $(element).parent("pre").replaceWith(figure);
     },
   );
-  $("table").wrap('<div class="table-scroll"></div>');
+  $("pre").attr("tabindex", "0").attr("aria-label", "Code listing");
+  $("table").each((index, table) => {
+    // Give keyboard users a named scroll region even when the table has no caption.
+    const label =
+      $(table).find("caption").text().trim() || `Table ${index + 1}`;
+    $(table).wrap(
+      $('<div class="table-scroll" tabindex="0" role="region"></div>').attr(
+        "aria-label",
+        label,
+      ),
+    );
+  });
   return { html: $.html(), headings };
 }

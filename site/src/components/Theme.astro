@@ -1,0 +1,34 @@
+<!-- Resolve the theme before paint; CSS supplies the system default without JS. -->
+<script is:inline>
+  try {
+    const theme = localStorage.getItem("wisp-theme");
+    if (theme === "light" || theme === "dark")
+      document.documentElement.dataset.theme = theme;
+  } catch {
+    /* Storage is optional. */
+  }
+</script>
+<script>
+  const system = matchMedia("(prefers-color-scheme: dark)");
+  const select = document.querySelector<HTMLSelectElement>("#theme-select");
+  const root = document.documentElement;
+  if (select) {
+    select.value = root.dataset.theme ?? "system";
+    select.disabled = false;
+    select.addEventListener("change", () => {
+      const theme = select.value;
+      if (theme === "system") delete root.dataset.theme;
+      else root.dataset.theme = theme;
+      try {
+        if (theme === "system") localStorage.removeItem("wisp-theme");
+        else localStorage.setItem("wisp-theme", theme);
+      } catch {
+        /* The selection still works for this page without storage. */
+      }
+      document.dispatchEvent(new Event("wisp-theme"));
+    });
+  }
+  system.addEventListener("change", () => {
+    if (!root.dataset.theme) document.dispatchEvent(new Event("wisp-theme"));
+  });
+</script>
