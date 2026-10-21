@@ -94,7 +94,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
         .iter()
         .position(|row| row.contains("Enter apply"))
         .expect("panel hint");
-    assert!(bottom >= rows.len() - 5, "{painted}");
+    assert!(bottom >= rows.len() - 6, "{painted}");
 
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
@@ -903,7 +903,7 @@ async fn mode_acknowledgement_controls_header_and_draft_and_ctrl_c_remains_avail
         assert_eq!(ui.editor.text(), if ok { "" } else { "/plan" });
         let rendered = draw(&mut ui, 80, 18);
         assert!(
-            rendered.contains(if ok { "plan" } else { "build" }),
+            rendered.contains(if ok { "Plan" } else { "Build" }),
             "{rendered}"
         );
     }

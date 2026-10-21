@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import reap, rendered_without_spacing, welcome_ready
+from tests.tui_e2e.support import reap, rendered_without_spacing, screen_shows, welcome_ready
 
 
 @pytest.mark.process
@@ -80,7 +80,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     context_redrawn = True
                 # Wait for welcome copy after hydration; the composer appears earlier.
                 ready = context_redrawn and welcome_ready(output)
-                if picker_phase == "startup" and ready and b"fake/fake" in output:
+                if picker_phase == "startup" and ready and screen_shows(output, "fake fake"):
                     os.write(terminal_fd, b"/model\r")
                     picker_phase = "loading"
                     output.clear()
@@ -115,7 +115,12 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     assert saved["provider"] != "fake" and saved["model"]
                     assert saved["effort"]
                     picker_phase = "done"
-                elif not submitted and not picker_only and ready and b"fake/fake" in output:
+                elif (
+                    not submitted
+                    and not picker_only
+                    and ready
+                    and screen_shows(output, "fake fake")
+                ):
                     os.write(terminal_fd, b"/model fake::custom-model effort\r")
                     submitted = True
                     output.clear()
@@ -133,16 +138,16 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     restart
                     and ready
                     and not restored_label_redrawn
-                    and b"fake/custom" in rendered_without_spacing(output)
+                    and b"custom-modelfake" in rendered_without_spacing(output)
                 ):
-                    # The restored footer label can arrive in a differential frame that
+                    # The restored identity line can arrive in a differential frame that
                     # skips letters shared with the previous frame. Request a full frame
                     # so the raw PTY stream contains the whole label.
                     output.clear()
                     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
                     restored_label_redrawn = True
                 applied = (
-                    ready and b"fake/custom-model" in output and b"effort" in output
+                    ready and screen_shows(output, "custom-model fake · effort")
                     if restart
                     else (
                         b"Model selection applied." in output

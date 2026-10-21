@@ -56,8 +56,8 @@ def test_screen_rows_join_partial_repaints() -> None:
     assert run_settled(reused + _frame(b""), 0, b"l")
 
     # A branch named after a status word does not settle a working run.
-    branch = _frame(b"\x1b[2;1Hworking \xc2\xb7 ~/Wisp \xc2\xb7 fix/idle")
-    assert not run_settled(branch, 0, b"Wisp")
+    branch = _frame(b"\x1b[2;1Hidle \xc2\xb7 fix/idle     working \xc2\xb7 ctx ~?")
+    assert not run_settled(branch, 0, b"fix")
 
 
 def test_run_settled_respects_offset() -> None:

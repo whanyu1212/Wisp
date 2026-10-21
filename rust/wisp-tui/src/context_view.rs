@@ -40,6 +40,19 @@ fn abbreviated(value: u64) -> String {
     }
 }
 
+/// Cells in the footer's context meter.
+pub(crate) const METER_CELLS: usize = 10;
+
+/// How full the context window is, as a fraction, when the window is known.
+pub(crate) fn fill(state: &UiState) -> Option<f64> {
+    let budget = state.context.budget.as_ref()?;
+    let window = budget.context_window.filter(|window| *window > 0)?;
+    Some(tokens(budget) as f64 / window as f64)
+}
+
+/// The footer's context reading: `ctx ▰▰▰▰▰▰▰▱▱▱ 68%`, or `ctx ~68%` when the meter
+/// does not fit in `width`. The meter caps at full; the percent does not. Without a
+/// known window it reads the token count, and `ctx ~…`/`ctx ~?` before a budget.
 pub(crate) fn indicator(state: &UiState, width: usize) -> String {
     let Some(budget) = &state.context.budget else {
         return if state.context.loading() {
@@ -49,24 +62,21 @@ pub(crate) fn indicator(state: &UiState, width: usize) -> String {
         }
         .into();
     };
-    let current = tokens(budget);
     let prefix = if approximate(budget) { "~" } else { "" };
-    let percent = budget
-        .context_window
-        .map(|window| format!("{:.0}%", current as f64 / window as f64 * 100.0));
-    let full = format!(
-        "ctx {prefix}{}/{} {}",
-        abbreviated(current),
-        budget
-            .context_window
-            .map(abbreviated)
-            .unwrap_or_else(|| "?".into()),
-        percent.as_deref().unwrap_or("")
+    let Some(fill) = fill(state) else {
+        return format!("ctx {prefix}{}", abbreviated(tokens(budget)));
+    };
+    let percent = format!("{prefix}{:.0}%", fill * 100.0);
+    let filled = ((fill * METER_CELLS as f64).round() as usize).min(METER_CELLS);
+    let meter = format!(
+        "ctx {}{} {percent}",
+        "▰".repeat(filled),
+        "▱".repeat(METER_CELLS - filled)
     );
-    if full.width() <= width {
-        full.trim_end().into()
+    if meter.width() <= width {
+        meter
     } else {
-        format!("ctx {prefix}{}", percent.unwrap_or_else(|| "?".into()))
+        format!("ctx {percent}")
     }
 }
 
@@ -289,22 +299,25 @@ mod tests {
     #[test]
     fn display_distinguishes_estimated_observed_hybrid_unknown_and_over_budget() {
         let mut state = state();
-        assert_eq!(indicator(&state, 80), "ctx ~3.0k/10.0k 30%");
+        assert_eq!(indicator(&state, 80), "ctx ▰▰▰▱▱▱▱▱▱▱ ~30%");
         assert_eq!(indicator(&state, 10), "ctx ~30%");
         assert!(rows(&state).join("\n").contains("≥$0.0123 USD"));
         let budget = state.context.budget.as_mut().unwrap();
         budget.observed_is_current = true;
         budget.observed_tokens = Some(4000);
         budget.accounting_method = ContextAccountingMethod::ProviderObserved;
-        assert!(indicator(&state, 80).contains("ctx 4.0k"));
+        assert_eq!(indicator(&state, 80), "ctx ▰▰▰▰▱▱▱▱▱▱ 40%");
         let budget = state.context.budget.as_mut().unwrap();
         budget.effective_tokens = Some(11000);
         budget.accounting_method = ContextAccountingMethod::ProviderObservedPlusEstimate;
+        // The meter stops at full; the percent still says how far over.
+        assert!(indicator(&state, 80).ends_with("▰▰▰▰▰▰▰▰▰▰ ~110%"));
         let text = rows(&state).join("\n");
         assert!(text.contains("110.0% · remaining: -2000 tokens · over budget"));
         assert!(text.contains("provider observation + trailing estimate"));
         state.context.budget.as_mut().unwrap().context_window = None;
         assert!(rows(&state).join("\n").contains("11000 / unknown"));
+        assert_eq!(indicator(&state, 80), "ctx ~11.0k");
         let stats = state.context.stats.as_mut().unwrap();
         stats.compaction = None;
         stats.cost.priced_record_count = 0;

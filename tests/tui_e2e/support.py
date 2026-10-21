@@ -246,17 +246,18 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
 
     Returns:
         bool: True when every fragment is in a complete frame after ``offset`` and
-        the first status word on the last complete frame's footer is ``idle``.
+        the status word on the last complete frame's footer is ``idle``.
     """
     frames = complete_frames(output)
     phase = frames[offset:]
     if not all(fragment in phase for fragment in fragments):
         return False
     footer = next((row for row in reversed(screen_rows(frames)) if row.strip()), "")
-    # The status label is the footer's first status word; a branch or folder name
-    # later on the row must not count.
-    label = _STATUS_LABEL.search(footer)
-    return label is not None and label.group(1) == "idle"
+    # The status label opens the footer's right side, after the folder and branch
+    # on the left, so the last match wins and a branch named after a status word
+    # does not count.
+    labels = _STATUS_LABEL.findall(footer)
+    return bool(labels) and labels[-1] == "idle"
 
 
 def welcome_ready(output: bytes | bytearray) -> bool:

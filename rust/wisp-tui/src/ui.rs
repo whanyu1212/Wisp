@@ -26,7 +26,7 @@ use wisp_protocol::commands::QueueKind;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-const MAX_COMPOSER_HEIGHT: u16 = 8;
+const MAX_COMPOSER_HEIGHT: u16 = 9;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
@@ -69,7 +69,8 @@ fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>)
             layout
                 .map_or(1, |layout| layout.rows.len())
                 .saturating_add(queue_rows)
-                .saturating_add(if area.height >= 16 { 2 } else { 0 }),
+                // A framed composer adds its borders and the identity row.
+                .saturating_add(if area.height >= 16 { 3 } else { 0 }),
         )
         .unwrap_or(MAX_COMPOSER_HEIGHT)
         .clamp(2, ceiling)
@@ -473,7 +474,7 @@ fn workspace_label(cwd: &str, home: Option<&str>) -> String {
     format!("…/{last}")
 }
 
-fn footer_leading_parts(state: &UiState) -> Vec<String> {
+fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = vec![status_label(state)];
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
@@ -485,35 +486,41 @@ fn footer_leading_parts(state: &UiState) -> Vec<String> {
         }
     }
     // Queue and mode stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer.
-    if state.mode_confirmed {
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
+    // framed composer names the mode first on its identity line instead.
+    if state.mode_confirmed && !identity_in_composer {
         parts.push(state.mode.as_str().to_string());
     }
     parts
 }
 
-/// The footer's closing parts. While the composer's border names the mode and model,
-/// the footer shows where commands run instead; the branch is its own part so it is
-/// the first to go on a narrow row.
+/// The status line's closing parts: the identity when the composer cannot show it,
+/// and any compaction in progress.
 fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = Vec::new();
-    if identity_in_composer {
-        // Folder and branch names come from the file system and the repository, so
-        // they are cleaned of terminal controls before they are painted.
-        if let Some(cwd) = state.workspace_cwd.as_deref() {
-            parts.push(display_workspace(&sanitize_for_terminal(cwd)));
+    if !identity_in_composer {
+        if let Some(identity) = header_identity(state) {
+            parts.push(identity);
         }
-        if let Some(branch) = state.git_branch.as_deref() {
-            parts.push(clip_columns(
-                &sanitize_for_terminal(branch),
-                BRANCH_MAX_COLUMNS,
-            ));
-        }
-    } else if let Some(identity) = header_identity(state) {
-        parts.push(identity);
     }
     if let Some(reason) = state.context.compaction {
         parts.push(format!("compacting ({})", reason.as_str()));
+    }
+    parts
+}
+
+/// Where commands run, for the footer's left side. Folder and branch names come from
+/// the file system and the repository, so they are cleaned of terminal controls.
+fn footer_workspace_parts(state: &UiState) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(cwd) = state.workspace_cwd.as_deref() {
+        parts.push(display_workspace(&sanitize_for_terminal(cwd)));
+    }
+    if let Some(branch) = state.git_branch.as_deref() {
+        parts.push(clip_columns(
+            &sanitize_for_terminal(branch),
+            BRANCH_MAX_COLUMNS,
+        ));
     }
     parts
 }
@@ -1489,7 +1496,73 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
 /// Whether the composer draws its frame, whose bottom border then names the mode
 /// and model in place of the footer.
 fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
-    editable(state) && padded && area.height >= 3
+    editable(state) && padded && area.height >= 4
+}
+
+/// The framed composer's last row: mode first so narrow widths cut the model
+/// and effort, never the mode.
+fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
+    let separator = || Span::styled(" · ", Style::default().fg(palette.muted));
+    let mut spans = Vec::new();
+    if state.mode_confirmed {
+        let mut letters = state.mode.as_str().chars();
+        let label = letters
+            .next()
+            .map(|first| first.to_uppercase().chain(letters).collect::<String>())
+            .unwrap_or_default();
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(provider) = state.provider.as_deref() {
+        if !spans.is_empty() {
+            spans.push(separator());
+        }
+        if let Some(model) = state
+            .model_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.selection.effective_model.as_deref())
+            .or(state.model.as_deref())
+        {
+            spans.push(Span::styled(
+                sanitize_for_terminal(model),
+                Style::default().fg(palette.foreground),
+            ));
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::styled(
+            sanitize_for_terminal(provider),
+            Style::default().fg(palette.muted),
+        ));
+        if let Some(effort) = state.effort.as_deref() {
+            spans.push(separator());
+            spans.push(Span::styled(
+                sanitize_for_terminal(effort),
+                Style::default().fg(palette.warning),
+            ));
+        }
+        if state.model_selection_stale {
+            spans.push(Span::styled(
+                " (last confirmed; selection unavailable)",
+                Style::default().fg(palette.muted),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Paint the composer's left border as a thick accent bar between its corners.
+/// The rest of the border keeps the status colour.
+fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
+    let buffer = frame.buffer_mut();
+    for y in area.y.saturating_add(1)..area.bottom().saturating_sub(1) {
+        if let Some(cell) = buffer.cell_mut((area.x, y)) {
+            cell.set_symbol("┃").set_fg(color);
+        }
+    }
 }
 
 fn render_composer(
@@ -1507,25 +1580,40 @@ fn render_composer(
     let border_style = Style::default().fg(status_color(state, palette));
     let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
-        let block = Block::default()
+        Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(border_style);
-        match header_identity(state) {
-            Some(identity) => block.title_bottom(
-                Line::from(format!(" {} ", sanitize_for_terminal(&identity)))
-                    .style(Style::default().fg(palette.muted))
-                    .right_aligned(),
-            ),
-            None => block,
-        }
+            .border_style(border_style)
     } else {
         Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
     .style(palette.base());
-    let inner = block.inner(area);
+    let mut inner = block.inner(area);
     if editable(state) {
         frame.render_widget(block, area);
+        if framed_input {
+            // Waiting and error colours win; otherwise the bar keeps the accent
+            // while the border dims at idle.
+            let status = status_color(state, palette);
+            let accent = if status == palette.warning || status == palette.error {
+                status
+            } else {
+                palette.accent
+            };
+            paint_composer_accent(frame, area, accent);
+            inner.height = inner.height.saturating_sub(1);
+            // Indented past the prompt prefix so it lines up with the draft.
+            let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
+            frame.render_widget(
+                Paragraph::new(composer_identity_line(state, palette)),
+                Rect {
+                    x: inner.x.saturating_add(prefix_width).min(inner.right()),
+                    y: inner.bottom(),
+                    width: inner.width.saturating_sub(prefix_width),
+                    height: 1,
+                },
+            );
+        }
         let preview_rows = if state.active_prompt_editable() {
             queued_total
                 .min(3)
@@ -2441,7 +2529,10 @@ fn render_footer(
     } else {
         (terminal_width / 2).max(19)
     };
-    let leading = footer_leading_parts(state);
+
+    // Right: the status the footer always keeps, label first since it carries the
+    // status colour, then the hints that still fit.
+    let leading = footer_leading_parts(state, identity_in_composer);
     let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
     let ctx_width = status_budget
         .saturating_sub(leading_width)
@@ -2458,65 +2549,113 @@ fn render_footer(
     }
     let status_line = join_hints(status, status_budget);
     let status_width = status_line.width();
-    let remaining = width.saturating_sub(status_width.saturating_add(2));
-    let (rest, rest_style) = match notice {
+
+    // Left: a notice, or where commands run. On a narrow row the branch goes
+    // first, then the hints; the folder stays while it fits beside the status.
+    let hint_cap = |room: usize| {
+        if terminal_width < 120 {
+            room.min(56)
+        } else {
+            room
+        }
+    };
+    let beside_status = width.saturating_sub(status_width.saturating_add(2));
+    let (left, left_style, hints) = match notice {
         Some(notice) => (
             sanitize_for_terminal(notice),
             Style::default().fg(palette.warning),
+            String::new(),
         ),
-        None => (
-            // Keep common shortcuts quiet and leave breathing room between
-            // the action hints and right-aligned session status.
-            footer_hints(
+        None => {
+            let workspace = footer_workspace_parts(state);
+            let hints = footer_hints(
                 state,
                 bindings,
-                if terminal_width < 120 {
-                    remaining.min(56)
-                } else {
-                    remaining
-                },
-            ),
-            Style::default().fg(palette.muted),
-        ),
+                hint_cap(width.saturating_sub(status_width).saturating_sub(3)),
+            );
+            let hints_width = if hints.is_empty() {
+                0
+            } else {
+                hints.width() + 3
+            };
+            let left_room = (width / 3).min(beside_status.saturating_sub(hints_width + 2));
+            let left = join_hints(workspace.iter().cloned(), left_room);
+            if !left.is_empty() || workspace.is_empty() {
+                (left, Style::default().fg(palette.muted), hints)
+            } else {
+                // The folder alone does not fit beside every hint: keep the
+                // folder and give the hints what remains.
+                let left = join_hints(
+                    workspace.into_iter().take(1),
+                    (width / 3).min(beside_status),
+                );
+                let hint_room = beside_status
+                    .saturating_sub(left.width())
+                    .saturating_sub(if left.is_empty() { 1 } else { 3 });
+                let hints = footer_hints(state, bindings, hint_cap(hint_room));
+                (left, Style::default().fg(palette.muted), hints)
+            }
+        }
     };
-    let label = status_label(state);
-    let mut spans = Vec::new();
-    if let Some(tail) = status_line.strip_prefix(&label) {
-        spans.push(Span::styled(
-            label,
-            Style::default().fg(status_color(state, palette)),
-        ));
-        spans.push(Span::styled(
-            tail.to_owned(),
-            Style::default().fg(palette.muted),
-        ));
-    } else {
-        spans.push(Span::styled(
-            status_line,
-            Style::default().fg(palette.muted),
-        ));
+    let left_width = left.width().min(beside_status);
+
+    let mut right = status_spans(state, &status_line, palette);
+    if !hints.is_empty() {
+        right.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+        right.extend(keycap_hints(&hints, palette).spans);
     }
-    let rest = if notice.is_some() {
-        Line::from(rest)
-    } else {
-        keycap_hints(&rest, palette)
-    };
+    let right = Line::from(right).style(Style::default().fg(palette.muted));
+    let right_width = right.width();
     frame.render_widget(
-        Paragraph::new(rest).style(rest_style),
+        Paragraph::new(left).style(left_style),
         Rect {
-            width: remaining as u16,
+            width: left_width as u16,
             ..area
         },
     );
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
+        Paragraph::new(right).alignment(Alignment::Right),
         Rect {
-            x: area.right().saturating_sub(status_width as u16),
-            width: status_width as u16,
+            x: area.right().saturating_sub(right_width as u16),
+            width: right_width.min(width) as u16,
             ..area
         },
     );
 }
+
+/// Style the footer's status line: the label in the status colour and the context
+/// meter in the warning colour once the window is mostly full.
+fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Span<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let label = status_label(state);
+    let Some(tail) = status_line.strip_prefix(&label) else {
+        return vec![Span::styled(status_line.to_owned(), muted)];
+    };
+    let mut spans = vec![Span::styled(
+        label,
+        Style::default().fg(status_color(state, palette)),
+    )];
+    let pressured =
+        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    match tail.find("ctx ").filter(|_| pressured) {
+        Some(start) => {
+            let meter_end = tail[start..]
+                .find(" · ")
+                .map_or(tail.len(), |end| start + end);
+            spans.push(Span::styled(tail[..start].to_owned(), muted));
+            spans.push(Span::styled(
+                tail[start..meter_end].to_owned(),
+                Style::default().fg(palette.warning),
+            ));
+            spans.push(Span::styled(tail[meter_end..].to_owned(), muted));
+        }
+        None => spans.push(Span::styled(tail.to_owned(), muted)),
+    }
+    spans
+}
+
+/// The context meter turns to the warning colour from this fill.
+const CONTEXT_WARNING_FILL: f64 = 0.7;
 
 /// Style joined `key action` hints with each key as a keycap. Keys never contain
 /// spaces, so the first space ends the key; widths match the plain string.
@@ -3479,7 +3618,7 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("fake/model-x"));
+        assert!(rendered.contains("model-x fake"));
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Enter send"));
         assert!(rendered.contains("/ commands"));
@@ -3503,7 +3642,7 @@ mod tests {
         assert!(rendered.contains("Browse commands"));
         assert!(rendered.contains("Mention a project file"));
         assert!(!rendered.contains("Connect a provider"));
-        assert!(rendered.contains("fake/model-x"));
+        assert!(rendered.contains("model-x fake"));
 
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(compact.contains("Wisp 0.9.0"));
@@ -3513,7 +3652,9 @@ mod tests {
 
         let mut unconfigured = state;
         unconfigured.provider = None;
-        let rendered = render_to_string(80, 18, &unconfigured, &PromptEditor::default());
+        // The framed composer's identity row leaves 13 transcript rows at 18; the
+        // action list is guaranteed from 14 (see the welcome height contract).
+        let rendered = render_to_string(80, 19, &unconfigured, &PromptEditor::default());
         assert!(rendered.contains("Connect a provider"));
         assert!(rendered.contains("/connect"));
     }
@@ -3652,10 +3793,13 @@ mod tests {
             &PromptEditor::default(),
             Some("Model catalog unavailable. Use /model <model> or press r to retry."),
         );
-        assert!(rendered.contains("plan"), "{rendered}");
+        assert!(
+            rendered.contains("Plan · custom-model fake · effort"),
+            "{rendered}"
+        );
         assert!(rendered.contains("ctx"), "{rendered}");
         assert!(rendered.contains('~'), "{rendered}");
-        assert!(rendered.contains("fake/custom-model"), "{rendered}");
+        assert!(rendered.contains("custom-model fake"), "{rendered}");
         assert!(rendered.contains("effort"), "{rendered}");
         assert!(rendered.contains("Model catalog unavailable"), "{rendered}");
 
@@ -4599,7 +4743,7 @@ mod tests {
         let mut state = UiState::new("fake".into(), None, None);
         state.workspace_cwd = Some("/srv/evil\u{1b}[2Jdir".into());
         state.git_branch = Some(format!("main\u{202e}{}", "x".repeat(60)));
-        let parts = footer_trailing_parts(&state, true);
+        let parts = footer_workspace_parts(&state);
         assert!(
             parts.iter().all(|part| !part.contains('\u{1b}')),
             "{parts:?}"
@@ -4640,19 +4784,70 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             };
-            (row(height - 2), row(height - 1))
+            (row(height - 3), row(height - 1))
         };
 
-        let (border, footer) = draw(20);
-        assert!(border.contains(" fake/model-x · high "), "{border}");
-        assert!(footer.contains("idle · build"), "{footer}");
-        assert!(footer.contains("/srv/wisp · feat/x"), "{footer}");
+        let (identity, footer) = draw(20);
+        assert!(
+            identity
+                .trim_start()
+                .starts_with("┃  Build · model-x fake · high"),
+            "{identity}"
+        );
+        assert!(
+            footer.trim_start().starts_with("/srv/wisp · feat/x"),
+            "{footer}"
+        );
+        assert!(footer.contains("idle · ctx"), "{footer}");
         assert!(!footer.contains("model-x"), "{footer}");
+        assert!(!footer.contains("build"), "{footer}");
 
-        // Too short to frame the composer: the footer keeps the identity.
+        // Too short to frame the composer: the footer keeps mode and identity.
         let (_, footer) = draw(12);
+        assert!(footer.contains("idle · build"), "{footer}");
         assert!(footer.contains("fake/model-x · high"), "{footer}");
-        assert!(!footer.contains("/srv/wisp"), "{footer}");
+    }
+
+    #[test]
+    fn narrow_footer_drops_branch_then_hints() {
+        let footer = |width: u16| {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            state.workspace_cwd = Some("/srv/wisp".into());
+            state.git_branch = Some("feat/footer".into());
+            let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        &state,
+                        &mut TranscriptViewport::default(),
+                        &mut TranscriptRowCache::default(),
+                        &PromptEditor::default(),
+                        &connection(),
+                        None,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..width)
+                .map(|x| buffer[(x, 19)].symbol())
+                .collect::<String>()
+        };
+
+        let wide = footer(100);
+        assert!(wide.contains("/srv/wisp · feat/footer"), "{wide}");
+        assert!(wide.contains("idle · ctx"), "{wide}");
+        assert!(wide.contains("help"), "{wide}");
+
+        let narrow = footer(60);
+        assert!(narrow.contains("/srv/wisp"), "{narrow}");
+        assert!(!narrow.contains("feat/footer"), "{narrow}");
+        assert!(narrow.contains("idle · ctx"), "{narrow}");
+
+        let tight = footer(40);
+        assert!(tight.contains("/srv/wisp"), "{tight}");
+        assert!(!tight.contains("help"), "{tight}");
+        assert!(tight.contains("ctx"), "{tight}");
     }
 
     #[test]
@@ -4710,11 +4905,27 @@ mod tests {
                     );
                 })
                 .unwrap();
-            style_at_text(terminal.backend(), "╭").unwrap().0
+            terminal.backend().clone()
         };
+        let color = |backend: &TestBackend, text: &str| style_at_text(backend, text).unwrap().0;
         let palette = Palette::default();
-        let mut state = UiState::new("fake".into(), None, None);
-        assert_eq!(border(&state), palette.muted);
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate { total_tokens: 8000 },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        });
+        let idle = border(&state);
+        // The border dims at idle while the accent bar and effort stay lit.
+        assert_eq!(color(&idle, "╭"), palette.muted);
+        assert_eq!(color(&idle, "┃"), palette.accent);
+        assert_eq!(color(&idle, "high"), palette.warning);
+        // An 80% full window turns the meter amber.
+        assert_eq!(color(&idle, "▰"), palette.warning);
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
         state.current_command = Some(ActiveCommand {
@@ -4722,7 +4933,10 @@ mod tests {
             command_type: ActiveCommandType::Prompt,
         });
         assert!(state.editor_editable());
-        assert_eq!(border(&state), palette.primary);
+        assert_eq!(color(&border(&state), "╭"), palette.primary);
+
+        state.context.budget.as_mut().unwrap().estimate.total_tokens = 2000;
+        assert_eq!(color(&border(&state), "▰"), palette.muted);
     }
 
     #[test]
@@ -6452,7 +6666,7 @@ mod tests {
         if expanded {
             cache.fold_mut().expand(card);
         }
-        let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, 18)).unwrap();
         terminal
             .draw(|frame| {
                 render_interactive(
