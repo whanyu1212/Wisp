@@ -753,6 +753,9 @@ pub struct UiState {
     /// of showing each delta as it arrives. Off by default, so reductions stay immediate.
     pub(crate) stream_pacing: bool,
     pub(crate) run_progress: Option<RunProgress>,
+    /// What the last finished run's replies cost, added up when it completed: once a
+    /// history sync replaces the transcript, its prompt id no longer finds its replies.
+    pub(crate) finished_run_cost: Option<crate::web_search::CostTotal>,
     pub history: HistoryWindow,
     history_request: Option<HistoryRequest>,
     post_prompt_session_sync_pending: bool,
@@ -834,6 +837,7 @@ impl UiState {
             transcript: SharedTranscript::default(),
             stream_pacing: false,
             run_progress: None,
+            finished_run_cost: None,
             history: HistoryWindow::default(),
             history_request: None,
             post_prompt_session_sync_pending: false,
@@ -1149,7 +1153,7 @@ pub enum BackendEvent {
     MessageCompleted {
         turn: u64,
         content: String,
-        cost: Option<String>,
+        cost: Option<crate::web_search::MessageCost>,
     },
     /// Where the session's commands run and the branch checked out there.
     WorkspaceReported {
@@ -1692,6 +1696,7 @@ fn submit(
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
     state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.finished_run_cost = None;
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RecordPromptHistory(content),
@@ -1745,6 +1750,7 @@ fn init_project(
     state.context.operation_started();
     let prompt = state.transcript.append_prompt("/init".into());
     state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.finished_run_cost = None;
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
@@ -2872,6 +2878,7 @@ fn commit_session_and_hydrate(
     // previous session's failure; same-session history syncs keep it.
     state.last_command_error = None;
     state.transcript = SharedTranscript::default();
+    state.finished_run_cost = None;
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
     state.history_request = None;
@@ -3581,6 +3588,7 @@ fn handle_session_backend_event(
                 // A failure belongs to the session that produced it.
                 state.last_command_error = None;
                 state.transcript = SharedTranscript::default();
+                state.finished_run_cost = None;
                 state.selected_session = None;
                 state.last_session = None;
                 state.history = HistoryWindow::default();
@@ -4641,6 +4649,18 @@ fn handle_backend_event(
                 duration_ms,
                 outcome: crate::transcript::RunOutcome::parse(&outcome),
             };
+            // Total the run while its prompt id still finds its replies, steers and
+            // follow-ups included.
+            state.finished_run_cost = state
+                .run_progress
+                .and_then(|run| state.transcript.entry_index(run.prompt))
+                .map(|index| {
+                    crate::web_search::CostTotal::of(
+                        state.transcript.entries()[index + 1..]
+                            .iter()
+                            .filter_map(|entry| entry.cost()),
+                    )
+                });
             let recorded = state
                 .run_progress
                 .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));

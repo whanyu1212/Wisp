@@ -6,7 +6,9 @@
 //! and draws it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
 use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
@@ -210,14 +212,45 @@ fn line_counts(before: &str, after: &str) -> (usize, usize) {
         })
 }
 
+/// What leads the panel: the session at idle, the run while one is going, or the
+/// decision it waits on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Focus {
+    Idle,
+    Running,
+    Approval,
+}
+
+impl Focus {
+    fn of(state: &UiState) -> Self {
+        if state.pending_approval.is_some() {
+            Self::Approval
+        } else if ui::run_in_status_line(state) {
+            Self::Running
+        } else {
+            // A project trust prompt keeps the idle layout: it comes before any run,
+            // and the header's status label says what it waits on.
+            Self::Idle
+        }
+    }
+}
+
 /// Draw the panel into `area`. A docked panel has a rule on its left; an overlay is
 /// boxed so it reads as lying over the transcript.
+///
+/// The sections follow what Wisp is doing. At idle: the session, context, model,
+/// changed files, turns and MCP. While a run goes, `Now` and the message queue come
+/// first and the turn list folds to one row; while it waits for approval, the
+/// decision and the held queue come first.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     panel: &SidePanel,
-    toggle_key: &str,
+    bindings: &Bindings,
+    activity_frame: u8,
+    run_elapsed: Option<Duration>,
     palette: Palette,
 ) {
     let overlay = !panel.docked();
@@ -240,23 +273,46 @@ pub(crate) fn render(
         return;
     }
 
+    let toggle_key = ui::primary_label(bindings, KeyAction::TogglePanel);
     let hint = if overlay {
         format!("{toggle_key} close · Esc close")
     } else {
         format!("{toggle_key} hide panel")
     };
-    let mut sections = vec![
-        header_lines(state, width, palette),
+    let focus = Focus::of(state);
+    let mut sections = vec![header_lines(state, width, palette)];
+    match focus {
+        Focus::Idle => {}
+        Focus::Running => {
+            sections.push(now_lines(
+                state,
+                activity_frame,
+                run_elapsed,
+                width,
+                palette,
+            ));
+            sections.extend(queue_lines(state, false, bindings, width, palette));
+        }
+        Focus::Approval => {
+            sections.extend(approval_lines(state, width, palette));
+            sections.extend(queue_lines(state, true, bindings, width, palette));
+        }
+    }
+    sections.extend([
         context_lines(state, width, palette),
-        model_lines(state, width, palette),
+        model_lines(state, focus, width, palette),
         file_lines(state, panel, width, palette),
-    ];
+    ]);
     let mcp = mcp_line(state, width, palette);
-    // The turn list takes what the other sections leave, keeping its newest turns.
-    let fixed: usize = sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
-        + mcp.as_ref().map_or(0, |_| 2)
-        + 1;
-    let turns = turn_lines(state, width, height.saturating_sub(fixed + 1), palette);
+    let turns = if focus == Focus::Idle {
+        // The turn list takes what the other sections leave, keeping its newest turns.
+        let fixed: usize = sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
+            + mcp.as_ref().map_or(0, |_| 2)
+            + 1;
+        turn_lines(state, width, height.saturating_sub(fixed + 1), palette)
+    } else {
+        folded_turn_lines(state, focus, width, palette)
+    };
     if !turns.is_empty() {
         sections.push(turns);
     }
@@ -371,6 +427,223 @@ fn first_line(text: &str) -> String {
     .to_owned()
 }
 
+/// `Now`: what the run is doing and for how long, then the turn it has reached, its
+/// tool count and time.
+fn now_lines(
+    state: &UiState,
+    activity_frame: u8,
+    run_elapsed: Option<Duration>,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let running = Style::default().fg(palette.secondary);
+    let muted = Style::default().fg(palette.muted);
+    let activity = ui::run_activity(state);
+    let spinner = Span::styled(format!("{} ", ui::spinner_frame(activity_frame)), running);
+    let doing = match activity.item {
+        Some(item) => spread(
+            vec![
+                spinner,
+                Span::styled(format!(" {} ", item.label), palette.chip(&item.label)),
+                Span::raw(" "),
+                Span::raw(item.detail),
+            ],
+            item.elapsed
+                .map(|elapsed| vec![Span::styled(duration(elapsed), running)])
+                .unwrap_or_default(),
+            width,
+        ),
+        None => Line::from(vec![
+            spinner,
+            Span::styled(ui::activity_phase(state), running),
+        ]),
+    };
+    let mut totals = Vec::new();
+    if activity.turn > 0 {
+        totals.push(format!("turn {}", activity.turn));
+    }
+    totals.push(format!(
+        "{} tool{}",
+        activity.tools,
+        if activity.tools == 1 { "" } else { "s" }
+    ));
+    if let Some(elapsed) = run_elapsed {
+        totals.push(duration(elapsed));
+    }
+    vec![
+        Line::from(heading("Now", palette)),
+        doing,
+        spread(
+            vec![Span::styled(totals.join(" · "), muted)],
+            ui::keycap_hints("Esc interrupt", palette).spans,
+            width,
+        ),
+    ]
+}
+
+fn duration(elapsed: Duration) -> String {
+    crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Queued rows listed before the rest are counted.
+const MAX_QUEUE_ROWS: usize = 5;
+
+/// Messages waiting for the run, in the order it takes them in: steers join at its
+/// next step, follow-ups once it ends. Nothing while the queue is empty.
+fn queue_lines(
+    state: &UiState,
+    held: bool,
+    bindings: &Bindings,
+    width: usize,
+    palette: Palette,
+) -> Option<Vec<Line<'static>>> {
+    let muted = Style::default().fg(palette.muted);
+    let queued: Vec<_> = state
+        .queue
+        .steering
+        .iter()
+        .map(|message| ("↪ steer    ", message))
+        .chain(
+            state
+                .queue
+                .follow_up
+                .iter()
+                .map(|message| ("⏎ follow-up", message)),
+        )
+        .collect();
+    if queued.is_empty() {
+        return None;
+    }
+    let mut lines = vec![spread(
+        vec![
+            heading("Queue ", palette),
+            Span::styled(queued.len().to_string(), muted),
+        ],
+        vec![Span::styled(
+            if held {
+                "held until you answer"
+            } else {
+                "delivered in order"
+            },
+            muted,
+        )],
+        width,
+    )];
+    let number_width = queued.len().min(MAX_QUEUE_ROWS).to_string().len();
+    for (index, (kind, message)) in queued.iter().enumerate().take(MAX_QUEUE_ROWS) {
+        let lead = format!("{:>number_width$} {kind} ", index + 1);
+        let room = width.saturating_sub(lead.width());
+        lines.push(Line::from(vec![
+            Span::styled(lead, Style::default().fg(palette.secondary)),
+            Span::raw(ui::clip_columns(&first_line(&message.content), room)),
+        ]));
+    }
+    if queued.len() > MAX_QUEUE_ROWS {
+        lines.push(Line::styled(
+            format!("+{} more · /queue to review", queued.len() - MAX_QUEUE_ROWS),
+            muted,
+        ));
+    }
+    // A held queue waits on the decision, which takes the keyboard until answered.
+    if held {
+        return Some(lines);
+    }
+    lines.push(Line::styled(
+        ui::clip_columns("steers join at the next step; follow-ups wait", width),
+        muted,
+    ));
+    let restore = ui::primary_label(bindings, KeyAction::RestoreQueue);
+    let hints = if restore == "Unbound" {
+        "/queue manage".to_owned()
+    } else {
+        format!("{restore} restore newest · /queue manage")
+    };
+    lines.push(ui::keycap_hints(&hints, palette).style(muted));
+    Some(lines)
+}
+
+/// `Needs approval`: the call waiting on the user, how long it has waited, and what
+/// the permission mode means for it. A call missing from the transcript is named by
+/// its tool alone.
+fn approval_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec<Line<'static>>> {
+    let pending = state.pending_approval.as_ref()?;
+    let muted = Style::default().fg(palette.muted);
+    let entry = state
+        .transcript
+        .tool_entry_for_call(&pending.call_id)
+        .and_then(|id| state.transcript.entry_index(id))
+        .map(|index| &state.transcript.entries()[index]);
+    let tool = entry.and_then(|entry| entry.tool_card());
+    let (label, detail) = match (tool, entry.and_then(|entry| entry.process_card())) {
+        (Some(card), _) => (card.action_label(), card.display_arguments()),
+        // Polling or stopping a background process asks about the process itself.
+        (None, Some(card)) => (
+            card.action_label().to_owned(),
+            card.task_label
+                .clone()
+                .unwrap_or_else(|| "Background command".to_owned()),
+        ),
+        (None, None) => (pending.name.clone(), String::new()),
+    };
+    let label = sanitize_for_terminal(&label);
+    let detail = sanitize_for_terminal(&detail.split_whitespace().collect::<Vec<_>>().join(" "));
+    // A tool card's clock starts at its call, so it times the wait; a process card's
+    // clock is the process's own age.
+    let waited = tool
+        .and(entry)
+        .and_then(|entry| entry.running_elapsed())
+        .map(|elapsed| {
+            vec![Span::styled(
+                duration(elapsed),
+                Style::default().fg(palette.warning),
+            )]
+        })
+        .unwrap_or_default();
+    let mut lines = vec![
+        spread(
+            vec![Span::styled(
+                "Needs approval",
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+            )],
+            waited,
+            width,
+        ),
+        Line::from(vec![
+            Span::styled(format!(" {label} "), palette.chip(&label)),
+            Span::raw(" "),
+            Span::raw(ui::clip_columns(
+                &detail,
+                width.saturating_sub(label.width() + 3),
+            )),
+        ]),
+    ];
+    let mut paused = vec![sanitize_for_terminal(&pending.safety)];
+    let turn = state.run_progress.map_or(0, |run| run.turn);
+    paused.push(if turn > 0 {
+        format!("turn {turn} paused")
+    } else {
+        "run paused".to_owned()
+    });
+    lines.push(Line::styled(
+        ui::clip_columns(&paused.join(" · "), width),
+        muted,
+    ));
+    if let Some(mode) = permission_mode(state) {
+        // YOLO skips only the prompts it can grant; some tools ask on every call.
+        let note = if mode == "ask" && pending.grants_allowed {
+            "permissions ask · YOLO skips prompts like this"
+        } else if pending.grants_allowed {
+            "permissions YOLO"
+        } else {
+            "asks on every call"
+        };
+        lines.push(Line::styled(ui::clip_columns(note, width), muted));
+    }
+    Some(lines)
+}
+
 /// `Context  198.8k / 272.0k 73%` over a bar of the window's fill.
 fn context_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
@@ -432,8 +705,14 @@ fn context_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
     lines
 }
 
-/// The model, its effort, the session's cost, and the permission mode.
-fn model_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+/// The model, its effort, the session's and this turn's cost, and the permission
+/// mode, which the approval block shows instead while a decision waits.
+fn model_lines(
+    state: &UiState,
+    focus: Focus,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
     let mut lines = vec![Line::from(heading("Model", palette))];
     let model = state
@@ -476,17 +755,30 @@ fn model_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'sta
             ]
         },
     );
-    let permissions = state.permissions.snapshot.as_ref().map(|permissions| {
-        vec![
-            Span::styled("permissions ", muted),
-            Span::raw(match permissions.mode {
-                PermissionMode::Ask => "ask",
-                PermissionMode::Yolo => "YOLO",
-            }),
-        ]
-    });
-    lines.push(spread(cost, permissions.unwrap_or_default(), width));
+    let turn_cost = crate::context_view::turn_cost(state)
+        .map(|cost| vec![Span::raw(cost), Span::styled(" this turn", muted)])
+        .unwrap_or_default();
+    lines.push(spread(cost, turn_cost, width));
+    if focus != Focus::Approval {
+        if let Some(mode) = permission_mode(state) {
+            lines.push(Line::from(vec![
+                Span::styled("permissions ", muted),
+                Span::raw(mode),
+            ]));
+        }
+    }
     lines
+}
+
+fn permission_mode(state: &UiState) -> Option<&'static str> {
+    state
+        .permissions
+        .snapshot
+        .as_ref()
+        .map(|permissions| match permissions.mode {
+            PermissionMode::Ask => "ask",
+            PermissionMode::Yolo => "YOLO",
+        })
 }
 
 /// Git's changed files with their line counts; the rest are counted on one row.
@@ -661,6 +953,41 @@ fn turn_lines(state: &UiState, width: usize, rows: usize, palette: Palette) -> V
         ));
     }
     lines
+}
+
+/// The turn list folded to one row while a run or a decision leads the panel.
+fn folded_turn_lines(
+    state: &UiState,
+    focus: Focus,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let prompts = state
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.role == TranscriptRole::User)
+        .count();
+    if prompts == 0 {
+        return Vec::new();
+    }
+    vec![spread(
+        vec![
+            Span::styled("▸ ", muted),
+            heading("Turns ", palette),
+            Span::styled(prompts.to_string(), muted),
+        ],
+        vec![Span::styled(
+            if focus == Focus::Running {
+                "collapsed while running"
+            } else {
+                ""
+            },
+            muted,
+        )],
+        width,
+    )]
 }
 
 /// `MCP ●●●○ 3/4 connected`, once the servers' status is known.
@@ -968,18 +1295,311 @@ mod tests {
         assert_eq!(cost("1.8412"), "$1.84");
     }
 
-    #[test]
-    fn running_turn_has_no_result() {
+    /// The session with a third prompt running a shell call at turn 6.
+    fn running() -> UiState {
         let mut state = session();
-        state.transcript.append_prompt("now push it".into());
+        let prompt = state.transcript.append_prompt("now push it".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
         state.view_status = ViewStatus::Running;
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("working"), "{panel}");
-        let latest = panel
+        state.transcript.observe_tool_call(push_call());
+        state
+    }
+
+    fn push_call() -> crate::tool_cards::ToolCallInput {
+        crate::tool_cards::ToolCallInput {
+            call_id: "push-1".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "git push -u origin fix/timeouts"}),
+        }
+    }
+
+    struct Ids;
+    impl crate::reducer::CommandIdSource for Ids {
+        fn next_id(&mut self, kind: crate::reducer::CommandKind) -> String {
+            format!("{}-1", kind.prefix())
+        }
+    }
+
+    fn backend(state: &mut UiState, event: crate::reducer::BackendEvent) {
+        crate::reducer::reduce(
+            state,
+            crate::reducer::UiAction::BackendEvent(event),
+            &mut Ids,
+        )
+        .unwrap();
+    }
+
+    fn queue(state: &mut UiState, steering: &[&str], follow_up: &[&str]) {
+        backend(
+            state,
+            crate::reducer::BackendEvent::QueueUpdated {
+                steering: steering.iter().map(|&text| text.into()).collect(),
+                follow_up: follow_up.iter().map(|&text| text.into()).collect(),
+            },
+        );
+    }
+
+    /// The running session waiting to approve its push, with a follow-up queued.
+    fn approving() -> UiState {
+        let mut state = running();
+        state.transcript.observe_approval_requested(push_call());
+        state.pending_approval = Some(crate::reducer::PendingApproval {
+            call_id: "push-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "git push -u origin fix/timeouts"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        });
+        state.view_status = ViewStatus::WaitingForApproval;
+        queue(&mut state, &[], &["then open the PR"]);
+        state
+    }
+
+    fn row_of(panel: &str, text: &str) -> usize {
+        panel
             .lines()
-            .find(|line| line.contains("3 now push it"))
+            .position(|line| line.contains(text))
+            .unwrap_or_else(|| panic!("{text}\n{panel}"))
+    }
+
+    #[test]
+    fn running_leads_with_now() {
+        let panel = panel_text(&screen(&running(), &mut SidePanel::default(), 200), 200);
+        for expected in [
+            "working",
+            "Bash  git push -u origin fix/timeouts",
+            "turn 6 · 1 tool",
+            "Esc interrupt",
+            "▸ Turns 3",
+            "collapsed while running",
+            "permissions ask",
+        ] {
+            assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+        assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
+        // The turn list folds, and an empty queue takes no rows.
+        assert!(!panel.contains("4m 12s ✓"), "{panel}");
+        assert!(!panel.contains("Queue"), "{panel}");
+    }
+
+    #[test]
+    fn queue_lists_steers_first() {
+        let mut state = running();
+        queue(
+            &mut state,
+            &["also check the docs"],
+            &["then draft release notes"],
+        );
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        for expected in [
+            "Queue 2",
+            "delivered in order",
+            "steers join at the next step",
+            "Alt+Up restore newest · /queue manage",
+        ] {
+            assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+        let steer = row_of(&panel, "1 ↪ steer");
+        assert!(
+            panel
+                .lines()
+                .nth(steer)
+                .unwrap()
+                .contains("also check the docs")
+        );
+        assert_eq!(row_of(&panel, "2 ⏎ follow-up then draft"), steer + 1);
+        assert!(row_of(&panel, "Now") < row_of(&panel, "Queue"), "{panel}");
+        assert!(
+            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            "{panel}"
+        );
+    }
+
+    #[test]
+    fn approval_leads_with_decision() {
+        let state = approving();
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        for expected in [
+            "Needs approval",
+            "Bash  git push -u origin fix/timeouts",
+            "command · turn 6 paused",
+            "permissions ask · YOLO skips prompts like this",
+            "Queue 1",
+            "held until you answer",
+            "1 ⏎ follow-up then open the PR",
+            "▸ Turns 3",
+        ] {
+            assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+        assert!(
+            row_of(&panel, "Needs approval") < row_of(&panel, "Queue"),
+            "{panel}"
+        );
+        assert!(
+            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            "{panel}"
+        );
+        // The run is paused, not running, and the mode is stated once.
+        assert!(!panel.contains("Now"), "{panel}");
+        assert!(!panel.contains("collapsed while running"), "{panel}");
+        assert!(!panel.contains("steers join"), "{panel}");
+        assert!(!panel.contains("restore newest"), "{panel}");
+        assert_eq!(panel.matches("permissions").count(), 1, "{panel}");
+    }
+
+    fn overlay_text(state: &UiState) -> String {
+        let mut panel = SidePanel::default();
+        panel.observe_width(140);
+        panel.toggle();
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = overlay_area(frame.area());
+                render(
+                    frame,
+                    area,
+                    state,
+                    &panel,
+                    &Bindings::default(),
+                    0,
+                    None,
+                    Palette::default(),
+                );
+            })
             .unwrap();
-        assert!(latest.ends_with('…'), "{latest}");
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| (0..140).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        panel_text(&rows, 140)
+    }
+
+    #[test]
+    fn overlay_follows_state() {
+        let panel = overlay_text(&running());
+        assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
+        assert!(panel.contains("Ctrl+B close · Esc close"), "{panel}");
+        let panel = overlay_text(&approving());
+        assert!(
+            row_of(&panel, "Needs approval") < row_of(&panel, "Queue"),
+            "{panel}"
+        );
+        assert!(
+            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            "{panel}"
+        );
+    }
+
+    #[test]
+    fn stale_run_costs_latest_turn() {
+        let priced = |nano_usd| {
+            Some(crate::web_search::MessageCost {
+                label: String::new(),
+                nano_usd: Some(nano_usd),
+                lower_bound: false,
+            })
+        };
+        let mut state = session();
+        let first = state.transcript.entries()[0].id;
+        state.transcript.append_prompt("third".into());
+        state
+            .transcript
+            .complete_message_with_cost(3, "Done.".into(), priced(500_000_000));
+        state.transcript.append_prompt("fourth".into());
+        state
+            .transcript
+            .complete_message_with_cost(4, "Done.".into(), priced(20_000_000));
+        // A replaced transcript leaves the finished run's prompt id naming an older
+        // entry; at idle only the latest prompt's replies count.
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt: first,
+            turn: 1,
+        });
+        assert_eq!(
+            crate::context_view::turn_cost(&state).as_deref(),
+            Some("$0.020")
+        );
+        // Compacting starts no run, so the latest turn still counts.
+        state.current_command = Some(crate::reducer::ActiveCommand {
+            id: "compact-1".into(),
+            command_type: crate::reducer::ActiveCommandType::Compact,
+        });
+        assert_eq!(
+            crate::context_view::turn_cost(&state).as_deref(),
+            Some("$0.020")
+        );
+    }
+
+    #[test]
+    fn steered_run_keeps_total() {
+        let priced = |nano_usd| {
+            Some(crate::web_search::MessageCost {
+                label: String::new(),
+                nano_usd: Some(nano_usd),
+                lower_bound: false,
+            })
+        };
+        let mut state = session();
+        let prompt = state.transcript.append_prompt("push it".into());
+        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 3 });
+        state
+            .transcript
+            .complete_message_with_cost(3, "Pushing.".into(), priced(210_000_000));
+        // A steer the run took in reads as a prompt of its own.
+        state.transcript.append_prompt("also open the PR".into());
+        state
+            .transcript
+            .complete_message_with_cost(4, "Opened.".into(), priced(100_000_000));
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::RunCompleted {
+                outcome: "completed".into(),
+                duration_ms: Some(9_000),
+                tool_calls: 2,
+                output_tokens: None,
+                model_ms: None,
+            },
+        );
+        let cost = |state: &UiState| crate::context_view::turn_cost(state);
+        assert_eq!(cost(&state).as_deref(), Some("$0.310"));
+        // A history sync replaces the transcript; the run keeps its total.
+        state.transcript = Default::default();
+        assert_eq!(cost(&state).as_deref(), Some("$0.310"));
+    }
+
+    #[test]
+    fn turn_cost_marks_floors() {
+        let cost = |nano_usd, lower_bound| crate::web_search::MessageCost {
+            label: String::new(),
+            nano_usd,
+            lower_bound,
+        };
+        let mut state = session();
+        let turn = |state: &UiState| crate::context_view::turn_cost(state);
+        assert_eq!(turn(&state), None);
+        state.transcript.append_prompt("price it".into());
+        state.transcript.complete_message_with_cost(
+            3,
+            "Reading.".into(),
+            Some(cost(Some(210_000_000), false)),
+        );
+        state.transcript.complete_message_with_cost(
+            4,
+            "Done.".into(),
+            Some(cost(Some(100_000_000), false)),
+        );
+        assert_eq!(turn(&state).as_deref(), Some("$0.310"));
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("$0.310 this turn"), "{panel}");
+
+        // An unpriced reply or a web search leaves only a floor.
+        state
+            .transcript
+            .complete_message_with_cost(5, "Searched.".into(), Some(cost(None, false)));
+        assert_eq!(turn(&state).as_deref(), Some("≥$0.310"));
     }
 
     #[test]

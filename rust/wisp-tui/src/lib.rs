@@ -1869,13 +1869,14 @@ impl LiveUi {
                     mouse::Rows::default()
                 }
                 OverlayKind::SidePanel => {
-                    let toggle = ui::primary_label(&self.bindings, KeyAction::TogglePanel);
                     side_panel::render(
                         frame,
                         area,
                         &self.state,
                         &self.side_panel,
-                        &toggle,
+                        &self.bindings,
+                        self.activity_frame,
+                        activity_elapsed,
                         palette,
                     );
                     mouse::Rows::default()
@@ -1909,7 +1910,10 @@ impl LiveUi {
     fn activity_animation_active(&self) -> bool {
         !self.state.configuration_active()
             && (self.state.view_status == ViewStatus::Running
-                || self.state.interaction_status == InteractionStatus::Compacting)
+                || self.state.interaction_status == InteractionStatus::Compacting
+                // The side panel times how long an approval has waited.
+                || (self.state.view_status == ViewStatus::WaitingForApproval
+                    && self.state.side_panel_visible))
     }
 
     /// How long the current command has run, for the working row. The clock restarts

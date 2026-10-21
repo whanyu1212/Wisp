@@ -737,7 +737,10 @@ mod tests {
                 } else {
                     expected_label
                 };
-                assert_eq!(cost.as_deref(), expected_label);
+                assert_eq!(
+                    cost.as_ref().map(|cost| cost.label.as_str()),
+                    expected_label
+                );
                 let mut live = SharedTranscript::default();
                 live.begin_message(turn);
                 live.complete_message_with_cost(turn, content.clone(), cost);

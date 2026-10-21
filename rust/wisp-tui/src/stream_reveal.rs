@@ -827,7 +827,12 @@ mod tests {
     fn cost_waits_for_drain() {
         let mut transcript = Transcript::default();
         transcript.append_paced_message_delta(1, "Done ");
-        transcript.complete_message_with_cost(1, "Done here.".into(), Some("$0.01".into()));
+        let cost = crate::web_search::MessageCost {
+            label: "$0.01".into(),
+            nano_usd: Some(10_000_000),
+            lower_bound: false,
+        };
+        transcript.complete_message_with_cost(1, "Done here.".into(), Some(cost));
         assert!(!transcript.entries()[0].display_content().contains("$0.01"));
         transcript.flush_reveal();
         let entry = &transcript.entries()[0];

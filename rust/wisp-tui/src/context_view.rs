@@ -3,6 +3,7 @@
 use crate::reducer::UiState;
 use crate::theme::Palette;
 use crate::ui::sanitize_for_terminal;
+use crate::web_search::CostTotal;
 use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
@@ -69,6 +70,44 @@ pub(crate) fn session_cost(state: &UiState) -> Option<String> {
         format_usd,
     );
     Some(format!("{}{amount}", if cost.complete { "" } else { "≥" }))
+}
+
+/// What the latest run's replies cost, from the estimate each reply carries. `None`
+/// until a reply in it is priced. A reply that searched the web, or one with text that
+/// could not be priced, makes the total a floor (`≥$0.31`); an unpriced reply that
+/// only called tools carries no cost and is not counted.
+pub(crate) fn turn_cost(state: &UiState) -> Option<String> {
+    // `/compact` runs no turn of its own, so the finished run's total stays shown.
+    let running = state
+        .current_command
+        .as_ref()
+        .is_some_and(|command| command.command_type != crate::reducer::ActiveCommandType::Compact);
+    let total = if running {
+        // A run in progress spans the steers and follow-ups it takes in.
+        CostTotal::of(
+            crate::ui::current_turn(state)
+                .iter()
+                .filter_map(|entry| entry.cost()),
+        )
+    } else if let Some(total) = state.finished_run_cost {
+        total
+    } else {
+        // A session opened from history: its last run's steers are prompts like any
+        // other, so the turn is what follows the latest one.
+        let entries = state.transcript.entries();
+        let start = entries
+            .iter()
+            .rposition(|entry| entry.role == crate::transcript::TranscriptRole::User)
+            .map_or(0, |index| index + 1);
+        CostTotal::of(entries[start..].iter().filter_map(|entry| entry.cost()))
+    };
+    total.priced.then(|| {
+        format!(
+            "{}{}",
+            if total.floor { "≥" } else { "" },
+            format_usd(total.nano_usd as f64 / 1e9)
+        )
+    })
 }
 
 /// Round a cost for display like the backend's `format_usd`, keeping more places
