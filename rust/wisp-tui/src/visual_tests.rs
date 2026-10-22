@@ -230,6 +230,62 @@ fn fixture(scenario: &str) -> LiveUi {
             );
         }
     }
+    if scenario == "diff-previews" {
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("ok lets work on it".into());
+        let mut first_edit = None;
+        for (id, name, arguments) in [
+            (
+                "package",
+                "edit",
+                json!({
+                    "path": "site/package.json",
+                    "edits": [{
+                        "oldText": "\"preview\": \"astro preview\"\n",
+                        "newText": "\"preview\": \"astro preview --host 127.0.0.1\",\n\"test:browser\": \"playwright test\"\n"
+                    }]
+                }),
+            ),
+            (
+                "styles",
+                "edit",
+                json!({
+                    "path": "site/src/styles/site.css",
+                    "edits": [{"oldText": ".mermaid svg * {\n  animation: none !important;\n}\n", "newText": ""}]
+                }),
+            ),
+            (
+                "browser",
+                "write",
+                json!({
+                    "path": "site/tests/browser/layouts.spec.ts",
+                    "content": "test('mobile navigation', async ({ page }) => {\n  await page.goto('/');\n  const menu = page.getByRole('button', { name: 'Menu' });\n  await menu.click();\n  const nav = page.getByRole('navigation');\n  await expect(nav).toBeVisible();\n  await page.keyboard.press('Escape');\n});\n"
+                }),
+            ),
+        ] {
+            let entry = ui.state.transcript.observe_tool_call(ToolCallInput {
+                call_id: id.into(),
+                name: name.into(),
+                detail_source: tool_detail::project_tool_detail_source(
+                    name,
+                    arguments.as_object().unwrap(),
+                ),
+                arguments: tool_cards::bounded_tool_arguments(name, &arguments),
+            });
+            first_edit.get_or_insert(entry);
+            let mut finished = result.clone();
+            finished.call_id = id.into();
+            finished.name = name.into();
+            finished.created = name == "write";
+            ui.state.transcript.observe_tool_result(finished);
+        }
+        ui.transcript_row_cache
+            .fold_mut()
+            .expand_group(first_edit.unwrap());
+        ui.editor = PromptEditor::default();
+    }
     if scenario == "reading" {
         ui.state.transcript = Default::default();
         ui.state
@@ -290,6 +346,52 @@ fn row_containing(buffer: &ratatui::buffer::Buffer, text: &str) -> u16 {
                 .contains(text)
         })
         .unwrap_or_else(|| panic!("missing {text:?} in {buffer:?}"))
+}
+
+#[test]
+fn diff_previews_match_the_mockup_and_keep_full_review_available() {
+    for selected in theme::themes() {
+        for no_color in [false, true] {
+            let mut ui = fixture("diff-previews");
+            ui.theme.active = selected;
+            ui.no_color = no_color;
+            let palette = ui.palette();
+            for width in [40, 80, 200, 80] {
+                let buffer = draw(&mut ui, width, 64);
+                let removed = row_containing(&buffer, ".mermaid svg * {");
+                let added = row_containing(&buffer, "await page.goto");
+                let omission = row_containing(&buffer, "5 more changed lines");
+                let column = if ui.side_panel.docked() {
+                    ui.side_panel.split(buffer.area).0.width
+                } else {
+                    width
+                };
+                for x in [column / 2, column - 5] {
+                    assert_eq!(buffer[(x, removed)].bg, palette.deletion_background);
+                    assert_eq!(buffer[(x, added)].bg, palette.addition_background);
+                    assert_eq!(buffer[(x, omission)].bg, palette.surface);
+                }
+                let screen = buffer
+                    .content
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>();
+                assert!(!screen.contains("menu.click"));
+                assert!(!screen.contains("⋯ ▸"));
+            }
+            let entry = ui.state.transcript.entries().last().unwrap();
+            let card = entry.tool_card().unwrap();
+            let tool_detail::DetailAvailability::LiveRetained(detail) = &card.structured_detail
+            else {
+                panic!("expected retained write diff");
+            };
+            assert_eq!(detail.additions, 8);
+            ui.detail_view.open(entry.id, detail);
+            let buffer = draw(&mut ui, 100, 40);
+            row_containing(&buffer, "await menu.click()");
+            row_containing(&buffer, "await page.keyboard.press('Escape')");
+        }
+    }
 }
 
 #[test]
@@ -727,7 +829,7 @@ fn capture_conversation_screens() {
     let output =
         PathBuf::from(std::env::var_os("WISP_VISUAL_OUTPUT").expect("set WISP_VISUAL_OUTPUT"));
     fs::create_dir_all(&output).unwrap();
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8), (100, 64)] {
+    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8), (100, 64), (200, 40)] {
         for (variant, selected, no_color) in [
             ("dark", theme::default_theme(), false),
             ("grove", theme::resolve("grove").unwrap(), false),
@@ -736,6 +838,7 @@ fn capture_conversation_screens() {
         ] {
             for scenario in [
                 "reading",
+                "diff-previews",
                 "conversation",
                 "tools",
                 "working",
