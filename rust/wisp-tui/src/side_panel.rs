@@ -29,8 +29,13 @@ use wisp_protocol::events::{
     ContextBreakdown, ContextSource, McpServerStatus, SessionBranchSummary,
 };
 
-/// The panel's width, its border included.
+/// The panel's width, its border included: the overlay's width, and the docked
+/// panel's on the narrowest terminal that docks it.
 pub(crate) const PANEL_WIDTH: u16 = 56;
+
+/// The widest a docked panel grows, so long paths and names fit without the
+/// panel becoming a second transcript.
+const MAX_PANEL_WIDTH: u16 = 76;
 
 /// What the transcript keeps beside a docked panel: replies wrap at 100 columns,
 /// plus the turn rail and the conversation margins.
@@ -321,9 +326,18 @@ pub(crate) fn overlay_area(above_composer: Rect) -> Rect {
     }
 }
 
+/// The docked panel's width on a terminal `total` columns wide, its border included.
+/// The panel and the transcript share the columns beyond the docking threshold
+/// evenly, up to [`MAX_PANEL_WIDTH`]: 160 columns give 56, 180 give 66, and 200 or
+/// more give 76.
+pub(crate) fn docked_width(total: u16) -> u16 {
+    let spare = total.saturating_sub(PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH);
+    (PANEL_WIDTH + spare / 2).min(MAX_PANEL_WIDTH)
+}
+
 /// Split a frame into the conversation and the docked panel at its right.
 pub(crate) fn split(area: Rect) -> (Rect, Rect) {
-    let width = PANEL_WIDTH.min(area.width);
+    let width = docked_width(area.width).min(area.width);
     (
         Rect {
             width: area.width - width,
@@ -1780,7 +1794,7 @@ mod tests {
 
     /// The panel's columns of each row.
     fn panel_text(rows: &[String], width: u16) -> String {
-        let start = usize::from(width - PANEL_WIDTH);
+        let start = usize::from(width - docked_width(width));
         rows.iter()
             .map(|row| {
                 row.chars()
@@ -1824,11 +1838,33 @@ mod tests {
         let footer = rows.last().unwrap();
         let conversation: String = footer
             .chars()
-            .take(usize::from(200 - PANEL_WIDTH))
+            .take(usize::from(200 - docked_width(200)))
             .collect();
         assert!(conversation.contains("idle ·"), "{conversation}");
         assert!(!conversation.contains("/srv/wisp"), "{conversation}");
         assert!(!conversation.contains("ctx"), "{conversation}");
+    }
+
+    #[test]
+    fn docked_panel_grows_capped() {
+        for (total, panel) in [(160, 56), (161, 56), (180, 66), (200, 76), (240, 76)] {
+            assert_eq!(docked_width(total), panel, "{total}");
+            let (conversation, docked) = split(Rect::new(0, 0, total, 10));
+            assert_eq!((conversation.width, docked.width), (total - panel, panel));
+        }
+        // The overlay on a terminal too narrow to dock keeps the narrowest width.
+        assert_eq!(overlay_area(Rect::new(0, 0, 150, 10)).width, PANEL_WIDTH);
+    }
+
+    #[test]
+    fn wide_panel_fits_paths() {
+        let path = "src/wisp/agent/harness/boundaries/overflow_recovery.rs";
+        let mut state = session();
+        state.git_diff.snapshot = Some(changes(vec![file(path, "added", "", "x\n")]));
+        let narrow = panel_text(&screen(&state, &mut SidePanel::default(), 160), 160);
+        assert!(!narrow.contains(path), "{narrow}");
+        let wide = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(wide.contains(&format!("A {path}")), "{wide}");
     }
 
     #[test]
@@ -2124,9 +2160,10 @@ mod tests {
 
     #[test]
     fn idle_context_split_rows() {
+        // The narrowest docked panel, so the bar is 52 columns.
         let panel = panel_text(
-            &screen(&with_split(session()), &mut SidePanel::default(), 200),
-            200,
+            &screen(&with_split(session()), &mut SidePanel::default(), 160),
+            160,
         );
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
@@ -2214,7 +2251,7 @@ mod tests {
     fn context_without_split() {
         let mut state = with_split(session());
         state.context.stats.as_mut().unwrap().context_breakdown = None;
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 160), 160);
         // Older statistics have no split: one run, the reserve after its marker.
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
@@ -2458,7 +2495,7 @@ mod tests {
                     .contains(text)
             })
             .unwrap_or_else(|| panic!("{text}"));
-        buffer[(width - PANEL_WIDTH / 2, y)].style().bg
+        buffer[(width - docked_width(width) / 2, y)].style().bg
     }
 
     #[test]

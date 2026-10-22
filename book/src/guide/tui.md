@@ -732,8 +732,9 @@ its name (or first prompt) and status, the folder and branch, where the session 
 opens the tree), context use, the model and effort, the session's cost, the permission mode, Git's
 changed files with line counts (`◆` marks files Wisp edited this session; in the `Ctrl+B` overlay,
 Enter on one jumps to its edit card), each prompt's run time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
-and model to the panel. `Ctrl+B` hides or shows it. On a narrower terminal, `Ctrl+B` opens the same
-panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
+and model to the panel. The panel is 56 columns wide at 160 columns and takes half of any extra
+width, up to 76 columns at 200 columns or more. `Ctrl+B` hides or shows it. On a narrower terminal,
+`Ctrl+B` opens the same 56-column panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
 when the panel appears and after each run, but not while `/diff` is open. On a terminal at least
 160 columns wide, Edit and Write cards in the transcript set old and new side by side.
 
