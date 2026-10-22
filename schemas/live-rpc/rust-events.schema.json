@@ -16,6 +16,42 @@
           "default": null,
           "title": "AgentCompletedDurationMs"
         },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedEffort"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedMode"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedModel"
+        },
         "model_ms": {
           "anyOf": [
             {
@@ -86,7 +122,10 @@
         "duration_ms",
         "tool_calls",
         "output_tokens",
-        "model_ms"
+        "model_ms",
+        "mode",
+        "model",
+        "effort"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -2872,6 +2911,18 @@
           "title": "RpcMessageSnapshotRole",
           "type": "string"
         },
+        "run_completed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentCompleted"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageSnapshotRunCompleted"
+        },
         "skill_invocation": {
           "anyOf": [
             {
@@ -2980,6 +3031,7 @@
         "usage",
         "cost",
         "web_searches",
+        "run_completed",
         "tool_result",
         "skill_invocation"
       ],
@@ -3088,6 +3140,32 @@
           "title": "RpcMessageToolResultSnapshotOutputHasExitStatus",
           "type": "boolean"
         },
+        "process_ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotProcessEndedAt"
+        },
+        "process_started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotProcessStartedAt"
+        },
         "status": {
           "anyOf": [
             {
@@ -3132,7 +3210,9 @@
         "created",
         "summary",
         "truncated",
-        "duration_ms"
+        "duration_ms",
+        "process_started_at",
+        "process_ended_at"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -5720,6 +5800,19 @@
           "title": "ToolExecutionEndedOutputHasExitStatus",
           "type": "boolean"
         },
+        "process_ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionEndedProcessEndedAt"
+        },
         "process_error": {
           "anyOf": [
             {
@@ -5743,6 +5836,19 @@
           ],
           "default": null,
           "title": "ToolExecutionEndedProcessId"
+        },
+        "process_started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionEndedProcessStartedAt"
         },
         "process_state": {
           "anyOf": [
@@ -5780,6 +5886,19 @@
           "default": false,
           "title": "ToolExecutionEndedRetryable",
           "type": "boolean"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionEndedStartedAt"
         },
         "stderr": {
           "anyOf": [
@@ -5874,6 +5993,7 @@
         "summary",
         "truncated",
         "duration_ms",
+        "started_at",
         "process_id",
         "process_state",
         "process_error",
@@ -5882,7 +6002,9 @@
         "stdout_truncated",
         "stderr_truncated",
         "stdout_dropped_bytes",
-        "stderr_dropped_bytes"
+        "stderr_dropped_bytes",
+        "process_started_at",
+        "process_ended_at"
       ],
       "title": "ToolExecutionEnded",
       "type": "object"
@@ -6031,6 +6153,19 @@
           "title": "ToolResultReadyOutputHasExitStatus",
           "type": "boolean"
         },
+        "process_ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolResultReadyProcessEndedAt"
+        },
         "process_error": {
           "anyOf": [
             {
@@ -6054,6 +6189,19 @@
           ],
           "default": null,
           "title": "ToolResultReadyProcessId"
+        },
+        "process_started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolResultReadyProcessStartedAt"
         },
         "process_state": {
           "anyOf": [
@@ -6091,6 +6239,19 @@
           "default": false,
           "title": "ToolResultReadyRetryable",
           "type": "boolean"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolResultReadyStartedAt"
         },
         "stderr": {
           "anyOf": [
@@ -6185,6 +6346,7 @@
         "summary",
         "truncated",
         "duration_ms",
+        "started_at",
         "process_id",
         "process_state",
         "process_error",
@@ -6193,7 +6355,9 @@
         "stdout_truncated",
         "stderr_truncated",
         "stdout_dropped_bytes",
-        "stderr_dropped_bytes"
+        "stderr_dropped_bytes",
+        "process_started_at",
+        "process_ended_at"
       ],
       "title": "ToolResultReady",
       "type": "object"

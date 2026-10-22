@@ -90,6 +90,8 @@ def test_continues_with_history_and_labeled_tool_observations(
     )
 
     records = [json.loads(line) for line in session.path.read_text(encoding="utf-8").splitlines()]
+    # The run's totals close the file, after its messages.
+    assert records.pop()["event"]["payload"]["type"] == "agent.completed"
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",

@@ -387,7 +387,7 @@ impl BackendEvent {
             }
             "web.search" => Self::WebSearch {
                 turn: u64_field(value, &event_type, "turn")?,
-                text: crate::web_search::search(value),
+                search: crate::web_search::search(value),
             },
             "rpc.workspace" => Self::WorkspaceReported {
                 cwd: string_field(value, &event_type, "cwd")?,
@@ -396,13 +396,16 @@ impl BackendEvent {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             },
-            "agent.completed" => Self::RunCompleted {
+            "agent.completed" => Self::RunCompleted(crate::transcript::RunTotals {
                 outcome: string_field(value, &event_type, "outcome")?,
                 duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
                 tool_calls: u64_field_or(value, &event_type, "tool_calls", 0)?,
                 output_tokens: optional_u64_field(value, &event_type, "output_tokens")?,
                 model_ms: optional_u64_field(value, &event_type, "model_ms")?,
-            },
+                mode: optional_string_field(value, &event_type, "mode")?,
+                model: optional_string_field(value, &event_type, "model")?,
+                effort: optional_string_field(value, &event_type, "effort")?,
+            }),
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
@@ -550,6 +553,17 @@ impl BackendEvent {
                         0,
                     )?,
                     duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
+                    started_at_ms: optional_timestamp_ms_field(value, &event_type, "started_at")?,
+                    process_started_at_ms: optional_timestamp_ms_field(
+                        value,
+                        &event_type,
+                        "process_started_at",
+                    )?,
+                    process_ended_at_ms: optional_timestamp_ms_field(
+                        value,
+                        &event_type,
+                        "process_ended_at",
+                    )?,
                 }))
             }
             "trust.requested" => Self::TrustRequested {
@@ -1663,6 +1677,25 @@ fn optional_u64_field(
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_u64()
+            .map(Some)
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
+    }
+}
+
+/// Read an RFC 3339 time as Unix milliseconds.
+fn optional_timestamp_ms_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<i64>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .and_then(crate::tool_cards::timestamp_ms)
             .map(Some)
             .ok_or_else(|| EventProjectionError::InvalidField {
                 event_type: event_type.to_owned(),

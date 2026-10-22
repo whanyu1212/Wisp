@@ -2596,13 +2596,12 @@ mod tests {
             .complete_message_with_cost(4, "Opened.".into(), priced(100_000_000));
         backend(
             &mut state,
-            crate::reducer::BackendEvent::RunCompleted {
+            crate::reducer::BackendEvent::RunCompleted(crate::transcript::RunTotals {
                 outcome: "completed".into(),
                 duration_ms: Some(9_000),
                 tool_calls: 2,
-                output_tokens: None,
-                model_ms: None,
-            },
+                ..Default::default()
+            }),
         );
         let cost = |state: &UiState| crate::context_view::turn_cost(state);
         assert_eq!(cost(&state).as_deref(), Some("$0.310"));

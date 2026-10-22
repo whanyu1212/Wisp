@@ -313,6 +313,10 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
     }
     if update.exit_code is not None:
         data["exit_code"] = update.exit_code
+    if update.started_at is not None:
+        data["process_started_at"] = update.started_at
+    if update.ended_at is not None:
+        data["process_ended_at"] = update.ended_at
     return ToolResult(
         text=output.text,
         data=data,

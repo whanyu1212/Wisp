@@ -144,7 +144,8 @@ def test_rpc_mode_reports_stats_after_queued_prompt(tmp_path: Path) -> None:
     stats = next(record for record in records if record["type"] == "session.stats")
     assert stats["command_id"] == "stats-1"
     assert stats["stats"]["session_id"]
-    assert stats["stats"]["entry_count"] == 5
+    # Three system prompts, the prompt, the reply, and the run's totals.
+    assert stats["stats"]["entry_count"] == 6
     assert stats["stats"]["active_message_count"] == 2
     assert stats["stats"]["context"]["estimate"]["total_tokens"] > 0
     finished = [
@@ -194,7 +195,9 @@ def test_rpc_mode_reports_messages_after_queued_prompt(tmp_path: Path) -> None:
         "fake response to: hello",
     ]
     assert turn_messages[1]["parent_id"] == turn_messages[0]["entry_id"]
-    assert turn_messages[1]["entry_id"] == report["active_leaf_id"]
+    # The run's totals follow its reply as the active leaf and ride on the reply.
+    assert turn_messages[1]["entry_id"] != report["active_leaf_id"]
+    assert turn_messages[1]["run_completed"]["outcome"] == "completed"
     assert all(message["content_truncated"] is False for message in turn_messages)
     finished = [
         record

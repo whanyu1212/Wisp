@@ -368,6 +368,7 @@ def test_executes_tool_calls_and_continues_to_final_response(tmp_path: Path) -> 
         "tool.call",
         "tool.execution.started",
         "tool.execution.ended",
+        "agent.completed",
     ]
     assert event_records[1]["event"]["payload"]["call_id"] == "call-1"
     assert event_records[1]["event"]["payload"]["arguments"] == {"text": "hello"}
@@ -763,6 +764,7 @@ def test_blocks_approval_required_tool_without_override(tmp_path: Path) -> None:
         "tool.approval.requested",
         "tool.approval.resolved",
         "tool.execution.ended",
+        "agent.completed",
     ]
     assert event_records[3]["event"]["payload"]["approved"] is False
     assert "requires approval" in event_records[3]["event"]["payload"]["reason"]

@@ -9,6 +9,7 @@ unrelated ``exit_code`` from being styled as a failure.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import anyio
@@ -31,6 +32,8 @@ from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
+
+_PROCESS_START = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
@@ -512,6 +515,8 @@ def test_executor_promotes_bash_process_metadata_and_round_trips() -> None:
                     "stderr_dropped_bytes": 0,
                     "exit_code": 0,
                     "output_has_exit_status": False,
+                    "process_started_at": _PROCESS_START,
+                    "process_ended_at": _PROCESS_START + timedelta(minutes=4, seconds=12),
                 },
             ),
         )
@@ -534,6 +539,8 @@ def test_executor_promotes_bash_process_metadata_and_round_trips() -> None:
     assert round_tripped.process_id == "p1"
     assert round_tripped.process_state == "completed"
     assert round_tripped.stdout == "ready\n"
+    assert round_tripped.process_started_at == _PROCESS_START
+    assert round_tripped.process_ended_at == _PROCESS_START + timedelta(minutes=4, seconds=12)
 
 
 def test_executor_bounds_bash_process_output_metadata() -> None:
@@ -615,6 +622,9 @@ def test_executor_ignores_malformed_bash_process_metadata() -> None:
                     "process_state": ["running"],
                     "stdout_dropped_bytes": -1,
                     "stderr_dropped_bytes": "many",
+                    # A naive time cannot be placed on the frontend's clock.
+                    "process_started_at": datetime(2026, 1, 2, 3, 4, 5),
+                    "process_ended_at": "2026-01-02T03:08:17Z",
                 },
             ),
         )
@@ -625,6 +635,8 @@ def test_executor_ignores_malformed_bash_process_metadata() -> None:
     assert ended.process_state is None
     assert ended.stdout_dropped_bytes == 0
     assert ended.stderr_dropped_bytes == 0
+    assert ended.process_started_at is None
+    assert ended.process_ended_at is None
 
 
 def test_executor_keeps_bash_exit_line_beyond_tiny_budget() -> None:

@@ -239,6 +239,8 @@ def test_streams_fake_response_and_saves_session(tmp_path: Path) -> None:
     assert saved.path.exists()
 
     records = [json.loads(line) for line in saved.path.read_text(encoding="utf-8").splitlines()]
+    # The run's totals close the file, after its messages.
+    assert records.pop()["event"]["payload"]["type"] == "agent.completed"
     assert [record["message"]["role"] for record in records] == [
         "system",
         "system",
@@ -402,3 +404,18 @@ def test_failure_after_completed_turn_does_not_complete_it_twice(
 
 class _OtherProvider(ScriptedProvider):
     name = "other-scripted"
+
+
+def test_run_saves_its_totals(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(provider=FakeProvider(), sessions=store, model="fake-x", mode="plan")
+        return [event async for event in agent.run("hello")]
+
+    events = anyio.run(run_agent)
+    completed = next(event for event in events if isinstance(event, AgentCompleted))
+    assert (completed.mode, completed.model, completed.effort) == ("plan", "fake-x", None)
+    saved = next(event for event in events if isinstance(event, SessionSaved))
+    page = store.load(saved.path).read_message_page()
+    assert page.messages[-1].run_completed == completed

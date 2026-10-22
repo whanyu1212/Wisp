@@ -15,6 +15,7 @@ from wisp.events._base import (
     WispEvent,
     _MessageOriginEvent,
 )
+from wisp.events.rpc import AgentMode
 from wisp.events.usage import ContextObservation, TokenUsage, UsageCost
 
 
@@ -121,6 +122,11 @@ class AgentCompleted(WispEvent):
     # start to its completion, so throughput leaves out tool time; None when no
     # response completed.
     model_ms: int | None = Field(default=None, ge=0)
+    # The mode, model, and effort the run ended with, so a reopened session can show
+    # the same closing line; None when the backend did not report them.
+    mode: AgentMode | None = None
+    model: str | None = None
+    effort: str | None = None
 
 
 class ModelProviderAutoSwitched(WispEvent):

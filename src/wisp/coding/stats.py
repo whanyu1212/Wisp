@@ -20,6 +20,7 @@ from wisp.coding.costs import aggregate_session_cost
 from wisp.coding.prompt import PromptPart
 from wisp.events import (
     AgentCompleted,
+    AgentMode,
     CompactionPolicyStatus,
     ContextBudget,
     ContextObservation,
@@ -80,22 +81,38 @@ class RunStats:
                     elapsed = time.monotonic() - started
                     self.model_seconds = (self.model_seconds or 0.0) + elapsed
 
-    def completed(self, *, session_id: str, turns: int, outcome: RunOutcome) -> AgentCompleted:
+    def completed(
+        self,
+        *,
+        session_id: str,
+        turns: int,
+        outcome: RunOutcome,
+        mode: AgentMode | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> AgentCompleted:
         """Build the run's terminal event with its totals.
 
         Args:
             session_id (str): Session the run belongs to.
             turns (int): Turns the run completed.
             outcome (RunOutcome): How the run ended.
+            mode (AgentMode | None): Mode the run ended in.
+            model (str | None): Model the run ended with.
+            effort (str | None): Reasoning effort the run ended with.
 
         Returns:
             AgentCompleted: Terminal event carrying the run's duration, tool count,
-                output tokens, and model streaming time.
+                output tokens, model streaming time, and the mode, model, and effort
+                it ended with.
         """
         return AgentCompleted(
             session_id=session_id,
             turns=turns,
             outcome=outcome,
+            mode=mode,
+            model=model,
+            effort=effort,
             duration_ms=max(0, round((time.monotonic() - self.started) * 1000)),
             tool_calls=self.tool_calls,
             output_tokens=self.output_tokens,

@@ -1440,6 +1440,7 @@ fn render_transcript_row(
         }
         TranscriptRowKind::CardAction
         | TranscriptRowKind::CardGroup
+        | TranscriptRowKind::Evidence
         | TranscriptRowKind::Thought => base.fg(palette.muted),
         _ if user => base,
         _ if matches!(
@@ -1464,7 +1465,7 @@ fn render_transcript_row(
     let spinner = pulse.map(|frame| format!("{}  ", spinner_frame(frame)));
     let label = matches!(
         row.kind,
-        TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
+        TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup | TranscriptRowKind::Evidence
     )
     .then(|| {
         row.spans
@@ -3729,6 +3730,9 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
             duration_ms: None,
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
         }
     }
 
