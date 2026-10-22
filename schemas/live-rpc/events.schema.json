@@ -16,6 +16,41 @@
           "default": null,
           "title": "Duration Ms"
         },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
         "model_ms": {
           "anyOf": [
             {
@@ -86,7 +121,10 @@
         "duration_ms",
         "tool_calls",
         "output_tokens",
-        "model_ms"
+        "model_ms",
+        "mode",
+        "model",
+        "effort"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -3040,6 +3078,17 @@
           "title": "Role",
           "type": "string"
         },
+        "run_completed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentCompleted"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "skill_invocation": {
           "anyOf": [
             {
@@ -3145,6 +3194,7 @@
         "usage",
         "cost",
         "web_searches",
+        "run_completed",
         "tool_result",
         "skill_invocation"
       ],
@@ -7338,6 +7388,9 @@
   "x-wisp-conformance-fixtures": {
     "agent.completed": {
       "duration_ms": null,
+      "effort": null,
+      "mode": null,
+      "model": null,
       "model_ms": null,
       "outcome": "completed",
       "output_tokens": null,

@@ -309,7 +309,9 @@ def test_print_mode_outputs_response_and_writes_session(tmp_path: Path) -> None:
     assert len(session_files) == 1
 
     records = [
-        json.loads(line) for line in session_files[0].read_text(encoding="utf-8").splitlines()
+        json.loads(line)
+        for line in session_files[0].read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "message"
     ]
     assert [record["message"]["role"] for record in records] == [
         "system",
@@ -436,7 +438,9 @@ def test_print_mode_continue_appends_to_latest_session(tmp_path: Path) -> None:
     session_files = list(tmp_path.glob("*.jsonl"))
     assert len(session_files) == 1
     records = [
-        json.loads(line) for line in session_files[0].read_text(encoding="utf-8").splitlines()
+        json.loads(line)
+        for line in session_files[0].read_text(encoding="utf-8").splitlines()
+        if json.loads(line)["kind"] == "message"
     ]
     assert [record["message"]["role"] for record in records] == [
         "system",
@@ -478,7 +482,9 @@ def test_print_mode_resume_appends_to_named_session(tmp_path: Path) -> None:
     assert second.exit_code == 0, second.output
     records = [json.loads(line) for line in session_file.read_text(encoding="utf-8").splitlines()]
     assert [
-        record["message"]["content"] for record in records if record["message"]["role"] == "user"
+        record["message"]["content"]
+        for record in records
+        if record["kind"] == "message" and record["message"]["role"] == "user"
     ] == [
         "first",
         "second",

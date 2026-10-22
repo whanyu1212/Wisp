@@ -94,6 +94,69 @@ pub enum TranscriptEntryKind {
     Process(ProcessCardSnapshot),
 }
 
+/// A finished run's totals, as `agent.completed` reports them live and a page of history
+/// returns them for a reopened session. Both build the same summary line from them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RunTotals {
+    pub outcome: String,
+    pub duration_ms: Option<u64>,
+    pub tool_calls: u64,
+    pub output_tokens: Option<u64>,
+    /// Time the run's model responses spent streaming, which throughput uses.
+    pub model_ms: Option<u64>,
+    /// The mode, model and effort the run ended with.
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl RunTotals {
+    /// The line closing the run's last entry, such as
+    /// `Build · gpt-6 · high · 6m 41s · 14 tools · 31 tok/s`; empty when the run
+    /// reported nothing to total. The turn's rail draws the leading `╰`.
+    pub(crate) fn summary_line(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(mode) = &self.mode {
+            parts.push(match mode.as_str() {
+                "build" => "Build".to_owned(),
+                "plan" => "Plan".to_owned(),
+                other => other.to_owned(),
+            });
+        }
+        parts.extend(self.model.iter().cloned());
+        parts.extend(self.effort.iter().cloned());
+        if let Some(duration_ms) = self.duration_ms {
+            parts.push(crate::tool_cards::format_duration(duration_ms));
+        }
+        match self.tool_calls {
+            0 => {}
+            1 => parts.push("1 tool".to_owned()),
+            count => parts.push(format!("{count} tools")),
+        }
+        // Throughput over the time the model streamed, so tool time does not dilute it.
+        if let (Some(tokens), Some(model_ms)) = (
+            self.output_tokens.filter(|tokens| *tokens > 0),
+            self.model_ms.filter(|milliseconds| *milliseconds > 0),
+        ) {
+            parts.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
+        }
+        if self.outcome != "completed" {
+            parts.push(self.outcome.clone());
+        }
+        parts.join(" · ")
+    }
+}
+
+/// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
+fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
+    let rate = tokens as f64 * 1000.0 / model_ms as f64;
+    if rate < 10.0 {
+        format!("{rate:.1}")
+    } else {
+        format!("{rate:.0}")
+    }
+}
+
 /// How a finished run ended and how long it took, kept on the prompt that started it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RunResult {
@@ -2583,6 +2646,12 @@ impl Transcript {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn throughput_keeps_a_digit() {
+        assert_eq!(tokens_per_second(1_234, 40_000), "31");
+        assert_eq!(tokens_per_second(42, 5_000), "8.4");
+    }
 
     #[test]
     fn cards_keep_their_run_folder() {

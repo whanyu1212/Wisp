@@ -18,7 +18,7 @@ from wisp.events._base import (
     WispEvent,
     _MessageOriginEvent,
 )
-from wisp.events.run import WebSearchPerformed
+from wisp.events.run import AgentCompleted, WebSearchPerformed
 from wisp.events.usage import TokenUsage, UsageCost
 from wisp.skills.models import SkillInvocationEvidence
 
@@ -91,6 +91,8 @@ class RpcMessageSnapshot(BaseModel):
     usage: TokenUsage | None = None
     cost: UsageCost | None = None
     web_searches: tuple[WebSearchPerformed, ...] = ()
+    # The totals of the run this message closed, on the last message a run persisted.
+    run_completed: AgentCompleted | None = None
     tool_result: RpcMessageToolResultSnapshot | None = None
     skill_invocation: RpcSkillInvocationSnapshot | None = None
 

@@ -132,6 +132,14 @@ pub(crate) fn project_chronological_history<'a>(
                 transcript.record_history_pending_result(entry_id, result);
             }
         }
+        // The run this message closed: rebuild the summary line its live turn ended with,
+        // on the same entry the live run chose.
+        if let Some(totals) = run_totals(message, index)? {
+            let summary = totals.summary_line();
+            if !summary.is_empty() {
+                transcript.attach_run_summary(summary);
+            }
+        }
         durable_entry_ids.push(durable_entry_id.to_owned());
     }
     transcript.finish_history_projection(MISSING_TOOL_RESULT);
@@ -206,6 +214,35 @@ fn project_assistant(
         entries.push(entry_id);
     }
     Ok(entries)
+}
+
+/// The totals a message's `run_completed` carries; `None` for messages that closed no
+/// run, including every message saved before runs kept their totals.
+fn run_totals(
+    message: &Value,
+    index: usize,
+) -> Result<Option<crate::transcript::RunTotals>, HistoryProjectionError> {
+    let Some(totals) = message
+        .get("run_completed")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(None);
+    };
+    let u64_of =
+        |name: &'static str| optional_u64(totals.get(name).unwrap_or(&Value::Null), index, name);
+    let string_of = |name: &'static str| {
+        optional_string(totals, index, name).map(|value| value.map(str::to_owned))
+    };
+    Ok(Some(crate::transcript::RunTotals {
+        outcome: string(totals, index, "outcome")?.to_owned(),
+        duration_ms: u64_of("duration_ms")?,
+        tool_calls: u64_of("tool_calls")?.unwrap_or(0),
+        output_tokens: u64_of("output_tokens")?,
+        model_ms: u64_of("model_ms")?,
+        mode: string_of("mode")?,
+        model: string_of("model")?,
+        effort: string_of("effort")?,
+    }))
 }
 
 fn user_content(message: &Value, index: usize) -> Result<String, HistoryProjectionError> {
@@ -1481,6 +1518,56 @@ mod tests {
             .unwrap();
         assert!(!card.arguments_available);
         assert_eq!(card.status.as_str(), "done");
+    }
+
+    fn finished_run() -> Value {
+        json!({"type": "agent.completed", "session_id": "s", "turns": 2,
+            "outcome": "completed", "duration_ms": 401_000, "tool_calls": 14,
+            "output_tokens": 3_100, "model_ms": 100_000,
+            "mode": "build", "model": "gpt-6-astra", "effort": "high"})
+    }
+
+    #[test]
+    fn reopened_run_keeps_summary() {
+        let mut reply = message("assistant", "Pushed.");
+        reply["run_completed"] = finished_run();
+        let restored = project_rpc_messages(&[message("user", "push it"), reply]).unwrap();
+        let line = "Build · gpt-6-astra · high · 6m 41s · 14 tools · 31 tok/s";
+        assert_eq!(restored.entries()[1].run_summary(), Some(line));
+        // The live run builds its line from the same totals.
+        let crate::reducer::BackendEvent::RunCompleted(live) =
+            crate::reducer::BackendEvent::from_projection_value(&finished_run()).unwrap()
+        else {
+            panic!("expected a finished run");
+        };
+        assert_eq!(live.summary_line(), line);
+    }
+
+    #[test]
+    fn card_closes_reopened_run() {
+        let mut call = message("assistant", "");
+        call["tool_calls"] = json!([{"call_id": "c1", "name": "bash",
+            "arguments": {"command": "ls"}, "arguments_original_bytes": 15}]);
+        let mut result = message("tool", "done");
+        result["tool_call_id"] = json!("c1");
+        result["tool_name"] = json!("bash");
+        result["run_completed"] = finished_run();
+        let restored = project_rpc_messages(&[message("user", "list"), call, result]).unwrap();
+        let card = restored.entries().last().unwrap();
+        assert!(card.tool_card().is_some());
+        assert!(card.run_summary().is_some());
+    }
+
+    #[test]
+    fn older_pages_have_no_summary() {
+        let restored =
+            project_rpc_messages(&[message("user", "hi"), message("assistant", "hello")]).unwrap();
+        assert!(
+            restored
+                .entries()
+                .iter()
+                .all(|entry| entry.run_summary().is_none())
+        );
     }
 
     #[test]

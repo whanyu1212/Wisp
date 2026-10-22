@@ -809,7 +809,7 @@ def test_stops_when_truncation_cannot_shrink_active_turn(
         for entry in session.read_active_path()
         if isinstance(entry, EventSessionEntry)
     ]
-    assert active_event_types[-1:] == ["error"]
+    assert active_event_types[-2:] == ["error", "agent.completed"]
     assert "context.overflow" not in active_event_types
 
     retry_events = anyio.run(run_retry)
