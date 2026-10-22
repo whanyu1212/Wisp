@@ -723,9 +723,7 @@ fn render_transcript(
     let visible_lines = usize::from(rows_area.height).max(1);
     // Wide terminals set diff cards' old and new side by side (the mock's "wide
     // only"), before sizing so a resize re-anchors on the new layout.
-    row_cache.set_side_by_side_width(
-        crate::side_panel::docks(frame.area().width).then_some(content_width),
-    );
+    row_cache.set_side_by_side_width((frame.area().width >= 160).then_some(content_width));
     // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);

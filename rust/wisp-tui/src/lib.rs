@@ -1589,6 +1589,9 @@ impl LiveUi {
             self.side_panel.observe_width(size.width);
         }
         self.side_panel.sync_files(&self.state.git_diff);
+        // A tiny terminal or a covering decision may omit the panel this frame.
+        // Its previous hit regions must not outlive the pixels they described.
+        self.side_panel.clear_paint();
         let overlay = self.active_overlay();
         let palette = self.palette();
         let mut painted = mouse::Frame {
@@ -1771,6 +1774,9 @@ impl LiveUi {
                 ),
                 // The side panel lies over the right of the transcript, down to the
                 // composer, so the prompt stays in view.
+                None if overlay == Some(OverlayKind::SidePanel) && self.side_panel.docked() => {
+                    Some(self.side_panel.split(frame.area()).1)
+                }
                 None if overlay == Some(OverlayKind::SidePanel) => ui::docked_popup_area(
                     column,
                     &self.state,
@@ -3263,6 +3269,26 @@ impl LiveUi {
                 self.notice = None;
                 self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
             }
+            side_panel::Target::Skills => {
+                self.discovery_view =
+                    Some(DiscoveryView::skills(self.state.skills.snapshot.as_deref()));
+                self.dispatch(UiAction::LoadSkills, writer, limit).await
+            }
+            side_panel::Target::Context => {
+                self.context_view = Some(context_view::ContextView::default());
+                self.dispatch(UiAction::LoadContext, writer, limit).await
+            }
+            side_panel::Target::Tree => {
+                self.dispatch_session_action_with(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: None,
+                    },
+                    false,
+                    writer,
+                    limit,
+                )
+                .await
+            }
         }
     }
 
@@ -4129,6 +4155,18 @@ impl LiveUi {
                 self.theme.toggle();
                 self.finish_theme_change();
             }
+            return Ok(LoopControl::Continue);
+        }
+        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::FocusPanel))
+            && self.active_overlay().is_none()
+            && !matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            )
+        {
+            self.side_panel.focus();
+            self.rendered_overlay = None;
+            self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
         if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::TogglePanel))

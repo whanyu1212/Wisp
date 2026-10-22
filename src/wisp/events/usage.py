@@ -286,6 +286,7 @@ class SessionStats(BaseModel):
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
     context_breakdown: ContextBreakdown | None = None
     branch: SessionBranchSummary = SessionBranchSummary()
+    used_skill_names: tuple[str, ...] = ()
 
 
 class ContextPressure(WispEvent):

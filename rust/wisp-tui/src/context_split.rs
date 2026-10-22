@@ -21,9 +21,6 @@ pub(crate) const RESERVE_CELL: &str = "╍";
 const USED_CELL: &str = "━";
 const MARKER_CELL: &str = "┃";
 const SPARK_LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-/// Turns the side panel's sparkline shows, newest last.
-pub(crate) const SPARK_TURNS: usize = 8;
-
 /// Tokens a budget counts as in use: the provider's figure plus an estimate of what
 /// followed it, the provider's figure alone when current, else the estimate.
 pub(crate) fn budget_tokens(budget: &ContextBudget) -> u64 {

@@ -402,6 +402,7 @@ the entire default keymap; other valid user settings still apply.
 | `history.open` | Ctrl+R | Search submitted prompts |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+B | Show or hide the side panel |
+| `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Select transcript cards |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
@@ -651,6 +652,7 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+B` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
+| `F8` | Focus the side panel for keyboard navigation |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
@@ -728,19 +730,37 @@ prompt is running.
 
 ### Side panel
 
-On a terminal at least 160 columns wide, a side panel beside the transcript summarizes the session:
-its name (or first prompt) and status, the folder and branch, where the session sits in its tree
-(`⑂ branched from turn 4 · 2 siblings`, or `⑂ root · 2 branches` on the original line; `Ctrl+T`
-opens the tree), context use, the model and effort, the session's cost, the permission mode, Git's
-changed files with line counts (`◆` marks files Wisp edited this session; in the `Ctrl+B` overlay,
-Enter on one jumps to its edit card), each prompt's run time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
-and model to the panel. The panel is 56 columns wide at 160 columns and takes half of any extra
-width, up to 76 columns at 200 columns or more. Drag its left border to set another width, from
-56 columns up to what leaves the transcript 104; double-click the border to return to the automatic
-width. A dragged width lasts until Wisp exits. `Ctrl+B` hides or shows it. On a narrower terminal,
-`Ctrl+B` opens the same 56-column panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
-when the panel appears and after each run, but not while `/diff` is open. On a terminal at least
-160 columns wide, Edit and Write cards in the transcript set old and new side by side.
+On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
+folder and branch, compact context usage, named MCP servers, skills, changed files, and the three
+most recent turns. The latest turn is highlighted; permissions stay at the bottom. Model and effort
+remain in the composer. Context's **Breakdown** expands source totals and costs; `/context` opens
+full details.
+
+**MCP servers** and **Skills** start expanded. MCP rows show connection status and expand to tool
+counts, errors, and `/mcp` management. Skill rows show **available** or **used**, and expand to their
+description and source. Used means a skill was successfully loaded by the skill tool or an explicit
+`/skill:name` invocation on the current session branch. Usage refreshes with session statistics after
+an operation, survives resume and compaction, and excludes failed calls and sibling-only usage.
+Project skills remain subject to trust. Empty, loading, and unavailable inventories are distinguished.
+Click either section heading to collapse it, or a member row to expand its details.
+
+The panel starts at 44 columns and grows to at most 52 automatically. Drag its left border to resize
+it while leaving at least 104 columns for the conversation; double-click the border to restore the
+automatic width. The chosen width lasts until Wisp exits. `Ctrl+B` hides or shows it. On narrower
+terminals, `Ctrl+B` opens a 44-column overlay above the composer.
+
+`F8` focuses the sidebar at either width. `Tab` and `Shift+Tab` move between sections, arrow keys
+move among actionable rows, and `Enter` or `Space` expands details or opens the selected view.
+`Esc` returns to the composer without changing its draft. `PageUp`/`PageDown`, or the mouse wheel
+over the panel, scroll the panel independently. Keyboard navigation brings offscreen rows into view.
+The bottom-right position indicator appears when the panel has more content below or above.
+
+Changed files show line counts and retain `◆` for files Wisp edited on this branch. Selecting an
+edited file jumps to its edit card; other files open `/diff`. File snapshots refresh when the panel
+appears and after each run, except while `/diff` is open. The Recent turns heading opens `/tree`;
+`Ctrl+T` also opens the session tree. While working or awaiting approval, the current activity and
+queue lead the panel. On terminals at least 160 columns wide, Edit and Write cards still show old
+and new content side by side.
 
 ## Modes
 

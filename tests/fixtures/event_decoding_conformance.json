@@ -3441,6 +3441,15 @@
   },
   {
    "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "used_skill_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
    "operation": "add_unknown",
    "path": [
     "stats"

@@ -5632,6 +5632,14 @@
           "minimum": 0,
           "title": "Usage Record Count",
           "type": "integer"
+        },
+        "used_skill_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Used Skill Names",
+          "type": "array"
         }
       },
       "required": [
@@ -5645,7 +5653,8 @@
         "compaction",
         "cost",
         "context_breakdown",
-        "branch"
+        "branch",
+        "used_skill_names"
       ],
       "title": "SessionStats",
       "type": "object"
@@ -8173,7 +8182,8 @@
           "reasoning_output_tokens": null,
           "total_tokens": 0
         },
-        "usage_record_count": 0
+        "usage_record_count": 0,
+        "used_skill_names": []
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "session.stats"

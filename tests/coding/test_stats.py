@@ -23,6 +23,7 @@ from wisp.events import (
     MessageStarted,
     SessionStatsReported,
     TokenUsage,
+    ToolCallSnapshot,
     ToolResultReady,
     wisp_event_from_json,
 )
@@ -35,6 +36,131 @@ from wisp.sessions.entries import (
     SessionEntry,
 )
 from wisp.sessions.replay import replay_session_entries
+from wisp.skills.models import SkillInvocationEvidence
+
+
+def test_used_skills_follow_successful_loads_and_the_active_branch_through_compaction() -> None:
+    def entry(identifier: str, message: Message) -> MessageSessionEntry:
+        return MessageSessionEntry(id=identifier, session_id="s", message=message)
+
+    def invocation(name: str) -> Message:
+        return Message(
+            role="user",
+            content="expanded instructions",
+            skill_invocation=SkillInvocationEvidence(
+                name=name,
+                original_content=f"/skill:{name} help",
+                request="help",
+                content_sha256="a" * 64,
+            ),
+        )
+
+    def call(identifier: str, name: str) -> ToolCallSnapshot:
+        return ToolCallSnapshot(call_id=identifier, name="skill", arguments={"name": name})
+
+    entries: tuple[SessionEntry, ...] = linked_entries(
+        (
+            entry("explicit", invocation("review")),
+            entry(
+                "calls",
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=(
+                        call("ok", "build"),
+                        call("failed", "broken"),
+                        call("pending", "waiting"),
+                        call("duplicate", "review"),
+                        call("cancelled", "cancelled"),
+                    ),
+                ),
+            ),
+            entry(
+                "success",
+                Message(
+                    role="tool",
+                    content="instructions",
+                    tool_name="skill",
+                    tool_call_id="ok",
+                    is_error=False,
+                ),
+            ),
+            entry(
+                "error",
+                Message(
+                    role="tool",
+                    content="missing",
+                    tool_name="skill",
+                    tool_call_id="failed",
+                    is_error=True,
+                ),
+            ),
+            entry(
+                "duplicate",
+                Message(
+                    role="tool",
+                    content="instructions",
+                    tool_name="skill",
+                    tool_call_id="duplicate",
+                    is_error=False,
+                ),
+            ),
+            entry(
+                "cancelled",
+                Message(
+                    role="tool", content="cancelled", tool_name="skill", tool_call_id="cancelled"
+                ),
+            ),
+            entry("later", Message(role="user", content="continue")),
+            entry("answer", Message(role="assistant", content="done", finish_reason="stop")),
+            CompactionSessionEntry(
+                id="compact",
+                session_id="s",
+                compaction=CompactionRecord(
+                    summary="Previous work",
+                    replaced_entry_ids=(
+                        "explicit",
+                        "calls",
+                        "success",
+                        "error",
+                        "duplicate",
+                        "cancelled",
+                    ),
+                    provider="test",
+                ),
+            ),
+            entry("sibling", invocation("sibling-only")),
+        )
+    )
+    entries += (
+        ActiveLeafSessionEntry(
+            id="switch", session_id="s", previous_leaf_id="sibling", active_leaf_id="compact"
+        ),
+    )
+    replay = replay_session_entries(entries)
+    assert all(message.skill_invocation is None for message in replay.messages)
+    stats = build_session_stats(
+        session_id="s",
+        entries=entries,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=10000,
+        reserve_tokens=100,
+    )
+    assert stats.used_skill_names == ("review", "build")
+    # Reading again after serialization models resume, including branch selection.
+    restored = tuple(type(item).model_validate_json(item.model_dump_json()) for item in entries)
+    replay = replay_session_entries(restored)
+    assert build_session_stats(
+        session_id="s",
+        entries=restored,
+        replay=replay,
+        provider_messages=replay.messages,
+        tools=(),
+        context_window=10000,
+        reserve_tokens=100,
+    ).used_skill_names == ("review", "build")
 
 
 def _usage(
