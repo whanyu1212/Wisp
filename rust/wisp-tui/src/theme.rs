@@ -75,14 +75,13 @@ impl Palette {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// A tool-specific label on a tinted surface. The wash stays visible over a glass
-    /// theme's terminal background. Where the accent is too faint on its wash, the text
-    /// moves toward the foreground until it reads; monochrome palettes reverse the
-    /// row's colours instead.
+    /// A tool-specific label: the tool's hue on the plain background, in bold, so a column
+    /// of stacked rows reads as labels rather than blocks. Where the hue is too faint on the
+    /// background, the text moves toward the foreground until it reads; monochrome palettes
+    /// use bold alone.
     pub fn chip(self, label: &str) -> Style {
-        const TINT: f64 = 0.18;
         if self.monochrome {
-            return Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD);
+            return Style::default().add_modifier(Modifier::BOLD);
         }
         // Stable hue families keep tools distinguishable even in a theme whose accents
         // are close together. Blend them into the theme, then enforce text contrast.
@@ -100,30 +99,11 @@ impl Palette {
             _ => self.muted,
         };
         let accent = mix(accent, self.secondary, 0.85);
-        let fill = mix(accent, self.background, TINT);
         let text = (0..=20)
             .map(|step| mix(self.foreground, accent, f64::from(step) / 20.0))
-            .find(|text| contrast_ratio(*text, fill) >= 4.5)
+            .find(|text| contrast_ratio(*text, self.background) >= 4.5)
             .unwrap_or(self.foreground);
-        Style::default()
-            .fg(text)
-            .bg(fill)
-            .add_modifier(Modifier::BOLD)
-    }
-
-    /// Shade the existing padding cells to give a compact chip a shallow edge.
-    pub fn chip_edge(self, chip: Style, leading: bool) -> Style {
-        let (Some(text), Some(fill)) = (chip.fg, chip.bg) else {
-            return chip;
-        };
-        if self.monochrome {
-            return chip;
-        }
-        chip.bg(if leading {
-            mix(text, fill, 0.16)
-        } else {
-            mix(fill, self.background, 0.35)
-        })
+        Style::default().fg(text).add_modifier(Modifier::BOLD)
     }
 
     pub fn tool_argument(self) -> Style {

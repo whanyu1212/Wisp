@@ -1073,10 +1073,7 @@ fn render_status_line(
     let mut timer = None;
     match activity.item {
         Some(item) => {
-            lead.push(Span::styled(
-                format!(" {} ", item.label),
-                palette.chip(&item.label),
-            ));
+            lead.push(Span::styled(item.label.clone(), palette.chip(&item.label)));
             lead.push(Span::raw(" "));
             detail = item.detail;
             timer = item.elapsed.map(|elapsed| {
@@ -1490,10 +1487,9 @@ fn render_transcript_row(
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
-        let chip = spans[label]
-            .style
-            .patch(palette.chip(spans[label].content.trim()));
-        fill_label_chip(&mut spans, label, chip, palette);
+        // The chip has no fill, so the label's alignment padding can share its style.
+        let chip = palette.chip(spans[label].content.trim());
+        spans[label].style = spans[label].style.patch(chip);
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, base.fg(palette.muted)));
@@ -1527,52 +1523,6 @@ fn render_transcript_row(
             Rect::new(content.right() - columns, content.y, columns, 1),
         );
     }
-}
-
-/// Fill a card's label as a chip one space wider than the name on each side. The padding
-/// borrows the space that ends the status marker and the first space after the name, which
-/// is either the label's own alignment padding or the gap after it, so the row's text, width
-/// and copied selection stay the same. The rest of the alignment padding stays plain, so
-/// stacked chips differ in width instead of forming one block.
-fn fill_label_chip(spans: &mut Vec<Span<'static>>, label: usize, chip: Style, palette: Palette) {
-    let content = spans[label].content.to_string();
-    let name = content.trim_end_matches(' ');
-    let mut text = name.to_owned();
-    let mut padding = content[name.len()..].to_owned();
-    let plain = spans[label].style;
-    if let Some(before) = label
-        .checked_sub(1)
-        .map(|index| &mut spans[index])
-        .filter(|before| before.content.ends_with(' '))
-    {
-        before.content.to_mut().pop();
-        text.insert(0, ' ');
-    }
-    if !padding.is_empty() {
-        padding.remove(0);
-        text.push(' ');
-    } else if let Some(after) = spans
-        .get_mut(label + 1)
-        .filter(|after| after.content.starts_with(' '))
-    {
-        after.content.to_mut().remove(0);
-        text.push(' ');
-    }
-    let mut face = text.as_str();
-    let mut decorated = Vec::new();
-    if let Some(rest) = face.strip_prefix(' ') {
-        decorated.push(Span::styled(" ", palette.chip_edge(chip, true)));
-        face = rest;
-    }
-    let trailing = face.ends_with(' ');
-    decorated.push(Span::styled(face.trim_end_matches(' ').to_owned(), chip));
-    if trailing {
-        decorated.push(Span::styled(" ", palette.chip_edge(chip, false)));
-    }
-    if !padding.is_empty() {
-        decorated.push(Span::styled(padding, plain));
-    }
-    spans.splice(label..=label, decorated);
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
@@ -4328,17 +4278,16 @@ mod tests {
             });
         let (text, backend) = status_row(&state, 100, Some(151));
         assert!(
-            text.starts_with("◐  Bash  gh pr checks 766 --watch "),
+            text.starts_with("◐ Bash gh pr checks 766 --watch "),
             "{text}"
         );
         assert!(text.contains(" · turn 6 1 tool · 2m 31s"), "{text}");
         assert!(text.trim_end().ends_with("ctx ~?"), "{text}");
         let palette = Palette::default();
         assert_eq!(style_at_text(&backend, "◐").unwrap().0, palette.secondary);
-        assert_eq!(
-            style_at_text(&backend, "Bash").map(|style| (Some(style.0), Some(style.1))),
-            Some((palette.chip("Bash").fg, palette.chip("Bash").bg))
-        );
+        let (chip_fg, _, chip_modifiers) = style_at_text(&backend, "Bash").unwrap();
+        assert_eq!(Some(chip_fg), palette.chip("Bash").fg);
+        assert!(chip_modifiers.contains(Modifier::BOLD));
 
         // A short row clips the command, then drops the turn details, and keeps
         // the context on the right.
@@ -5866,10 +5815,9 @@ mod tests {
             })
             .unwrap();
         let palette = Palette::default();
-        let (_, chip_bg, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
-        assert_eq!(Some(chip_bg), palette.chip("MCP").bg);
-        let (marker_fg, marker_bg, _) = style_at_text(terminal.backend(), "✓").unwrap();
-        assert_ne!(Some(marker_bg), palette.chip("MCP").bg);
+        let (chip_fg, _, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
+        assert_eq!(Some(chip_fg), palette.chip("MCP").fg);
+        let (marker_fg, _, _) = style_at_text(terminal.backend(), "✓").unwrap();
         assert_eq!(marker_fg, palette.success);
     }
 
@@ -6452,7 +6400,7 @@ mod tests {
         cache
             .fold_mut()
             .expand_group(state.transcript.entries()[1].id);
-        let mut terminal = Terminal::new(TestBackend::new(40, 18)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal
             .draw(|frame| {
                 render(
@@ -6472,10 +6420,16 @@ mod tests {
             .iter()
             .position(|line| line.contains("cargo fmt"))
             .unwrap();
-        // A plain row separates the prompt from the persistent group header.
-        assert!(lines[first - 1].contains("▾ 2 commands"), "{screen}");
+        // A plain row separates the prompt from the persistent group header, and a rule
+        // separates the header from its first member as it does the later members.
+        assert!(lines[first - 2].contains("▾ 2 commands"), "{screen}");
         assert!(
-            lines[first - 2].trim_matches(['"', ' ']).is_empty(),
+            lines[first - 1].trim_matches(['"', ' ', '│']).is_empty(),
+            "{screen}"
+        );
+        assert!(lines[first - 1].contains('│'), "{screen}");
+        assert!(
+            lines[first - 3].trim_matches(['"', ' ']).is_empty(),
             "{screen}"
         );
         assert!(
@@ -6486,14 +6440,13 @@ mod tests {
         assert!(lines[first + 2].contains("Rust tests"), "{screen}");
         let palette = Palette::default();
         let user_bg = palette.user_text().bg;
-        let gap_row = u16::try_from(first - 2).unwrap();
+        let gap_row = u16::try_from(first - 3).unwrap();
         assert_ne!(
             Some(terminal.backend().buffer()[(5, gap_row)].bg),
             user_bg,
             "{screen}"
         );
         let chip = palette.chip("Process");
-        let chip_bg = chip.bg;
         let buffer = terminal.backend().buffer();
         let (x, y) = (0..buffer.area.height)
             .find_map(|y| {
@@ -6504,19 +6457,11 @@ mod tests {
                     .map(|byte| (u16::try_from(row[..byte].chars().count()).unwrap(), y))
             })
             .expect("process card");
-        let bg_at = |x: u16| Some(buffer[(x, y)].bg);
-        assert_eq!(
-            (bg_at(x - 1), bg_at(x), bg_at(x + 7)),
-            (
-                palette.chip_edge(chip, true).bg,
-                chip_bg,
-                palette.chip_edge(chip, false).bg,
-            ),
-            "{screen}"
-        );
-        assert_ne!(bg_at(x + 8), chip_bg, "{screen}");
-        // A plain column keeps the status marker off the chip.
-        assert_ne!(bg_at(x - 2), chip_bg, "{screen}");
+        // The chip colours the name alone: no fill, so its cells match the row around it.
+        assert_eq!(Some(buffer[(x, y)].fg), chip.fg, "{screen}");
+        assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "{screen}");
+        assert_eq!(buffer[(x, y)].bg, buffer[(x - 2, y)].bg, "{screen}");
+        assert_eq!(buffer[(x, y)].bg, buffer[(x + 8, y)].bg, "{screen}");
     }
 
     #[test]
@@ -6559,10 +6504,10 @@ mod tests {
                 .contains("Read      README.md · awaiting approval")
         );
         let palette = Palette::default();
-        let (pending_fg, pending_bg, pending_modifiers) =
+        let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Read      README.md").unwrap();
         let chip = palette.chip("Read");
-        assert_eq!((Some(pending_fg), Some(pending_bg)), (chip.fg, chip.bg));
+        assert_eq!(Some(pending_fg), chip.fg);
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
             style_at_text(pending.backend(), "?  Read").unwrap().0,
@@ -6593,20 +6538,11 @@ mod tests {
         assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, success_bg, success_modifiers) =
             style_at_text(complete.backend(), "Read    ▸ README.md").unwrap();
-        assert_eq!((Some(success_fg), Some(success_bg)), (chip.fg, chip.bg));
-        // The chip spans the marker's space, the name and one space; the alignment padding
-        // after it stays plain, so stacked chips of different names differ in width.
+        assert_eq!(Some(success_fg), chip.fg);
+        // The chip has no fill, so the label sits on the row's own background.
         assert_eq!(
-            Some(style_at_text(complete.backend(), " Read ").unwrap().1),
-            palette.chip_edge(chip, true).bg
-        );
-        assert_ne!(
-            Some(
-                style_at_text(complete.backend(), "    ▸ README.md")
-                    .unwrap()
-                    .1
-            ),
-            chip.bg
+            success_bg,
+            style_at_text(complete.backend(), "README.md").unwrap().1
         );
         // Only the card selected in browse shows how to expand it; every foldable
         // card shows its muted arrow.
@@ -7098,15 +7034,14 @@ mod tests {
 
             let (fg, bg, modifiers) = style_at_text(terminal.backend(), "Read ").unwrap();
             let chip = palette.chip("Read");
-            if no_color {
-                assert!(modifiers.contains(Modifier::REVERSED));
-            } else {
-                assert_eq!((Some(fg), Some(bg)), (chip.fg, chip.bg));
+            assert!(modifiers.contains(Modifier::BOLD));
+            assert!(!modifiers.contains(Modifier::REVERSED));
+            if !no_color {
+                assert_eq!(Some(fg), chip.fg);
             }
-            // The chip ends with the gap's first space; the second stays plain.
-            let (_, gap_bg, gap_modifiers) = style_at_text(terminal.backend(), " a.rs").unwrap();
-            assert!(!gap_modifiers.contains(Modifier::REVERSED));
-            assert_ne!(Some(gap_bg), chip.bg);
+            // The chip has no fill, so the gap after it shares the label's background.
+            let (_, gap_bg, _) = style_at_text(terminal.backend(), " a.rs").unwrap();
+            assert_eq!(gap_bg, bg);
             assert_eq!(
                 style_at_text(terminal.backend(), "└").unwrap().0,
                 palette.muted
@@ -7947,8 +7882,8 @@ mod tests {
             let running = render_to_string_with_activity(width, height, &state, 1);
             let line = status(&running);
             // A narrow row clips the command.
-            assert!(line.contains(" Bash  c"), "{running}");
-            assert!(width < 80 || line.contains(" Bash  check 19"), "{running}");
+            assert!(line.contains(" Bash c"), "{running}");
+            assert!(width < 80 || line.contains(" Bash check 19"), "{running}");
             assert!(!line.contains("Working"), "{running}");
         }
         for index in 0..20 {
@@ -7981,7 +7916,7 @@ mod tests {
         state.transcript.observe_tool_result(process_result);
         let process = render_to_string_with_activity(80, 18, &state, 3);
         assert!(
-            status(&process).contains(" Process  Background command"),
+            status(&process).contains(" Process Background command"),
             "{process}"
         );
         // Once the model answers again, the background process no longer names the run.

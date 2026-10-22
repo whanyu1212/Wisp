@@ -187,47 +187,42 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
 }
 
 #[test]
-fn chip_fill_reads_everywhere() {
+fn chip_text_reads_everywhere() {
     for theme in crate::theme::themes() {
         let palette = theme.palette(false);
-        let mut fills = Vec::new();
+        let mut colors = Vec::new();
         for label in [
             "Read", "Search", "List", "Explore", "Bash", "Edit", "Write", "MCP", "Process",
         ] {
             let chip = palette.chip(label);
-            let (Some(fg), Some(bg)) = (chip.fg, chip.bg) else {
-                panic!("{} {label} chip has no fill", theme.name);
+            let Some(fg) = chip.fg else {
+                panic!("{} {label} chip has no colour", theme.name);
             };
+            assert_eq!(chip.bg, None, "{} {label} chip has a fill", theme.name);
             assert!(
-                crate::theme::contrast_ratio(fg, bg) >= 4.5,
+                crate::theme::contrast_ratio(fg, palette.background) >= 4.5,
                 "{} {label} chip contrast",
                 theme.name
             );
             assert!(
-                crate::theme::contrast_ratio(bg, palette.background) > 1.0,
-                "{} {label} chip fill",
-                theme.name
-            );
-            assert!(
-                !fills.contains(&bg),
+                !colors.contains(&fg),
                 "{} {label} repeats a chip color",
                 theme.name
             );
-            fills.push(bg);
+            colors.push(fg);
             assert!(chip.add_modifier.contains(Modifier::BOLD));
             assert!(!chip.add_modifier.contains(Modifier::UNDERLINED));
-            assert_ne!(palette.chip_edge(chip, true).bg, chip.bg);
-            assert_ne!(palette.chip_edge(chip, false).bg, chip.bg);
         }
     }
 }
 
 #[test]
-fn no_color_chip_reverses() {
+fn no_color_chip_bolds() {
     for theme in crate::theme::themes() {
         let chip = theme.palette(true).chip("Read");
         assert_eq!((chip.fg, chip.bg), (None, None), "{}", theme.name);
-        assert!(chip.add_modifier.contains(Modifier::REVERSED));
+        assert!(chip.add_modifier.contains(Modifier::BOLD));
+        assert!(!chip.add_modifier.contains(Modifier::REVERSED));
     }
 }
 
