@@ -645,17 +645,19 @@ def _response_tail(plain: str) -> str | None:
     """Return the painted text after the fake response's start marker.
 
     Incremental repaints write only changed cells, so blank cells between words
-    may never appear in the PTY stream. Match without whitespace, as ``_ready``
-    does, so a streamed response cannot be split by the gaps a repaint skips.
+    may never appear in the PTY stream. Composer borders can also be painted
+    between wrapped response rows. Ignore whitespace and those vertical borders
+    when matching the fixed ASCII markers.
 
     Args:
         plain: Printable PTY text since the prompt was submitted.
 
     Returns:
-        Whitespace-free text after the start marker, or ``None`` before it paints.
+        Text without whitespace or vertical borders after the start marker, or
+        ``None`` before it paints.
     """
 
-    compact = "".join(plain.split())
+    compact = "".join(plain.replace("│", "").split())
     marker = "".join(f"{_FAKE_RESPONSE_PREFIX}{START_TOKEN}".split())
     index = compact.find(marker)
     return None if index < 0 else compact[index + len(marker) :]
