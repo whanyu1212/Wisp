@@ -375,6 +375,43 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
+        // Resizing answers no pending decision, and must precede sidebar clicks
+        // because its full surface includes the border.
+        if self.press_panel_border(event) {
+            return Ok(LoopControl::Continue);
+        }
+        // The visible sidebar owns its own wheel and disclosure clicks. Requiring
+        // the current painted layer prevents clicks through a covering popup.
+        if matches!(
+            self.mouse_layer(),
+            Layer::Conversation | Layer::Overlay(OverlayKind::SidePanel)
+        ) && self
+            .mouse_frame
+            .as_ref()
+            .is_some_and(|frame| frame.layer == self.mouse_layer())
+            && (self.side_panel.docked() || self.rendered_overlay == Some(OverlayKind::SidePanel))
+            && self.side_panel.contains(event.column, event.row)
+        {
+            if let Some(lines) = scroll_lines {
+                self.side_panel.scroll_by(lines);
+            } else if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if matches!(
+                    self.state.view_status,
+                    ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+                ) {
+                    return Ok(LoopControl::Continue);
+                }
+                if let crate::side_panel::OverlayKey::Open(target) =
+                    self.side_panel.click(event.column, event.row)
+                {
+                    self.side_panel.close_overlay();
+                    self.render_pending = true;
+                    return self.open_from_panel(target, writer, limit).await;
+                }
+            }
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
         if let (Layer::Conversation, Some(lines)) = (self.mouse_layer(), scroll_lines) {
             // Scrolling activates nothing and needs no hit regions, so it moves the
             // transcript wherever the pointer is (over the composer too) and also in
@@ -394,11 +431,6 @@ impl LiveUi {
                 .await?;
             self.reconcile_browse_selection();
             return Ok(control);
-        }
-        // Ahead of the decision guard: resizing the panel answers nothing, and the
-        // panel leads with the pending decision.
-        if self.press_panel_border(event) {
-            return Ok(LoopControl::Continue);
         }
         if matches!(
             self.state.view_status,
@@ -563,13 +595,19 @@ impl LiveUi {
     }
 
     /// Start resizing the docked side panel on a left press over its border, or return it
-    /// to its automatic width on a double-click, and say whether the press was there. Only
-    /// the conversation layer counts, since a centred popup may cover the border.
+    /// to its automatic width on a double-click, and say whether the press was there.
+    /// The docked panel may own keyboard focus, but a covering popup blocks its border.
     fn press_panel_border(&mut self, event: MouseEvent) -> bool {
         let border = self
             .mouse_frame
             .as_ref()
-            .filter(|frame| frame.layer == Layer::Conversation && frame.layer == self.mouse_layer())
+            .filter(|frame| {
+                frame.layer == self.mouse_layer()
+                    && (frame.layer == Layer::Conversation
+                        || (frame.layer == Layer::Overlay(OverlayKind::SidePanel)
+                            && self.side_panel.docked()
+                            && self.rendered_overlay == Some(OverlayKind::SidePanel)))
+            })
             .and_then(|frame| frame.panel_border)
             .filter(|area| {
                 matches!(event.kind, MouseEventKind::Down(MouseButton::Left))

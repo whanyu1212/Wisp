@@ -29,11 +29,12 @@ pub(crate) enum Action {
     LineDown,
     ManageQueue,
     TogglePanel,
+    FocusPanel,
     SessionTree,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 16] = [
+    pub(crate) const ALL: [Self; 17] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -49,6 +50,7 @@ impl Action {
         Self::LineDown,
         Self::ManageQueue,
         Self::TogglePanel,
+        Self::FocusPanel,
         Self::SessionTree,
     ];
 
@@ -60,6 +62,7 @@ impl Action {
             Self::RestoreQueue => "queue.restore",
             Self::ManageQueue => "queue.manage",
             Self::TogglePanel => "panel.toggle",
+            Self::FocusPanel => "panel.focus",
             Self::SessionTree => "session.tree",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
@@ -81,6 +84,7 @@ impl Action {
             Self::RestoreQueue => "Restore the newest queued prompt",
             Self::ManageQueue => "Inspect and manage queues (/queue)",
             Self::TogglePanel => "Show or hide the side panel",
+            Self::FocusPanel => "Focus the side panel (Esc returns to the composer)",
             Self::SessionTree => "Open the session tree to switch branches (/tree)",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
@@ -251,6 +255,7 @@ impl Default for Bindings {
             "Ctrl+T",
         )];
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
+        chords[FocusPanel.index()] = vec![Chord::exact(KeyCode::F(8), KeyModifiers::NONE, "F8")];
         chords[TogglePanel.index()] = vec![Chord::exact(
             KeyCode::Char('b'),
             KeyModifiers::CONTROL,

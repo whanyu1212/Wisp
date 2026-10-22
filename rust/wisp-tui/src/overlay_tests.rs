@@ -966,7 +966,7 @@ async fn ctrl_b_follows_width() {
     let screen = text(terminal.backend().buffer());
     assert!(screen.contains("Context"), "{screen}");
     assert!(
-        screen.contains("Esc close · Tab sections · Enter open"),
+        screen.contains("Esc close · Tab sections · Enter"),
         "{screen}"
     );
     assert!(screen.contains("keep this"), "{screen}");
@@ -980,7 +980,7 @@ async fn ctrl_b_follows_width() {
     let mut ui = base();
     let mut wide = Terminal::new(TestBackend::new(200, 32)).unwrap();
     draw(&mut ui, &mut wide);
-    assert!(text(wide.backend().buffer()).contains("Ctrl+B hide panel"));
+    assert!(text(wide.backend().buffer()).contains("Ctrl+B panel"));
     ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut wide);
     assert!(!text(wide.backend().buffer()).contains("Context"));
@@ -990,7 +990,7 @@ async fn ctrl_b_follows_width() {
     ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut wide);
     assert_eq!(ui.active_overlay(), None);
-    assert!(text(wide.backend().buffer()).contains("Ctrl+B hide panel"));
+    assert!(text(wide.backend().buffer()).contains("Ctrl+B panel"));
 }
 
 #[tokio::test]
@@ -1024,7 +1024,14 @@ async fn panel_enter_opens_diff() {
         .await
         .unwrap();
     assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
-    // Focus starts on the changed file; Enter opens /diff and keeps the draft.
+    // Context is first; navigate through the inventories to Changed files.
+    for _ in 0..3 {
+        ui.handle_input(key(KeyCode::Tab), &writer, 8192)
+            .await
+            .unwrap();
+        draw(&mut ui, &mut terminal);
+    }
+    // Enter on the file section opens /diff and keeps the draft.
     draw(&mut ui, &mut terminal);
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await

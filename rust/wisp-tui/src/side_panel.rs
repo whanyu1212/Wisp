@@ -5,11 +5,12 @@
 //! screen (see `UiAction::SetSidePanelVisible`); this module decides where it goes
 //! and draws it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::context_split::{self, SPARK_TURNS, Split, abbreviated};
+use crate::context_split::{Split, abbreviated};
 use crate::git_diff_view::EditCard;
 use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
@@ -25,17 +26,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::{
-    ContextBreakdown, ContextSource, McpServerStatus, SessionBranchSummary,
-};
+use wisp_protocol::events::{McpServerStatus, SessionBranchSummary};
 
 /// The panel's width, its border included: the overlay's width, and the docked
 /// panel's on the narrowest terminal that docks it.
-pub(crate) const PANEL_WIDTH: u16 = 56;
+pub(crate) const PANEL_WIDTH: u16 = 44;
 
 /// The widest a docked panel grows on its own, so long paths and names fit without
 /// the panel becoming a second transcript. Dragging its border can go wider.
-const MAX_PANEL_WIDTH: u16 = 76;
+const MAX_PANEL_WIDTH: u16 = 52;
 
 /// Columns from the panel's left edge that start a resize: the border and the gap
 /// beside it, so the press need not land on a one-column line.
@@ -80,10 +79,37 @@ pub(crate) struct SidePanel {
     /// The overlay's keyboard focus, when it has moved off the first row it can act
     /// on. Clamped to what the panel shows, since queues drain and files refresh.
     cursor: Option<Cursor>,
-    /// How many of each section's focusable rows the last frame drew, by
-    /// `Section::index`: a short panel cuts off its last sections, and focus must
-    /// not land where the user cannot see it. `None` before the first frame.
-    drawn: Cell<Option<[usize; 3]>>,
+    /// Logical action rows from the last paint, including rows below the viewport.
+    painted: RefCell<Painted>,
+    scroll: Cell<usize>,
+    context_expanded: bool,
+    mcp_collapsed: bool,
+    skills_collapsed: bool,
+    server_details: BTreeSet<String>,
+    skill_details: BTreeSet<String>,
+}
+
+#[derive(Debug, Default)]
+struct Painted {
+    surface: Rect,
+    area: Rect,
+    total: usize,
+    actions: Vec<(usize, Section, PanelAction)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Disclosure {
+    Context,
+    Mcp,
+    Skills,
+    Server(String),
+    Skill(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PanelAction {
+    Toggle(Disclosure),
+    Open(Target),
 }
 
 /// A drag of the docked panel's border in progress.
@@ -102,14 +128,11 @@ struct Resize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Queue,
-    Files,
+    Context,
     Mcp,
-}
-
-impl Section {
-    fn index(self) -> usize {
-        self as usize
-    }
+    Skills,
+    Files,
+    Turns,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +151,9 @@ pub(crate) enum Target {
     Edit(EditCard),
     Queue,
     Mcp,
+    Skills,
+    Context,
+    Tree,
 }
 
 /// What a key in the overlay asks of the app.
@@ -147,7 +173,7 @@ impl SidePanel {
     }
 
     pub(crate) fn overlay_open(&self) -> bool {
-        self.overlay && !docks(self.width)
+        self.overlay
     }
 
     fn visible(&self) -> bool {
@@ -159,30 +185,43 @@ impl SidePanel {
     pub(crate) fn toggle(&mut self) {
         if docks(self.width) {
             self.hidden = !self.hidden;
+            self.overlay = false;
         } else {
             self.overlay = !self.overlay;
             self.cursor = None;
-            self.drawn.set(None);
+            *self.painted.borrow_mut() = Painted::default();
         }
     }
 
-    /// A key while the overlay is open: Tab and Shift+Tab move between the sections
-    /// that open a view, arrows move within one, Enter opens what is focused, and Esc
-    /// closes the overlay. The docked panel takes no keys, so typing stays with the
-    /// composer.
+    pub(crate) fn focus(&mut self) {
+        self.hidden = false;
+        self.overlay = true;
+        self.cursor = None;
+    }
+
+    /// Keyboard navigation follows the same rows and disclosure controls as clicks.
     pub(crate) fn key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
         if key == KeyCode::Esc {
             return OverlayKey::Close;
+        }
+        if matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
+            let height = self.painted.borrow().area.height.max(1) as i32;
+            self.scroll_by(if key == KeyCode::PageUp {
+                -height
+            } else {
+                height
+            });
+            return OverlayKey::Moved;
         }
         let sections = self.sections(state);
         let Some(cursor) = self.focused(state) else {
             return OverlayKey::Ignored;
         };
-        let rows = self.targets(cursor.section, state).len();
+        let targets = self.targets(cursor.section, state);
         let position = sections
             .iter()
             .position(|section| *section == cursor.section)
-            .expect("a focused section is listed");
+            .unwrap();
         let moved = match key {
             KeyCode::Tab => Cursor {
                 section: sections[(position + 1) % sections.len()],
@@ -197,86 +236,59 @@ impl SidePanel {
                 ..cursor
             },
             KeyCode::Down => Cursor {
-                row: (cursor.row + 1).min(rows - 1),
+                row: (cursor.row + 1).min(targets.len() - 1),
                 ..cursor
             },
             KeyCode::Home => Cursor { row: 0, ..cursor },
             KeyCode::End => Cursor {
-                row: rows - 1,
+                row: targets.len() - 1,
                 ..cursor
             },
-            KeyCode::Enter => {
-                let target = self.targets(cursor.section, state).swap_remove(cursor.row);
-                return OverlayKey::Open(target);
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                return self.activate(targets[cursor.row].clone());
             }
             _ => return OverlayKey::Ignored,
         };
         self.cursor = Some(moved);
+        if let Some((line, ..)) = self
+            .painted
+            .borrow()
+            .actions
+            .iter()
+            .filter(|(_, section, _)| *section == moved.section)
+            .nth(moved.row)
+        {
+            let height = usize::from(self.painted.borrow().area.height);
+            if *line < self.scroll.get() {
+                self.scroll.set(*line);
+            } else if *line >= self.scroll.get() + height {
+                self.scroll
+                    .set(line.saturating_sub(height.saturating_sub(1)));
+            }
+        }
         OverlayKey::Moved
     }
 
-    /// The sections focus can land on, in the order the panel draws them.
-    fn sections(&self, state: &UiState) -> Vec<Section> {
-        [Section::Queue, Section::Files, Section::Mcp]
-            .into_iter()
-            .filter(|section| !self.targets(*section, state).is_empty())
+    fn sections(&self, _state: &UiState) -> Vec<Section> {
+        let mut sections = Vec::new();
+        for (_, section, _) in &self.painted.borrow().actions {
+            if !sections.contains(section) {
+                sections.push(*section);
+            }
+        }
+        sections
+    }
+
+    fn targets(&self, section: Section, _state: &UiState) -> Vec<PanelAction> {
+        self.painted
+            .borrow()
+            .actions
+            .iter()
+            .filter(|(_, kind, _)| *kind == section)
+            .map(|(_, _, action)| action.clone())
             .collect()
     }
 
-    /// What each of a section's focusable rows opens, one per row the last frame
-    /// drew.
-    fn targets(&self, section: Section, state: &UiState) -> Vec<Target> {
-        let mut targets = self.section_targets(section, state);
-        if let Some(drawn) = self.drawn.get() {
-            targets.truncate(drawn[section.index()]);
-        }
-        targets
-    }
-
-    /// What each of a section's focusable rows opens, one per row it draws when the
-    /// panel has room for all of them.
-    fn section_targets(&self, section: Section, state: &UiState) -> Vec<Target> {
-        match section {
-            // The queue is drawn only while a run is going or waits on a decision.
-            Section::Queue if Focus::of(state) == Focus::Idle => Vec::new(),
-            Section::Queue => {
-                let queued = state.queued_steering() + state.queued_follow_ups();
-                // The listed rows, and the row counting the rest.
-                let rows = queued.min(MAX_QUEUE_ROWS) + usize::from(queued > MAX_QUEUE_ROWS);
-                vec![Target::Queue; rows]
-            }
-            Section::Files => {
-                let Some(summary) = &self.files else {
-                    return Vec::new();
-                };
-                let count = summary.snapshot.files.len();
-                let mut targets: Vec<_> = summary
-                    .rows
-                    .iter()
-                    .map(|row| match &row.edit {
-                        Some(edit) => Target::Edit(EditCard::of(edit, &row.git_path)),
-                        None => Target::Diff(Some(row.git_path.clone())),
-                    })
-                    .collect();
-                // The row counting the rest, or the one saying a partial snapshot
-                // omitted every file, opens /diff where it starts.
-                if count > MAX_FILE_ROWS || (count == 0 && summary.snapshot.truncated) {
-                    targets.push(Target::Diff(None));
-                }
-                targets
-            }
-            Section::Mcp => state
-                .mcp
-                .snapshot
-                .as_ref()
-                .filter(|snapshot| !snapshot.servers.is_empty())
-                .map(|_| vec![Target::Mcp])
-                .unwrap_or_default(),
-        }
-    }
-
-    /// The focused row: the cursor clamped to what the panel shows now, or the first
-    /// row of the first section before focus has moved.
     fn focused(&self, state: &UiState) -> Option<Cursor> {
         let sections = self.sections(state);
         let section = self
@@ -292,6 +304,79 @@ impl SidePanel {
         Some(Cursor { section, row })
     }
 
+    pub(crate) fn activate(&mut self, action: PanelAction) -> OverlayKey {
+        match action {
+            PanelAction::Open(target) => OverlayKey::Open(target),
+            PanelAction::Toggle(disclosure) => {
+                match disclosure {
+                    Disclosure::Context => self.context_expanded = !self.context_expanded,
+                    Disclosure::Mcp => self.mcp_collapsed = !self.mcp_collapsed,
+                    Disclosure::Skills => self.skills_collapsed = !self.skills_collapsed,
+                    Disclosure::Server(name) => toggle_member(&mut self.server_details, name),
+                    Disclosure::Skill(name) => toggle_member(&mut self.skill_details, name),
+                }
+                // The row stays selected; the next paint rebuilds its hit regions.
+                OverlayKey::Moved
+            }
+        }
+    }
+
+    pub(crate) fn contains(&self, column: u16, row: u16) -> bool {
+        let area = self.painted.borrow().surface;
+        self.visible()
+            && column >= area.x
+            && column < area.right()
+            && row >= area.y
+            && row < area.bottom()
+    }
+
+    pub(crate) fn click(&mut self, column: u16, row: u16) -> OverlayKey {
+        if !self.contains(column, row) {
+            return OverlayKey::Ignored;
+        }
+        let hit = {
+            let painted = self.painted.borrow();
+            if row < painted.area.y || row >= painted.area.bottom() {
+                return OverlayKey::Ignored;
+            }
+            let line = usize::from(row - painted.area.y) + self.scroll.get();
+            painted
+                .actions
+                .iter()
+                .find(|(index, ..)| *index == line)
+                .cloned()
+        };
+        let Some((line, section, action)) = hit else {
+            return OverlayKey::Ignored;
+        };
+        let row = self
+            .painted
+            .borrow()
+            .actions
+            .iter()
+            .filter(|(index, kind, _)| *kind == section && *index < line)
+            .count();
+        self.cursor = Some(Cursor { section, row });
+        self.activate(action)
+    }
+
+    pub(crate) fn scroll_by(&self, lines: i32) {
+        let painted = self.painted.borrow();
+        let max = painted
+            .total
+            .saturating_sub(usize::from(painted.area.height));
+        self.scroll.set(
+            self.scroll
+                .get()
+                .saturating_add_signed(lines as isize)
+                .min(max),
+        );
+    }
+
+    pub(crate) fn clear_paint(&self) {
+        *self.painted.borrow_mut() = Painted::default();
+    }
+
     /// Whether Ctrl+B would open or close the overlay rather than the docked panel.
     pub(crate) fn toggles_overlay(&self) -> bool {
         !docks(self.width)
@@ -304,7 +389,7 @@ impl SidePanel {
     /// Follow the terminal's width. An overlay open when the terminal grows wide
     /// enough becomes the docked panel.
     pub(crate) fn observe_width(&mut self, width: u16) {
-        if self.overlay && docks(width) {
+        if self.overlay && !docks(self.width) && docks(width) {
             self.overlay = false;
             self.hidden = false;
         }
@@ -453,8 +538,7 @@ pub(crate) fn overlay_area(above_composer: Rect) -> Rect {
 
 /// The docked panel's width on a terminal `total` columns wide when its border was
 /// not dragged, its border included. The panel and the transcript share the columns
-/// beyond the docking threshold evenly, up to [`MAX_PANEL_WIDTH`]: 160 columns give
-/// 56, 180 give 66, and 200 or more give 76.
+/// beyond the docking threshold evenly, up to [`MAX_PANEL_WIDTH`].
 pub(crate) fn auto_width(total: u16) -> u16 {
     let spare = total.saturating_sub(PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH);
     (PANEL_WIDTH + spare / 2).min(MAX_PANEL_WIDTH)
@@ -574,10 +658,9 @@ impl Focus {
 /// Draw the panel into `area`. A docked panel has a rule on its left; an overlay is
 /// boxed so it reads as lying over the transcript.
 ///
-/// The sections follow what Wisp is doing. At idle: the session, context, model,
-/// changed files, turns and MCP. While a run goes, `Now` and the message queue come
-/// first and the turn list folds to one row; while it waits for approval, the
-/// decision and the held queue come first.
+/// The Reading layout keeps context compact and named inventories open by default.
+/// A running operation or pending decision leads; permissions stay at the bottom.
+/// Overflow scrolls independently, including while sections are expanded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -613,137 +696,144 @@ pub(crate) fn render(
     let width = usize::from(inner.width);
     let height = usize::from(inner.height);
     if width == 0 || height == 0 {
+        *panel.painted.borrow_mut() = Painted::default();
         return;
     }
 
-    let toggle_key = ui::primary_label(bindings, KeyAction::TogglePanel);
-    let tree_key = ui::primary_label(bindings, KeyAction::SessionTree);
-    let hint = if overlay {
-        "Esc close · Tab sections · Enter open".to_owned()
-    } else {
-        format!("{toggle_key} hide panel")
-    };
-    // The docked panel names the session tree's key at its right, as the mock does.
-    let tree_hint = (!overlay && tree_key != "Unbound").then(|| format!("{tree_key} session tree"));
     let focus = Focus::of(state);
-    let mut sections = vec![header_lines(state, bindings, width, palette)];
-    // Where each focusable section sits in `sections`, and the row its focusable
-    // rows start at.
-    let mut focusable: Vec<(Section, usize, usize)> = Vec::new();
+    let mut rows = PanelRows::default();
+    rows.section(
+        Section::Context,
+        header_lines(state, bindings, width, palette),
+    );
     match focus {
         Focus::Idle => {}
         Focus::Running => {
-            sections.push(now_lines(
-                state,
-                activity_frame,
-                run_elapsed,
-                width,
-                palette,
-            ));
-            if let Some(queue) = queue_lines(state, false, bindings, width, palette) {
-                focusable.push((Section::Queue, sections.len(), 1));
-                sections.push(queue);
-            }
+            rows.section(
+                Section::Queue,
+                now_lines(state, activity_frame, run_elapsed, width, palette),
+            );
         }
         Focus::Approval => {
-            sections.extend(approval_lines(state, width, palette));
-            if let Some(queue) = queue_lines(state, true, bindings, width, palette) {
-                focusable.push((Section::Queue, sections.len(), 1));
-                sections.push(queue);
+            if let Some(lines) = approval_lines(state, width, palette) {
+                rows.section(Section::Queue, lines);
             }
         }
     }
-    let context_detail = match focus {
-        Focus::Idle if overlay => ContextDetail::Overlay,
-        Focus::Idle => ContextDetail::Full,
-        Focus::Running | Focus::Approval => ContextDetail::Compact,
-    };
-    let context_index = sections.len();
-    sections.extend([
-        context_lines(state, context_detail, width, palette),
-        model_lines(state, focus, width, palette),
-    ]);
-    focusable.push((Section::Files, sections.len(), 1));
-    sections.push(file_lines(state, panel, overlay, width, palette));
-    let mcp = mcp_line(state, width, palette);
-    let fixed = |sections: &[Vec<Line<'static>>]| {
-        sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
-            + mcp.as_ref().map_or(0, |_| 2)
-            + 1
-    };
-    if context_detail != ContextDetail::Compact && fixed(&sections) + 1 > height {
-        // Too short for the split's rows: keep the changed files and MCP in view.
-        sections[context_index] = context_lines(state, ContextDetail::Compact, width, palette);
+    if focus != Focus::Idle {
+        if let Some(lines) = queue_lines(state, focus == Focus::Approval, bindings, width, palette)
+        {
+            let count =
+                (state.queued_steering() + state.queued_follow_ups()).min(MAX_QUEUE_ROWS + 1);
+            rows.section(Section::Queue, lines);
+            for index in 1..=count {
+                rows.action(index, PanelAction::Open(Target::Queue));
+            }
+        }
+    }
+    reading_context(&mut rows, state, panel, width, palette);
+    inventory_rows(&mut rows, state, panel, width, palette);
+    rows.section(
+        Section::Files,
+        file_lines(state, panel, overlay, width, palette),
+    );
+    rows.action(0, PanelAction::Open(Target::Diff(None)));
+    if let Some(summary) = &panel.files {
+        for (index, file) in summary.rows.iter().enumerate() {
+            let target = match &file.edit {
+                Some(edit) => Target::Edit(EditCard::of(edit, &file.git_path)),
+                None => Target::Diff(Some(file.git_path.clone())),
+            };
+            rows.action(index + 1, PanelAction::Open(target));
+        }
+        if summary.snapshot.files.len() > MAX_FILE_ROWS
+            || (summary.rows.is_empty() && summary.snapshot.truncated)
+        {
+            rows.action(
+                summary.rows.len() + 1,
+                PanelAction::Open(Target::Diff(None)),
+            );
+        }
     }
     let turns = if focus == Focus::Idle {
-        // The turn list takes what the other sections leave, keeping its newest turns.
-        turn_lines(
-            state,
-            width,
-            height.saturating_sub(fixed(&sections) + 1),
-            palette,
-        )
+        turn_lines(state, width, 4, palette)
     } else {
         folded_turn_lines(state, focus, width, palette)
     };
     if !turns.is_empty() {
-        sections.push(turns);
-    }
-    if let Some(mcp) = mcp {
-        focusable.push((Section::Mcp, sections.len(), 0));
-        sections.push(vec![mcp]);
+        rows.section(Section::Turns, turns);
+        rows.action(0, PanelAction::Open(Target::Tree));
     }
 
-    let mut lines = Vec::new();
-    let mut starts = Vec::with_capacity(sections.len());
-    for section in sections {
-        if !lines.is_empty() {
-            lines.push(Line::default());
-        }
-        starts.push(lines.len());
-        lines.extend(section);
-    }
-    lines.truncate(height.saturating_sub(1));
-
-    // Record what fits before marking focus, so the mark and the keys agree on it.
-    let mut drawn = [0; 3];
-    for &(section, index, first_row) in &focusable {
-        let rows = panel.section_targets(section, state).len();
-        drawn[section.index()] = rows.min(lines.len().saturating_sub(starts[index] + first_row));
-    }
-    panel.drawn.set(Some(drawn));
-    // Only the overlay takes keys, so only it marks a focused row.
-    if let Some(cursor) = overlay.then(|| panel.focused(state)).flatten() {
-        if let Some(&(_, index, first_row)) = focusable
-            .iter()
-            .find(|(section, ..)| *section == cursor.section)
-        {
-            mark_focus(
-                &mut lines[starts[index]..],
-                first_row + cursor.row,
-                width,
-                palette,
-            );
-        }
-    }
-    let hint_row = Rect {
-        y: inner.bottom() - 1,
-        height: 1,
+    // Permissions and navigation stay anchored while the inventory scrolls.
+    let footer_height = height.min(2);
+    let body = Rect {
+        height: inner.height.saturating_sub(footer_height as u16),
         ..inner
     };
-    frame.render_widget(Paragraph::new(lines), inner);
-    let hint_line = match tree_hint {
-        Some(tree_hint) => spread(
-            ui::keycap_hints(&hint, palette).spans,
-            ui::keycap_hints(&tree_hint, palette).spans,
-            width,
-        ),
-        None => ui::keycap_hints(&hint, palette),
+    let max_scroll = rows.lines.len().saturating_sub(usize::from(body.height));
+    let offset = panel.scroll.get().min(max_scroll);
+    panel.scroll.set(offset);
+    *panel.painted.borrow_mut() = Painted {
+        surface: area,
+        area: body,
+        total: rows.lines.len(),
+        actions: rows.actions,
     };
-    frame.render_widget(
-        Paragraph::new(hint_line).style(Style::default().fg(palette.muted)),
-        hint_row,
-    );
+    if let Some(cursor) = panel.overlay_open().then(|| panel.focused(state)).flatten() {
+        if let Some((line, ..)) = panel
+            .painted
+            .borrow()
+            .actions
+            .iter()
+            .filter(|(_, section, _)| *section == cursor.section)
+            .nth(cursor.row)
+        {
+            mark_focus(&mut rows.lines, *line, width, palette);
+        }
+    }
+    let visible: Vec<_> = rows
+        .lines
+        .into_iter()
+        .skip(offset)
+        .take(usize::from(body.height))
+        .collect();
+    frame.render_widget(Paragraph::new(visible), body);
+    let muted = Style::default().fg(palette.muted);
+    let footer = Rect {
+        y: body.bottom(),
+        height: footer_height as u16,
+        ..inner
+    };
+    let mut lines = Vec::new();
+    if footer_height > 1 {
+        lines.push(spread(
+            vec![Span::styled("Permissions", muted)],
+            vec![Span::styled(
+                permission_mode(state).unwrap_or("unknown"),
+                Style::default().fg(palette.warning),
+            )],
+            width,
+        ));
+    }
+    let toggle = ui::primary_label(bindings, KeyAction::TogglePanel);
+    let tree = ui::primary_label(bindings, KeyAction::SessionTree);
+    let hint = if panel.overlay_open() {
+        "Esc close · Tab sections · Enter".to_owned()
+    } else {
+        format!("{toggle} panel · {tree} tree")
+    };
+    let more = if max_scroll > 0 {
+        format!(" {}/{}", offset + 1, max_scroll + 1)
+    } else {
+        String::new()
+    };
+    lines.push(spread(
+        ui::keycap_hints(&hint, palette).spans,
+        vec![Span::styled(more, muted)],
+        width,
+    ));
+    frame.render_widget(Paragraph::new(lines), footer);
 }
 
 /// A row with `left` at the start and `right` against the end; the left side is
@@ -782,12 +872,8 @@ pub(crate) fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'s
     clipped
 }
 
-/// Highlight the focused row across the panel's `width`, and its section's heading,
-/// the first span of the section's first line.
+/// Highlight the focused row across the panel's `width`.
 fn mark_focus(lines: &mut [Line<'static>], row: usize, width: usize, palette: Palette) {
-    if let Some(heading) = lines.first_mut().and_then(|line| line.spans.first_mut()) {
-        heading.style = heading.style.fg(palette.primary);
-    }
     if let Some(line) = lines.get_mut(row) {
         // Pad the row so the highlight spans the panel, as a list selection does.
         let padding = width.saturating_sub(line.width());
@@ -1117,343 +1203,6 @@ fn approval_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec
     Some(lines)
 }
 
-/// How much of the context split the panel shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContextDetail {
-    /// Every row, the sparkline, and the footnote: the docked panel at idle.
-    Full,
-    /// Every row without the sparkline or footnote: the Ctrl+B overlay.
-    Overlay,
-    /// The bar and one line about the turn: while a run goes, or when the panel is
-    /// too short for the rows.
-    Compact,
-}
-
-/// `Context  198.8k / 272.0k 73%` over the window split by source, with the
-/// compaction reserve dashed after its marker, then as much of the split as
-/// `detail` allows.
-fn context_lines(
-    state: &UiState,
-    detail: ContextDetail,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let Some(split) = Split::of(state) else {
-        let reading = if state.context.loading() {
-            "reading…"
-        } else {
-            "unknown"
-        };
-        return vec![spread(
-            vec![heading("Context", palette)],
-            vec![Span::styled(reading, muted)],
-            width,
-        )];
-    };
-    let prefix = if split.approximate { "~" } else { "" };
-    let used = abbreviated(split.total);
-    let Some(window) = split.window else {
-        return vec![spread(
-            vec![heading("Context", palette)],
-            vec![Span::raw(format!("{prefix}{used}"))],
-            width,
-        )];
-    };
-    let fill = split.total as f64 / window as f64;
-    let level = if fill >= ui::CONTEXT_WARNING_FILL {
-        Style::default().fg(palette.warning)
-    } else {
-        muted
-    };
-    let mut lines = vec![
-        spread(
-            vec![heading("Context", palette)],
-            vec![
-                Span::raw(format!("{prefix}{used}")),
-                Span::styled(format!(" / {} ", abbreviated(window)), muted),
-                Span::styled(format!("{prefix}{:.0}%", fill * 100.0), level),
-            ],
-            width,
-        ),
-        context_split::bar(&split, width, palette),
-    ];
-    let Some(breakdown) = split.breakdown else {
-        return lines;
-    };
-    if detail == ContextDetail::Compact {
-        lines.extend(compact_turn_line(state, &split, width, palette));
-        return lines;
-    }
-    lines.extend(source_rows(&split, breakdown, width, palette));
-    let threshold = threshold_label(&split, palette);
-    if detail == ContextDetail::Full && !breakdown.turns.is_empty() {
-        lines.push(spread(sparkline(breakdown, palette), threshold, width));
-    } else if !threshold.is_empty() {
-        lines.push(spread(Vec::new(), threshold, width));
-    }
-    lines.extend(finished_turn_line(&split, breakdown, width, palette));
-    if detail == ContextDetail::Full {
-        let note = if breakdown.scaled {
-            "~ estimated split, scaled to provider total"
-        } else {
-            "~ estimated split"
-        };
-        lines.push(spread(
-            vec![Span::styled(note, Style::default().fg(palette.rail()))],
-            vec![Span::styled("/context", muted)],
-            width,
-        ));
-    }
-    lines
-}
-
-/// A row per source with its share, the Messages parts under it, then the
-/// compaction reserve and free space.
-fn source_rows(
-    split: &Split<'_>,
-    breakdown: &ContextBreakdown,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let dim = Style::default().fg(palette.rail());
-    let percent = |tokens: u64| {
-        split
-            .percent(tokens)
-            .map_or_else(String::new, |percent| format!("{percent:.1}%"))
-    };
-    let row = |swatch: Span<'static>, label: Vec<Span<'static>>, tokens: String, share: String| {
-        let mut left = vec![swatch, Span::raw(" ")];
-        left.extend(label);
-        spread(
-            left,
-            vec![
-                Span::styled(format!("{tokens:>8}"), dim),
-                Span::styled(format!("{share:>7}"), muted),
-            ],
-            width,
-        )
-    };
-    let mut lines = Vec::new();
-    for (usage, (source, tokens)) in breakdown.sources.iter().zip(split.sources()) {
-        let mut label = vec![Span::styled(context_split::source_label(source), muted)];
-        if source == ContextSource::McpTools && !usage.children.is_empty() {
-            let servers = usage.children.len();
-            label.push(Span::styled(
-                format!(" {servers} server{}", if servers == 1 { "" } else { "s" }),
-                dim,
-            ));
-        }
-        lines.push(row(
-            Span::styled(
-                "■",
-                Style::default().fg(context_split::source_color(source, palette)),
-            ),
-            label,
-            context_split::estimated(tokens),
-            percent(tokens),
-        ));
-        if source == ContextSource::Messages && !usage.children.is_empty() {
-            let mut parts: Vec<_> = usage.children.iter().collect();
-            parts.sort_by(|a, b| b.tokens.cmp(&a.tokens));
-            let text = parts
-                .iter()
-                .map(|part| {
-                    format!(
-                        "{} {}",
-                        sanitize_for_terminal(&part.label),
-                        abbreviated(part.tokens)
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(" · ");
-            lines.push(Line::styled(
-                ui::clip_columns(&format!("  {text}"), width),
-                dim,
-            ));
-        }
-    }
-    if let Some(free) = split.free() {
-        lines.push(row(
-            Span::styled(
-                context_split::RESERVE_CELL,
-                Style::default().fg(palette.rail()),
-            ),
-            vec![Span::styled("Compaction reserve", dim)],
-            abbreviated(split.reserve),
-            percent(split.reserve),
-        ));
-        lines.push(row(
-            Span::styled("■", Style::default().fg(palette.panel)),
-            vec![Span::styled("Free space", dim)],
-            split.free_label(free),
-            percent(free),
-        ));
-    }
-    lines
-}
-
-/// `▏compacts at 85%`, or nothing when the reserve leaves no threshold.
-fn threshold_label(split: &Split<'_>, palette: Palette) -> Vec<Span<'static>> {
-    split
-        .threshold()
-        .and_then(|threshold| split.percent(threshold))
-        .map(|percent| {
-            vec![
-                Span::styled("▏", Style::default().fg(palette.error)),
-                Span::styled(
-                    format!("compacts at {percent:.0}%"),
-                    Style::default().fg(palette.rail()),
-                ),
-            ]
-        })
-        .unwrap_or_default()
-}
-
-/// `per turn ▂▅▁█▃▄`: the newest turns' growth, the latest in the warning colour.
-fn sparkline(breakdown: &ContextBreakdown, palette: Palette) -> Vec<Span<'static>> {
-    let turns = &breakdown.turns[breakdown.turns.len().saturating_sub(SPARK_TURNS)..];
-    let tokens: Vec<u64> = turns.iter().map(|turn| turn.tokens).collect();
-    let blocks = context_split::spark(&tokens);
-    let mut spans = vec![Span::styled(
-        "per turn ",
-        Style::default().fg(palette.muted),
-    )];
-    for (index, block) in blocks.iter().enumerate() {
-        let color = if index + 1 == blocks.len() {
-            palette.warning
-        } else {
-            palette.secondary
-        };
-        spans.push(Span::styled(*block, Style::default().fg(color)));
-    }
-    spans
-}
-
-/// `turn 6 +38.2k · largest: gh pr checks output 21.4k`, clipping the label
-/// rather than the size.
-fn finished_turn_line(
-    split: &Split<'_>,
-    breakdown: &ContextBreakdown,
-    width: usize,
-    palette: Palette,
-) -> Option<Line<'static>> {
-    let (turn, growth) = split.finished_turn()?;
-    let dim = Style::default().fg(palette.rail());
-    let mut spans = turn_growth(turn, growth, palette);
-    // Until a finished run's statistics arrive, the largest items predate it.
-    if let Some(largest) = breakdown.largest.first().filter(|_| split.growth == 0) {
-        let size = format!(" {}", abbreviated(largest.tokens));
-        let used: usize = spans.iter().map(|span| span.content.width()).sum();
-        let label = format!(" · largest: {}", sanitize_for_terminal(&largest.label));
-        let room = width.saturating_sub(used + size.width());
-        spans.push(Span::styled(ui::clip_columns(&label, room), dim));
-        spans.push(Span::styled(size, dim));
-    }
-    Some(Line::from(clip_spans(spans, width)))
-}
-
-/// The compact layout's line: what the run in progress has added, or the newest
-/// turn at idle. A compaction is not a turn, so it shows neither.
-fn compact_turn_line(
-    state: &UiState,
-    split: &Split<'_>,
-    width: usize,
-    palette: Palette,
-) -> Option<Line<'static>> {
-    let compacting = state.context.compaction.is_some()
-        || state.current_command.as_ref().is_some_and(|command| {
-            command.command_type == crate::reducer::ActiveCommandType::Compact
-        });
-    if compacting {
-        return None;
-    }
-    if !ui::run_in_status_line(state) {
-        let breakdown = split.breakdown?;
-        return finished_turn_line(split, breakdown, width, palette);
-    }
-    let (turn, growth) = split.running_turn()?;
-    let mut spans = turn_growth(turn, growth, palette);
-    spans.push(Span::styled(" so far", Style::default().fg(palette.muted)));
-    Some(Line::from(clip_spans(spans, width)))
-}
-
-fn turn_growth(turn: u64, growth: u64, palette: Palette) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(format!("turn {turn} "), Style::default().fg(palette.muted)),
-        Span::styled(
-            format!("+{}", abbreviated(growth)),
-            Style::default().fg(palette.warning),
-        ),
-    ]
-}
-
-/// The model, its effort, the session's and this turn's cost, and the permission
-/// mode, which the approval block shows instead while a decision waits.
-fn model_lines(
-    state: &UiState,
-    focus: Focus,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let mut lines = vec![Line::from(heading("Model", palette))];
-    let model = state
-        .model_catalog
-        .as_ref()
-        .and_then(|catalog| catalog.selection.effective_model.as_deref())
-        .or(state.model.as_deref());
-    let mut identity = Vec::new();
-    if let Some(model) = model {
-        identity.push(Span::raw(sanitize_for_terminal(model)));
-    }
-    if let Some(provider) = state.provider.as_deref() {
-        if !identity.is_empty() {
-            identity.push(Span::raw(" "));
-        }
-        identity.push(Span::styled(sanitize_for_terminal(provider), muted));
-    }
-    let effort = state
-        .effort
-        .as_deref()
-        .map(|effort| {
-            vec![Span::styled(
-                sanitize_for_terminal(effort),
-                Style::default()
-                    .fg(palette.warning)
-                    .add_modifier(Modifier::BOLD),
-            )]
-        })
-        .unwrap_or_default();
-    if !identity.is_empty() || !effort.is_empty() {
-        lines.push(spread(identity, effort, width));
-    }
-    let cost = crate::context_view::session_cost(state).map_or_else(
-        || vec![Span::styled("cost unknown", muted)],
-        |cost| {
-            vec![
-                Span::styled("cost ", muted),
-                Span::raw(cost),
-                Span::styled(" session", muted),
-            ]
-        },
-    );
-    let turn_cost = crate::context_view::turn_cost(state)
-        .map(|cost| vec![Span::raw(cost), Span::styled(" this turn", muted)])
-        .unwrap_or_default();
-    lines.push(spread(cost, turn_cost, width));
-    if focus != Focus::Approval {
-        if let Some(mode) = permission_mode(state) {
-            lines.push(Line::from(vec![
-                Span::styled("permissions ", muted),
-                Span::raw(mode),
-            ]));
-        }
-    }
-    lines
-}
-
 fn permission_mode(state: &UiState) -> Option<&'static str> {
     state
         .permissions
@@ -1489,32 +1238,12 @@ fn file_lines(
     // A partial snapshot omits files past Git's limits, so its count is a floor.
     let partial = summary.snapshot.truncated;
     let by_wisp = summary.by_wisp;
-    let trailer = if by_wisp > 0 {
-        let others = count - by_wisp;
-        vec![
-            Span::styled("◆", Style::default().fg(palette.primary)),
-            Span::styled(
-                format!(
-                    " {by_wisp} by Wisp · {others}{} other",
-                    if partial { "+" } else { "" }
-                ),
-                muted,
-            ),
-        ]
-    } else {
-        vec![Span::styled(
-            match (count, partial) {
-                (0, _) => String::new(),
-                (1, false) => "1 file".to_owned(),
-                (count, false) => format!("{count} files"),
-                (count, true) => format!("{count}+ files"),
-            },
-            muted,
-        )]
-    };
     let mut lines = vec![spread(
         vec![heading("Changed files", palette)],
-        trailer,
+        vec![Span::styled(
+            format!("{count}{} · /diff", if partial { "+" } else { "" }),
+            muted,
+        )],
         width,
     )];
     if count == 0 {
@@ -1634,46 +1363,37 @@ fn turn_lines(state: &UiState, width: usize, rows: usize, palette: Palette) -> V
     let first = prompts.len() - shown;
     let number_width = prompts.len().to_string().len();
     let mut lines = vec![spread(
-        vec![heading("Turns", palette)],
-        vec![Span::styled(prompts.len().to_string(), muted)],
+        vec![heading("Recent turns", palette)],
+        vec![Span::styled(format!("{} · /tree", prompts.len()), muted)],
         width,
     )];
     for (index, prompt) in prompts.iter().enumerate().skip(first) {
         let latest = index + 1 == prompts.len();
-        let (duration, outcome) = match prompt.run_result() {
-            Some(result) => (
-                result
-                    .duration_ms
-                    .map(crate::tool_cards::format_duration)
-                    .unwrap_or_default(),
-                match result.outcome {
-                    RunOutcome::Completed => {
-                        Span::styled("✓", Style::default().fg(palette.success))
-                    }
-                    RunOutcome::Cancelled => Span::styled("⊘", muted),
-                    RunOutcome::Failed => Span::styled("✗", Style::default().fg(palette.error)),
-                },
-            ),
-            None if latest && running => (
-                String::new(),
-                Span::styled(SPINNER_OUTCOME, Style::default().fg(palette.secondary)),
-            ),
-            None => (String::new(), Span::raw(" ")),
+        let outcome = match prompt.run_result().map(|result| result.outcome) {
+            Some(RunOutcome::Failed) => vec![Span::styled("✗", Style::default().fg(palette.error))],
+            Some(RunOutcome::Cancelled) => vec![Span::styled("⊘", muted)],
+            None if latest && running => vec![Span::styled(SPINNER_OUTCOME, muted)],
+            _ => Vec::new(),
         };
-        let text_style = if latest { Style::default() } else { muted };
-        let mut right = Vec::new();
-        if !duration.is_empty() {
-            right.push(Span::styled(format!("{duration} "), muted));
-        }
-        right.push(outcome);
-        lines.push(spread(
+        let mut line = spread(
             vec![
+                Span::styled(
+                    if latest { "│" } else { " " },
+                    Style::default().fg(palette.primary),
+                ),
                 Span::styled(format!("{:>number_width$} ", index + 1), muted),
-                Span::styled(first_line(prompt.display_content()), text_style),
+                Span::styled(
+                    first_line(prompt.display_content()),
+                    if latest { Style::default() } else { muted },
+                ),
             ],
-            right,
+            outcome,
             width,
-        ));
+        );
+        if latest {
+            line = line.patch_style(Style::default().bg(palette.panel));
+        }
+        lines.push(line);
     }
     lines
 }
@@ -1698,7 +1418,7 @@ fn folded_turn_lines(
     vec![spread(
         vec![
             Span::styled("▸ ", muted),
-            heading("Turns ", palette),
+            heading("Recent turns ", palette),
             Span::styled(prompts.to_string(), muted),
         ],
         vec![Span::styled(
@@ -1713,33 +1433,45 @@ fn folded_turn_lines(
     )]
 }
 
-/// `MCP ●●●○ 3/4 connected`, once the servers' status is known.
-fn mcp_line(state: &UiState, width: usize, palette: Palette) -> Option<Line<'static>> {
-    let servers = &state.mcp.snapshot.as_ref()?.servers;
-    if servers.is_empty() {
-        return None;
+mod reading;
+use reading::{inventory_rows, reading_context};
+
+fn toggle_member(expanded: &mut BTreeSet<String>, name: String) {
+    if !expanded.remove(&name) {
+        expanded.insert(name);
     }
-    let connected = servers
-        .iter()
-        .filter(|server| server.status == McpServerStatus::Connected)
-        .count();
-    let mut dots = vec![heading("MCP ", palette)];
-    for server in servers.iter().take(12) {
-        let (dot, color) = match server.status {
-            McpServerStatus::Connected => ("●", palette.success),
-            McpServerStatus::Disabled => ("○", palette.muted),
-            McpServerStatus::Disconnected | McpServerStatus::Unavailable => ("●", palette.error),
-        };
-        dots.push(Span::styled(dot, Style::default().fg(color)));
+}
+
+#[derive(Default)]
+struct PanelRows {
+    lines: Vec<Line<'static>>,
+    actions: Vec<(usize, Section, PanelAction)>,
+    current: Option<(usize, Section)>,
+}
+
+impl PanelRows {
+    fn section(&mut self, kind: Section, lines: Vec<Line<'static>>) {
+        if !self.lines.is_empty() {
+            self.lines.push(Line::default());
+        }
+        self.current = Some((self.lines.len(), kind));
+        self.lines.extend(lines);
     }
-    Some(spread(
-        dots,
-        vec![Span::styled(
-            format!("{connected}/{} connected", servers.len()),
-            Style::default().fg(palette.muted),
-        )],
-        width,
-    ))
+
+    fn action(&mut self, row: usize, action: PanelAction) {
+        let (start, kind) = self.current.expect("section before action");
+        if start + row < self.lines.len() {
+            self.actions.push((start + row, kind, action));
+        }
+    }
+
+    fn push(&mut self, line: Line<'static>, action: Option<PanelAction>) {
+        if let Some(action) = action {
+            let (_, kind) = self.current.expect("section before row");
+            self.actions.push((self.lines.len(), kind, action));
+        }
+        self.lines.push(line);
+    }
 }
 
 #[cfg(test)]
@@ -1757,7 +1489,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use wisp_protocol::events::{
         ContextAccountingMethod, ContextBreakdown, ContextBudget, ContextEstimate, ContextItem,
-        ContextSourceItem, ContextSourceUsage, ContextTurnGrowth, McpServerSnapshot,
+        ContextSource, ContextSourceItem, ContextSourceUsage, ContextTurnGrowth, McpServerSnapshot,
         McpStatusSnapshot, PermissionState, SessionCostSummary, SessionStats, SessionTokenUsage,
     };
 
@@ -1826,6 +1558,7 @@ mod tests {
             },
             context_breakdown: None,
             branch: Default::default(),
+            used_skill_names: Vec::new(),
         }));
         state.permissions.snapshot = Some(Arc::new(PermissionState {
             mode: PermissionMode::Ask,
@@ -1939,21 +1672,169 @@ mod tests {
         for expected in [
             "why does codex time out",
             "/srv/wisp · fix/timeouts",
-            "198.8k / 272.0k 73%",
-            "gpt-6-astra openai-codex",
-            "cost $1.84 session",
-            "permissions ask",
-            "2 files",
+            "198.8k / 272.0k",
+            "73%",
+            "Permissions",
+            "2 · /diff",
             "M src/lib.rs",
             "+2 −1",
             "? notes.md",
-            "Turns",
-            "4m 12s ✓",
-            "4m 12s ⊘",
+            "Recent turns",
+            "add a read timeout setting",
             "2/2 connected",
-            "Ctrl+B hide panel",
+            "Ctrl+B panel",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+    }
+
+    fn reading_session() -> UiState {
+        let mut state = with_split(session());
+        let mut catalog = crate::commands::tests::skills();
+        catalog.entries = ["wisp-development", "playwright", "frontend-design"]
+            .into_iter()
+            .map(|name| wisp_protocol::events::SkillCatalogEntry {
+                name: name.into(),
+                description: format!("Instructions for {name}"),
+                source: wisp_protocol::events::SkillSource::PackageWisp,
+            })
+            .collect();
+        catalog.project_trusted = true;
+        catalog.diagnostics.clear();
+        state.skills.snapshot = Some(Arc::new(catalog));
+        state.context.stats.as_mut().unwrap().used_skill_names = vec!["wisp-development".into()];
+        state
+    }
+
+    #[test]
+    fn reading_layout_keeps_named_inventories_visible_and_details_collapsed() {
+        let state = reading_session();
+        let mut panel = SidePanel::default();
+        let text = panel_text(&screen(&state, &mut panel, 200), 200);
+        let mut previous = 0;
+        for label in [
+            "Context",
+            "Breakdown",
+            "MCP servers",
+            "● docs",
+            "● linear",
+            "Skills",
+            "◆ wisp-development",
+            "◇ playwright",
+            "◇ frontend-design",
+            "Changed files",
+            "Recent turns",
+            "Permissions",
+        ] {
+            let row = row_of(&text, label);
+            assert!(row >= previous, "{label}\n{text}");
+            previous = row;
+        }
+        assert!(
+            text.lines()
+                .any(|line| line.contains("wisp-development") && line.contains("used"))
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.contains("playwright") && line.contains("available"))
+        );
+        assert!(!text.contains("Instructions for"));
+        assert!(!text.contains("Model"));
+        assert!(!text.contains("Messages"));
+        assert!(!text.contains("cost unknown"));
+        panel.activate(PanelAction::Toggle(Disclosure::Skill(
+            "wisp-development".into(),
+        )));
+        let text = panel_text(&screen(&state, &mut panel, 200), 200);
+        assert!(text.contains("Used on this session branch"), "{text}");
+        assert!(text.contains("Instructions for wisp-development"), "{text}");
+        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
+        let text = panel_text(&screen(&state, &mut panel, 200), 200);
+        assert!(!text.contains("● docs"));
+        assert!(text.contains("docs · linear"), "{text}");
+    }
+
+    #[test]
+    fn long_inventories_scroll_and_do_not_hide_permissions_or_keyboard_targets() {
+        let mut state = reading_session();
+        let catalog = Arc::make_mut(state.skills.snapshot.as_mut().unwrap());
+        let template = catalog.entries[0].clone();
+        catalog.entries = (0..30)
+            .map(|index| {
+                let mut skill = template.clone();
+                skill.name = format!("skill-{index}");
+                skill
+            })
+            .collect();
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Skills);
+        panel.key(KeyCode::End, &state);
+        let text = row_background(&panel, &state, 140, "skill-29");
+        assert_eq!(text, Palette::default().selection().bg);
+        assert!(panel.scroll.get() > 0);
+        panel.scroll_by(i32::MAX);
+        paint_overlay(&state, &panel);
+        assert_eq!(
+            panel.scroll.get(),
+            panel
+                .painted
+                .borrow()
+                .total
+                .saturating_sub(usize::from(panel.painted.borrow().area.height))
+        );
+        panel.scroll_by(i32::MIN);
+        assert_eq!(panel.scroll.get(), 0);
+        for (width, height) in [(1, 1), (24, 8), (80, 24), (148, 40), (200, 48)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            panel.observe_width(width);
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &panel,
+                        &Bindings::default(),
+                        0,
+                        None,
+                        Palette::default(),
+                    )
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn reading_render_snapshot() {
+        let state = reading_session();
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        panel.sync_files(&state.git_diff);
+        let mut terminal = Terminal::new(TestBackend::new(52, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &state,
+                    &panel,
+                    &Bindings::default(),
+                    0,
+                    None,
+                    Palette::default(),
+                )
+            })
+            .unwrap();
+        // Optional visual QA capture of the actual Ratatui cells, never a hand-built mock.
+        if let Ok(path) = std::env::var("WISP_TEST_SIDEBAR_SNAPSHOT") {
+            let buffer = terminal.backend().buffer();
+            let cells: Vec<_> = buffer.content.iter().map(|cell| serde_json::json!({"text":cell.symbol(), "fg":format!("{:?}", cell.fg), "bg":format!("{:?}", cell.bg), "bold":cell.modifier.contains(Modifier::BOLD)})).collect();
+            std::fs::write(
+                path,
+                serde_json::to_string(&serde_json::json!({"width":52,"height":40,"cells":cells}))
+                    .unwrap(),
+            )
+            .unwrap();
         }
     }
 
@@ -1972,7 +1853,14 @@ mod tests {
 
     #[test]
     fn docked_panel_grows_capped() {
-        for (total, panel) in [(160, 56), (161, 56), (180, 66), (200, 76), (240, 76)] {
+        for (total, panel) in [
+            (148, 44),
+            (160, 50),
+            (161, 50),
+            (180, 52),
+            (200, 52),
+            (240, 52),
+        ] {
             assert_eq!(auto_width(total), panel, "{total}");
             let (conversation, docked) = SidePanel::default().split(Rect::new(0, 0, total, 10));
             assert_eq!((conversation.width, docked.width), (total - panel, panel));
@@ -2100,7 +1988,7 @@ mod tests {
         let narrow = panel_text(&screen(&state, &mut SidePanel::default(), 160), 160);
         assert!(!narrow.contains(path), "{narrow}");
         let wide = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(wide.contains(&format!("A {path}")), "{wide}");
+        assert!(wide.contains("overflow_recovery.rs"), "{wide}");
     }
 
     #[test]
@@ -2128,7 +2016,7 @@ mod tests {
                 .collect(),
         ));
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("10 files"), "{panel}");
+        assert!(panel.contains("10 · /diff"), "{panel}");
         assert!(panel.contains("A src/deeply/nested/module_7.rs"), "{panel}");
         assert!(!panel.contains("module_8.rs"), "{panel}");
         assert!(panel.contains("+2 more · /diff to review"), "{panel}");
@@ -2141,7 +2029,7 @@ mod tests {
         Arc::get_mut(&mut snapshot).unwrap().truncated = true;
         state.git_diff.snapshot = Some(snapshot);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("1+ files"), "{panel}");
+        assert!(panel.contains("1+ · /diff"), "{panel}");
         assert!(panel.contains("partial: some files omitted"), "{panel}");
 
         let mut empty = changes(Vec::new());
@@ -2193,7 +2081,7 @@ mod tests {
         );
         let rows = screen(&session(), &mut SidePanel::default(), 200);
         let footer = panel_text(&rows, 200);
-        assert!(footer.contains("Ctrl+T session tree"), "{footer}");
+        assert!(footer.contains("Ctrl+T tree"), "{footer}");
     }
 
     #[test]
@@ -2210,7 +2098,7 @@ mod tests {
             file("src/other.rs", "modified", "a\n", "c\n"),
         ]));
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("◆ 1 by Wisp · 1 other"), "{panel}");
+        assert!(panel.contains("2 · /diff"), "{panel}");
         assert!(panel.contains("◆ M src/lib.rs"), "{panel}");
         assert!(panel.contains("  M src/other.rs"), "{panel}");
         assert!(panel.contains("not from Wisp"), "{panel}");
@@ -2221,6 +2109,8 @@ mod tests {
         assert!(overlay_text(&state).contains("Enter jumps to the edit"));
         // Enter on the ◆ file jumps to its edit; on the other, it opens /diff.
         let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Files);
+        panel.key(KeyCode::Down, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
             OverlayKey::Open(Target::Edit(EditCard {
@@ -2396,42 +2286,31 @@ mod tests {
 
     #[test]
     fn idle_context_split_rows() {
-        // The narrowest docked panel, so the bar is 52 columns.
-        let panel = panel_text(
-            &screen(&with_split(session()), &mut SidePanel::default(), 160),
-            160,
-        );
-        let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
-        let bar = bar.trim_start_matches(['│', ' ']);
-        // 85% of the 52-column bar: the marker, then the reserve's dashed rule.
-        assert_eq!(bar.chars().position(|c| c == '┃'), Some(44), "{panel}");
-        assert!(bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
-        let mut previous = row_of(&panel, "Context");
-        for expected in [
-            "■ Messages                            ~152.6k  56.1%",
-            "tool output 95.2k · assistant 41.0k · user 16.4k",
-            "■ MCP tools 4 servers                  ~14.1k   5.2%",
-            "■ Project context                       ~5.0k   1.8%",
-            "╍ Compaction reserve                    40.8k  15.0%",
-            // An exact total leaves free space exact.
-            "■ Free space                            32.4k  11.9%",
-            "per turn ▄▆▂█▅▆                     ▏compacts at 85%",
-            "turn 6 +38.2k · largest: gh pr checks 766 out… 21.4k",
-            "~ estimated split, scaled to provider total /context",
+        let state = with_split(session());
+        let mut view = SidePanel::default();
+        let text = panel_text(&screen(&state, &mut view, 200), 200);
+        assert!(text.contains("+38.2k last turn"), "{text}");
+        assert!(!text.contains("Messages"), "{text}");
+        view.activate(PanelAction::Toggle(Disclosure::Context));
+        let text = panel_text(&screen(&state, &mut view, 200), 200);
+        for label in [
+            "Messages",
+            "MCP tools",
+            "Other instructions/tools",
+            "Compaction reserve",
+            "Compacts at 85%",
         ] {
-            let row = row_of(&panel, expected);
-            assert!(row > previous, "{expected}\n{panel}");
-            previous = row;
+            assert!(text.contains(label), "{label}\n{text}");
         }
     }
 
     #[test]
     fn overlay_context_drops_sparkline() {
-        let panel = overlay_text(&with_split(session()));
-        assert!(panel.contains("■ Skills"), "{panel}");
-        assert!(panel.contains("turn 6 +38.2k"), "{panel}");
-        assert!(!panel.contains("per turn"), "{panel}");
-        assert!(!panel.contains("/context"), "{panel}");
+        let text = overlay_text(&with_split(session()));
+        assert!(text.contains("+38.2k last turn"), "{text}");
+        assert!(text.contains("Breakdown · /context"), "{text}");
+        assert!(text.contains("MCP servers"), "{text}");
+        assert!(!text.contains("per turn"), "{text}");
     }
 
     #[test]
@@ -2440,8 +2319,8 @@ mod tests {
         let budget = state.context.budget.as_mut().unwrap();
         budget.observed_tokens = Some(210_000);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("210.0k / 272.0k 77%"), "{panel}");
-        assert!(panel.contains("turn 7 +11.2k so far"), "{panel}");
+        assert!(panel.contains("210.0k / 272.0k"), "{panel}");
+        assert!(panel.contains("+11.2k so far"), "{panel}");
         assert!(!panel.contains("Messages"), "{panel}");
     }
 
@@ -2452,7 +2331,7 @@ mod tests {
         // Too short for every source row: the bar and the newest turn keep the
         // changed files in view.
         assert!(!panel.contains("■ Messages"), "{panel}");
-        assert!(panel.contains("turn 6 +38.2k"), "{panel}");
+        assert!(panel.contains("+38.2k last turn"), "{panel}");
         assert!(panel.contains("M src/lib.rs"), "{panel}");
     }
 
@@ -2462,7 +2341,7 @@ mod tests {
         // A compaction during the run: the next request is far smaller.
         state.context.budget.as_mut().unwrap().observed_tokens = Some(60_000);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("60.0k / 272.0k 22%"), "{panel}");
+        assert!(panel.contains("60.0k / 272.0k"), "{panel}");
         assert!(!panel.contains("so far"), "{panel}");
     }
 
@@ -2471,7 +2350,7 @@ mod tests {
         let mut state = with_split(session());
         state.context.budget.as_mut().unwrap().observed_tokens = Some(210_000);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("turn 7 +11.2k"), "{panel}");
+        assert!(panel.contains("+11.2k last turn"), "{panel}");
         assert!(!panel.contains("largest"), "{panel}");
     }
 
@@ -2479,8 +2358,8 @@ mod tests {
     fn compaction_is_not_a_turn() {
         let mut state = with_split(running());
         state.context.compaction = Some(wisp_protocol::events::CompactionReason::Manual);
-        let split = Split::of(&state).unwrap();
-        assert!(compact_turn_line(&state, &split, 52, Palette::default()).is_none());
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(!panel.contains("so far"));
     }
 
     #[test]
@@ -2491,7 +2370,7 @@ mod tests {
         // Older statistics have no split: one run, the reserve after its marker.
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
-        assert!(bar.starts_with('━') && bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
+        assert!(bar.starts_with('━') && bar.ends_with('─'), "{panel}");
         assert!(!panel.contains("Messages"), "{panel}");
     }
 
@@ -2503,9 +2382,9 @@ mod tests {
             "Bash git push -u origin fix/timeouts",
             "turn 6 · 1 tool",
             "Esc interrupt",
-            "▸ Turns 3",
+            "▸ Recent turns 3",
             "collapsed while running",
-            "permissions ask",
+            "Permissions",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
@@ -2560,7 +2439,7 @@ mod tests {
             "Queue 1",
             "held until you answer",
             "1 ⏎ follow-up then open the PR",
-            "▸ Turns 3",
+            "▸ Recent turns 3",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
@@ -2613,7 +2492,7 @@ mod tests {
         let panel = overlay_text(&running());
         assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
         assert!(
-            panel.contains("Esc close · Tab sections · Enter open"),
+            panel.contains("Esc close · Tab sections · Enter"),
             "{panel}"
         );
         let panel = overlay_text(&approving());
@@ -2633,7 +2512,39 @@ mod tests {
         panel.observe_width(140);
         panel.toggle();
         panel.sync_files(&state.git_diff);
+        paint_overlay(state, &panel);
         panel
+    }
+
+    fn paint_overlay(state: &UiState, panel: &SidePanel) {
+        let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    overlay_area(frame.area()),
+                    state,
+                    panel,
+                    &Bindings::default(),
+                    0,
+                    None,
+                    Palette::default(),
+                )
+            })
+            .unwrap();
+    }
+
+    fn focus_section(panel: &mut SidePanel, state: &UiState, section: Section) {
+        for _ in 0..8 {
+            if panel
+                .focused(state)
+                .is_some_and(|cursor| cursor.section == section)
+            {
+                return;
+            }
+            panel.key(KeyCode::Tab, state);
+        }
+        panic!("missing section {section:?}");
     }
 
     #[test]
@@ -2641,53 +2552,47 @@ mod tests {
         let mut state = running();
         queue(&mut state, &["steer"], &["later"]);
         let mut panel = overlay(&state);
-        let mut press = |key| panel.key(key, &state);
-        // Focus starts on the queue, the first section that opens a view.
-        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Queue));
-        assert_eq!(press(KeyCode::Tab), OverlayKey::Moved);
         assert_eq!(
-            press(KeyCode::Enter),
-            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Queue)
         );
-        press(KeyCode::Down);
-        press(KeyCode::Down);
+        for section in [
+            Section::Context,
+            Section::Mcp,
+            Section::Skills,
+            Section::Files,
+            Section::Turns,
+            Section::Queue,
+        ] {
+            panel.key(KeyCode::Tab, &state);
+            assert_eq!(panel.focused(&state).unwrap().section, section);
+        }
+        panel.key(KeyCode::BackTab, &state);
         assert_eq!(
-            press(KeyCode::Enter),
-            OverlayKey::Open(Target::Diff(Some("notes.md".into())))
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Tree)
         );
-        press(KeyCode::Tab);
-        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Mcp));
-        // Tab wraps, and Shift+Tab goes back.
-        press(KeyCode::Tab);
-        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Queue));
-        press(KeyCode::BackTab);
-        assert_eq!(press(KeyCode::Enter), OverlayKey::Open(Target::Mcp));
-        assert_eq!(press(KeyCode::Char('x')), OverlayKey::Ignored);
-        assert_eq!(press(KeyCode::Esc), OverlayKey::Close);
+        assert_eq!(panel.key(KeyCode::Char('x'), &state), OverlayKey::Ignored);
+        assert_eq!(panel.key(KeyCode::Esc, &state), OverlayKey::Close);
     }
 
     #[test]
     fn focus_skips_empty_sections() {
-        // At idle the queue is not drawn, so focus starts on the changed files.
-        let mut state = session();
+        let mut state = running();
         queue(&mut state, &["steer"], &[]);
         let mut panel = overlay(&state);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
-        );
-        // Focus left on a section that empties moves to the first one still drawn.
-        panel.key(KeyCode::Tab, &state);
-        assert_eq!(panel.focused(&state).unwrap().section, Section::Mcp);
-        state.mcp.snapshot = None;
-        assert_eq!(panel.focused(&state).unwrap().section, Section::Files);
-        // The row counting the rest of a long list opens /diff where it starts.
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Queue);
+        queue(&mut state, &[], &[]);
+        paint_overlay(&state, &panel);
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Context);
         state.git_diff.snapshot = Some(changes(
             (0..10)
                 .map(|index| file(&format!("f{index}.rs"), "added", "", "x\n"))
                 .collect(),
         ));
-        let mut panel = overlay(&state);
+        panel.sync_files(&state.git_diff);
+        paint_overlay(&state, &panel);
+        focus_section(&mut panel, &state, Section::Files);
         panel.key(KeyCode::End, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
@@ -2758,16 +2663,16 @@ mod tests {
         assert_ne!(row_background(&panel, &state, 140, "later 5"), selection);
         panel.key(KeyCode::Up, &state);
         assert_eq!(row_background(&panel, &state, 140, "later 5"), selection);
-        // So is the file list's.
-        panel.key(KeyCode::Tab, &state);
+        // So is the file list's, even below the viewport.
+        focus_section(&mut panel, &state, Section::Files);
         panel.key(KeyCode::End, &state);
         assert_eq!(
             row_background(&panel, &state, 140, "+2 more · /diff"),
             selection
         );
-        // The panel is too short for the MCP line, so Tab skips it.
-        assert_eq!(panel.drawn.get().unwrap()[Section::Mcp.index()], 0);
-        panel.key(KeyCode::Tab, &state);
+        // Offscreen sections stay reachable by keyboard and scroll into view.
+        assert!(!panel.targets(Section::Mcp, &state).is_empty());
+        focus_section(&mut panel, &state, Section::Queue);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
             OverlayKey::Open(Target::Queue)
@@ -2779,6 +2684,8 @@ mod tests {
         let mut state = session();
         state.git_diff.snapshot = Some(changes(vec![file("a\tb.rs", "modified", "a\n", "b\n")]));
         let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Files);
+        panel.key(KeyCode::Down, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
             OverlayKey::Open(Target::Diff(Some("a\tb.rs".into())))
@@ -2789,27 +2696,17 @@ mod tests {
     fn overlay_marks_focus() {
         let state = session();
         let selection = Palette::default().selection().bg;
-        let panel = overlay(&state);
-        assert_eq!(
-            row_background(&panel, &state, 140, "M src/lib.rs"),
-            selection
-        );
-        assert_ne!(row_background(&panel, &state, 140, "? notes.md"), selection);
-        // The MCP line takes focus as a whole.
-        let mut panel = panel;
-        panel.key(KeyCode::Tab, &state);
+        let mut panel = overlay(&state);
+        assert_eq!(row_background(&panel, &state, 140, "Breakdown"), selection);
+        focus_section(&mut panel, &state, Section::Mcp);
         assert_eq!(
             row_background(&panel, &state, 140, "2/2 connected"),
             selection
         );
-        // The docked panel takes no keys, so it marks nothing.
         let mut docked = SidePanel::default();
         docked.observe_width(200);
         docked.sync_files(&state.git_diff);
-        assert_ne!(
-            row_background(&docked, &state, 200, "M src/lib.rs"),
-            selection
-        );
+        assert_ne!(row_background(&docked, &state, 200, "Breakdown"), selection);
     }
 
     #[test]
@@ -2911,7 +2808,10 @@ mod tests {
         );
         assert_eq!(turn(&state).as_deref(), Some("$0.310"));
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("$0.310 this turn"), "{panel}");
+        assert!(
+            !panel.contains("this turn"),
+            "cost details stay behind Breakdown"
+        );
 
         // An unpriced reply or a web search leaves only a floor.
         state

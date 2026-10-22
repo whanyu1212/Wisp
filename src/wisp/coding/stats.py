@@ -199,7 +199,37 @@ def build_session_stats(
         ),
         context_breakdown=breakdown,
         branch=session_branch_summary(entries),
+        used_skill_names=_used_skill_names(active_entries),
     )
+
+
+def _used_skill_names(entries: Sequence[SessionEntry]) -> tuple[str, ...]:
+    """Collect successfully loaded skills on the complete active branch.
+
+    Compaction replaces provider context, but its ancestors still carry usage
+    evidence. Calls alone are insufficient: failed or interrupted loads do not
+    count. Return distinct names in their first successful-use order.
+    """
+    pending: dict[str, str] = {}
+    used: dict[str, None] = {}
+    for entry in entries:
+        if not isinstance(entry, MessageSessionEntry):
+            continue
+        message = entry.message
+        if message.role == "user" and message.skill_invocation is not None:
+            used.setdefault(message.skill_invocation.name, None)
+        if message.role == "assistant":
+            for call in message.tool_calls or ():
+                # Replace an earlier binding if a provider reuses a call ID.
+                pending.pop(call.call_id, None)
+                argument = call.arguments.get("name")
+                if call.name == "skill" and isinstance(argument, str) and argument:
+                    pending[call.call_id] = argument
+        if message.role == "tool" and message.tool_call_id is not None:
+            name = pending.pop(message.tool_call_id, None)
+            if name is not None and message.tool_name == "skill" and message.is_error is False:
+                used.setdefault(name, None)
+    return tuple(used)
 
 
 def session_branch_summary(entries: Sequence[SessionEntry]) -> SessionBranchSummary:

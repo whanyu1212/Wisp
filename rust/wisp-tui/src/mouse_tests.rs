@@ -1256,6 +1256,119 @@ async fn border_drag_resizes_panel() {
 }
 
 #[tokio::test]
+async fn sidebar_clicks_scroll_and_keyboard_focus_keep_the_draft() {
+    let (writer, mut receiver) = mpsc::channel(32);
+    let (mut ui, _) = transcript_ui();
+    let draft = ui.editor.text().to_owned();
+    let screen = draw(&mut ui, 200, 30);
+    let (x, y) = cell_of(&screen, "Breakdown");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    let screen = draw(&mut ui, 200, 30);
+    assert!(screen.content.iter().any(|cell| cell.symbol() == "▾"));
+    let (x, y) = cell_of(&screen, "Open full context details");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::Context));
+    assert_eq!(ui.editor.text(), draft);
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 200, 30);
+    ui.handle_input(key(KeyCode::F(8)), &writer, 8192)
+        .await
+        .unwrap();
+    let screen = draw(&mut ui, 200, 30);
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+    // Focusing a docked panel must not open a second panel over the conversation.
+    assert!((0..screen.area.height).any(|y| row_text(&screen, y).contains("alpha line")));
+    assert_eq!(
+        ui.mouse_frame.as_ref().unwrap().popup.unwrap().x,
+        200 - side_panel::auto_width(200)
+    );
+    for input in [key(KeyCode::Tab), key(KeyCode::Enter), key(KeyCode::Esc)] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+        draw(&mut ui, 200, 30);
+    }
+    assert_eq!(ui.active_overlay(), None);
+    assert_eq!(ui.editor.text(), draft);
+    // Drain the read-only context request; no prompt was submitted.
+    while let Ok(WriterMessage::Frame { payload, .. }) = receiver.try_recv() {
+        assert_ne!(
+            serde_json::from_slice::<Value>(&payload).unwrap()["type"],
+            "prompt"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sidebar_footer_owns_scroll_and_focused_border_still_resizes() {
+    let (writer, _receiver) = mpsc::channel(32);
+    let (mut ui, _) = transcript_ui();
+    ui.state
+        .transcript
+        .complete_message(2, "a long response\n".repeat(100));
+    let mut skills = crate::commands::tests::skills();
+    let template = skills.entries[0].clone();
+    skills.entries = (0..40)
+        .map(|index| {
+            let mut skill = template.clone();
+            skill.name = format!("skill-{index}");
+            skill
+        })
+        .collect();
+    ui.state.skills.snapshot = Some(std::sync::Arc::new(skills));
+    let screen = draw(&mut ui, 200, 30);
+    let (x, y) = cell_of(&screen, "Permissions");
+    let viewport = ui.transcript_viewport.clone();
+    ui.handle_input(
+        Input::Scroll(mouse::Scroll {
+            event: event(MouseEventKind::ScrollDown, x, y),
+            lines: 10,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let after = draw(&mut ui, 200, 30);
+    assert_eq!(ui.transcript_viewport, viewport);
+    assert_ne!(row_text(&after, 2), row_text(&screen, 2));
+    ui.handle_input(key(KeyCode::F(8)), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 200, 30);
+    let border = 200 - side_panel::auto_width(200);
+    for input in [
+        click(border, 5),
+        drag(MouseEventKind::Drag(MouseButton::Left), 110, 5),
+        drag(MouseEventKind::Up(MouseButton::Left), 110, 5),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.side_panel.docked_width(200), 90);
+}
+
+#[tokio::test]
+async fn unpainted_sidebar_has_no_stale_click_targets_after_resize() {
+    let (writer, mut receiver) = mpsc::channel(32);
+    let (mut ui, _) = transcript_ui();
+    draw(&mut ui, 100, 30);
+    ui.handle_input(key(KeyCode::F(8)), &writer, 8192)
+        .await
+        .unwrap();
+    let screen = draw(&mut ui, 100, 30);
+    let (x, y) = cell_of(&screen, "Breakdown");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    let screen = draw(&mut ui, 100, 30);
+    let (x, y) = cell_of(&screen, "Open full context details");
+    draw(&mut ui, 100, 7);
+    assert!(ui.rendered_overlay.is_none());
+    assert!(!ui.side_panel.contains(x, y));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(ui.context_view.is_none());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn transcript_drag_skips_resize() {
     let (writer, _receiver) = mpsc::channel(16);
     let (mut ui, copied) = transcript_ui();

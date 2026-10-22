@@ -5229,6 +5229,14 @@
           "minimum": 0,
           "title": "SessionStatsUsageRecordCount",
           "type": "integer"
+        },
+        "used_skill_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "SessionStatsUsedSkillNames",
+          "type": "array"
         }
       },
       "required": [
@@ -5242,7 +5250,8 @@
         "compaction",
         "cost",
         "context_breakdown",
-        "branch"
+        "branch",
+        "used_skill_names"
       ],
       "title": "SessionStats",
       "type": "object"

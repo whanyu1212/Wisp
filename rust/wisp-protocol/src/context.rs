@@ -119,6 +119,8 @@ pub struct SessionStats {
     pub context_breakdown: Option<ContextBreakdown>,
     #[serde(default)]
     pub branch: SessionBranchSummary,
+    #[serde(default)]
+    pub used_skill_names: Vec<String>,
 }
 
 /// Where the active path sits in the session tree. `branched_from_turn` is set when
