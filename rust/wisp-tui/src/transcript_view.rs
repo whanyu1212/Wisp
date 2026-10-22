@@ -239,6 +239,10 @@ pub struct TranscriptRow {
     /// A call still in progress keeps the trailing columns for a live timer, which
     /// the renderer paints each frame so the cached row never goes stale.
     pub live_timer: bool,
+    /// How far a row beside a cut-off preview fades toward the preview's surface: 0
+    /// for none, up to [`FADE_LINES`] for the row nearest the cut. Only colours change,
+    /// so copied text stays the same.
+    pub fade: u8,
 }
 
 /// Columns a live timer keeps, enough for `59m 59s`.
@@ -312,6 +316,7 @@ impl TranscriptRow {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            fade: 0,
         }
     }
 }
@@ -481,6 +486,59 @@ struct CardDetailTone {
     tone: TranscriptRowTone,
 }
 
+/// Lines beside a preview's cut that fade toward its surface.
+pub(crate) const FADE_LINES: u8 = 3;
+
+/// A preview showing fewer lines than this keeps them all at full strength, so a fade
+/// never covers most of what it shows.
+const FADE_MIN_LINES: usize = 6;
+
+/// Fade levels for the last lines of `text` before a cut at byte `cut`, the line
+/// nearest the cut faintest, as byte ranges that include each line's newline.
+pub(crate) fn fade_before_cut(text: &str, cut: usize) -> Vec<(std::ops::Range<usize>, u8)> {
+    let lines = line_ranges(text[..cut].strip_suffix('\n').unwrap_or(&text[..cut]));
+    if lines.len() < FADE_MIN_LINES {
+        return Vec::new();
+    }
+    lines
+        .into_iter()
+        .rev()
+        .zip((1..=FADE_LINES).rev())
+        .collect()
+}
+
+/// Fade levels for the first lines of `text` below a cut above it, the first line
+/// faintest.
+fn fade_after_cut(text: &str) -> Vec<(std::ops::Range<usize>, u8)> {
+    let lines = line_ranges(text);
+    if lines.len() < FADE_MIN_LINES {
+        return Vec::new();
+    }
+    lines.into_iter().zip((1..=FADE_LINES).rev()).collect()
+}
+
+/// The byte range of each line of `text`, through its break. A lone `\r` ends a line
+/// as `\n` and `\r\n` do, since the transcript draws each as its own row.
+fn line_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let (mut start, mut index) = (0, 0);
+    while index < bytes.len() {
+        let end = match bytes[index] {
+            b'\r' if bytes.get(index + 1) == Some(&b'\n') => index + 2,
+            b'\r' | b'\n' => index + 1,
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        ranges.push(start..end);
+        (start, index) = (end, end);
+    }
+    ranges.push(start..text.len() + 1);
+    ranges
+}
+
 /// How a card text row styles its source text: the action line's status, name,
 /// argument and summary ranges, or the changed-word ranges of a diff preview.
 #[derive(Clone, Copy)]
@@ -575,6 +633,9 @@ struct CardProjection {
     detail_emphasis: Vec<std::ops::Range<usize>>,
     detail_syntax: Vec<crate::syntax::SyntaxToken>,
     detail_gutters: Vec<std::ops::Range<usize>>,
+    /// Byte ranges of `detail` beside a cut and how far each fades; see
+    /// [`TranscriptRow::fade`].
+    detail_fades: Vec<(std::ops::Range<usize>, u8)>,
     /// Where a status note or a diff's `+N -M` summary starts in `action`. It is
     /// styled like plain text and kept whole when the row is truncated.
     action_suffix_start: usize,
@@ -618,6 +679,11 @@ impl CardProjection {
                     .len()
                     .saturating_mul(std::mem::size_of::<std::ops::Range<usize>>()),
             )
+            .saturating_add(
+                self.detail_fades
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(std::ops::Range<usize>, u8)>()),
+            )
             .saturating_add(self.omission.as_ref().map_or(0, String::len))
             .saturating_add(std::mem::size_of::<Self>())
     }
@@ -628,6 +694,14 @@ impl CardProjection {
             .iter()
             .find(|range| range.start <= offset && offset < range.end)
             .map_or(TranscriptRowTone::Default, |range| range.tone)
+    }
+
+    fn detail_fade(&self, absolute_offset: usize) -> u8 {
+        let offset = absolute_offset.saturating_sub(self.detail_base);
+        self.detail_fades
+            .iter()
+            .find(|(range, _)| range.contains(&offset))
+            .map_or(0, |(_, fade)| *fade)
     }
 }
 
@@ -1861,6 +1935,7 @@ impl TranscriptRowCache {
                     next,
                 );
                 projected.row.gutter = result_gutter(entry, &projection, anchor);
+                projected.row.fade = projection.detail_fade(absolute_offset);
                 Some(projected)
             }
             CardSection::Omission => {
@@ -2683,6 +2758,7 @@ impl TranscriptRowCache {
                 fold_arrow: None,
                 trailing: None,
                 live_timer: false,
+                fade: 0,
             },
             next,
         }
@@ -3191,44 +3267,58 @@ fn card_projection(
                     DetailPresentationKind::DiffCreate | DetailPresentationKind::DiffModify
                 );
                 let mut action_suffix_start = note_start;
-                let (preview, detail_tones, detail_emphasis, detail_syntax, detail_gutters) =
-                    if diff {
-                        // The action line already names the file; carry the change counts
-                        // there instead of a separate `M path +N -M` heading row.
-                        action_suffix_start = action_suffix_start.min(action.len());
-                        if detail.kind == DetailPresentationKind::DiffCreate {
-                            action.push_str("  new file");
+                let (
+                    preview,
+                    detail_tones,
+                    detail_emphasis,
+                    detail_syntax,
+                    detail_gutters,
+                    detail_fades,
+                ) = if diff {
+                    // The action line already names the file; carry the change counts
+                    // there instead of a separate `M path +N -M` heading row.
+                    action_suffix_start = action_suffix_start.min(action.len());
+                    if detail.kind == DetailPresentationKind::DiffCreate {
+                        action.push_str("  new file");
+                    }
+                    if !detail.summary.is_empty() {
+                        action.push_str("  ");
+                        action.push_str(&detail.summary);
+                    }
+                    let preview = match side_by_side_width {
+                        Some(width) => {
+                            crate::diff_card::side_by_side_preview(detail, result_width(width))
                         }
-                        if !detail.summary.is_empty() {
-                            action.push_str("  ");
-                            action.push_str(&detail.summary);
-                        }
-                        let preview = match side_by_side_width {
-                            Some(width) => {
-                                crate::diff_card::side_by_side_preview(detail, result_width(width))
-                            }
-                            None => crate::diff_card::preview(detail),
-                        };
-                        let tones = preview
-                            .tones
-                            .into_iter()
-                            .map(|(range, tone)| CardDetailTone {
-                                start: range.start,
-                                end: range.end,
-                                tone,
-                            })
-                            .collect();
-                        (
-                            preview.text,
-                            tones,
-                            preview.emphasis,
-                            preview.syntax,
-                            preview.gutters,
-                        )
-                    } else {
-                        let (preview, tones) = structured_card_preview(detail);
-                        (preview, tones, Vec::new(), Vec::new(), Vec::new())
+                        None => crate::diff_card::preview(detail),
                     };
+                    let tones = preview
+                        .tones
+                        .into_iter()
+                        .map(|(range, tone)| CardDetailTone {
+                            start: range.start,
+                            end: range.end,
+                            tone,
+                        })
+                        .collect();
+                    (
+                        preview.text,
+                        tones,
+                        preview.emphasis,
+                        preview.syntax,
+                        preview.gutters,
+                        preview.fades,
+                    )
+                } else {
+                    let (preview, tones) = structured_card_preview(detail);
+                    (
+                        preview,
+                        tones,
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                };
                 return Some(CardProjection {
                     action,
                     action_marker_end,
@@ -3242,6 +3332,7 @@ fn card_projection(
                     detail_emphasis,
                     detail_syntax,
                     detail_gutters,
+                    detail_fades,
                     action_suffix_start,
                     inline_detail: diff,
                     side_by_side: diff && side_by_side_width.is_some(),
@@ -3330,6 +3421,15 @@ fn card_projection(
             } else {
                 Vec::new()
             };
+            // A tail cut above fades in under its note, so the earlier lines read as
+            // having scrolled away. Output the backend truncated keeps its start, so
+            // its first lines stay whole.
+            let cut_above = retained_preview.dropped_lines > 0 || retained_preview.base_offset > 0;
+            let detail_fades = if framed && cut_above {
+                fade_after_cut(&detail)
+            } else {
+                Vec::new()
+            };
             Some(CardProjection {
                 action,
                 action_marker_end,
@@ -3343,6 +3443,7 @@ fn card_projection(
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
+                detail_fades,
                 action_suffix_start: note_start,
                 inline_detail: false,
                 side_by_side: false,
@@ -3382,6 +3483,7 @@ fn card_projection(
                 detail_emphasis: Vec::new(),
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
+                detail_fades: Vec::new(),
                 action_suffix_start: note_start.min(exit_start),
                 inline_detail: false,
                 side_by_side: false,
@@ -7067,6 +7169,19 @@ mod tests {
             ),
             Some(header)
         );
+    }
+
+    #[test]
+    fn fade_lines_follow_rows() {
+        // A lone carriage return draws its own row, so it ends a faded line too.
+        let text = "a\rb\r\nc\nd\ne\nf\ng";
+        let lines = line_ranges(text)
+            .into_iter()
+            .map(|range| &text[range.start..range.end.min(text.len())])
+            .collect::<Vec<_>>();
+        assert_eq!(lines, ["a\r", "b\r\n", "c\n", "d\n", "e\n", "f\n", "g"]);
+        assert_eq!(fade_after_cut(text), [(0..2, 3), (2..5, 2), (5..7, 1)]);
+        assert!(fade_after_cut("a\nb\nc").is_empty());
     }
 
     #[test]
