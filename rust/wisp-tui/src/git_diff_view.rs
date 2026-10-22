@@ -5,7 +5,7 @@
 //! and a row of keys. Narrow terminals show the tree or the diff, switched by Tab.
 use crate::{
     diff_review::DiffReview,
-    reducer::git_diff::{GitDiff, GitDiffFile, GitDiffSnapshot},
+    reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffFile, GitDiffSnapshot},
     side_panel::spread,
     theme::Palette,
     tool_detail::{ToolDetailPresentation, git_presentation},
@@ -36,8 +36,20 @@ const CHURN_CELLS: usize = 6;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EditCard {
     pub call_id: String,
+    /// The session entry holding the call's result.
+    pub entry_id: String,
     /// The file, so `/diff` can open at it when the card is not in the transcript.
     pub path: String,
+}
+
+impl EditCard {
+    pub(crate) fn of(edit: &GitDiffEdit, path: &str) -> Self {
+        Self {
+            call_id: edit.call_id.clone(),
+            entry_id: edit.entry_id.clone(),
+            path: path.to_owned(),
+        }
+    }
 }
 
 pub(crate) struct GitDiffView {
@@ -298,10 +310,9 @@ impl GitDiffView {
             }
             KeyCode::Enter => {
                 let file = self.snapshot.as_ref()?.files.get(self.active)?;
-                return file.latest_edit().map(|edit| EditCard {
-                    call_id: edit.call_id.clone(),
-                    path: file.path.clone(),
-                });
+                return file
+                    .latest_edit()
+                    .map(|edit| EditCard::of(edit, &file.path));
             }
             KeyCode::Up => self.review.scroll(-1),
             KeyCode::Down => self.review.scroll(1),
@@ -808,7 +819,7 @@ impl GitDiffView {
         let attribution = match file.latest_edit() {
             // Named by the latest edit, the card Enter jumps to.
             Some(edit) => {
-                let turn = turn_of_call(transcript, &edit.call_id)
+                let turn = turn_of_edit(transcript, edit)
                     .map(|turn| format!(" in turn {turn}"))
                     .unwrap_or_default();
                 let tool = edit.tool_label();
@@ -938,26 +949,36 @@ fn age(elapsed: Duration) -> String {
     }
 }
 
-/// The transcript card of a tool call: found through the call index, or by a scan
-/// once the index has let a resolved call go.
-pub(crate) fn edit_card_entry(transcript: &Transcript, call_id: &str) -> Option<TranscriptEntryId> {
-    transcript.tool_entry_for_call(call_id).or_else(|| {
-        transcript
-            .entries()
-            .iter()
-            .find(|entry| {
-                entry
-                    .tool_card()
-                    .is_some_and(|card| card.call_id == call_id)
-            })
-            .map(|entry| entry.id)
-    })
+/// The transcript card of an edit: the card its result entry was drawn into, then,
+/// for a card known only by its call (a live one before its entry arrived), the
+/// call index or a scan once the index has let a resolved call go.
+pub(crate) fn edit_card_entry(
+    transcript: &Transcript,
+    entry_id: &str,
+    call_id: &str,
+) -> Option<TranscriptEntryId> {
+    let by_entry = (!entry_id.is_empty())
+        .then(|| transcript.tool_entry_with_origin(entry_id))
+        .flatten();
+    by_entry
+        .or_else(|| transcript.tool_entry_for_call(call_id))
+        .or_else(|| {
+            transcript
+                .entries()
+                .iter()
+                .find(|entry| {
+                    entry
+                        .tool_card()
+                        .is_some_and(|card| card.call_id == call_id)
+                })
+                .map(|entry| entry.id)
+        })
 }
 
-/// The turn a tool call ran in, numbered as the side panel's turn list numbers
-/// prompts; `None` when the call's card is not in the transcript.
-fn turn_of_call(transcript: &Transcript, call_id: &str) -> Option<usize> {
-    let card = edit_card_entry(transcript, call_id)?;
+/// The turn an edit ran in, numbered as the side panel's turn list numbers prompts;
+/// `None` when its card is not in the transcript.
+fn turn_of_edit(transcript: &Transcript, edit: &GitDiffEdit) -> Option<usize> {
+    let card = edit_card_entry(transcript, &edit.entry_id, &edit.call_id)?;
     let mut turn = 0;
     for entry in transcript.entries() {
         if entry.id == card {
@@ -990,6 +1011,7 @@ mod tests {
     fn edit(id: &str) -> GitDiffEdit {
         GitDiffEdit {
             call_id: id.into(),
+            entry_id: String::new(),
             tool: "edit".into(),
         }
     }
@@ -1259,6 +1281,7 @@ mod tests {
             view.key(KeyCode::Enter),
             Some(EditCard {
                 call_id: "edit-2".into(),
+                entry_id: String::new(),
                 path: "src/codex.py".into(),
             })
         );

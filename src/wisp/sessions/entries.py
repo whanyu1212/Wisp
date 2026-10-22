@@ -76,6 +76,10 @@ class ToolResultPresentationSnapshot(BaseModel):
     # long it ran; absent for other tools and for results recorded before they were kept.
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
+    # The folder an edit or write ran in, so its relative path resolves against that
+    # folder after the session is resumed elsewhere; absent for other tools and for
+    # results recorded before it was kept.
+    cwd: str | None = Field(default=None, min_length=1)
 
 
 class RepositoryStatusSnapshot(BaseModel):

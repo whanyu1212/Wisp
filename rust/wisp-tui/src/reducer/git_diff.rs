@@ -228,6 +228,10 @@ impl GitDiffFile {
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub struct GitDiffEdit {
     pub call_id: String,
+    /// The session entry holding the call's result, which identifies its card even
+    /// when a provider reused the call ID.
+    #[serde(default)]
+    pub entry_id: String,
     /// `edit` or `write`.
     pub tool: String,
 }

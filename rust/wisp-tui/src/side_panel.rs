@@ -12,7 +12,7 @@ use std::time::Duration;
 use crate::context_split::{self, SPARK_TURNS, Split, abbreviated};
 use crate::git_diff_view::EditCard;
 use crate::keybindings::{Action as KeyAction, Bindings};
-use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
+use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
 use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
 use crate::transcript::{RunOutcome, TranscriptRole};
@@ -224,10 +224,7 @@ impl SidePanel {
                     .rows
                     .iter()
                     .map(|row| match &row.edit {
-                        Some(call_id) => Target::Edit(EditCard {
-                            call_id: call_id.clone(),
-                            path: row.git_path.clone(),
-                        }),
+                        Some(edit) => Target::Edit(EditCard::of(edit, &row.git_path)),
                         None => Target::Diff(Some(row.git_path.clone())),
                     })
                     .collect();
@@ -364,7 +361,7 @@ struct FileRow {
     counted: bool,
     /// The session's latest edit or write call on the file; `None` when the file
     /// changed only outside this session.
-    edit: Option<String>,
+    edit: Option<GitDiffEdit>,
 }
 
 impl FileSummary {
@@ -393,7 +390,7 @@ impl FileSummary {
                     additions,
                     deletions,
                     counted,
-                    edit: file.latest_edit().map(|edit| edit.call_id.clone()),
+                    edit: file.latest_edit().cloned(),
                 }
             })
             .collect();
@@ -1930,6 +1927,7 @@ mod tests {
         let mut edited = file("src/lib.rs", "modified", "a\n", "b\n");
         edited.edits = vec![crate::reducer::git_diff::GitDiffEdit {
             call_id: "edit-1".into(),
+            entry_id: String::new(),
             tool: "edit".into(),
         }];
         state.git_diff.snapshot = Some(changes(vec![
@@ -1952,6 +1950,7 @@ mod tests {
             panel.key(KeyCode::Enter, &state),
             OverlayKey::Open(Target::Edit(EditCard {
                 call_id: "edit-1".into(),
+                entry_id: String::new(),
                 path: "src/lib.rs".into(),
             }))
         );

@@ -1700,6 +1700,18 @@
     0,
     "edits",
     0,
+    "entry_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
     "tool"
    ],
    "accepted": false

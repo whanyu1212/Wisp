@@ -2462,12 +2462,18 @@
     },
     "RpcGitDiffEdit": {
       "additionalProperties": false,
-      "description": "One successful edit or write call in the active session path that targeted a file.",
+      "description": "One successful edit or write call in the active session path that targeted a file.\n\n``entry_id`` names the session entry holding the call's result. It identifies\nthe call even when a provider reuses ``call_id``, so a frontend finds its card.",
       "properties": {
         "call_id": {
           "maxLength": 256,
           "minLength": 1,
           "title": "Call Id",
+          "type": "string"
+        },
+        "entry_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Entry Id",
           "type": "string"
         },
         "tool": {
@@ -2481,6 +2487,7 @@
       },
       "required": [
         "call_id",
+        "entry_id",
         "tool"
       ],
       "title": "RpcGitDiffEdit",
@@ -7832,6 +7839,7 @@
           "edits": [
             {
               "call_id": "call-1",
+              "entry_id": "entry-1",
               "tool": "edit"
             }
           ],

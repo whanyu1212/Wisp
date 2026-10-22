@@ -530,7 +530,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
                 "before": "old\n",
                 "after": "new\n",
                 "notice": "",
-                "edits": [{"call_id": "call-1", "tool": "edit"}],
+                "edits": [{"call_id": "call-1", "entry_id": "entry-1", "tool": "edit"}],
             }
         ],
         "truncated": False,

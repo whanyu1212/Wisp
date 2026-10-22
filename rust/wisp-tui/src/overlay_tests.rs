@@ -1103,6 +1103,7 @@ fn edited_snapshot() -> std::sync::Arc<reducer::git_diff::GitDiffSnapshot> {
             after: "b\n".into(),
             edits: vec![GitDiffEdit {
                 call_id: "edit-1".into(),
+                entry_id: String::new(),
                 tool: "edit".into(),
             }],
             ..Default::default()
@@ -1156,6 +1157,7 @@ async fn missing_card_opens_diff() {
     ui.open_from_panel(
         side_panel::Target::Edit(git_diff_view::EditCard {
             call_id: "gone".into(),
+            entry_id: String::new(),
             path: "src/lib.rs".into(),
         }),
         &writer,
@@ -1234,6 +1236,7 @@ async fn jump_opens_folded_group() {
     ui.open_from_panel(
         side_panel::Target::Edit(git_diff_view::EditCard {
             call_id: "edit-1".into(),
+            entry_id: String::new(),
             path: "src/lib.rs".into(),
         }),
         &writer,
@@ -1320,4 +1323,28 @@ async fn ctrl_t_keeps_draft() {
         "{}",
         ui.editor.text()
     );
+}
+
+#[tokio::test]
+async fn jump_follows_result_entry() {
+    // A provider reused a call ID: the edit names its result's entry, which picks
+    // the card the call ID alone cannot.
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    let first = finished_edit(&mut ui, "edit-a");
+    let second = finished_edit(&mut ui, "edit-b");
+    ui.state.transcript.add_live_origin(second, "entry-b");
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "edit-a".into(),
+            entry_id: "entry-b".into(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_expanded(second));
+    assert!(!ui.transcript_row_cache.fold().is_expanded(first));
 }

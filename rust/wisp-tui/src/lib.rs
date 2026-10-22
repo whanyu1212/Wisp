@@ -3273,7 +3273,8 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         self.render_pending = true;
-        let entry = git_diff_view::edit_card_entry(&self.state.transcript, &card.call_id);
+        let entry =
+            git_diff_view::edit_card_entry(&self.state.transcript, &card.entry_id, &card.call_id);
         let Some(entry) = entry else {
             self.notice =
                 Some("That edit's card is not in the transcript; showing the file.".into());

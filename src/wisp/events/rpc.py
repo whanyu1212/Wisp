@@ -481,11 +481,16 @@ class RpcProjectFilesReported(WispEvent):
 
 
 class RpcGitDiffEdit(BaseModel):
-    """One successful edit or write call in the active session path that targeted a file."""
+    """One successful edit or write call in the active session path that targeted a file.
+
+    ``entry_id`` names the session entry holding the call's result. It identifies
+    the call even when a provider reuses ``call_id``, so a frontend finds its card.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     call_id: str = Field(min_length=1, max_length=256)
+    entry_id: str = Field(min_length=1, max_length=256)
     tool: Literal["edit", "write"]
 
 
