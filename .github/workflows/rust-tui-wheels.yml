@@ -3,11 +3,17 @@ name: Rust TUI wheel candidates
 on:
   workflow_call:
   workflow_dispatch:
-  # Every merge gets a wheel build, so a Python change that breaks the
-  # installed wheel surfaces on main even when its pull request skipped this.
+  # Runtime merges still verify the installed wheel, even when their PR skipped
+  # candidate builds. Content-only updates cannot change the distribution.
   push:
     branches:
       - main
+    paths-ignore:
+      - "book/**"
+      - "site/**"
+      - "assets/**"
+      - "AGENTS.md"
+      - "CHANGELOG.md"
   # Pull requests build wheels only when they touch packaging, the native crates
   # the wheel bundles beyond the TUI, the wheel scripts and tests, or the Python
   # code that loads a native binary. TUI-only changes are compiled and tested by
@@ -17,10 +23,17 @@ on:
       - main
     paths:
       - ".github/workflows/rust-tui-wheels.yml"
+      - ".cargo/**"
+      - ".python-version"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "rust-toolchain.toml"
+      - "uv.lock"
+      - "schemas/**"
       - "packaging/**"
       - "pyproject.toml"
+      - "README.md"
+      - "LICENSE"
       - "rust/wisp-process-text/**"
       - "rust/wisp-protocol/**"
       - "rust/wisp-python/**"
@@ -28,6 +41,7 @@ on:
       - "scripts/smoke_installed_rust_tui.py"
       - "scripts/verify_rust_tui_install_lifecycle.py"
       - "scripts/verify_rust_tui_wheel.py"
+      - "scripts/verify_sdk_install.py"
       - "src/wisp/cli/native_tui/**"
       - "src/wisp/tools/search/**"
       - "src/wisp/tools/shell/**"
@@ -35,6 +49,7 @@ on:
       - "tests/tools/search/test_native_grep_conformance.py"
       - "tests/tools/shell/*supervisor*.py"
       - "tests/scripts/test_verify_rust_tui_wheel.py"
+      - "tests/scripts/test_smoke_installed_rust_tui.py"
 
 permissions:
   contents: read
