@@ -496,8 +496,6 @@ struct CardRowStyle<'a> {
     emphasis: &'a [std::ops::Range<usize>],
     syntax: &'a [crate::syntax::SyntaxToken],
     gutters: &'a [std::ops::Range<usize>],
-    /// Tones within the row, for a side-by-side diff whose sides differ.
-    tones: &'a [CardDetailTone],
 }
 
 impl CardRowStyle<'_> {
@@ -510,16 +508,7 @@ impl CardRowStyle<'_> {
         emphasis: &[],
         syntax: &[],
         gutters: &[],
-        tones: &[],
     };
-
-    /// The tone of the side holding `offset`, in a side-by-side diff row.
-    fn tone_at(&self, offset: usize) -> Option<TranscriptRowTone> {
-        self.tones
-            .iter()
-            .find(|tone| tone.start <= offset && offset < tone.end)
-            .map(|tone| tone.tone)
-    }
 
     /// The inline style of the grapheme of `len` bytes at `offset`.
     fn inline_at(
@@ -582,9 +571,6 @@ struct CardProjection {
     /// styled like plain text and kept whole when the row is truncated.
     action_suffix_start: usize,
     inline_detail: bool,
-    /// Whether `detail` sets old and new side by side, so its tones change within
-    /// a row.
-    side_by_side: bool,
     omission: Option<String>,
     omission_before_detail: bool,
     /// Closes the detail, such as `exit 0` under shell output.
@@ -929,26 +915,11 @@ pub struct TranscriptRowCache {
     card_retained_bytes: usize,
     work: LayoutWork,
     fold: FoldState,
-    /// The transcript's width while the terminal is wide enough to set Edit and
-    /// Write cards' old and new side by side; `None` keeps them unified.
-    side_by_side_width: Option<usize>,
 }
 
 impl TranscriptRowCache {
     pub fn fold(&self) -> &FoldState {
         &self.fold
-    }
-
-    /// Set diff cards side by side in a transcript `width` columns wide, or unified
-    /// with `None`. A change rebuilds the cards and rewraps like a fold.
-    pub(crate) fn set_side_by_side_width(&mut self, width: Option<usize>) {
-        if self.side_by_side_width != width {
-            self.side_by_side_width = width;
-            self.cards.clear();
-            self.card_order.clear();
-            self.card_retained_bytes = 0;
-            self.fold.bump();
-        }
     }
 
     pub fn fold_mut(&mut self) -> &mut FoldState {
@@ -1671,7 +1642,7 @@ impl TranscriptRowCache {
             self.card_order.push_back(key);
             return Some(snapshot);
         }
-        let snapshot = Arc::new(card_projection(entry, self.side_by_side_width)?);
+        let snapshot = Arc::new(card_projection(entry)?);
         self.card_retained_bytes = self
             .card_retained_bytes
             .saturating_add(snapshot.retained_bytes());
@@ -1719,7 +1690,6 @@ impl TranscriptRowCache {
                     emphasis: &[],
                     syntax: &[],
                     gutters: &[],
-                    tones: &[],
                 };
                 // A collapsed card keeps its action on one row; expanding it (Right in
                 // browse) wraps the full command or path instead and shows any hidden
@@ -1883,11 +1853,6 @@ impl TranscriptRowCache {
                         emphasis: &projection.detail_emphasis,
                         syntax: &projection.detail_syntax,
                         gutters: &projection.detail_gutters,
-                        tones: if projection.side_by_side {
-                            &projection.detail_tones
-                        } else {
-                            &[]
-                        },
                         ..CardRowStyle::PLAIN
                     },
                     next,
@@ -2244,7 +2209,6 @@ impl TranscriptRowCache {
                 || !style.emphasis.is_empty()
                 || !style.syntax.is_empty()
                 || !style.gutters.is_empty()
-                || !style.tones.is_empty()
             {
                 let inline = style.inline_at(kind, relative, grapheme.len());
                 let syntax = style
@@ -2252,12 +2216,10 @@ impl TranscriptRowCache {
                     .iter()
                     .find(|token| token.range.contains(&relative))
                     .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class);
-                let tone = style.tone_at(relative);
-                if let Some(last) = action_spans.last_mut().filter(|last| {
-                    last.style.inline == inline
-                        && last.style.syntax == syntax
-                        && last.style.tone == tone
-                }) {
+                if let Some(last) = action_spans
+                    .last_mut()
+                    .filter(|last| last.style.inline == inline && last.style.syntax == syntax)
+                {
                     last.text.push_str(&safe);
                     last.affinity.source_end = relative + grapheme.len();
                 } else {
@@ -2266,7 +2228,6 @@ impl TranscriptRowCache {
                         style: TranscriptSpanStyle {
                             inline,
                             syntax,
-                            tone,
                             ..TranscriptSpanStyle::default()
                         },
                         affinity: SourceAffinity {
@@ -3234,12 +3195,7 @@ fn push_status_note(action: &mut String, note: Option<&str>) -> usize {
     start
 }
 
-/// `side_by_side_width` is the transcript's width when diff cards set old and new
-/// side by side.
-fn card_projection(
-    entry: &TranscriptEntry,
-    side_by_side_width: Option<usize>,
-) -> Option<CardProjection> {
+fn card_projection(entry: &TranscriptEntry) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) => {
@@ -3269,12 +3225,7 @@ fn card_projection(
                             action.push_str("  ");
                             action.push_str(&detail.summary);
                         }
-                        let preview = match side_by_side_width {
-                            Some(width) => {
-                                crate::diff_card::side_by_side_preview(detail, result_width(width))
-                            }
-                            None => crate::diff_card::preview(detail),
-                        };
+                        let preview = crate::diff_card::preview(detail);
                         let tones = preview
                             .tones
                             .into_iter()
@@ -3310,7 +3261,6 @@ fn card_projection(
                     detail_gutters,
                     action_suffix_start,
                     inline_detail: diff,
-                    side_by_side: diff && side_by_side_width.is_some(),
                     omission: None,
                     omission_before_detail: false,
                     footer: None,
@@ -3411,7 +3361,6 @@ fn card_projection(
                 detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
                 inline_detail: false,
-                side_by_side: false,
                 omission,
                 omission_before_detail: tail_preview,
                 footer,
@@ -3450,7 +3399,6 @@ fn card_projection(
                 detail_gutters: Vec::new(),
                 action_suffix_start: note_start.min(exit_start),
                 inline_detail: false,
-                side_by_side: false,
                 omission,
                 omission_before_detail: true,
                 footer: None,
@@ -3758,7 +3706,6 @@ impl McpGroupHeader {
             emphasis: &[],
             syntax: &[],
             gutters: &[],
-            tones: &[],
         }
     }
 
@@ -6391,7 +6338,7 @@ mod tests {
         });
         transcript.observe_tool_result(tool_result("call-large", &"x".repeat(4_000)));
 
-        let projection = card_projection(transcript.entry(card_id).unwrap(), None).unwrap();
+        let projection = card_projection(transcript.entry(card_id).unwrap()).unwrap();
         let omission = projection.omission.unwrap();
         assert!(omission.contains("omitted after this preview"));
         assert!(!omission.contains("omitted before this preview"));
@@ -6418,7 +6365,7 @@ mod tests {
         failed.exit_code = Some(1);
         transcript.observe_tool_result(failed);
 
-        let projection = card_projection(transcript.entry(card_id).unwrap(), None).unwrap();
+        let projection = card_projection(transcript.entry(card_id).unwrap()).unwrap();
         assert!(
             projection
                 .detail
@@ -6463,7 +6410,7 @@ mod tests {
                 .ends_with("BUILD FINISHED SUCCESSFULLY")
         );
         assert!(!card.retained_output.text.contains("EARLY BUILD MARKER"));
-        let projection = card_projection(entry, None).unwrap();
+        let projection = card_projection(entry).unwrap();
         assert!(projection.detail.contains("BUILD FINISHED SUCCESSFULLY"));
         assert!(!projection.detail.contains("EARLY BUILD MARKER"));
         assert!(projection.omission_before_detail);
@@ -6501,7 +6448,7 @@ mod tests {
         card.status = ToolStatus::Running;
         card.exit_code = None;
 
-        let projection = card_projection(&entry, None).unwrap();
+        let projection = card_projection(&entry).unwrap();
         assert!(projection.framed);
         assert!(projection.omission_before_detail);
         assert!(projection.detail.ends_with("LATEST LINE"));

@@ -10,8 +10,6 @@
 use std::ops::Range;
 
 use similar::{ChangeTag, TextDiff};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 
 use crate::tool_detail::{
     DETAIL_COLLAPSED_MAX_BYTES, DetailRow, DetailRowKind, ToolDetailPresentation,
@@ -102,204 +100,27 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
     preview
 }
 
-/// The card preview with old and new side by side in `width` columns, as `/diff`
-/// lays out its split: the old line and its number on the left, the new on the
-/// right, a column apart, with a blank side where only one side changed. The hunk
-/// header leads, later hunks are separated by `⋯`, and long lines wrap within their
-/// side under a `↳`.
-pub(crate) fn side_by_side_preview(
-    detail: &ToolDetailPresentation,
-    width: usize,
-) -> DiffCardPreview {
-    let mut rows = coherent_preview_rows(
-        &card_rows(&detail.rows),
-        detail.additions.saturating_add(detail.deletions),
-    );
-    // Tabs and controls become what the transcript draws, so the sides keep their
-    // columns.
-    for row in &mut rows {
-        row.text = displayable(&row.text);
-    }
-    let emphasis = row_emphasis(&rows);
-    let language = detail.title.rsplit('.').next().unwrap_or("");
-    let mut preview = DiffCardPreview {
-        text: String::new(),
-        tones: Vec::new(),
-        emphasis: Vec::new(),
-        syntax: Vec::new(),
-        gutters: Vec::new(),
-    };
-    if let Some(hunk) = detail
-        .rows
-        .iter()
-        .find(|row| row.kind == DetailRowKind::Hunk && row.text.starts_with("@@ -"))
-    {
-        // A file range leads, as in `/diff`; an edit's fragment-relative hunk does
-        // not, since its action line already says the numbers are the fragment's.
-        preview.push_line(
-            &format!("       {}", displayable(&hunk.text)),
-            TranscriptRowTone::SurfaceNote,
-        );
-    }
-    let left_width = width.saturating_sub(1) / 2;
-    let right_width = width.saturating_sub(1 + left_width);
-    let mut index = 0;
-    while index < rows.len() {
-        let row = &rows[index];
-        let pairs: Vec<(Option<usize>, Option<usize>)> = match row.kind {
-            DetailRowKind::Deletion => {
-                let deleted = run_length(&rows[index..], DetailRowKind::Deletion);
-                let added = run_length(&rows[index + deleted..], DetailRowKind::Addition);
-                let pairs = (0..deleted.max(added))
-                    .map(|n| {
-                        (
-                            (n < deleted).then_some(index + n),
-                            (n < added).then_some(index + deleted + n),
-                        )
-                    })
-                    .collect();
-                index += deleted + added;
-                pairs
-            }
-            DetailRowKind::Addition => {
-                index += 1;
-                vec![(None, Some(index - 1))]
-            }
-            DetailRowKind::Context => {
-                index += 1;
-                vec![(Some(index - 1), Some(index - 1))]
-            }
-            _ => {
-                // Separators, the trailing-newline row and the omission span the card.
-                let (line, _) = format_row(row, false);
-                preview.push_line(&line, row_tone(row.kind));
-                index += 1;
-                continue;
-            }
-        };
-        for (left, right) in pairs {
-            let left = left.map(|i| side_cell(&rows[i], &emphasis[i], true, left_width));
-            let right = right.map(|i| side_cell(&rows[i], &emphasis[i], false, right_width));
-            let lines = left
-                .as_ref()
-                .map_or(0, |cell| cell.len())
-                .max(right.as_ref().map_or(0, |cell| cell.len()));
-            for line in 0..lines {
-                if !preview.text.is_empty() {
-                    preview.text.push('\n');
-                }
-                preview.push_cell(
-                    left.as_ref().and_then(|cell| cell.get(line)),
-                    left_width,
-                    language,
-                );
-                preview.text.push(' ');
-                preview.push_cell(
-                    right.as_ref().and_then(|cell| cell.get(line)),
-                    right_width,
-                    language,
-                );
-            }
-        }
-    }
-    if detail.truncated {
-        preview.push_line(
-            "⋯ retained detail is incomplete",
-            TranscriptRowTone::Warning,
-        );
-    }
-    preview
-}
-
-/// One wrapped line of one side: its gutter, its text, the changed words within
-/// it, and its tone.
-struct SideLine {
-    gutter: String,
-    text: String,
-    emphasis: Vec<Range<usize>>,
-    tone: TranscriptRowTone,
-    /// Whether `text` starts at its row's beginning, so syntax can be highlighted
-    /// from the line's own start.
-    first: bool,
-}
-
-/// A row's old or new side, wrapped to `width` columns: `  15 − text`, then
-/// `     ↳ rest` for each continuation.
-fn side_cell(row: &DetailRow, emphasis: &[Range<usize>], old: bool, width: usize) -> Vec<SideLine> {
-    let sign = match row.kind {
-        DetailRowKind::Addition => "+",
-        DetailRowKind::Deletion => "−",
-        _ => " ",
-    };
-    let number = if old { row.old_line } else { row.new_line };
-    let gutter = format!(
-        "{:>4} {sign} ",
-        number.map_or(String::new(), |n| n.to_string())
-    );
-    let room = width.saturating_sub(gutter.width()).max(1);
-    let mut lines = Vec::new();
-    let mut start = 0;
-    let mut columns = 0;
-    let mut chunk = String::new();
-    for (offset, grapheme) in row.text.grapheme_indices(true) {
-        let size = grapheme.width();
-        if columns > 0 && columns + size > room {
-            lines.push((start, std::mem::take(&mut chunk)));
-            start = offset;
-            columns = 0;
-        }
-        chunk.push_str(grapheme);
-        columns += size;
-    }
-    lines.push((start, chunk));
-    lines
-        .into_iter()
-        .enumerate()
-        .map(|(index, (start, text))| {
-            let end = start + text.len();
-            SideLine {
-                gutter: if index == 0 {
-                    gutter.clone()
-                } else {
-                    format!("{:>6} ", "↳")
-                },
-                emphasis: emphasis
-                    .iter()
-                    .filter_map(|range| {
-                        let (from, to) = (range.start.max(start), range.end.min(end));
-                        (from < to).then(|| from - start..to - start)
-                    })
-                    .collect(),
-                text,
-                tone: row_tone(row.kind),
-                first: index == 0,
-            }
-        })
-        .collect()
-}
-
-/// `text` as the transcript draws it: tabs to the next four-column stop, and
-/// controls as `�`.
-fn displayable(text: &str) -> String {
-    let mut shown = String::with_capacity(text.len());
-    let mut column = 0;
-    for grapheme in text.graphemes(true) {
-        let sanitized = crate::transcript_view::sanitize_grapheme(grapheme, column);
-        column += sanitized.width();
-        shown.push_str(&sanitized);
-    }
-    shown
-}
-
-/// Keep short hunks intact. Larger previews end at a hunk boundary when possible;
-/// never splice the tail of a function onto its beginning across hidden changes.
+/// Show up to three changed lines with nearby context. End at a hunk boundary
+/// when possible; never splice a hidden tail onto the start of a function.
 fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRow> {
-    const MAX_ROWS: usize = 16;
+    const MAX_CHANGED_LINES: usize = 3;
+    // A hunk can contribute three context lines on each side.
+    const MAX_ROWS: usize = MAX_CHANGED_LINES + 6;
     let mut bytes = 0usize;
+    let mut changed_lines = 0;
     let limit = rows
         .iter()
         .take(MAX_ROWS)
         .take_while(|row| {
+            if row.kind == DetailRowKind::Omission {
+                return false;
+            }
+            if matches!(row.kind, DetailRowKind::Addition | DetailRowKind::Deletion) {
+                if changed_lines == MAX_CHANGED_LINES {
+                    return false;
+                }
+                changed_lines += 1;
+            }
             bytes = bytes.saturating_add(row.text.len());
             bytes <= DETAIL_COLLAPSED_MAX_BYTES
         })
@@ -326,7 +147,12 @@ fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRo
     selected.push(DetailRow {
         key: hidden.first().map_or(0, |row| row.key),
         kind: DetailRowKind::Omission,
-        text: format!("▸ {changed} more changed lines · Enter to review"),
+        text: if changed > 0 {
+            let unit = if changed == 1 { "line" } else { "lines" };
+            format!("▸ {changed} more changed {unit} · Enter to review")
+        } else {
+            "▸ More detail · Enter to review".into()
+        },
         old_line: None,
         new_line: None,
         hidden_rows: hidden.len() as u64,
@@ -336,39 +162,6 @@ fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRo
 }
 
 impl DiffCardPreview {
-    /// Append one side of a split line, padded to `width` so its tone fills the side;
-    /// a missing side is blank.
-    fn push_cell(&mut self, line: Option<&SideLine>, width: usize, language: &str) {
-        let start = self.text.len();
-        let Some(line) = line else {
-            self.text.push_str(&" ".repeat(width));
-            self.tones
-                .push((start..self.text.len(), TranscriptRowTone::Surface));
-            return;
-        };
-        self.text.push_str(&line.gutter);
-        let content = self.text.len();
-        self.gutters.push(start..content);
-        self.text.push_str(&line.text);
-        if line.first {
-            if let Ok(highlight) = crate::syntax::highlight_fence(language, &line.text) {
-                self.syntax
-                    .extend(highlight.tokens.into_iter().map(|mut token| {
-                        token.range = content + token.range.start..content + token.range.end;
-                        token
-                    }));
-            }
-        }
-        self.emphasis.extend(
-            line.emphasis
-                .iter()
-                .map(|range| content + range.start..content + range.end),
-        );
-        let used = line.gutter.width() + line.text.width();
-        self.text.push_str(&" ".repeat(width.saturating_sub(used)));
-        self.tones.push((start..self.text.len(), line.tone));
-    }
-
     fn push_line(&mut self, line: &str, tone: TranscriptRowTone) {
         if !self.text.is_empty() {
             self.text.push('\n');
@@ -438,18 +231,18 @@ fn is_note(row: &DetailRow, side: &str) -> bool {
 /// Format one card row, returning the line and the byte offset where its source
 /// text starts (emphasis ranges are relative to that text).
 fn format_row(row: &DetailRow, gutter: bool) -> (String, usize) {
-    let (sign, _number) = match row.kind {
+    let (sign, number) = match row.kind {
         DetailRowKind::Addition => ("+", row.new_line),
         // A card-only sign; the details view keeps the unified-diff `-`.
         DetailRowKind::Deletion => ("−", row.old_line),
         DetailRowKind::Context => (" ", row.new_line.or(row.old_line)),
+        DetailRowKind::Omission => return (row.text.clone(), 0),
         _ => return (crate::transcript_view::format_structured_detail_row(row), 0),
     };
     let prefix = if gutter {
         format!(
-            "{:>4} {:>4} {sign} ",
-            row.old_line.map_or(String::new(), |line| line.to_string()),
-            row.new_line.map_or(String::new(), |line| line.to_string()),
+            "{:>3} {sign} ",
+            number.map_or(String::new(), |line| line.to_string()),
         )
     } else {
         format!("{sign} ")
@@ -573,21 +366,75 @@ mod tests {
     }
 
     #[test]
-    fn small_functions_stay_complete_and_large_hunks_do_not_splice_tails() {
-        let short = (0..12)
+    fn short_changes_stay_complete_and_large_hunks_do_not_splice_tails() {
+        let short = (0..3)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
-        assert_eq!(coherent_preview_rows(&short, 12), short);
+        assert_eq!(coherent_preview_rows(&short, 3), short);
         let long = (0..30)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
         let preview = coherent_preview_rows(&long, 30);
-        assert_eq!(preview[15].text, "line 15");
-        assert_eq!(
-            preview[16].text,
-            "▸ 14 more changed lines · Enter to review"
-        );
+        assert_eq!(preview[2].text, "line 2");
+        assert_eq!(preview[3].text, "▸ 27 more changed lines · Enter to review");
         assert!(!preview.iter().any(|row| row.text == "line 29"));
+    }
+
+    #[test]
+    fn leading_context_does_not_use_the_changed_line_budget() {
+        let mut rows = (0..3)
+            .map(|n| row(DetailRowKind::Context, &format!("context {n}")))
+            .collect::<Vec<_>>();
+        rows.extend((0..8).map(|n| row(DetailRowKind::Addition, &format!("added {n}"))));
+        let preview = coherent_preview_rows(&rows, 8);
+        assert_eq!(preview[5].text, "added 2");
+        assert_eq!(preview[6].text, "▸ 5 more changed lines · Enter to review");
+        assert_eq!(preview.len(), 7);
+    }
+
+    #[test]
+    fn preview_ends_before_a_partial_second_hunk() {
+        let rows = [
+            row(DetailRowKind::Deletion, "before"),
+            row(DetailRowKind::Addition, "after"),
+            row(DetailRowKind::Hunk, "⋯"),
+            row(DetailRowKind::Deletion, "old tail"),
+            row(DetailRowKind::Addition, "new tail"),
+        ];
+        let preview = coherent_preview_rows(&rows, 4);
+        assert_eq!(&preview[..2], &rows[..2]);
+        assert_eq!(preview[2].text, "▸ 2 more changed lines · Enter to review");
+        assert_eq!(preview.len(), 3);
+    }
+
+    #[test]
+    fn hidden_context_does_not_claim_more_changes() {
+        let mut rows = vec![row(DetailRowKind::Addition, "added")];
+        rows.extend((0..20).map(|n| row(DetailRowKind::Context, &format!("context {n}"))));
+        let preview = coherent_preview_rows(&rows, 1);
+        assert_eq!(
+            preview.last().unwrap().text,
+            "▸ More detail · Enter to review"
+        );
+    }
+
+    #[test]
+    fn retained_omissions_and_byte_limits_keep_honest_change_counts() {
+        let retained = [
+            row(DetailRowKind::Addition, "first"),
+            row(DetailRowKind::Omission, "retained rows omitted"),
+        ];
+        assert_eq!(
+            coherent_preview_rows(&retained, 500)[1].text,
+            "▸ 499 more changed lines · Enter to review"
+        );
+        let oversized = [row(
+            DetailRowKind::Addition,
+            &"x".repeat(DETAIL_COLLAPSED_MAX_BYTES + 1),
+        )];
+        let preview = coherent_preview_rows(&oversized, 1);
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].text, "▸ 1 more changed line · Enter to review");
     }
 
     #[test]
@@ -622,7 +469,7 @@ mod tests {
             };
             let preview = preview(&detail);
             assert!(
-                preview.text.contains("484 more changed lines"),
+                preview.text.contains("497 more changed lines"),
                 "{}",
                 preview.text
             );
@@ -763,7 +610,7 @@ mod tests {
         addition.new_line = Some(118);
         assert_eq!(
             format_row(&addition, true),
-            ("      118 + value".into(), "      118 + ".len())
+            ("118 + value".into(), "118 + ".len())
         );
         let deletion = row(DetailRowKind::Deletion, "value");
         assert_eq!(format_row(&deletion, false), ("− value".into(), "− ".len()));

@@ -81,11 +81,14 @@ Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
 Ctrl+G lists every resolved binding. Successful `edit` and `write` cards show a bounded inline diff
 preview under the action line, which carries the change counts (and `new file` for a created file).
-Rows keep stable `+`/`-` signs, quiet themed backgrounds, and syntax coloring where the
-file extension is recognized. Old/new line-number gutters locate changes; edit fragments use
-**fragment-relative** numbers because the edit arguments do not carry file positions. Short hunks
-stay intact. Larger previews end at a hunk boundary when possible; an omission says how many
-changed lines remain and points to Enter for review. Wrapped continuations keep an indented gutter.
+Inline previews use one full-width column at every terminal size, including additions-only and
+deletions-only changes. Rows keep stable `+`/`−` signs, quiet themed backgrounds, and syntax coloring
+where the file extension is recognized. A compact line-number gutter shows the old line for a
+removal and the new line for an addition or context; edit fragments use **fragment-relative**
+numbers because the edit arguments do not carry file positions. Previews show up to three changed
+lines with nearby context. Larger previews end at a hunk boundary when possible; an explicit
+omission says how many changed lines remain and points to Enter for review. Wrapped continuations
+keep an indented gutter. The full retained edit remains available in review, including split view.
 Visible diff lines and shell-output tails keep their normal colors up to the omission marker;
 the marker identifies hidden content without fading the displayed text.
 Separate hunks are divided by `⋯`, and `⏎ trailing newline added/removed` appears only when the

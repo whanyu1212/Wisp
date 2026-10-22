@@ -721,9 +721,6 @@ fn render_transcript(
     let content = content_area(rows_area);
     let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(rows_area.height).max(1);
-    // Wide terminals set diff cards' old and new side by side (the mock's "wide
-    // only"), before sizing so a resize re-anchors on the new layout.
-    row_cache.set_side_by_side_width((frame.area().width >= 160).then_some(content_width));
     // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
@@ -6062,12 +6059,12 @@ mod tests {
                     )
                 };
                 let (screen, backend) = render_file_card(name, arguments, None, additions, width);
-                assert!(screen.contains("14 more changed lines"), "{screen}");
-                let expected = style_at_text(&backend, "line 12").unwrap();
+                assert!(screen.contains("27 more changed lines"), "{screen}");
+                let expected = style_at_text(&backend, "line 0").unwrap();
                 assert_eq!(expected.1, background, "{screen}");
                 // The final visible lines keep the same text and background colors
-                // as the rest of the preview, in unified and side-by-side layouts.
-                for line in ["line 13", "line 14", "line 15"] {
+                // as the rest of the preview, on both normal and wide terminals.
+                for line in ["line 1", "line 2"] {
                     assert_eq!(style_at_text(&backend, line), Some(expected), "{screen}");
                 }
             }
@@ -6692,51 +6689,42 @@ mod tests {
     }
 
     #[test]
-    fn wide_edit_card_splits() {
+    fn inline_diffs_stay_unified_at_every_width() {
         let arguments = json!({
-            "path": "docs/configuration.md",
+            "path": "site/package.json",
             "edits": [{
-                "oldText": "## Provider diagnostics\n- Codex transport errors report the exception text.\nNo URLs.\n",
-                "newText": "## Provider diagnostics\n- Codex transport diagnostics include exception type.\n- Add a read timeout setting.\nNo URLs.\n"
+                "oldText": "preview before\n",
+                "newText": "preview after\nbrowser tests\n"
             }]
         });
-        let (wide, backend) = render_file_card("edit", arguments.clone(), None, false, 200);
-        // At 160 columns and wider, old and new share a row: the old line on the
-        // left beside its replacement, then the added line beside a blank side.
-        let row = wide
-            .lines()
-            .find(|line| line.contains("errors report the exception text"))
-            .unwrap_or_else(|| panic!("{wide}"));
-        assert!(row.contains("diagnostics include exception type"), "{wide}");
-        assert!(!wide.contains("@@ edit"), "{wide}");
-        let added = wide
-            .lines()
-            .find(|line| line.contains("Add a read timeout setting"))
-            .unwrap();
-        assert!(!added.contains('−'), "{wide}");
-        let palette = Palette::default();
-        assert_eq!(
-            style_at_text(&backend, "- Codex transport").map(|style| style.1),
-            Some(palette.deletion_background),
-            "{wide}"
-        );
-        assert_eq!(
-            style_at_text(&backend, "Add a read").map(|style| style.1),
-            Some(palette.addition_background),
-            "{wide}"
-        );
-        // Below the threshold the card stays unified: one side per row.
-        let (normal, _) = render_file_card("edit", arguments, None, false, 159);
-        let row = normal
-            .lines()
-            .find(|line| line.contains("errors report the exception text"))
-            .unwrap_or_else(|| panic!("{normal}"));
-        assert!(!row.contains("diagnostics include"), "{normal}");
-        assert!(!normal.contains("@@ -1"), "{normal}");
+        for width in [40, 80, 159, 160, 200] {
+            let (screen, backend) = render_file_card("edit", arguments.clone(), None, false, width);
+            let deleted = screen
+                .lines()
+                .find(|line| line.contains("− preview before"))
+                .unwrap_or_else(|| panic!("{screen}"));
+            let added = screen
+                .lines()
+                .find(|line| line.contains("+ preview after"))
+                .unwrap_or_else(|| panic!("{screen}"));
+            assert!(!deleted.contains("preview after"), "{screen}");
+            assert!(!added.contains("preview before"), "{screen}");
+            assert!(screen.contains("  2 + browser tests"), "{screen}");
+            assert!(!screen.contains("@@"), "{screen}");
+            let palette = Palette::default();
+            assert_eq!(
+                style_at_text(&backend, "− preview").unwrap().1,
+                palette.deletion_background
+            );
+            assert_eq!(
+                style_at_text(&backend, "+ preview").unwrap().1,
+                palette.addition_background
+            );
+        }
     }
 
     #[test]
-    fn edit_card_marks_rewrapped_words_and_separates_edits() {
+    fn edit_card_marks_rewrapped_words_and_omits_later_edits() {
         let (rendered, backend) = render_edit_card(
             json!({
                 "path": "src/wisp/providers/google.py",
@@ -6755,18 +6743,14 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("− retain portable"), "{rendered}");
-        assert!(rendered.contains("+ so they cannot"), "{rendered}");
-        assert!(
-            rendered.contains("⋯"),
-            "the second edit is separated: {rendered}"
-        );
+        assert!(rendered.contains("+ retain portable"), "{rendered}");
+        assert!(rendered.contains("3 more changed lines"), "{rendered}");
+        assert!(!rendered.contains("wait 30"), "{rendered}");
         assert!(!rendered.contains("@@") && !rendered.contains("No newline"));
         let (_, _, moved) = style_at_text(&backend, "so they").unwrap();
         assert!(moved.contains(Modifier::UNDERLINED), "{moved:?}");
         let (_, _, unchanged) = style_at_text(&backend, "retain portable").unwrap();
         assert!(!unchanged.contains(Modifier::UNDERLINED));
-        let (_, _, changed_number) = style_at_text(&backend, "30").unwrap();
-        assert!(changed_number.contains(Modifier::UNDERLINED));
     }
 
     #[test]
@@ -6813,13 +6797,13 @@ mod tests {
     fn write_card_numbers_lines_and_shows_a_changed_trailing_newline() {
         let (rendered, _) = render_file_card(
             "write",
-            json!({"path": "notes.txt", "content": "a\nB\nc"}),
-            Some("a\nb\nc\n"),
+            json!({"path": "notes.txt", "content": "a\nB"}),
+            Some("a\nb\n"),
             false,
             100,
         );
-        assert!(rendered.contains("   2      − b"), "{rendered}");
-        assert!(rendered.contains("      2 + B"), "{rendered}");
+        assert!(rendered.contains("  2 − b"), "{rendered}");
+        assert!(rendered.contains("  2 + B"), "{rendered}");
         assert!(
             rendered.contains("⏎ trailing newline removed"),
             "{rendered}"
@@ -6833,7 +6817,7 @@ mod tests {
             100,
         );
         assert!(created.contains("new.txt  new file"), "{created}");
-        assert!(created.contains("      1 + first"), "{created}");
+        assert!(created.contains("  1 + first"), "{created}");
 
         let (unterminated, _) = render_file_card(
             "write",
@@ -6842,7 +6826,7 @@ mod tests {
             true,
             100,
         );
-        assert!(unterminated.contains("      2 + second"), "{unterminated}");
+        assert!(unterminated.contains("  2 + second"), "{unterminated}");
         assert!(!unterminated.contains('⏎'), "{unterminated}");
 
         // Appending an unterminated line keeps the old final line as context.
