@@ -6262,13 +6262,28 @@ mod tests {
             "stderr_truncated": false,
             "stdout_dropped_bytes": 11,
             "stderr_dropped_bytes": 12,
-            "duration_ms": 1250
+            "duration_ms": 1250,
+            "started_at": "2026-01-02T03:04:03.750Z",
+            "process_started_at": "2026-01-02T03:00:00+00:00",
+            "process_ended_at": "2026-01-02T03:04:05.250000Z"
         });
         let live = wisp_protocol::events::deserialize(value).unwrap();
         let BackendEvent::ToolResult(result) = BackendEvent::from_live(&live).unwrap() else {
             panic!("tool result expected");
         };
         assert_eq!(result.duration_ms, Some(1250));
+        let at = |text| crate::tool_cards::timestamp_ms(text).unwrap();
+        assert_eq!(
+            result.started_at_ms,
+            Some(at("2026-01-02T03:04:05Z") - 1250)
+        );
+        assert_eq!(
+            result
+                .process_ended_at_ms
+                .zip(result.process_started_at_ms)
+                .map(|(ended, started)| ended - started),
+            Some(245_250)
+        );
         assert_eq!(result.call_id, bounded_identity("call-7"));
         assert_eq!(result.exit_code, Some(1));
         assert_eq!(result.failure_code.as_deref(), Some("internal_error"));

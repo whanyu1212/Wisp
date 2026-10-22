@@ -553,6 +553,17 @@ impl BackendEvent {
                         0,
                     )?,
                     duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
+                    started_at_ms: optional_timestamp_ms_field(value, &event_type, "started_at")?,
+                    process_started_at_ms: optional_timestamp_ms_field(
+                        value,
+                        &event_type,
+                        "process_started_at",
+                    )?,
+                    process_ended_at_ms: optional_timestamp_ms_field(
+                        value,
+                        &event_type,
+                        "process_ended_at",
+                    )?,
                 }))
             }
             "trust.requested" => Self::TrustRequested {
@@ -1666,6 +1677,25 @@ fn optional_u64_field(
         None | Some(Value::Null) => Ok(None),
         Some(value) => value
             .as_u64()
+            .map(Some)
+            .ok_or_else(|| EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field,
+            }),
+    }
+}
+
+/// Read an RFC 3339 time as Unix milliseconds.
+fn optional_timestamp_ms_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+) -> Result<Option<i64>, EventProjectionError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .and_then(crate::tool_cards::timestamp_ms)
             .map(Some)
             .ok_or_else(|| EventProjectionError::InvalidField {
                 event_type: event_type.to_owned(),

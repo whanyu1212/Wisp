@@ -1902,6 +1902,8 @@ class CodingSession:
                 summary=event.summary,
                 truncated=event.truncated,
                 duration_ms=event.duration_ms,
+                process_started_at=event.process_started_at,
+                process_ended_at=event.process_ended_at,
             )
             if isinstance(event, ToolExecutionEnded)
             else None

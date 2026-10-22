@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import anyio
@@ -554,6 +555,39 @@ def test_projects_tool_result_presentation_metadata(
         summary="wrote file",
         truncated=True,
     )
+
+
+def test_pages_keep_process_times(tmp_path: Path) -> None:
+    started = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
+    ended = started + timedelta(minutes=4, seconds=12)
+    session = JsonlSessionStore(tmp_path).create()
+    entry = MessageSessionEntry(
+        session_id=session.session_id,
+        message=Message(
+            role="tool",
+            content="Process p1 completed with exit code 2",
+            tool_call_id="call-1",
+            tool_name="bash",
+            is_error=True,
+        ),
+        tool_result=ToolResultPresentationSnapshot(
+            status="error",
+            process_started_at=started,
+            process_ended_at=ended,
+        ),
+    )
+
+    async def write() -> None:
+        await session.append_entry(entry)
+
+    anyio.run(write)
+
+    reloaded = session.read_entries()[0]
+    assert isinstance(reloaded, MessageSessionEntry)
+    assert reloaded.tool_result == entry.tool_result
+    paged = session.read_message_page().messages[0].tool_result
+    assert paged is not None
+    assert (paged.process_started_at, paged.process_ended_at) == (started, ended)
 
 
 def test_rejects_tool_result_metadata_on_non_tool_message() -> None:

@@ -4356,6 +4356,14 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "process_ended_at"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "process_error"
    ],
    "accepted": true
@@ -4365,6 +4373,14 @@
    "operation": "remove",
    "path": [
     "process_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "process_started_at"
    ],
    "accepted": true
   },
@@ -4389,6 +4405,14 @@
    "operation": "remove",
    "path": [
     "retryable"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "started_at"
    ],
    "accepted": true
   },
@@ -4608,6 +4632,14 @@
    "event": "tool.result",
    "operation": "remove",
    "path": [
+    "process_ended_at"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
     "process_error"
    ],
    "accepted": true
@@ -4617,6 +4649,14 @@
    "operation": "remove",
    "path": [
     "process_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "process_started_at"
    ],
    "accepted": true
   },
@@ -4641,6 +4681,14 @@
    "operation": "remove",
    "path": [
     "retryable"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "started_at"
    ],
    "accepted": true
   },
