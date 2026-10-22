@@ -1148,7 +1148,7 @@ pub enum BackendEvent {
     },
     WebSearch {
         turn: u64,
-        text: String,
+        search: crate::web_search::WebSearch,
     },
     MessageCompleted {
         turn: u64,
@@ -4607,8 +4607,8 @@ fn handle_backend_event(
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::WebSearch { turn, text } => {
-            state.transcript.observe_search(turn, text);
+        BackendEvent::WebSearch { turn, search } => {
+            state.transcript.observe_search(turn, search);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta { .. }

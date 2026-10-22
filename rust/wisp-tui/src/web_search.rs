@@ -1,59 +1,61 @@
 //! Bounded display-only provider search and cost metadata.
 use serde_json::Value;
 
+/// Remote text as one inert line: the transcript draws searches as tool rows, so only
+/// controls and bidi overrides need removing.
 fn text(value: &str, limit: usize) -> String {
     value
         .chars()
         .filter(|c| !c.is_control() && !crate::is_bidi_control(*c))
         .take(limit)
-        .flat_map(|c| {
-            // Keep remote text literal inside the Markdown transcript.
-            if c.is_ascii_punctuation() {
-                vec!['\\', c]
-            } else {
-                vec![c]
-            }
-        })
         .collect()
 }
 
-pub(crate) fn search(value: &Value) -> String {
-    let action = match value["action"].as_str().unwrap_or("search") {
-        "open_page" => "Opened page",
-        "find_in_page" => "Searched within page",
-        _ => "Searched",
-    };
-    let mut result = format!(
-        "{action} {}",
-        text(value["query"].as_str().unwrap_or(""), 512)
-    );
-    if let Some(error) = value["error"].as_str() {
-        result.push_str(&format!(" — failed: {}", text(error, 128)));
-    }
-    if let Some(sources) = value["sources"].as_array() {
-        for source in sources.iter().take(8) {
-            let url = source["url"].as_str().unwrap_or("");
-            // No clickable remote URLs: show only an HTTP(S) authority without userinfo.
-            let host = url
-                .strip_prefix("https://")
-                .or_else(|| url.strip_prefix("http://"))
-                .map(|rest| {
-                    rest.split(['/', '?', '#'])
-                        .next()
-                        .unwrap_or("")
-                        .rsplit('@')
-                        .next()
-                        .unwrap_or("")
-                })
-                .unwrap_or("invalid URL");
-            result.push_str(&format!(
-                "\n\n  {} · {}",
-                text(source["title"].as_str().unwrap_or("Untitled"), 160),
-                text(host, 160)
-            ));
+/// A provider-native web search, as the reply's tool row shows it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WebSearch {
+    /// What was searched: the query, the page opened, or the pattern and its page.
+    pub argument: String,
+    /// The sites it returned, in order, each once.
+    pub hosts: Vec<String>,
+    pub failed: bool,
+}
+
+pub(crate) fn search(value: &Value) -> WebSearch {
+    let query = text(value["query"].as_str().unwrap_or(""), 512);
+    let mut hosts = Vec::new();
+    for source in value["sources"].as_array().into_iter().flatten().take(8) {
+        let host = text(host(source["url"].as_str().unwrap_or("")), 160);
+        if !hosts.contains(&host) {
+            hosts.push(host);
         }
     }
-    result
+    let argument = match value["action"].as_str().unwrap_or("search") {
+        // An opened page is named by its site; its own source lists nothing new.
+        "open_page" => format!("open {}", hosts.drain(..).next().unwrap_or(query)),
+        "find_in_page" if !hosts.is_empty() => format!("{query} in {}", hosts.remove(0)),
+        _ => query,
+    };
+    WebSearch {
+        argument,
+        hosts,
+        failed: value["error"].as_str().is_some(),
+    }
+}
+
+/// No clickable remote URLs: show only an HTTP(S) authority without userinfo.
+fn host(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .map(|rest| {
+            rest.split(['/', '?', '#'])
+                .next()
+                .unwrap_or("")
+                .rsplit('@')
+                .next()
+                .unwrap_or("")
+        })
+        .unwrap_or("invalid URL")
 }
 
 /// Do not create a cost-only placeholder before tools when no estimate is available.
@@ -147,17 +149,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn hostile_search_metadata_is_literal_and_bounded() {
+    fn hostile_search_metadata_is_inert() {
         let value = json!({"query":"\u{1b}[2J\u{202e}[click](javascript:bad)",
             "error":"\u{7}failed", "sources": vec![json!({"title":"x".repeat(10000),
             "url":"https://user:secret@example.com/path"}); 100]});
-        let rendered = search(&value);
-        assert!(!rendered.contains('\u{1b}'));
-        assert!(!rendered.contains('\u{202e}'));
-        assert!(!rendered.contains("secret"));
-        assert!(rendered.contains("example\\.com"));
-        assert!(rendered.contains("\\[click\\]"));
-        assert!(rendered.len() < 4000);
+        let search = search(&value);
+        assert_eq!(search.argument, "[2J[click](javascript:bad)");
+        assert_eq!(search.hosts, ["example.com"]);
+        assert!(search.failed);
+    }
+
+    #[test]
+    fn opened_pages_name_their_site() {
+        let page = |action, query| {
+            search(&json!({"action": action, "query": query,
+                "sources": [{"url": "https://docs.rs/serde"}, {"url": "https://serde.rs"}]}))
+        };
+        let opened = page("open_page", "https://docs.rs/serde");
+        assert_eq!(opened.argument, "open docs.rs");
+        assert!(opened.hosts.is_empty());
+        let found = page("find_in_page", "derive");
+        assert_eq!(found.argument, "derive in docs.rs");
+        assert_eq!(found.hosts, ["serde.rs"]);
     }
 
     #[test]

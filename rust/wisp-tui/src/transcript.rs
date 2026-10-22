@@ -138,13 +138,13 @@ pub struct TranscriptEntry {
     /// was granted, so time spent waiting for the user is left out. Drives the live
     /// timer of a call still in progress.
     running_since: Option<Instant>,
-    searches: Vec<String>,
+    /// Display-only web searches the provider ran for this reply, at most 32.
+    searches: Vec<crate::web_search::WebSearch>,
     cost: Option<crate::web_search::MessageCost>,
     /// Display-only summary closing the last reply of a finished run.
     run_summary: Option<String>,
     /// How the run this prompt started ended, for the side panel's turn list.
     run_result: Option<RunResult>,
-    decorated_content: Option<String>,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
     revision: u64,
@@ -165,23 +165,6 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
-    /// Compose display-only search evidence and cost without changing model text.
-    fn decorate(&mut self) {
-        if self.searches.is_empty() && self.cost.is_none() {
-            return;
-        }
-        let mut text = self.searches.join("\n\n");
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&self.content);
-        // The cost closes the reply, so it waits until the whole reply is shown.
-        if let Some(cost) = self.cost.as_ref().filter(|_| self.unrevealed.is_empty()) {
-            text.push_str(&format!("\n\n{}", cost.label));
-        }
-        self.decorated_content = Some(text);
-    }
-
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -196,10 +179,13 @@ impl TranscriptEntry {
     /// entries and messages without local presentation metadata display that
     /// source verbatim.
     pub(crate) fn display_content(&self) -> &str {
-        self.local_display
-            .as_deref()
-            .or(self.decorated_content.as_deref())
-            .unwrap_or(&self.content)
+        self.local_display.as_deref().unwrap_or(&self.content)
+    }
+
+    /// The web searches this reply ran, which the transcript view draws as tool rows
+    /// above the reply text.
+    pub(crate) fn searches(&self) -> &[crate::web_search::WebSearch] {
+        &self.searches
     }
 
     /// The totals that close this entry's turn, once the entry is fully shown. The
@@ -282,9 +268,15 @@ impl TranscriptEntry {
             .len()
             .saturating_add(self.local_display.as_ref().map_or(0, String::len))
             .saturating_add(self.thinking.len())
-            .saturating_add(self.searches.iter().map(String::len).sum::<usize>())
+            .saturating_add(
+                self.searches
+                    .iter()
+                    .map(|search| {
+                        search.argument.len() + search.hosts.iter().map(String::len).sum::<usize>()
+                    })
+                    .sum::<usize>(),
+            )
             .saturating_add(self.cost.as_ref().map_or(0, |cost| cost.label.len()))
-            .saturating_add(self.decorated_content.as_ref().map_or(0, String::len))
             .saturating_add(kind_bytes)
             .saturating_add(
                 self.live_message_origins
@@ -436,7 +428,6 @@ impl Transcript {
             let entry = self.entry_mut(entry_id);
             entry.finish_thinking();
             entry.content.push_str(delta);
-            entry.decorate();
             Self::bump_revision(entry);
             self.bump_generation();
         }
@@ -499,7 +490,6 @@ impl Transcript {
             entry.completes_after_reveal = false;
             entry.state = TranscriptEntryState::Complete;
         }
-        entry.decorate();
         Self::bump_revision(entry);
         if drained {
             self.revealing = None;
@@ -539,13 +529,11 @@ impl Transcript {
         entry_id
     }
 
-    pub(crate) fn observe_search(&mut self, turn: u64, text: String) {
+    pub(crate) fn observe_search(&mut self, turn: u64, search: crate::web_search::WebSearch) {
         let id = self.response_for_turn(turn);
         let entry = self.entry_mut(id);
         if entry.searches.len() < 32 {
-            entry.searches.push(text);
-            entry.decorate();
-            entry.layout_epoch += 1;
+            entry.searches.push(search);
             Self::bump_revision(entry);
             self.bump_generation();
         }
@@ -570,6 +558,7 @@ impl Transcript {
                 !(entry.role == TranscriptRole::Assistant
                     && matches!(entry.kind, TranscriptEntryKind::Message)
                     && entry.content.is_empty()
+                    && entry.searches.is_empty()
                     && entry.unrevealed.is_empty())
             })
             .filter(|entry| entry.role != TranscriptRole::User)
@@ -619,7 +608,6 @@ impl Transcript {
             let id = self.response_for_turn(turn);
             let entry = self.entry_mut(id);
             entry.cost = cost;
-            entry.decorate();
             Self::bump_revision(entry);
         }
         self.complete_message(turn, content)
@@ -651,7 +639,6 @@ impl Transcript {
         {
             entry.unrevealed = content[entry.content.len()..].to_owned();
             entry.completes_after_reveal = true;
-            entry.decorate();
             Self::bump_revision(entry);
             self.revealing = Some(entry_id);
             self.bump_generation();
@@ -666,7 +653,6 @@ impl Transcript {
             }
             entry.content = content;
             entry.state = TranscriptEntryState::Complete;
-            entry.decorate();
             Self::bump_revision(entry);
             if self.revealing == Some(entry_id) {
                 self.revealing = None;
@@ -1694,7 +1680,6 @@ impl Transcript {
                 thinking_started: None,
                 running_since: None,
                 thinking_ms: None,
-                decorated_content: None,
                 state: TranscriptEntryState::Complete,
                 kind: TranscriptEntryKind::Message,
                 revision: 0,
@@ -2388,7 +2373,6 @@ impl Transcript {
             thinking_started: None,
             running_since: None,
             thinking_ms: None,
-            decorated_content: None,
             state,
             kind: TranscriptEntryKind::Message,
             revision: 0,
@@ -2485,7 +2469,6 @@ impl Transcript {
             thinking_started: None,
             running_since: None,
             thinking_ms: None,
-            decorated_content: None,
             state,
             kind,
             revision: 0,

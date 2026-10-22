@@ -387,7 +387,7 @@ impl BackendEvent {
             }
             "web.search" => Self::WebSearch {
                 turn: u64_field(value, &event_type, "turn")?,
-                text: crate::web_search::search(value),
+                search: crate::web_search::search(value),
             },
             "rpc.workspace" => Self::WorkspaceReported {
                 cwd: string_field(value, &event_type, "cwd")?,

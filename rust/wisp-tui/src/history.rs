@@ -683,11 +683,11 @@ mod tests {
         live.append_message_delta(1, "ans");
         live.complete_message_with_cost(1, "answer".into(), cost_label);
         assert_eq!(
-            live.entries()[0].display_content(),
-            restored.entries()[0].display_content()
+            live.entries()[0].searches(),
+            restored.entries()[0].searches()
         );
-        assert_eq!(live.entries()[0].content, "answer");
-        assert!(live.entries()[0].display_content().contains("cost ≥$0.020"));
+        assert_eq!(live.entries()[0].cost(), restored.entries()[0].cost());
+        assert_eq!(live.entries()[0].display_content(), "answer");
     }
 
     #[test]
@@ -781,12 +781,12 @@ mod tests {
                 live.entries()[0].display_content(),
                 restored.entries()[0].display_content()
             );
-            assert!(restored.entries()[0].content.is_empty());
-            assert!(
-                restored.entries()[0]
-                    .display_content()
-                    .contains("Searched docs")
+            assert_eq!(
+                live.entries()[0].searches(),
+                restored.entries()[0].searches()
             );
+            assert!(restored.entries()[0].content.is_empty());
+            assert_eq!(restored.entries()[0].searches()[0].argument, "docs");
         }
     }
 

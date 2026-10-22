@@ -49,6 +49,9 @@ pub enum RowPosition {
     Header,
     Thought,
     ThoughtContent(usize),
+    /// The tool row of the reply's web search at this index into
+    /// `TranscriptEntry::searches`. It sits after any thought and before the reply text.
+    Evidence(usize),
     Content(usize),
     Markdown(MarkdownPosition),
     Card(CardPosition),
@@ -121,6 +124,9 @@ pub enum TranscriptRowKind {
     Content,
     Placeholder,
     Thought,
+    /// A web search the reply's provider ran, drawn like a tool's action row above the
+    /// reply text. It does not fold.
+    Evidence,
     CardAction,
     CardGroup,
     CardDetail,
@@ -507,7 +513,9 @@ impl CardRowStyle<'_> {
         use crate::markdown::InlineStyle;
         if !matches!(
             kind,
-            TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
+            TranscriptRowKind::CardAction
+                | TranscriptRowKind::CardGroup
+                | TranscriptRowKind::Evidence
         ) {
             if let Some(range) = self.gutters.iter().find(|range| range.contains(&offset)) {
                 // A gutter ends with its sign and one space; `−` is three bytes.
@@ -995,6 +1003,9 @@ impl TranscriptRowCache {
             {
                 self.build_thought_content_row(transcript, entry, anchor, start, width)
             }
+            RowPosition::Evidence(index) if index < entry.searches().len() => {
+                self.build_evidence_row(transcript, entry, anchor, index, width)
+            }
             RowPosition::Content(start)
                 if !uses_markdown(entry)
                     && start <= entry.display_content().len()
@@ -1114,12 +1125,33 @@ impl TranscriptRowCache {
         if !entry.thinking().is_empty() {
             RowPosition::Thought
         } else {
-            self.position_for_offset(entry, 0, width)
+            self.after_thought_position(entry, width)
         }
     }
 
     fn after_thought_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
-        self.position_for_offset(entry, 0, width)
+        if !entry.searches().is_empty() {
+            RowPosition::Evidence(0)
+        } else {
+            self.position_for_offset(entry, 0, width)
+        }
+    }
+
+    /// What follows a reply's searches: its text, or the separator when a finished reply
+    /// has no text to show, so searches alone do not end on a blank row.
+    fn after_evidence(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> Option<RowAnchor> {
+        if hides_body(entry) {
+            return separator_after(transcript, entry);
+        }
+        Some(RowAnchor {
+            entry_id: entry.id,
+            position: self.position_for_offset(entry, 0, width),
+        })
     }
 
     fn build_thought_row(
@@ -1187,14 +1219,15 @@ impl TranscriptRowCache {
                 position: self.after_thought_position(entry, width),
             })
             .filter(|_| {
-                !entry.content.is_empty()
+                !entry.display_content().is_empty()
+                    || !entry.searches().is_empty()
                     || entry.state != TranscriptEntryState::Complete
                     || separator_after(transcript, entry).is_some()
             })
             .or_else(|| separator_after(transcript, entry))
         };
         let next = next.or_else(|| {
-            if entry.content.is_empty() {
+            if entry.display_content().is_empty() && entry.searches().is_empty() {
                 separator_after(transcript, entry)
             } else {
                 Some(RowAnchor {
@@ -1279,6 +1312,65 @@ impl TranscriptRowCache {
             row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, start),
             next,
         }
+    }
+
+    /// The tool row of one web search the reply ran: its marker, a `Search` chip, what it
+    /// searched, then the sites it returned, previewed like a closed group's members.
+    /// Searches stay apart from the reply's text, so the reply's Markdown source and
+    /// offsets never shift when a search arrives mid-reply.
+    fn build_evidence_row(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        index: usize,
+        width: usize,
+    ) -> ProjectedRow {
+        let search = &entry.searches()[index];
+        let status = if search.failed {
+            ToolStatus::Error
+        } else {
+            ToolStatus::Done
+        };
+        let marker = status_marker(status);
+        let label = crate::tool_cards::pad_chip_label("Search".to_owned());
+        let mut source = format!("{marker}{label}{LABEL_GAP}{}", search.argument);
+        let note_start = push_status_note(&mut source, search.failed.then_some("failed"));
+        if !search.failed {
+            let budget = width.saturating_sub(self.action_columns(&source));
+            source.push_str(&self.preview_list(&search.hosts, search.hosts.len(), budget));
+        }
+        let spans = self.single_action_row_spans(
+            &source,
+            width,
+            CardRowStyle {
+                marker_end: marker.len(),
+                label_end: marker.len() + label.len(),
+                argument_start: marker.len() + label.len() + LABEL_GAP.len(),
+                argument_style: crate::markdown::InlineStyle::ToolArgument,
+                suffix_start: note_start,
+                ..CardRowStyle::PLAIN
+            },
+            TranscriptRowKind::Evidence,
+        );
+        let mut row = TranscriptRow::plain(
+            anchor,
+            entry.role,
+            TranscriptRowKind::Evidence,
+            String::new(),
+            0,
+        );
+        row.spans = spans;
+        row.tone = tool_status_tone(status);
+        let next = if index + 1 < entry.searches().len() {
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Evidence(index + 1),
+            })
+        } else {
+            self.after_evidence(transcript, entry, width)
+        };
+        ProjectedRow { row, next }
     }
 
     fn build_group_row(
@@ -1836,7 +1928,12 @@ impl TranscriptRowCache {
         let items = group_preview_items(transcript, kind, members);
         // Members whose arguments are unknown are still counted in `+N`, so the
         // preview always agrees with the header's count.
-        let total = members.len();
+        self.preview_list(&items, members.len(), budget)
+    }
+
+    /// ` · first, second +N`: as many of `items` as fit `budget` columns, each clipped,
+    /// with `+N` counting the rest of `total`. Empty when not even one fits.
+    fn preview_list(&mut self, items: &[String], total: usize, budget: usize) -> String {
         let mut preview = String::new();
         let mut shown = 0;
         for (index, item) in items.iter().enumerate() {
@@ -2562,6 +2659,11 @@ impl TranscriptRowCache {
             RowPosition::ThoughtContent(_) => {
                 self.thought_anchor_before(transcript, entry, anchor, width)
             }
+            RowPosition::Evidence(0) => Some(self.before_evidence_anchor(transcript, entry, width)),
+            RowPosition::Evidence(index) => Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Evidence(index - 1),
+            }),
             RowPosition::Content(offset) => {
                 let start = 0;
                 if offset <= start {
@@ -2704,7 +2806,25 @@ impl TranscriptRowCache {
         }
     }
 
+    /// The row before a reply's text: its last search row, else its thought's last row
+    /// or its header.
     fn before_body_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
+        match entry.searches().len() {
+            0 => self.before_evidence_anchor(transcript, entry, width),
+            searches => RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Evidence(searches - 1),
+            },
+        }
+    }
+
+    /// The row before a reply's searches: its thought's last row, or its header.
+    fn before_evidence_anchor(
         &mut self,
         transcript: &Transcript,
         entry: &TranscriptEntry,
@@ -2795,6 +2915,9 @@ impl TranscriptRowCache {
                 }
                 current = next;
             }
+        }
+        if hides_body(entry) {
+            return self.before_body_anchor(transcript, entry, width);
         }
         let (target, ends_with_break) = if uses_markdown(entry) {
             let snapshot = self.markdown_snapshot(entry, width);
@@ -4233,6 +4356,7 @@ fn cached_row_valid(
         | TranscriptRowKind::CardOmission
         | TranscriptRowKind::Placeholder
         | TranscriptRowKind::Thought
+        | TranscriptRowKind::Evidence
         | TranscriptRowKind::Rule => false,
     }
 }
@@ -4448,6 +4572,7 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         RowPosition::Markdown(position) => Some(position.output_offset),
         RowPosition::ThoughtContent(offset) => Some(offset),
         RowPosition::Header
+        | RowPosition::Evidence(_)
         | RowPosition::Thought
         | RowPosition::Card(_)
         | RowPosition::Spacer
@@ -4471,6 +4596,13 @@ fn keeps_full_width(
         span.style.block,
         crate::markdown::BlockStyle::Code | crate::markdown::BlockStyle::RawHtml
     ) || block.span_in_table(index)
+}
+
+/// Whether a finished reply shows only its searches: it searched but has no text.
+fn hides_body(entry: &TranscriptEntry) -> bool {
+    !entry.searches().is_empty()
+        && entry.display_content().is_empty()
+        && entry.state == TranscriptEntryState::Complete
 }
 
 /// Large messages stay fully readable as plain text without building an oversized Markdown tree.
@@ -4811,6 +4943,198 @@ mod tests {
         assert!(
             summary.width() <= 40 && summary.ends_with('…'),
             "{summary:?}"
+        );
+    }
+
+    /// A finished one-prompt turn whose reply ran `searches` and cost `usd`.
+    fn searched_reply(text: &str, usd: Option<&str>, searches: &[serde_json::Value]) -> Transcript {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("ask".into());
+        transcript.begin_message(1);
+        for search in searches {
+            transcript.observe_search(1, crate::web_search::search(search));
+        }
+        let cost = crate::web_search::message_cost(&serde_json::json!({
+            "content": text,
+            "cost": {"estimated_usd": usd},
+        }));
+        transcript.complete_message_with_cost(1, text.into(), cost);
+        transcript
+    }
+
+    fn docs_search() -> serde_json::Value {
+        serde_json::json!({"query": "docs", "sources": [
+            {"url": "https://example.com/a"}, {"url": "https://example.com/b"},
+            {"url": "https://docs.rs/x"},
+        ]})
+    }
+
+    /// A web search's tool row: marker, `Search` chip, then `rest`.
+    fn search_row(marker: &str, rest: &str) -> String {
+        let chip = crate::tool_cards::pad_chip_label("Search".into());
+        format!("{marker}  {chip}{LABEL_GAP}{rest}")
+    }
+
+    fn tail_rows(transcript: &Transcript) -> Vec<TranscriptRow> {
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(transcript, &mut cache, 60, 12);
+        viewport.visible_rows(transcript, &mut cache)
+    }
+
+    fn row_text(rows: &[TranscriptRow]) -> Vec<String> {
+        rows.iter().map(TranscriptRow::plain_text).collect()
+    }
+
+    #[test]
+    fn replies_show_no_cost() {
+        let oversized = "word ".repeat(MARKDOWN_SOURCE_MAX_BYTES / 4);
+        for text in ["**done**", oversized.as_str()] {
+            let mut transcript = searched_reply(text, Some("0.02"), &[]);
+            assert!(transcript.attach_run_summary("4.0s".into()));
+            // The cost still feeds the side panel's totals.
+            assert!(transcript.entries()[1].cost().is_some());
+            let rows = tail_rows(&transcript);
+            assert!(
+                row_text(&rows).iter().all(|row| !row.contains("cost")),
+                "{rows:#?}"
+            );
+            assert_eq!(rows.last().unwrap().kind, TranscriptRowKind::RunSummary);
+        }
+    }
+
+    #[test]
+    fn searches_precede_reply_text() {
+        let oversized = "word ".repeat(MARKDOWN_SOURCE_MAX_BYTES / 4);
+        let opened = serde_json::json!({"action": "open_page",
+            "sources": [{"url": "https://docs.rs/x"}]});
+        for text in ["**done**", oversized.as_str()] {
+            let transcript = searched_reply(text, None, &[docs_search(), opened.clone()]);
+            let reply = transcript.entries()[1].id;
+            let mut cache = TranscriptRowCache::default();
+            let mut viewport = TranscriptViewport::default();
+            viewport.set_geometry(&transcript, &mut cache, 60, 12);
+            viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let text = row_text(&rows);
+            let header = text.iter().position(|row| row == "wisp").expect("header");
+            assert_eq!(
+                text[header + 1..header + 3],
+                [
+                    search_row("✓", "docs · example.com, docs.rs"),
+                    search_row("✓", "open docs.rs"),
+                ],
+                "{text:#?}"
+            );
+            assert_eq!(rows[header + 1].kind, TranscriptRowKind::Evidence);
+            assert_eq!(rows[header + 1].tone, TranscriptRowTone::Success);
+            assert!(text[header + 3].starts_with("word") || text[header + 3] == "done");
+            // Walking back from the reply's first row passes every search row.
+            let mut anchor = rows[header + 3].anchor;
+            for expected in (header..header + 3).rev() {
+                anchor = cache.previous_anchor(&transcript, anchor, 60).unwrap();
+                assert_eq!(anchor, rows[expected].anchor);
+            }
+            assert_eq!(anchor.entry_id, reply);
+        }
+    }
+
+    #[test]
+    fn narrow_search_counts_hidden_sites() {
+        let transcript = searched_reply("done", None, &[docs_search()]);
+        let mut cache = TranscriptRowCache::default();
+        let row = cache
+            .row_at(
+                &transcript,
+                RowAnchor {
+                    entry_id: transcript.entries()[1].id,
+                    position: RowPosition::Evidence(0),
+                },
+                36,
+            )
+            .unwrap()
+            .row;
+        assert_eq!(row.plain_text(), search_row("✓", "docs · example.com +1"));
+    }
+
+    #[test]
+    fn failed_search_says_so() {
+        let failed = serde_json::json!({"query": "docs", "error": "timeout"});
+        let rows = tail_rows(&searched_reply("done", None, &[failed]));
+        let row = rows
+            .iter()
+            .find(|row| row.kind == TranscriptRowKind::Evidence)
+            .unwrap();
+        assert_eq!(row.plain_text(), search_row("✗", "docs · failed"));
+        assert_eq!(row.tone, TranscriptRowTone::Error);
+    }
+
+    #[test]
+    fn search_mid_reply_keeps_body() {
+        let search = serde_json::json!({"query": "docs", "sources": []});
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("ask".into());
+        transcript.append_thinking_delta(1, "plan");
+        let reply = transcript.append_message_delta(1, "first part\n\nsecond part");
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 60, 12);
+        let body = |rows: &[TranscriptRow]| {
+            rows.iter()
+                .filter(|row| {
+                    row.kind == TranscriptRowKind::Content && row.role == TranscriptRole::Assistant
+                })
+                .map(TranscriptRow::plain_text)
+                .collect::<Vec<_>>()
+        };
+        let before = body(&viewport.visible_rows(&transcript, &mut cache));
+        cache.reset_work();
+        transcript.observe_search(1, crate::web_search::search(&search));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        // The reply's source did not change, so only its open last block is parsed again.
+        assert_eq!(cache.work().markdown_full_reparses, 0);
+        assert!(cache.work().markdown_source_bytes_parsed <= "second part".len() + 1);
+        assert_eq!(body(&rows), before);
+        let thought = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Thought,
+        };
+        let evidence = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Evidence(0),
+        };
+        assert_eq!(
+            cache.row_at(&transcript, thought, 60).unwrap().next,
+            Some(evidence)
+        );
+        assert_eq!(
+            cache.previous_anchor(&transcript, evidence, 60),
+            Some(thought)
+        );
+        let text = rows
+            .iter()
+            .map(TranscriptRow::plain_text)
+            .collect::<Vec<_>>();
+        let searched = rows
+            .iter()
+            .position(|row| row.kind == TranscriptRowKind::Evidence)
+            .unwrap();
+        assert_eq!(text[searched + 1], "first part", "{text:#?}");
+    }
+
+    #[test]
+    fn search_only_reply_ends_cleanly() {
+        let mut transcript = searched_reply("", None, &[docs_search()]);
+        assert!(transcript.attach_run_summary("4.0s".into()));
+        let text = row_text(&tail_rows(&transcript));
+        assert_eq!(
+            text[text.len() - 2..],
+            [
+                search_row("✓", "docs · example.com, docs.rs"),
+                "4.0s".into()
+            ],
+            "{text:#?}"
         );
     }
 
