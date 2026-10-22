@@ -230,6 +230,35 @@ fn fixture(scenario: &str) -> LiveUi {
             );
         }
     }
+    if scenario == "reading" {
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("Based on Linear issues, what’s next for our Astro migration?".into());
+        ui.state.transcript.complete_message(
+            1,
+            r#"**Next: HY-314 — finish responsive layouts, navigation, and themes.**
+
+Linear marks **HY-312 (planning)** and **HY-313 (Astro foundation)** Done. The remaining migration work is still Backlog.
+
+Recommended order:
+
+1. [HY-314](https://example.test/HY-314) — complete mobile navigation, TOC, previous/next links, accessibility, and light/dark behavior. Some layout/theme groundwork already landed under HY-313; build on that rather than restart.
+2. [HY-315](https://example.test/HY-315) — Pagefind search. This is unblocked and can run in parallel, coordinating with the shared layout.
+3. **Finish the five structural/content tickets:**
+   - **HY-269:** User-first navigation.
+   - **HY-277:** homepage, screenshots, section indexes.
+   - **HY-274:** split the TUI guide.
+   - **HY-276:** separate SDK guides/reference; relocate capability audit.
+   - **HY-270:** publish changelog; relocate maintainer release records.
+4. [HY-316](https://example.test/HY-316) — CI/Pages cutover and mdBook retirement, **after all seven blockers above**. Require built-site checks and deployed-site smoke testing.
+
+**Don’t delay migration** for commands/settings corrections, the MCP guide, troubleshooting, or new curriculum chapters—those are explicitly non-blocking follow-ups.
+
+My pick for the next focused task: **HY-314, coordinated with HY-269’s navigation decisions.**"#.into(),
+        );
+        ui.editor = PromptEditor::default();
+    }
     ui
 }
 
@@ -272,7 +301,7 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             ui.no_color = no_color;
             let palette = ui.palette();
             let canvas = palette.base().bg.unwrap_or(Color::Reset);
-            let buffer = draw(&mut ui, 100, 30);
+            let buffer = draw(&mut ui, 100, 48);
             let user = row_containing(&buffer, "Review the startup");
             let label = row_containing(&buffer, "you");
             assert_eq!(buffer[(3, label - 1)].symbol(), " ");
@@ -332,7 +361,7 @@ fn scrolled_back_user_surface_keeps_a_plain_gap_after_the_previous_reply() {
     let mut ui = fixture("scrollback");
     let palette = ui.palette();
     let canvas = palette.base().bg.unwrap_or(Color::Reset);
-    let buffer = draw(&mut ui, 80, 40);
+    let buffer = draw(&mut ui, 80, 52);
     let prompt = row_containing(&buffer, "Now check the remaining edge cases.");
     let label = prompt - 1;
     assert_eq!(buffer[(3, label)].symbol(), "y");
@@ -698,7 +727,7 @@ fn capture_conversation_screens() {
     let output =
         PathBuf::from(std::env::var_os("WISP_VISUAL_OUTPUT").expect("set WISP_VISUAL_OUTPUT"));
     fs::create_dir_all(&output).unwrap();
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8), (100, 64)] {
         for (variant, selected, no_color) in [
             ("dark", theme::default_theme(), false),
             ("grove", theme::resolve("grove").unwrap(), false),
@@ -706,6 +735,7 @@ fn capture_conversation_screens() {
             ("mono", theme::default_theme(), true),
         ] {
             for scenario in [
+                "reading",
                 "conversation",
                 "tools",
                 "working",

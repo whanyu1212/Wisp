@@ -1216,8 +1216,8 @@ async fn dragging_over_the_transcript_highlights_and_copies_the_painted_text() {
     )
     .await
     .unwrap();
-    assert_eq!(copied.lock().unwrap().copied, ["line\nbeta"]);
-    assert_eq!(ui.notice.as_deref(), Some("Copied 9 chars to clipboard."));
+    assert_eq!(copied.lock().unwrap().copied, ["line\n\nbeta"]);
+    assert_eq!(ui.notice.as_deref(), Some("Copied 10 chars to clipboard."));
     let cleared = draw(&mut ui, 60, 20);
     assert!(!cleared[(x + 6, y)].modifier.contains(Modifier::REVERSED));
     assert!(receiver.try_recv().is_err());
@@ -1446,7 +1446,7 @@ async fn dragging_upward_selects_in_reading_order() {
     )
     .await
     .unwrap();
-    assert_eq!(copied.lock().unwrap().copied, ["line\nbeta"]);
+    assert_eq!(copied.lock().unwrap().copied, ["line\n\nbeta"]);
 }
 
 #[tokio::test]

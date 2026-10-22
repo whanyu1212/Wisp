@@ -65,6 +65,9 @@ pub struct TranscriptSpanStyle {
     pub strong: bool,
     pub emphasis: bool,
     pub struck: bool,
+    /// Text column beneath a list marker, including any enclosing quote prefix.
+    /// The row projector inserts this padding only at the start of a continuation.
+    pub hanging_indent: u8,
     /// A tone of its own, over the row's: each side of a side-by-side diff row.
     pub tone: Option<crate::transcript_view::TranscriptRowTone>,
 }
@@ -961,6 +964,7 @@ fn is_block_end(tag: TagEnd) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct ListState {
     next: Option<u64>,
+    has_item: bool,
 }
 
 #[derive(Debug)]
@@ -1237,6 +1241,7 @@ impl BlockRenderer {
                 let mut style = self.style;
                 style.inline = InlineStyle::ListMarker;
                 self.emit(if *checked { "☑ " } else { "☐ " }, source_offset, style);
+                self.style.hanging_indent = self.style.hanging_indent.saturating_add(2).min(32);
             }
             _ => {}
         }
@@ -1283,12 +1288,16 @@ impl BlockRenderer {
             Tag::Paragraph => {
                 if self.paragraph_inline {
                     self.paragraph_inline = false;
-                } else if self.line_has_content && (!self.lists.is_empty() || self.quote_depth > 0)
-                {
-                    self.emit_break(source_offset);
+                } else {
+                    self.separate_blocks(source_offset, 2);
                 }
             }
             Tag::Heading { level, .. } => {
+                if self.paragraph_inline {
+                    self.paragraph_inline = false;
+                } else {
+                    self.separate_blocks(source_offset, 2);
+                }
                 self.style.block = BlockStyle::Heading(heading_level(*level));
             }
             Tag::CodeBlock(_) => {
@@ -1296,9 +1305,8 @@ impl BlockRenderer {
                 // its own line rather than running on from the text before it.
                 if self.paragraph_inline {
                     self.paragraph_inline = false;
-                } else if self.line_has_content && (!self.lists.is_empty() || self.quote_depth > 0)
-                {
-                    self.emit_break(source_offset);
+                } else {
+                    self.separate_blocks(source_offset, 2);
                 }
                 self.style.block = BlockStyle::Code;
             }
@@ -1362,26 +1370,41 @@ impl BlockRenderer {
                 self.emit(&"│ ".repeat(self.quote_depth.min(8)), source_offset, style);
                 self.paragraph_inline = true;
             }
-            Tag::List(start) => self.lists.push(ListState { next: *start }),
+            Tag::List(start) => self.lists.push(ListState {
+                next: *start,
+                has_item: false,
+            }),
             Tag::Item => {
-                if self.line_has_content {
-                    self.emit("\n", source_offset, self.style);
-                }
-                let indent = "  ".repeat(self.lists.len().saturating_sub(1).min(8));
+                let sibling = self.lists.last().is_some_and(|list| list.has_item);
+                self.separate_blocks(
+                    source_offset,
+                    if self.lists.len() == 1 && sibling {
+                        2
+                    } else {
+                        1
+                    },
+                );
+                let quote_columns = self.quote_depth.min(8) * 2;
+                let parent_indent = usize::from(self.style.hanging_indent).max(quote_columns);
+                let indent = " ".repeat(parent_indent.saturating_sub(quote_columns));
                 let marker = self.lists.last_mut().map_or_else(
                     || "• ".to_owned(),
-                    |list| match &mut list.next {
-                        Some(next) => {
-                            let marker = format!("{next}. ");
-                            *next = next.saturating_add(1);
-                            marker
+                    |list| {
+                        list.has_item = true;
+                        match &mut list.next {
+                            Some(next) => {
+                                let marker = format!("{next}. ");
+                                *next = next.saturating_add(1);
+                                marker
+                            }
+                            None => "• ".to_owned(),
                         }
-                        None => "• ".to_owned(),
                     },
                 );
                 let mut style = self.style;
                 style.inline = InlineStyle::ListMarker;
                 self.emit(&format!("{indent}{marker}"), source_offset, style);
+                self.style.hanging_indent = (parent_indent + marker.width()).min(32) as u8;
                 self.paragraph_inline = true;
             }
             _ => {}
@@ -1445,6 +1468,31 @@ impl BlockRenderer {
             let mut style = self.style;
             style.inline = InlineStyle::QuoteMarker;
             self.emit(&"│ ".repeat(self.quote_depth.min(8)), source_offset, style);
+        }
+    }
+
+    /// Separate nested blocks without multiplying a code block's trailing newline.
+    /// Quote rails decorate blank lines but do not count as paragraph content.
+    fn separate_blocks(&mut self, source_offset: usize, breaks: usize) {
+        let mut trailing = 0;
+        let mut has_content = false;
+        'spans: for span in self.spans.iter().rev() {
+            if span.style.inline == InlineStyle::QuoteMarker {
+                continue;
+            }
+            for character in span.text.chars().rev() {
+                if character == '\n' {
+                    trailing += 1;
+                } else if !character.is_whitespace() {
+                    has_content = true;
+                    break 'spans;
+                }
+            }
+        }
+        if has_content {
+            for _ in trailing..breaks {
+                self.emit_break(source_offset);
+            }
         }
     }
 
@@ -1624,7 +1672,7 @@ mod tests {
         assert!(rendered.contains("Plan"));
         assert!(rendered.contains("bold"));
         assert!(rendered.contains("│ quote"));
-        assert!(rendered.contains("1. first\n2. second"));
+        assert!(rendered.contains("1. first\n\n2. second"));
         assert!(rendered.contains("let x = 1;"));
         assert!(!rendered.contains("https://example.test"));
         assert!(
@@ -1658,10 +1706,10 @@ mod tests {
         let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
         let rendered = build.document.plain_text();
         assert!(
-            rendered.contains("• item text\nlet value = 1;"),
+            rendered.contains("• item text\n\nlet value = 1;"),
             "{rendered:?}"
         );
-        assert!(rendered.contains("│ quoted\n│ code"), "{rendered:?}");
+        assert!(rendered.contains("│ quoted\n│ \n│ code"), "{rendered:?}");
     }
 
     #[test]
@@ -1713,6 +1761,7 @@ mod tests {
                 "read  │ Reads text files, optionally selecting a range of lines.",
                 "write │ Creates or overwrites text files, creating parent directories when needed.",
                 "edit  │ Makes precise, exact-text replacements without rewriting the whole file.",
+                "",
                 "Additional tools come through MCP integrations.",
             ]
         );
@@ -1834,7 +1883,7 @@ mod tests {
         let text = fresh.document.plain_text();
         assert!(text.contains("│ Item   │ Done"), "{text}");
         assert!(text.contains("│ longer │ yes"), "{text}");
-        assert!(text.contains("• ☑ Shipped\n• ☐ Pending"), "{text}");
+        assert!(text.contains("• ☑ Shipped\n\n• ☐ Pending"), "{text}");
         assert!(!text.contains("[x]"));
     }
 
@@ -1865,11 +1914,11 @@ mod tests {
         for (source, expected) in [
             (
                 "> | A | B |\n> | --- | --- |\n> | x | y |\n>\n> After",
-                "│ A │ B\n│ ──┼──\n│ x │ y\n│ After",
+                "│ A │ B\n│ ──┼──\n│ x │ y\n│ \n│ After",
             ),
             (
                 "- | A | B |\n  | --- | --- |\n  | x | y |\n\n  After",
-                "• A │ B\n──┼──\nx │ y\nAfter",
+                "• A │ B\n──┼──\nx │ y\n\nAfter",
             ),
         ] {
             let build = IncrementalMarkdownState::default().build(source, 0, 0, true);
@@ -2382,8 +2431,8 @@ mod tests {
         let source = "- first\n\n  second paragraph\n- third\n\n> first\n>\n> second";
         let rendered = state.build(source, 0, 0, true).document.plain_text();
 
-        assert!(rendered.contains("• first\nsecond paragraph\n• third"));
-        assert!(rendered.contains("│ first\n│ second"));
+        assert!(rendered.contains("• first\n\nsecond paragraph\n\n• third"));
+        assert!(rendered.contains("│ first\n│ \n│ second"));
     }
 
     #[test]
