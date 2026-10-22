@@ -29,10 +29,11 @@ pub(crate) enum Action {
     LineDown,
     ManageQueue,
     TogglePanel,
+    SessionTree,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 15] = [
+    pub(crate) const ALL: [Self; 16] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -48,6 +49,7 @@ impl Action {
         Self::LineDown,
         Self::ManageQueue,
         Self::TogglePanel,
+        Self::SessionTree,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -58,6 +60,7 @@ impl Action {
             Self::RestoreQueue => "queue.restore",
             Self::ManageQueue => "queue.manage",
             Self::TogglePanel => "panel.toggle",
+            Self::SessionTree => "session.tree",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -78,6 +81,7 @@ impl Action {
             Self::RestoreQueue => "Restore the newest queued prompt",
             Self::ManageQueue => "Inspect and manage queues (/queue)",
             Self::TogglePanel => "Show or hide the side panel",
+            Self::SessionTree => "Open the session tree to switch branches (/tree)",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",
@@ -239,7 +243,9 @@ impl Default for Bindings {
             KeyModifiers::CONTROL,
             "Ctrl+R",
         )];
-        chords[ToggleTheme.index()] = vec![Chord::exact(
+        // Ctrl+T opens the session tree; the theme toggle has no default chord and
+        // stays a `theme.toggle` binding away, with /theme to browse themes.
+        chords[SessionTree.index()] = vec![Chord::exact(
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
             "Ctrl+T",
@@ -658,7 +664,7 @@ mod tests {
                 "Ctrl+R",
             ),
             (
-                Action::ToggleTheme,
+                Action::SessionTree,
                 KeyCode::Char('t'),
                 KeyModifiers::CONTROL,
                 "Ctrl+T",
@@ -677,6 +683,7 @@ mod tests {
             assert_eq!(bindings.label(action), label);
         }
         assert_eq!(bindings.label(Action::Newline), "Shift+Enter / Ctrl+J");
+        assert_eq!(bindings.label(Action::ToggleTheme), "Unbound");
     }
 
     #[test]

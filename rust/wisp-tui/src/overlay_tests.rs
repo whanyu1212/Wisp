@@ -1268,3 +1268,53 @@ async fn diff_keeps_open_without_card() {
             .contains("not in the transcript")
     );
 }
+
+#[tokio::test]
+async fn ctrl_t_opens_tree() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    let theme = ui.theme.active.slug.clone();
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    // The tree's request ran: without a saved session it says so. The theme stays.
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("No persisted session is selected.")
+    );
+    assert_eq!(ui.theme.active.slug, theme);
+}
+
+#[tokio::test]
+async fn ctrl_t_keeps_draft() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.state.input_ready = true;
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "session-1".into(),
+        session_path: "/sessions/one.jsonl".into(),
+        session_name: None,
+    });
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    // The tree is requested, and unlike /tree the shortcut leaves the draft.
+    assert!(matches!(
+        ui.state.session_operation,
+        Some(reducer::SessionOperation::LoadingTree { .. })
+    ));
+    assert!(receiver.try_recv().is_ok());
+    assert!(
+        ui.editor.text().starts_with("keep this"),
+        "{}",
+        ui.editor.text()
+    );
+}

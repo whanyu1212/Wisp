@@ -157,6 +157,8 @@ const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_COMMAND_ID: &str = "rust-tui-shutdown";
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ACTIVITY_INTERVAL: Duration = Duration::from_millis(125);
+/// How often an open `/diff` repaints the age of its snapshot.
+const DIFF_AGE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -1152,6 +1154,19 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        self.dispatch_session_action_with(action, true, writer, limit)
+            .await
+    }
+
+    /// Dispatch a session action. A slash command clears the composer it was typed
+    /// in (`clear_draft`); a shortcut leaves the draft alone.
+    async fn dispatch_session_action_with(
+        &mut self,
+        action: UiAction,
+        clear_draft: bool,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         let startup = matches!(&action, UiAction::StartupHydration);
         // Loading another tree page is navigation, not a newly submitted command.
         let paging_tree = matches!(
@@ -1172,7 +1187,7 @@ impl LiveUi {
         }
         self.notice = None;
         let control = self.dispatch(action, writer, limit).await?;
-        if !paging_tree && self.notice.is_none() {
+        if clear_draft && !paging_tree && self.notice.is_none() {
             self.editor.clear();
         }
         Ok(control)
@@ -1946,6 +1961,11 @@ impl LiveUi {
 
     fn stream_reveal_pending(&self) -> bool {
         self.state.transcript.unrevealed().is_some()
+    }
+
+    /// Whether `/diff` is showing a snapshot's age, which goes stale between inputs.
+    fn diff_age_shown(&self) -> bool {
+        self.git_diff_view.is_some() && self.state.git_diff.snapshot.is_some()
     }
 
     fn advance_activity_animation(&mut self) -> bool {
@@ -4112,6 +4132,25 @@ impl LiveUi {
                 self.render_pending = true;
             }
             return Ok(LoopControl::Continue);
+        }
+        if matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel))
+            && self.editor_editable()
+            && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::SessionTree))
+        {
+            // As /tree does, but the draft stays; the panel's session-tree line names
+            // this key.
+            self.side_panel.close_overlay();
+            self.render_pending = true;
+            return self
+                .dispatch_session_action_with(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: None,
+                    },
+                    false,
+                    writer,
+                    limit,
+                )
+                .await;
         }
         if self.active_overlay().is_none()
             && self.editor_editable()

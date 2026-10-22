@@ -257,6 +257,17 @@ impl Palette {
         mix(self.muted, self.background, 0.4)
     }
 
+    /// Quiet text a step below muted, such as section labels, fold markers and
+    /// separators.
+    pub fn dim(self) -> Color {
+        mix(self.muted, self.background, 0.4)
+    }
+
+    /// The fill of a diff side with no line opposite the other side's change.
+    pub fn diff_filler(self) -> Color {
+        mix(self.surface, self.background, 0.5)
+    }
+
     /// The rail of a turn still running: the running colour, quieted toward the
     /// background so it frames the turn without competing with its text.
     pub fn running_rail(self) -> Color {

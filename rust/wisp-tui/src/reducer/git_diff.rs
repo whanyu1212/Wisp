@@ -2,6 +2,7 @@
 
 use super::{BackendEvent, CommandIdSource, CommandKind, UiEffect, UiState};
 use std::sync::Arc;
+use std::time::Instant;
 use wisp_protocol::{ProtocolDecodeError, commands::WispTypedClientRpcCommands};
 
 pub type GitDiffReport = Result<Arc<GitDiffSnapshot>, String>;
@@ -17,6 +18,8 @@ struct Pending {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct GitDiff {
     pub snapshot: Option<Arc<GitDiffSnapshot>>,
+    /// When the snapshot arrived, for the age `/diff` shows.
+    pub received_at: Option<Instant>,
     pub error: Option<String>,
     generation: u64,
     /// `/diff` is open.
@@ -154,6 +157,7 @@ impl GitDiff {
                         Ok(snapshot) => {
                             self.generation = snapshot.generation;
                             self.snapshot = Some(snapshot);
+                            self.received_at = Some(Instant::now());
                         }
                         Err(error) => self.error = Some(error),
                     }

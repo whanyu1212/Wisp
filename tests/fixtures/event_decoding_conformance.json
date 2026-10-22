@@ -3318,6 +3318,15 @@
    "operation": "remove",
    "path": [
     "stats",
+    "branch"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
     "compaction"
    ],
    "accepted": true
@@ -3399,6 +3408,45 @@
    "operation": "add_unknown",
    "path": [
     "stats"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "branched_from_turn"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "branches"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "siblings"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "branch"
    ],
    "accepted": false
   },

@@ -470,18 +470,44 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
 }
 
 /// Build a review from an authorized, bounded Git snapshot with real line numbers.
-pub(crate) fn git_presentation(path: &str, before: &str, after: &str) -> ToolDetailPresentation {
+/// A working-tree file's change against HEAD, for `/diff`. Each hunk header names
+/// the definition it falls in, as Git's do: `@@ -88,9 +88,15 @@ class CodexTransport`.
+/// `full_context` keeps every unchanged line, so the file reads as one hunk.
+pub(crate) fn git_presentation(
+    path: &str,
+    before: &str,
+    after: &str,
+    full_context: bool,
+) -> ToolDetailPresentation {
     let mut rows = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;
-    append_diff_rows(
+    append_diff_rows_with_context(
         &mut rows,
         before,
         after,
         true,
         &mut additions,
         &mut deletions,
+        // Context as long as either file joins every change into one hunk.
+        if full_context {
+            before.lines().count().max(after.lines().count()) + 1
+        } else {
+            3
+        },
     );
+    let language = path.rsplit('.').next().unwrap_or("");
+    let lines: Vec<&str> = before.lines().collect();
+    for hunk in rows
+        .iter_mut()
+        .filter(|row| row.kind == DetailRowKind::Hunk)
+    {
+        let start = hunk_old_start(&hunk.text).unwrap_or(0);
+        if let Some(definition) = enclosing_definition(&lines, start, language) {
+            hunk.text.push(' ');
+            hunk.text.push_str(&definition);
+        }
+    }
     finalize_presentation(
         DetailPresentationKind::DiffModify,
         path.into(),
@@ -551,8 +577,20 @@ fn append_diff_rows(
     additions: &mut u64,
     deletions: &mut u64,
 ) {
+    append_diff_rows_with_context(rows, before, after, line_numbers, additions, deletions, 3);
+}
+
+fn append_diff_rows_with_context(
+    rows: &mut Vec<DetailRow>,
+    before: &str,
+    after: &str,
+    line_numbers: bool,
+    additions: &mut u64,
+    deletions: &mut u64,
+    context: usize,
+) {
     let diff = TextDiff::from_lines(before, after);
-    for (group_index, operations) in diff.grouped_ops(3).into_iter().enumerate() {
+    for (group_index, operations) in diff.grouped_ops(context).into_iter().enumerate() {
         if line_numbers {
             let old_start = operations
                 .first()
@@ -639,6 +677,99 @@ fn append_diff_rows(
             }
         }
     }
+}
+
+/// The 0-based old-file line a unified hunk header starts at: `@@ -88,9 …` is 87.
+pub(crate) fn hunk_old_start(header: &str) -> Option<usize> {
+    let range = header.strip_prefix("@@ -")?.split([',', ' ']).next()?;
+    range
+        .parse::<usize>()
+        .ok()
+        .map(|line| line.saturating_sub(1))
+}
+
+/// The nearest definition above old-file line `line` (0-based), named by its
+/// keywords and identifier: `class CodexTransport`, `async def stream`, `fn render`.
+/// Files without a known language fall back to Git's default: the nearest line that
+/// starts with a letter, `_` or `$`.
+fn enclosing_definition(lines: &[&str], line: usize, language: &str) -> Option<String> {
+    let identifier = |text: &str| -> String {
+        text.chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+            .collect()
+    };
+    lines[..line.min(lines.len())]
+        .iter()
+        .rev()
+        .find_map(|source| {
+            let text = source.trim_start();
+            match language {
+                "py" | "pyi" => ["class ", "async def ", "def "].iter().find_map(|keyword| {
+                    let name = identifier(text.strip_prefix(keyword)?);
+                    (!name.is_empty()).then(|| format!("{keyword}{name}"))
+                }),
+                "rs" => {
+                    let mut rest = text;
+                    for prefix in [
+                        "pub(crate) ",
+                        "pub(super) ",
+                        "pub ",
+                        "async ",
+                        "unsafe ",
+                        "const ",
+                    ] {
+                        rest = rest.strip_prefix(prefix).unwrap_or(rest);
+                    }
+                    if let Some(target) = rest.strip_prefix("impl") {
+                        if !target.starts_with([' ', '<']) {
+                            return None;
+                        }
+                        // `impl<T> Trait for Type` names the type; generics after
+                        // `impl` are skipped.
+                        let target = match target.rsplit_once(" for ") {
+                            Some((_, ty)) => ty,
+                            None => target
+                                .trim_start()
+                                .strip_prefix('<')
+                                .and_then(|generics| generics.split_once('>'))
+                                .map_or(target, |(_, rest)| rest),
+                        };
+                        let name = identifier(target.trim_start());
+                        return (!name.is_empty()).then(|| format!("impl {name}"));
+                    }
+                    ["fn ", "struct ", "enum ", "trait ", "mod "]
+                        .iter()
+                        .find_map(|keyword| {
+                            let name = identifier(rest.strip_prefix(keyword)?);
+                            (!name.is_empty()).then(|| format!("{keyword}{name}"))
+                        })
+                }
+                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => {
+                    let mut rest = text;
+                    for prefix in ["export ", "default ", "async "] {
+                        rest = rest.strip_prefix(prefix).unwrap_or(rest);
+                    }
+                    ["function ", "class "].iter().find_map(|keyword| {
+                        let name = identifier(rest.strip_prefix(keyword)?.trim_start_matches('*'));
+                        (!name.is_empty()).then(|| format!("{keyword}{name}"))
+                    })
+                }
+                "go" => {
+                    let rest = text.strip_prefix("func ")?;
+                    // A method's receiver comes first: `func (v *View) Render(`.
+                    let rest = match rest.strip_prefix('(') {
+                        Some(receiver) => receiver.split_once(") ")?.1,
+                        None => rest,
+                    };
+                    let name = identifier(rest);
+                    (!name.is_empty()).then(|| format!("func {name}"))
+                }
+                "md" | "markdown" => text.starts_with('#').then(|| text.trim_end().to_owned()),
+                _ => source
+                    .starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$')
+                    .then(|| source.trim_end().chars().take(60).collect()),
+            }
+        })
 }
 
 fn build_read_presentation(
@@ -1134,7 +1265,22 @@ fn floor_char_boundary(source: &str, index: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::fmt::Write as _;
+
+    #[test]
+    fn hunks_name_rust_impls() {
+        let name = |line: &str| enclosing_definition(&[line, "    body"], 1, "rs");
+        assert_eq!(name("impl Foo {").as_deref(), Some("impl Foo"));
+        assert_eq!(name("impl<T> Foo<T> {").as_deref(), Some("impl Foo"));
+        assert_eq!(name("impl Display for Foo {").as_deref(), Some("impl Foo"));
+        assert_eq!(
+            name("impl<T> Trait for Type<T> {").as_deref(),
+            Some("impl Type")
+        );
+        assert_eq!(name("pub(crate) fn render(").as_deref(), Some("fn render"));
+        assert_eq!(name("implement_me();"), None);
+    }
 
     fn result<'a>(output: &'a str, summary: Option<&'a str>) -> DetailResult<'a> {
         DetailResult {

@@ -117,6 +117,20 @@ pub struct SessionStats {
     pub compaction: Option<CompactionPolicyStatus>,
     pub cost: SessionCostSummary,
     pub context_breakdown: Option<ContextBreakdown>,
+    #[serde(default)]
+    pub branch: SessionBranchSummary,
+}
+
+/// Where the active path sits in the session tree. `branched_from_turn` is set when
+/// the path takes a branch, with `siblings` other branches at that point; on the
+/// original line `branches` counts the branches that split off it.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+pub struct SessionBranchSummary {
+    pub branched_from_turn: Option<u64>,
+    #[serde(default)]
+    pub siblings: u64,
+    #[serde(default)]
+    pub branches: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

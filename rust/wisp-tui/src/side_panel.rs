@@ -25,7 +25,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::{ContextBreakdown, ContextSource, McpServerStatus};
+use wisp_protocol::events::{
+    ContextBreakdown, ContextSource, McpServerStatus, SessionBranchSummary,
+};
 
 /// The panel's width, its border included.
 pub(crate) const PANEL_WIDTH: u16 = 56;
@@ -480,13 +482,16 @@ pub(crate) fn render(
     }
 
     let toggle_key = ui::primary_label(bindings, KeyAction::TogglePanel);
+    let tree_key = ui::primary_label(bindings, KeyAction::SessionTree);
     let hint = if overlay {
         "Esc close · Tab sections · Enter open".to_owned()
     } else {
         format!("{toggle_key} hide panel")
     };
+    // The docked panel names the session tree's key at its right, as the mock does.
+    let tree_hint = (!overlay && tree_key != "Unbound").then(|| format!("{tree_key} session tree"));
     let focus = Focus::of(state);
-    let mut sections = vec![header_lines(state, width, palette)];
+    let mut sections = vec![header_lines(state, bindings, width, palette)];
     // Where each focusable section sits in `sections`, and the row its focusable
     // rows start at.
     let mut focusable: Vec<(Section, usize, usize)> = Vec::new();
@@ -592,8 +597,16 @@ pub(crate) fn render(
         ..inner
     };
     frame.render_widget(Paragraph::new(lines), inner);
+    let hint_line = match tree_hint {
+        Some(tree_hint) => spread(
+            ui::keycap_hints(&hint, palette).spans,
+            ui::keycap_hints(&tree_hint, palette).spans,
+            width,
+        ),
+        None => ui::keycap_hints(&hint, palette),
+    };
     frame.render_widget(
-        Paragraph::new(ui::keycap_hints(&hint, palette)).style(Style::default().fg(palette.muted)),
+        Paragraph::new(hint_line).style(Style::default().fg(palette.muted)),
         hint_row,
     );
 }
@@ -658,7 +671,12 @@ fn heading(title: &str, palette: Palette) -> Span<'static> {
 }
 
 /// The session's name, or its first prompt before it has one, and where it works.
-fn header_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+fn header_lines(
+    state: &UiState,
+    bindings: &Bindings,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
     let title = state
         .selected_session
         .as_ref()
@@ -691,7 +709,50 @@ fn header_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'st
             Style::default().fg(palette.muted),
         ));
     }
+    if let Some(branch) = state
+        .context
+        .stats
+        .as_ref()
+        .and_then(|stats| branch_text(&stats.branch))
+    {
+        let key = match ui::primary_label(bindings, KeyAction::SessionTree).as_str() {
+            "Unbound" => "/tree".to_owned(),
+            key => key.to_owned(),
+        };
+        lines.push(spread(
+            vec![
+                Span::styled("⑂ ", Style::default().fg(palette.muted)),
+                Span::styled(branch, Style::default().fg(palette.muted)),
+            ],
+            vec![Span::styled(key, palette.keycap())],
+            width,
+        ));
+    }
     lines
+}
+
+/// Where the active path sits in the session tree: `branched from turn 4 · 2
+/// siblings`, or `root · 2 branches` on the original line. A session that never
+/// branched has no line.
+fn branch_text(branch: &SessionBranchSummary) -> Option<String> {
+    let plural = |count: u64, one: &str, many: &str| {
+        format!("{count} {}", if count == 1 { one } else { many })
+    };
+    match branch.branched_from_turn {
+        Some(0) => Some(format!(
+            "branched from the start · {}",
+            plural(branch.siblings, "sibling", "siblings")
+        )),
+        Some(turn) => Some(format!(
+            "branched from turn {turn} · {}",
+            plural(branch.siblings, "sibling", "siblings")
+        )),
+        None if branch.branches > 0 => Some(format!(
+            "root · {}",
+            plural(branch.branches, "branch", "branches")
+        )),
+        None => None,
+    }
 }
 
 fn first_line(text: &str) -> String {
@@ -1625,6 +1686,7 @@ mod tests {
                 unpriced_record_count: 0,
             },
             context_breakdown: None,
+            branch: Default::default(),
         }));
         state.permissions.snapshot = Some(Arc::new(PermissionState {
             mode: PermissionMode::Ask,
@@ -1816,6 +1878,50 @@ mod tests {
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
         assert!(!panel.contains("No changes"), "{panel}");
         assert!(panel.contains("Changed files omitted"), "{panel}");
+    }
+
+    #[test]
+    fn tree_line_follows_branch() {
+        let line = |branch: SessionBranchSummary| {
+            let mut state = session();
+            state.context.stats.as_mut().unwrap().branch = branch;
+            let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+            panel
+                .lines()
+                .find_map(|line| line.find('⑂').map(|start| line[start..].to_owned()))
+        };
+        // A root session that never branched has no line.
+        assert_eq!(line(SessionBranchSummary::default()), None);
+        let root = line(SessionBranchSummary {
+            branches: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(root.starts_with("⑂ root · 2 branches"), "{root}");
+        assert!(root.ends_with("Ctrl+T"), "{root}");
+        let branched = line(SessionBranchSummary {
+            branched_from_turn: Some(4),
+            siblings: 1,
+            branches: 0,
+        })
+        .unwrap();
+        assert!(
+            branched.starts_with("⑂ branched from turn 4 · 1 sibling "),
+            "{branched}"
+        );
+        let sibling = line(SessionBranchSummary {
+            branched_from_turn: Some(4),
+            siblings: 2,
+            branches: 0,
+        })
+        .unwrap();
+        assert!(
+            sibling.starts_with("⑂ branched from turn 4 · 2 siblings"),
+            "{sibling}"
+        );
+        let rows = screen(&session(), &mut SidePanel::default(), 200);
+        let footer = panel_text(&rows, 200);
+        assert!(footer.contains("Ctrl+T session tree"), "{footer}");
     }
 
     #[test]

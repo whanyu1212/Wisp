@@ -721,6 +721,11 @@ fn render_transcript(
     let content = content_area(rows_area);
     let content_width = usize::from(content.width).max(1);
     let visible_lines = usize::from(rows_area.height).max(1);
+    // Wide terminals set diff cards' old and new side by side (the mock's "wide
+    // only"), before sizing so a resize re-anchors on the new layout.
+    row_cache.set_side_by_side_width(
+        crate::side_panel::docks(frame.area().width).then_some(content_width),
+    );
     // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
@@ -1708,6 +1713,9 @@ fn detail_line(row: DetailViewRow, palette: Palette) -> Line<'static> {
 }
 
 fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Palette) -> Style {
+    let base = semantic
+        .tone
+        .map_or(base, |tone| base.patch(tone_style(tone, palette)));
     let mut style = match semantic.block {
         BlockStyle::Normal => base,
         BlockStyle::Heading(level) => base.patch(palette.semantic_heading(level)),
@@ -6694,6 +6702,50 @@ mod tests {
             .unwrap();
         let backend = terminal.backend().clone();
         (backend.to_string(), backend)
+    }
+
+    #[test]
+    fn wide_edit_card_splits() {
+        let arguments = json!({
+            "path": "docs/configuration.md",
+            "edits": [{
+                "oldText": "## Provider diagnostics\n- Codex transport errors report the exception text.\nNo URLs.\n",
+                "newText": "## Provider diagnostics\n- Codex transport diagnostics include exception type.\n- Add a read timeout setting.\nNo URLs.\n"
+            }]
+        });
+        let (wide, backend) = render_file_card("edit", arguments.clone(), None, false, 200);
+        // At 160 columns and wider, old and new share a row: the old line on the
+        // left beside its replacement, then the added line beside a blank side.
+        let row = wide
+            .lines()
+            .find(|line| line.contains("errors report the exception text"))
+            .unwrap_or_else(|| panic!("{wide}"));
+        assert!(row.contains("diagnostics include exception type"), "{wide}");
+        assert!(!wide.contains("@@ edit"), "{wide}");
+        let added = wide
+            .lines()
+            .find(|line| line.contains("Add a read timeout setting"))
+            .unwrap();
+        assert!(!added.contains('−'), "{wide}");
+        let palette = Palette::default();
+        assert_eq!(
+            style_at_text(&backend, "- Codex transport").map(|style| style.1),
+            Some(palette.deletion_background),
+            "{wide}"
+        );
+        assert_eq!(
+            style_at_text(&backend, "Add a read").map(|style| style.1),
+            Some(palette.addition_background),
+            "{wide}"
+        );
+        // Below the threshold the card stays unified: one side per row.
+        let (normal, _) = render_file_card("edit", arguments, None, false, 159);
+        let row = normal
+            .lines()
+            .find(|line| line.contains("errors report the exception text"))
+            .unwrap_or_else(|| panic!("{normal}"));
+        assert!(!row.contains("diagnostics include"), "{normal}");
+        assert!(!normal.contains("@@ -1"), "{normal}");
     }
 
     #[test]

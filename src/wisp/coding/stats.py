@@ -26,6 +26,7 @@ from wisp.events import (
     MessageCompleted,
     MessageStarted,
     RunOutcome,
+    SessionBranchSummary,
     SessionStats,
     TokenUsage,
     ToolResultReady,
@@ -40,7 +41,7 @@ from wisp.sessions.entries import (
     MessageSessionEntry,
     SessionEntry,
 )
-from wisp.sessions.replay import SessionReplay
+from wisp.sessions.replay import SessionReplay, resolve_session_tree
 
 
 @dataclass(slots=True)
@@ -180,7 +181,41 @@ def build_session_stats(
             auto_compaction_enabled=auto_compaction_enabled,
         ),
         context_breakdown=breakdown,
+        branch=session_branch_summary(entries),
     )
+
+
+def session_branch_summary(entries: Sequence[SessionEntry]) -> SessionBranchSummary:
+    """Place the active path in the session tree for the session-tree line.
+
+    Args:
+        entries (Sequence[SessionEntry]): Every entry of the session, in append order.
+
+    Returns:
+        SessionBranchSummary: The deepest branch the active path takes, or the
+        branches that split off it when it follows the original line throughout.
+    """
+    tree = resolve_session_tree(entries)
+    children: dict[str | None, list[str]] = {}
+    for node in tree.nodes:
+        children.setdefault(node.parent_id, []).append(node.id)
+    turns = 0
+    branched: SessionBranchSummary | None = None
+    branches = 0
+    parent_id: str | None = None
+    for node in tree.active_path:
+        # `turns` counts the user turns before `node`: those shared at its parent.
+        alternatives = children.get(parent_id, [])
+        if len(alternatives) > 1:
+            branches += len(alternatives) - 1
+            if alternatives[0] != node.id:
+                branched = SessionBranchSummary(
+                    branched_from_turn=turns, siblings=len(alternatives) - 1
+                )
+        if isinstance(node, MessageSessionEntry) and node.message.role == "user":
+            turns += 1
+        parent_id = node.id
+    return branched or SessionBranchSummary(branches=branches)
 
 
 def _compaction_policy_status(

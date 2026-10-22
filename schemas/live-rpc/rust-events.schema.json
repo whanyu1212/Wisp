@@ -4943,6 +4943,44 @@
       "title": "RpcWorkspaceReported",
       "type": "object"
     },
+    "SessionBranchSummary": {
+      "additionalProperties": false,
+      "description": "Where the active path sits in the session tree.\n\nAt each node with several children, the first child appended is the original\nline and the later ones are branches. ``branched_from_turn`` is set when the\nactive path takes a branch: it counts the user turns shared with the original\nline at the deepest such point, and ``siblings`` counts the other children\nthere. On the original line ``branched_from_turn`` is ``None`` and\n``branches`` counts every branch that splits off the active path.",
+      "properties": {
+        "branched_from_turn": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SessionBranchSummaryBranchedFromTurn"
+        },
+        "branches": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SessionBranchSummaryBranches",
+          "type": "integer"
+        },
+        "siblings": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SessionBranchSummarySiblings",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branched_from_turn",
+        "siblings",
+        "branches"
+      ],
+      "title": "SessionBranchSummary",
+      "type": "object"
+    },
     "SessionCostSummary": {
       "additionalProperties": false,
       "description": "Cumulative persisted list-price accounting for a session.",
@@ -5033,6 +5071,15 @@
           "title": "SessionStatsActiveMessageCount",
           "type": "integer"
         },
+        "branch": {
+          "$ref": "#/$defs/SessionBranchSummary",
+          "default": {
+            "branched_from_turn": null,
+            "branches": 0,
+            "siblings": 0
+          },
+          "title": "SessionStatsBranch"
+        },
         "compaction": {
           "anyOf": [
             {
@@ -5107,7 +5154,8 @@
         "context",
         "compaction",
         "cost",
-        "context_breakdown"
+        "context_breakdown",
+        "branch"
       ],
       "title": "SessionStats",
       "type": "object"
