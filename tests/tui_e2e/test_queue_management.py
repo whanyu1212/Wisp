@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_e2e.support import full_repaint_after
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
@@ -106,12 +107,6 @@ main()
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
     width = 102
-
-    def full_repaint_after(output: bytes, offset: int) -> bytes | None:
-        # A resize clears the screen inside the next synchronized frame.
-        start = output.find(b"\x1b[?2026h\x1b[2J", offset)
-        end = output.find(b"\x1b[?2026l", start) if start >= 0 else -1
-        return output[start:end] if end >= 0 else None
 
     idle_footer = "↑↓ select".encode()
 

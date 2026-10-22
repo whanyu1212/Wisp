@@ -15,18 +15,11 @@ from pathlib import Path
 import pytest
 
 from tests.support.paths import FIXTURES_DIR
-from tests.tui_e2e.support import rendered_without_spacing
+from tests.tui_e2e.support import full_repaint_after, rendered_without_spacing
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
 SECRET = "sentinel-typed-value-42"
-
-
-def _full_repaint_after(output: bytes, offset: int) -> bytes | None:
-    # A resize clears the screen inside the next synchronized frame.
-    start = output.find(b"\x1b[?2026h\x1b[2J", offset)
-    end = output.find(b"\x1b[?2026l", start) if start >= 0 else -1
-    return output[start:end] if end >= 0 else None
 
 
 @pytest.mark.process
@@ -112,10 +105,10 @@ main()
             tui.resize(width=width)
 
             def repainted(output: bytes, start: int = offset) -> bool:
-                return _full_repaint_after(output, start) is not None
+                return full_repaint_after(output, start) is not None
 
             output = tui.wait_until(repainted, failure="TUI did not repaint after resize")
-            frame = _full_repaint_after(output, offset)
+            frame = full_repaint_after(output, offset)
             assert frame is not None
             if marker in rendered_without_spacing(frame):
                 return

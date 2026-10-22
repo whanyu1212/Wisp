@@ -15,6 +15,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
+    full_repaint_after,
     reap,
     rendered_without_spacing,
     screen_shows,
@@ -185,6 +186,8 @@ for line in sys.stdin:
     browse_sent = False
     startup_redraw_offset: int | None = None
     cards_redraw_offset: int | None = None
+    cards_width = 102
+    cards_frame: bytes | None = None
     process_expand_offset: int | None = None
     detail_requested = False
     detail_seen = False
@@ -219,18 +222,34 @@ for line in sys.stdin:
                 marker in rendered_without_spacing(output) for marker in (b"README.md", b"demo.txt")
             ):
                 cards_redraw_offset = len(output)
-                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                fcntl.ioctl(
+                    terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, cards_width, 0, 0)
+                )
                 continue
-            if (
-                # The cards resize forces a full frame, so an idle footer appears after it.
-                cards_redraw_offset is not None
-                and not browse_sent
-                and b"idle" in output[cards_redraw_offset:]
-                and b"completed prompt did not report" in output[cards_redraw_offset:]
-            ):
+            if cards_redraw_offset is not None and cards_frame is None:
+                # A frame painted at the old width can still arrive after the resize and
+                # show the idle footer, so only the resize's own full repaint proves the
+                # cards were painted before the browse keys below change them.
+                repaint = full_repaint_after(output, cards_redraw_offset)
                 # This stub has no persisted session. Its metadata warning marks
                 # post-prompt hydration as settled, so it cannot invalidate keys
-                # sent to inspect the live cards. Observe each changed selection.
+                # sent to inspect the live cards. A repaint drawn before that
+                # warning arrived is replaced by resizing again.
+                if repaint is not None and (
+                    b"completedpromptdidnotreport" in rendered_without_spacing(repaint)
+                ):
+                    cards_frame = repaint
+                elif repaint is not None:
+                    cards_redraw_offset = len(output)
+                    cards_width = 103 if cards_width == 102 else 102
+                    fcntl.ioctl(
+                        terminal_fd,
+                        termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 24, cards_width, 0, 0),
+                    )
+                    continue
+            if cards_frame is not None and not browse_sent:
+                # Observe each changed selection.
                 process_expand_offset = len(output)
                 os.write(terminal_fd, b"\x1b[17~\x1b[Z\x1b[C")
                 browse_sent = True
@@ -283,6 +302,7 @@ for line in sys.stdin:
             reap(child_pid, terminal_fd)
 
     assert prompt_sent, bytes(output)
+    assert cards_frame is not None, bytes(output)
     assert browse_sent, bytes(output)
     assert detail_seen, bytes(output)
     assert detail_resize_output_offset is not None, bytes(output)
@@ -291,9 +311,7 @@ for line in sys.stdin:
     assert b"README.md" in output
     # The resize repaints whole frames, where the completed marker sits beside the chip
     # and the fold arrow before the task.
-    assert "✓Process▸Backgroundcommand".encode() in rendered_without_spacing(
-        output[cards_redraw_offset:]
-    )
+    assert "✓Process▸Backgroundcommand".encode() in rendered_without_spacing(cards_frame)
     assert b"safe" in output
     assert b"safe\xef\xbf\xbd[2J" in output
     assert b"safe\x1b[2J" not in output
