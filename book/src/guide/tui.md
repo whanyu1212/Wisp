@@ -80,9 +80,9 @@ Rows keep stable `+`/`-` signs, quiet themed backgrounds, and syntax coloring wh
 file extension is recognized. Old/new line-number gutters locate changes; edit fragments use
 **fragment-relative** numbers because the edit arguments do not carry file positions. Short hunks
 stay intact. Larger previews end at a hunk boundary when possible; an omission says how many
-changed lines remain and points to Enter for review, and the three lines above it fade toward the
-preview's background (dim without color). Expanded shell output that hides earlier lines fades in
-the same way under its `(N earlier lines)` note. Wrapped continuations keep an indented gutter.
+changed lines remain and points to Enter for review. Wrapped continuations keep an indented gutter.
+Visible diff lines and shell-output tails keep their normal colors up to the omission marker;
+the marker identifies hidden content without fading the displayed text.
 Separate hunks are divided by `⋯`, and `⏎ trailing newline added/removed` appears only when the
 final newline actually changed. Changed words have stronger backgrounds, bold, and underline;
 monochrome retains the non-color emphasis.
