@@ -251,6 +251,11 @@ def test_rust_theme_preferences_interoperate_with_python_and_survive_restart(
     path.write_text(
         json.dumps({"theme": "wisp-wave", "last_dark_theme": "wisp-wave", "unrelated": unrelated})
     )
+    # The theme toggle has no default chord; bind it to Ctrl+T as the guide shows,
+    # moving the session tree off that chord.
+    (path.parent / "settings.json").write_text(
+        json.dumps({"tui_keybindings": {"theme.toggle": ["Ctrl+T"], "session.tree": []}})
+    )
     for preview in (True, False):
         _run_theme_session(
             binary, project, tmp_path / "sessions", no_color=no_color, preview=preview
