@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::tool_cards::{ToolCallInput, ToolResultInput};
+use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::{
     backend::TestBackend,
     style::{Color, Modifier},
@@ -230,6 +231,93 @@ fn fixture(scenario: &str) -> LiveUi {
             );
         }
     }
+    if matches!(scenario, "tool-activity" | "tool-activity-long") {
+        ui.state.transcript = Default::default();
+        // The task was launched in the previous turn; its next poll keeps the name.
+        ui.state
+            .transcript
+            .append_prompt("Start browser tests.".into());
+        ui.state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "browser-start".into(),
+            name: "bash".into(),
+            arguments: json!({"operation": "start", "command": "cd site && npm run test:browser"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+        let mut started = result.clone();
+        started.call_id = "browser-start".into();
+        started.name = "bash".into();
+        started.process_id = Some("browser-process".into());
+        started.process_state = Some("running".into());
+        ui.state.transcript.observe_tool_result(started);
+        ui.state
+            .transcript
+            .append_prompt("Check the migration issues and test results.".into());
+        let calls = std::iter::once((
+            "issues".to_owned(),
+            "mcp__linear__list_issues",
+            json!({"query": "astro", "limit": 100}),
+        ))
+        .chain(
+            ["HY-311", "HY-312", "HY-313", "HY-315", "HY-316"]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id.to_owned(),
+                        "mcp__linear__get_issue",
+                        json!({"id": id, "includeRelations": true}),
+                    )
+                }),
+        )
+        .chain(std::iter::once((
+            "checks".to_owned(),
+            "bash",
+            json!({"command": "cd site && npm test && npm run check"}),
+        )));
+        for (id, name, arguments) in calls {
+            ui.state.transcript.observe_tool_call(ToolCallInput {
+                call_id: id.clone(),
+                name: name.into(),
+                arguments,
+                detail_source: tool_detail::ToolDetailSource::None,
+            });
+            let mut finished = result.clone();
+            finished.call_id = id;
+            finished.name = name.into();
+            finished.duration_ms = Some(if name == "bash" { 6_900 } else { 440 });
+            finished.output = "13 tests passed\nType check completed · 0 errors".into();
+            ui.state.transcript.observe_tool_result(finished);
+        }
+        let process = ui.state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "browser-poll".into(),
+            name: "bash".into(),
+            arguments: json!({"operation": "poll", "process_id": "browser-process"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+        let mut completed = result.clone();
+        completed.call_id = "browser-poll".into();
+        completed.name = "bash".into();
+        completed.process_id = Some("browser-process".into());
+        completed.process_state = Some("completed".into());
+        completed.process_started_at_ms = Some(1_000);
+        completed.process_ended_at_ms = Some(9_100);
+        let earlier_count = if scenario == "tool-activity-long" {
+            600
+        } else {
+            29
+        };
+        let earlier = (1..=earlier_count).fold(String::new(), |mut output, i| {
+            use std::fmt::Write as _;
+            writeln!(&mut output, "check {i} passed").unwrap();
+            output
+        });
+        completed.stdout = Some(format!(
+            "{}✓ mobile navigation\n✓ system theme changes\n✓ keyboard focus\n✓ diagram layout\n✓ search navigation\n✓ theme persistence\n\n36 passed (8.1s)",
+            earlier
+        ));
+        ui.state.transcript.observe_tool_result(completed);
+        ui.transcript_row_cache.fold_mut().expand(process);
+        ui.editor = PromptEditor::default();
+    }
     if scenario == "diff-previews" {
         ui.state.transcript = Default::default();
         ui.state
@@ -346,6 +434,152 @@ fn row_containing(buffer: &ratatui::buffer::Buffer, text: &str) -> u16 {
                 .contains(text)
         })
         .unwrap_or_else(|| panic!("missing {text:?} in {buffer:?}"))
+}
+
+#[test]
+fn tool_activity_matches_the_mockup_across_themes_and_resize() {
+    for selected in theme::themes() {
+        for no_color in [false, true] {
+            let mut ui = fixture("tool-activity");
+            ui.theme.active = selected;
+            ui.no_color = no_color;
+            for width in [40, 80, 200, 80] {
+                let buffer = draw(&mut ui, width, 64);
+                let tail = row_containing(&buffer, "36 passed (8.1s)");
+                let omission = row_containing(&buffer, "30 earlier lines");
+                assert_eq!(buffer[(10, tail)].bg, ui.palette().surface);
+                assert_eq!(buffer[(10, omission)].bg, ui.palette().surface);
+                assert!(!buffer[(10, tail)].modifier.contains(Modifier::DIM));
+                if width >= 80 {
+                    row_containing(&buffer, "linear/list_issues · astro");
+                    row_containing(&buffer, "linear/get_issue · 5 calls");
+                    row_containing(&buffer, "npm test · npm run check");
+                    row_containing(&buffer, "Browser tests · passed");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn earlier_output_is_independently_browsable_and_clickable() {
+    let mut ui = fixture("tool-activity");
+    let process = ui.state.transcript.entries().last().unwrap().id;
+    draw(&mut ui, 100, 64);
+    assert!(
+        ui.visible_foldable_entries()
+            .contains(&BrowseTarget::Output(process))
+    );
+    ui.browse_selected = Some(BrowseTarget::Output(process));
+    let (writer, _receiver) = mpsc::channel(4);
+    ui.handle_browse_key(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &writer,
+        1024,
+    )
+    .await
+    .unwrap();
+    let buffer = draw(&mut ui, 100, 64);
+    row_containing(&buffer, "check 1 passed");
+    row_containing(&buffer, "36 passed (8.1s)");
+    row_containing(&buffer, "showing retained output");
+    // Resizing keeps the earlier-output selection separate from its parent card.
+    draw(&mut ui, 80, 64);
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Output(process)));
+    ui.handle_browse_key(
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        &writer,
+        1024,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_expanded(process));
+    assert!(!ui.transcript_row_cache.fold().is_output_expanded(process));
+    // A real click on the omission row activates the same independent fold.
+    ui.mouse_enabled = true;
+    let buffer = draw(&mut ui, 100, 64);
+    let y = row_containing(&buffer, "30 earlier lines");
+    for kind in [
+        MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Up(MouseButton::Left),
+    ] {
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind,
+                column: 8,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(ui.transcript_row_cache.fold().is_output_expanded(process));
+    ui.toggle_clicked_fold(BrowseTarget::Entry(process));
+    assert!(!ui.transcript_row_cache.fold().is_expanded(process));
+    assert!(!ui.transcript_row_cache.fold().is_output_expanded(process));
+}
+
+#[tokio::test]
+async fn long_output_stays_anchored_and_browsable_during_process_updates() {
+    let mut ui = fixture("tool-activity-long");
+    let process = ui.state.transcript.entries().last().unwrap().id;
+    let first_retained = ui
+        .state
+        .transcript
+        .entries()
+        .last()
+        .unwrap()
+        .process_card()
+        .unwrap()
+        .retained_output
+        .text
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned();
+    draw(&mut ui, 80, 24);
+    ui.browse_selected = Some(BrowseTarget::Output(process));
+    let (writer, _receiver) = mpsc::channel(4);
+    ui.handle_browse_key(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let buffer = draw(&mut ui, 80, 24);
+    row_containing(&buffer, "492 earlier lines");
+    row_containing(&buffer, &first_retained);
+    assert!(!ui.transcript_viewport.follows_tail());
+    assert_eq!(ui.browse_selected, Some(BrowseTarget::Output(process)));
+    for value in [
+        json!({"type": "tool.call", "call_id": "live-poll", "name": "bash", "arguments": {"operation": "poll", "process_id": "browser-process"}}),
+        json!({"type": "tool.result", "message_entry_id": null, "call_id": "live-poll", "name": "bash", "output": "", "is_error": false,
+            "process_id": "browser-process", "process_state": "running", "stdout": "new output\n"}),
+    ] {
+        let event = BackendEvent::from_projection_value(&value).unwrap();
+        ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(ui.browse_selected, Some(BrowseTarget::Output(process)));
+        let buffer = draw(&mut ui, 80, 24);
+        row_containing(&buffer, "492 earlier lines");
+        assert_eq!(ui.browse_selected, Some(BrowseTarget::Output(process)));
+    }
+    ui.handle_browse_key(
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let buffer = draw(&mut ui, 80, 24);
+    row_containing(&buffer, "new output");
+    assert!(ui.transcript_row_cache.fold().is_expanded(process));
+    assert!(!ui.transcript_row_cache.fold().is_output_expanded(process));
 }
 
 #[test]
@@ -839,6 +1073,7 @@ fn capture_conversation_screens() {
             for scenario in [
                 "reading",
                 "diff-previews",
+                "tool-activity",
                 "conversation",
                 "tools",
                 "working",

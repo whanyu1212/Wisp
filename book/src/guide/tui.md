@@ -129,16 +129,25 @@ normalization, without executing Git clean, external-diff, or textconv helpers.
 Files requiring filter or working-tree-encoding transformations are omitted and
 mark the snapshot partial; unchanged files beyond the scan budget may also be omitted.
 
-Other tool and process previews stay collapsed to an action line; consecutive `read` / `grep` / `find` / `ls`
-cards group as `explored N files`, and consecutive calls to the same MCP tool group as one action
-line with a count, such as `linear/get_issue ×8  id=HY-270 … id=HY-278`, showing the first and last
-call's arguments. While a call in the group is open, the line shows that call instead, with
-`· 7 of 8 done` and, when it waits for you, `· awaiting approval`. Thinking streams as a collapsed `thought` row. A collapsed
-card keeps its action line to one row, ending in `…` when the command or path is too long (paths
-are cut at a `/` or space, and a diff's change counts stay visible). F6 browses visible card rows:
-Right expands (showing original command arguments and retained output), Left collapses, Enter opens retained detail. Paths under the launch directory are displayed relatively. Familiar shell commands use concise labels
-such as `Python tests` or `Rust build`; expanding preserves the original command. Process rows reuse
-the originating command label when available, with process IDs and poll counts in expanded detail.
+Other tool and process previews stay collapsed to an action line. MCP summaries name the server,
+tool, and primary subject, such as `linear/list_issues · astro`; pagination and other bounded
+arguments remain in expanded detail. Consecutive calls to the same MCP tool show a compact count,
+such as `linear/get_issue · 5 calls`. Expanding the group reveals each call. While a call is open,
+the group follows its subject with `· 4 of 5 done`; approval, denial, and failure stay visible.
+Consecutive `read` / `grep` / `find` / `ls` cards group as exploration activity. Thinking streams
+as a collapsed `thought` row.
+
+A collapsed card keeps its action to one row, ending in `…` when needed; status and counts stay
+visible. F6 browses visible rows: Right expands, Left collapses, and Enter opens retained file
+detail. Paths under the launch directory display relatively. Familiar shell commands use concise
+summaries such as `Python tests`, `Rust build`, or `npm test · npm run check`; expanding shows the
+original bounded command. Process rows reuse the originating task name, such as
+`Browser tests · passed`, with process IDs, poll counts, and exit codes in expanded detail.
+
+Expanded shell and process cards show a framed output tail without fading. Click the
+`N earlier lines` row, or select it with F6/Tab and press Right or Enter, to show earlier retained
+output. Left folds those lines back while keeping the tail open. Output lost to retention limits
+or backend truncation is explicitly marked incomplete or unavailable; expanding cannot recover it.
 Routine tool rows use blank spacing rather than full-width rules. The
 footer shows the browse key once (`F6 browse`) whenever the transcript has rows, instead of a hint
 under every card. While following the tail, the latest user prompt stays pinned at the top of the conversation
@@ -687,7 +696,7 @@ directly, and cannot recover bytes that the tool truncated before persistence.
 
 Every persisted message row is represented, but representation is logical rather than one widget per
 JSONL row. A tool request and its result share one tool card. Repeated process start, poll, cancel,
-and completion rows for the same process share one process card; its header reports the poll count.
+and completion rows for the same process share one process card; expanded diagnostics report the poll count.
 Use `F6` to browse visible cards, `Left`/`Right` to collapse or expand one, and `Enter` to open its
 retained detail.
 

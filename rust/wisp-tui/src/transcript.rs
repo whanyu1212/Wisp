@@ -316,6 +316,7 @@ impl TranscriptEntry {
                 .len()
                 .saturating_add(card.name.len())
                 .saturating_add(card.action_arguments.len())
+                .saturating_add(card.mcp_subject.as_ref().map_or(0, String::len))
                 .saturating_add(card.process_id.as_ref().map_or(0, String::len))
                 .saturating_add(card.detail.len())
                 .saturating_add(card.retained_output.text.len())

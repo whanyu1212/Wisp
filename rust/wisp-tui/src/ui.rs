@@ -757,8 +757,17 @@ fn render_transcript(
                 .is_some_and(|index| index > user_index)
         });
         let mut tail_budget = visible_lines.saturating_sub(user_rows.len());
+        let anchored_output = !viewport.follows_tail()
+            && rows
+                .first()
+                .is_some_and(|row| matches!(BrowseTarget::for_row(row), BrowseTarget::Output(_)));
         if rows.len() > tail_budget {
-            rows.drain(..rows.len() - tail_budget);
+            if anchored_output {
+                // Opening retained output pins its control above the revealed lines.
+                rows.truncate(tail_budget);
+            } else {
+                rows.drain(..rows.len() - tail_budget);
+            }
         }
         // A rule only separates two cards; with the card above it cut off, it would hang
         // under the pinned prompt's gap.
@@ -773,7 +782,11 @@ fn render_transcript(
         if let Some(header) = assistant_header {
             tail_budget = tail_budget.saturating_sub(1);
             if rows.len() > tail_budget {
-                rows.drain(..rows.len() - tail_budget);
+                if anchored_output {
+                    rows.truncate(tail_budget);
+                } else {
+                    rows.drain(..rows.len() - tail_budget);
+                }
             }
             user_rows.push(header);
         }
@@ -836,17 +849,17 @@ fn render_transcript(
                 conversation.width,
                 1,
             );
-            if matches!(
+            if (matches!(
                 row.kind,
                 TranscriptRowKind::CardAction
                     | TranscriptRowKind::CardGroup
                     | TranscriptRowKind::Thought
-            ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_))
+            ) || (row.kind == TranscriptRowKind::CardOmission && row.fold_arrow.is_some()))
+                && !matches!(row.anchor.position, RowPosition::ThoughtContent(_))
             {
                 fold_rows.push(mouse::FoldRow {
                     y: area.y,
-                    entry: row.anchor.entry_id,
-                    group: row.kind == TranscriptRowKind::CardGroup,
+                    target: BrowseTarget::for_row(row),
                 });
             }
             if offset == 0
@@ -5769,15 +5782,15 @@ mod tests {
         cache.fold_mut().expand_group(first);
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP     ▸ linear/list_issues  id=HY-0"),
+            screen.contains("✓  MCP     ▸ linear/list_issues · HY-0"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP     ▸ linear/get_issue ×3  id=HY-1 … id=HY-3"),
+            screen.contains("✓  MCP     ▸ linear/get_issue · 3 calls"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP     ▸ linear/save_issue ×2  id=HY-4 · id=HY-5"),
+            screen.contains("✓  MCP     ▸ linear/save_issue · 2 calls"),
             "{screen}"
         );
         // Expanding the group reveals every command's individual row.
@@ -5826,14 +5839,14 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("MCP     ▸ linear/get_issue ×2  id=HY-2 · 1 of 2 done"),
+            screen.contains("MCP     ▸ linear/get_issue · HY-2 · 1 of 2 done"),
             "{screen}"
         );
         // The cached header follows a later member's result.
         finish_call(&mut state, "g2", "mcp__linear__get_issue");
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP     ▸ linear/get_issue ×2  id=HY-1 · id=HY-2"),
+            screen.contains("✓  MCP     ▸ linear/get_issue · 2 calls"),
             "{screen}"
         );
         assert!(!screen.contains("of 2 done"), "{screen}");
@@ -5856,7 +5869,7 @@ mod tests {
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
             screen.contains(
-                "?  MCP     ▸ linear/save_issue ×2  id=HY-2 · 1 of 2 done · awaiting approval"
+                "?  MCP     ▸ linear/save_issue · HY-2 · 1 of 2 done · awaiting approval"
             ),
             "{screen}"
         );
@@ -5889,7 +5902,10 @@ mod tests {
             })
             .unwrap();
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("✓  MCP     ▸ linear/… ×3"), "{screen}");
+        assert!(
+            screen.contains("✓  MCP     ▸ linear/… · 3 calls"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -6136,7 +6152,7 @@ mod tests {
         // A long tail counts the lines above it instead of the bytes.
         let long = draw(40);
         let text = long.to_string();
-        assert!(text.contains("(32 earlier lines)"), "{text}");
+        assert!(text.contains("32 earlier lines"), "{text}");
         assert!(!text.contains("bytes omitted"), "{text}");
         assert!(text.contains("line 39"), "{text}");
         assert!(text.contains("exit 3"), "{text}");
@@ -6148,13 +6164,13 @@ mod tests {
             assert!(!modifiers.contains(Modifier::DIM), "{line}");
         }
         assert_eq!(
-            style_at_text(&long, "(32 earlier lines)").unwrap().0,
+            style_at_text(&long, "32 earlier lines").unwrap().0,
             palette.muted
         );
 
         // Lines the projected tail already dropped still count.
         let projected = draw(600).to_string();
-        assert!(projected.contains("(592 earlier lines)"), "{projected}");
+        assert!(projected.contains("492 earlier lines"), "{projected}");
     }
 
     #[test]
@@ -6381,7 +6397,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘  MCP     ▸ linear/save_issue ×2  id=HY-1 · id=HY-2 · denied"),
+            screen.contains("⊘  MCP     ▸ linear/save_issue · 2 calls · denied"),
             "{screen}"
         );
     }
@@ -6397,13 +6413,13 @@ mod tests {
             finish_call(&mut state, call_id, "mcp__linear__get_issue");
         }
         let mut cache = TranscriptRowCache::default();
-        assert!(draw_cards(&state, &mut cache).contains("×3"));
+        assert!(draw_cards(&state, &mut cache).contains("3 calls"));
         cache.fold_mut().expand_group(first.unwrap());
         let screen = draw_cards(&state, &mut cache);
-        assert!(screen.contains("×3"), "{screen}");
+        assert!(screen.contains("3 calls"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
-                screen.contains(&format!("✓  MCP     ▸ linear/get_issue  id={id}")),
+                screen.contains(&format!("✓  MCP     ▸ linear/get_issue · {id}")),
                 "{screen}"
             );
         }

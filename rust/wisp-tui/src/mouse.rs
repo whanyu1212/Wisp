@@ -1,6 +1,5 @@
 //! Bounded hit regions captured by the paint that users actually saw.
 
-use crate::transcript::TranscriptEntryId;
 use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus, WriterMessage};
 use crate::{OverlayKind, prompt_editor::PromptEditor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -294,8 +293,7 @@ impl Editor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FoldRow {
     pub y: u16,
-    pub entry: TranscriptEntryId,
-    pub group: bool,
+    pub target: crate::transcript_view::BrowseTarget,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -647,7 +645,7 @@ impl LiveUi {
         }
         if selection.is_empty() {
             if let Some(target) = selection.fold_target {
-                self.toggle_clicked_fold(target.entry, target.group);
+                self.toggle_clicked_fold(target.target);
             }
             return;
         }
