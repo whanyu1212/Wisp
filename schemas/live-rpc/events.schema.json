@@ -3253,6 +3253,32 @@
           "title": "Output Has Exit Status",
           "type": "boolean"
         },
+        "process_ended_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Ended At"
+        },
+        "process_started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Process Started At"
+        },
         "status": {
           "anyOf": [
             {
@@ -3297,7 +3323,9 @@
         "created",
         "summary",
         "truncated",
-        "duration_ms"
+        "duration_ms",
+        "process_started_at",
+        "process_ended_at"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"

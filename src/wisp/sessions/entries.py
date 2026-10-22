@@ -72,6 +72,10 @@ class ToolResultPresentationSnapshot(BaseModel):
     truncated: bool = False
     # Execution time in milliseconds; absent for results recorded before it was kept.
     duration_ms: int | None = Field(default=None, ge=0)
+    # A background process's start and end, so a reopened session still shows how
+    # long it ran; absent for other tools and for results recorded before they were kept.
+    process_started_at: datetime | None = None
+    process_ended_at: datetime | None = None
 
 
 class RepositoryStatusSnapshot(BaseModel):

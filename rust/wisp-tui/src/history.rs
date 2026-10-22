@@ -364,6 +364,12 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         .and_then(crate::tool_cards::timestamp_ms)
         .zip(duration_ms)
         .map(|(saved, duration)| saved.saturating_sub(i64::try_from(duration).unwrap_or(i64::MAX)));
+    let process_time = |field| {
+        result
+            .and_then(|result| result.get(field))
+            .and_then(Value::as_str)
+            .and_then(crate::tool_cards::timestamp_ms)
+    };
     let call_id = optional_string(message, index, "tool_call_id")?
         .map(bounded_identity)
         .unwrap_or_else(|| format!("s:history-result-boundary-{index}"));
@@ -415,8 +421,8 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         stderr_dropped_bytes: 0,
         duration_ms,
         started_at_ms,
-        process_started_at_ms: None,
-        process_ended_at_ms: None,
+        process_started_at_ms: process_time("process_started_at"),
+        process_ended_at_ms: process_time("process_ended_at"),
     })
 }
 
@@ -1517,6 +1523,28 @@ mod tests {
             card.started_at_ms,
             crate::tool_cards::timestamp_ms("2026-01-02T03:04:05Z")
         );
+    }
+
+    #[test]
+    fn history_keeps_process_elapsed() {
+        let mut call = message("assistant", "");
+        call["tool_calls"] = json!([{
+            "call_id": "poll-1",
+            "name": "bash",
+            "arguments": {"operation": "poll", "process_id": "process-1"},
+        }]);
+        let mut result = message("tool", "Process process-1 completed with exit code 2");
+        result["tool_call_id"] = json!("poll-1");
+        result["tool_name"] = json!("bash");
+        result["tool_result"] = json!({
+            "status": "error",
+            "process_started_at": "2026-01-02T03:04:05Z",
+            "process_ended_at": "2026-01-02T03:08:17Z",
+        });
+        let transcript = project_rpc_messages(&[call, result]).unwrap();
+        let card = transcript.entries()[0].process_card().unwrap();
+        assert_eq!(card.exit_code, Some(2));
+        assert_eq!(card.elapsed_label().as_deref(), Some("4m 12s"));
     }
 
     #[test]
