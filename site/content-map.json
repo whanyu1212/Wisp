@@ -88,6 +88,17 @@
     "searchable": true
   },
   {
+    "source": "contributing/0.3.0-release.md",
+    "title": "Wisp 0.3.0 release decision and checklist",
+    "description": "Release scope, compatibility, wheel validation, publication acceptance, and rollback guidance for Wisp 0.3.0.",
+    "route": "maintainers/releases/0.3.0-release.html",
+    "section": "maintainers",
+    "order": 35,
+    "layout": "archive",
+    "listed": false,
+    "searchable": false
+  },
+  {
     "source": "contributing/0.2.4-release.md",
     "title": "Wisp 0.2.4 release decision and checklist",
     "description": "Release decision, prepublication checklist, public-install acceptance, and rollback guidance for Wisp 0.2.4.",
@@ -367,7 +378,7 @@
     "description": "Each turn sends an ordered system-instruction stack before the user prompt: Wisp's core coding policy, bounded project context, guidance for exposed tools and skills when\u2026",
     "route": "guide/context-and-compaction.html",
     "section": "using",
-    "order": 19,
+    "order": 20,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -400,7 +411,7 @@
     "description": "Every interface drives the same RPC command host, CodingSession, AgentHarness, and provider-neutral loop. Choose a surface based on who supplies input and how output needs to\u2026",
     "route": "guide/interfaces.html",
     "section": "using",
-    "order": 14,
+    "order": 15,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -411,7 +422,7 @@
     "description": "The built-in deepseek provider uses DeepSeek's OpenAI-format Chat Completions API at https://api.deepseek.com. Set DEEPSEEK_API_KEY or store a key with /connect deepseek. Wisp\u2026",
     "route": "guide/providers.html",
     "section": "using",
-    "order": 16,
+    "order": 17,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -433,7 +444,7 @@
     "description": "Use the Python SDK when an asyncio application should own Wisp in its process and consume the same typed command/event contract as the CLI and JSONL RPC interfaces. The SDK is\u2026",
     "route": "guide/sdk.html",
     "section": "using",
-    "order": 15,
+    "order": 16,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -444,7 +455,7 @@
     "description": "Wisp persists each run as a JSONL session and can continue an existing one:",
     "route": "guide/sessions.html",
     "section": "using",
-    "order": 18,
+    "order": 19,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -455,7 +466,7 @@
     "description": "Wisp discovers metadata from directories that follow the Agent Skills specification. Inspect the current catalog and isolated validation diagnostics with:",
     "route": "guide/skills.html",
     "section": "using",
-    "order": 20,
+    "order": 21,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -466,7 +477,7 @@
     "description": "Wisp keeps control and evidence in the same loop as the work. A live client can redirect an active run at a safe boundary, every frontend uses the same approval and\u2026",
     "route": "guide/staying-in-sync.html",
     "section": "using",
-    "order": 13,
+    "order": 14,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -477,7 +488,7 @@
     "description": "Wisp includes built-in local tools for reading files, editing files, searching projects, and running shell commands. File tools are sandboxed to the tool context's working\u2026",
     "route": "guide/tools-and-safety.html",
     "section": "using",
-    "order": 17,
+    "order": 18,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -488,7 +499,18 @@
     "description": "The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions, and sessions.",
     "route": "guide/tui.html",
     "section": "using",
-    "order": 21,
+    "order": 22,
+    "layout": "docs",
+    "listed": true,
+    "searchable": true
+  },
+  {
+    "source": "guide/upgrading-to-0.3.md",
+    "title": "Upgrading from Wisp 0.2 to 0.3",
+    "description": "Upgrade Wisp to 0.3 with matching Python and Rust versions, session backups, RPC compatibility, and safe rollback.",
+    "route": "guide/upgrading-to-0.3.html",
+    "section": "using",
+    "order": 12,
     "layout": "docs",
     "listed": true,
     "searchable": true
@@ -499,7 +521,7 @@
     "description": "Wisp 0.2 is a minor release with announced breaking changes. What you need to do depends on how you use Wisp:",
     "route": "guide/upgrading.html",
     "section": "using",
-    "order": 12,
+    "order": 13,
     "layout": "docs",
     "listed": true,
     "searchable": true

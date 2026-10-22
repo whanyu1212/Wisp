@@ -78,6 +78,18 @@ command error lifecycle, while unknown events are fatal to clients.
 The schema bundle is a repository build input and a GitHub release asset named
 `wisp-live-rpc.tar.gz`; it is not part of the Python wheel API.
 
+## Wisp 0.3 compatibility
+
+0.3.0 adds RPC commands/events and defaulted tool, run, context, and history metadata. Existing
+documented Python entry points remain available; external RPC clients must upgrade in lockstep
+with the backend and use the 0.3.0 schema bundle.
+
+0.3.0 reads 0.2.4 sessions using the existing entry v6, event-envelope v1, and compaction v4
+formats. This does not guarantee that an older package can read newer records: 0.2.4 may reject
+the added tool presentation fields, while its typed event reader rejects new event fields.
+Keep a pre-upgrade session backup. See [Upgrading to 0.3](../guide/upgrading-to-0.3.md) for the
+supported rollback procedure. Settings, credentials, and trust formats are unchanged.
+
 ## Deprecation and removal
 
 Except for an explicit exception documented below, a public API may be removed only when all of

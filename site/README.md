@@ -98,7 +98,7 @@ mdbook build book
   This avoids a browser-download prerequisite for static builds. The Mermaid runtime
   has a large lazy chunk; future optimization must preserve the conditional loading.
 - `src/content/check-output.ts` validates output, including the compatibility pages
-  for the 17 release records and the SDK audit. Those records still read their original
+  for the release records and the SDK audit. Those records still read their original
   source files; they are hidden from normal navigation and marked `noindex`.
 - `tests/content.test.ts` exercises invalid metadata, include failures, actual Astro
   rendering, source-link resolution and compatibility-validation failures.
