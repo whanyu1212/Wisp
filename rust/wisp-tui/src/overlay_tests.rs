@@ -1008,6 +1008,7 @@ async fn panel_enter_opens_diff() {
             before: "a\n".into(),
             after: "b\n".into(),
             notice: String::new(),
+            ..Default::default()
         }],
     }));
     draw(&mut ui, &mut terminal);
@@ -1087,4 +1088,263 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
     draw(&mut ui, &mut terminal);
     ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
     assert!(!ui.side_panel.overlay_open());
+}
+
+fn edited_snapshot() -> std::sync::Arc<reducer::git_diff::GitDiffSnapshot> {
+    use reducer::git_diff::{GitDiffEdit, GitDiffFile, GitDiffSnapshot};
+    std::sync::Arc::new(GitDiffSnapshot {
+        generation: 1,
+        head: "abc".into(),
+        truncated: false,
+        files: vec![GitDiffFile {
+            path: "src/lib.rs".into(),
+            status: "modified".into(),
+            before: "a\n".into(),
+            after: "b\n".into(),
+            edits: vec![GitDiffEdit {
+                call_id: "edit-1".into(),
+                entry_id: String::new(),
+                tool: "edit".into(),
+            }],
+            ..Default::default()
+        }],
+    })
+}
+
+#[tokio::test]
+async fn diff_enter_jumps_to_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    let card = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"path": "src/lib.rs", "edits": []}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    draw(&mut ui, &mut terminal);
+    // Tree focus: Enter opens the file in the diff pane; there, Enter jumps.
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), None);
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+    assert_eq!(
+        ui.transcript_viewport
+            .scrolled_top()
+            .map(|top| top.entry_id),
+        Some(card)
+    );
+}
+
+#[tokio::test]
+async fn missing_card_opens_diff() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "gone".into(),
+            entry_id: String::new(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(
+        ui.notice
+            .as_deref()
+            .unwrap()
+            .contains("not in the transcript")
+    );
+}
+
+fn finished_edit(ui: &mut LiveUi, call_id: &str) -> crate::transcript::TranscriptEntryId {
+    let card = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: call_id.into(),
+            name: "edit".into(),
+            arguments: json!({"path": "src/lib.rs", "edits": []}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    ui.state
+        .transcript
+        .observe_tool_result(tool_cards::ToolResultInput {
+            call_id: call_id.into(),
+            name: "edit".into(),
+            output: "Applied 1 edit(s) to src/lib.rs".into(),
+            output_tail: None,
+            output_source_bytes: 0,
+            output_source_lines: 1,
+            output_projection_cut_mid_line: false,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: None,
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+            duration_ms: None,
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
+        });
+    card
+}
+
+#[tokio::test]
+async fn jump_opens_folded_group() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    finished_edit(&mut ui, "edit-0");
+    let card = finished_edit(&mut ui, "edit-1");
+    let (_, members) = card_run(&ui.state.transcript, card).expect("edits group");
+    assert!(!ui.transcript_row_cache.fold().is_run_expanded(&members));
+    draw(&mut ui, &mut terminal);
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "edit-1".into(),
+            entry_id: String::new(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_run_expanded(&members));
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+    draw(&mut ui, &mut terminal);
+    assert_eq!(
+        ui.transcript_viewport
+            .scrolled_top()
+            .map(|top| top.entry_id),
+        Some(card)
+    );
+}
+
+#[tokio::test]
+async fn diff_keeps_open_without_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    draw(&mut ui, &mut terminal);
+    for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Enter] {
+        ui.handle_input(key(code), &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(
+        ui.notice
+            .as_deref()
+            .unwrap()
+            .contains("not in the transcript")
+    );
+}
+
+#[tokio::test]
+async fn ctrl_t_opens_tree() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    let theme = ui.theme.active.slug.clone();
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    // The tree's request ran: without a saved session it says so. The theme stays.
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("No persisted session is selected.")
+    );
+    assert_eq!(ui.theme.active.slug, theme);
+}
+
+#[tokio::test]
+async fn ctrl_t_keeps_draft() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.state.input_ready = true;
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "session-1".into(),
+        session_path: "/sessions/one.jsonl".into(),
+        session_name: None,
+    });
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    // The tree is requested, and unlike /tree the shortcut leaves the draft.
+    assert!(matches!(
+        ui.state.session_operation,
+        Some(reducer::SessionOperation::LoadingTree { .. })
+    ));
+    assert!(receiver.try_recv().is_ok());
+    assert!(
+        ui.editor.text().starts_with("keep this"),
+        "{}",
+        ui.editor.text()
+    );
+}
+
+#[tokio::test]
+async fn jump_follows_result_entry() {
+    // A provider reused a call ID: the edit names its result's entry, which picks
+    // the card the call ID alone cannot.
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    let first = finished_edit(&mut ui, "edit-a");
+    let second = finished_edit(&mut ui, "edit-b");
+    ui.state.transcript.add_live_origin(second, "entry-b");
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "edit-a".into(),
+            entry_id: "entry-b".into(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_expanded(second));
+    assert!(!ui.transcript_row_cache.fold().is_expanded(first));
 }

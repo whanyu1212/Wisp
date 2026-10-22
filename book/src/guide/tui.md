@@ -94,11 +94,19 @@ that was not retained. Full file locations remain in the review heading.
 
 Use `/diff` for a separate **working tree ↔ HEAD** review. It reads the current
 repository through the backend, combines staged and unstaged tracked edits, and
-lists untracked files separately without reading their contents. The changed-file
-list groups folders with counts; Enter expands a folder or focuses its file diff.
-Tab switches between the file list and diff. `[` / `]`, `s`, `c`, and scrolling
-work as in retained-edit review. On narrow terminals, Tab switches between full-width
-file navigation and the selected diff. Esc closes the view.
+lists untracked files separately without reading their contents. A header row shows
+the file count, the tracked files' `+N −M`, how many files Wisp edited this session,
+and the snapshot's age. The changed-file list groups folders with counts (a folder
+holding only one folder joins it, as `src/wisp/providers/`) and gives each tracked file a
+churn bar; Enter expands a folder or focuses its file diff. Files changed by a Wisp
+`edit` or `write` call in this session carry `◆`, and folders with none say
+`not from this session`; Enter in the diff of a `◆` file jumps to its edit card.
+Each hunk header is a bar naming the definition it falls in, as Git's do, and the
+unchanged lines between hunks fold into one `⋯ N unchanged lines` row. The diff is
+split where the pane is at least 100 columns wide. Tab switches between the file list
+and diff. `[` / `]` move between hunks, `s` switches split and unified, `c` shows every
+unchanged line, and scrolling works as in retained-edit review. On narrow terminals,
+Tab switches between full-width file navigation and the selected diff. Esc closes the view.
 
 Press `r` to capture a new snapshot. The view is read-only and does not watch the
 filesystem: a snapshot may become stale while Wisp or another program edits files.
@@ -198,7 +206,7 @@ saved key. Device login displays the
 short-lived user code and verification URL but never stores them in prompt or session history.
 
 The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and
-`/name --clear`, `/clone`, `/tree`, and `/unrevert`. The `/tree` picker uses `Up`/`Down`,
+`/name --clear`, `/clone`, `/tree` (also `Ctrl+T`), and `/unrevert`. The `/tree` picker uses `Up`/`Down`,
 `PageUp`/`PageDown`, `Home`/`End`, `Enter` to navigate, `f` to fork a selected user-message node,
 and `Escape` to close. It requests 200 append-ordered nodes per page and retains only the newest two
 pages (400 nodes); an omission row appears after the oldest page is evicted, and reopening `/tree`
@@ -272,8 +280,9 @@ opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate th
 picker previews with `Up`/`Down`, `PageUp`/`PageDown`,
 or `Home`/`End`; `Enter` applies the displayed choice, while `Escape` or `Ctrl+C` restores the
 committed theme. Streaming continues behind it. A new approval, trust request, or presented workflow
-cancels the preview without saving it. `Ctrl+T` switches between Paper and the last committed dark
-theme, including when starting from Dawn; it is ignored while the theme picker owns a preview.
+cancels the preview without saving it. The `theme.toggle` binding (unbound by default) switches
+between Paper and the last committed dark theme, including when starting from Dawn; it is ignored
+while the theme picker owns a preview.
 These are local presentation actions, never prompts or runtime configuration commands.
 
 Run `/logo` to preview and select Random, Classic WISP, Wisp Braille, Adal Braille, or Adal Mark
@@ -389,8 +398,9 @@ the entire default keymap; other valid user settings still apply.
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
-| `theme.toggle` | Ctrl+T | Toggle Paper / last dark theme |
+| `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+B | Show or hide the side panel |
+| `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Select transcript cards |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
 | `transcript.home`, `transcript.tail` | Ctrl+Home, Ctrl+End | Oldest content / live tail |
@@ -442,7 +452,8 @@ for remote terminals. Mouse drag selection and transcript clipboard copy remain 
 
 Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing
 Tab/Shift+Tab/Enter/Space, decision approval/denial, and editor navigation. They take precedence over
-custom application bindings. The existing Ctrl+T toggle remains global except during theme preview.
+custom application bindings. A bound theme toggle stays global except during theme preview. Binding
+`theme.toggle` to Ctrl+T also needs `"session.tree": []`, since two actions cannot share a chord.
 Ctrl+G opens read-only help for the current workflow, with resolved keys; Ctrl+G or Escape closes it
 without closing the underlying workflow. Ctrl+C keeps that workflow's cancellation behavior.
 Approval/trust requests preempt help, and positive decisions require the request to be visible.
@@ -636,7 +647,7 @@ submitted to the agent, and incomplete Markdown stays editable.
 | `Up` / `Down` | Move through an active suggestion menu |
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
-| `Ctrl+T` | Switch between the light and dark themes (remembered across runs) |
+| `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+B` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
@@ -673,8 +684,8 @@ Output bodies and tool arguments use bounded previews during initial loading. An
 load returns the exact text stored in JSONL; it cannot recover bytes truncated before persistence.
 
 Run `/theme` to preview Vapor, Glass, Orchid, Ember, Storm, Grove, Wave, Paper, and Dawn, or pass one
-of those names directly. `Ctrl+T` switches between Paper and the most recently selected dark palette;
-from Dawn it returns to that dark palette too. The choice is written to `~/.wisp/tui.json` and
+of those names directly. A bound `theme.toggle` switches between Paper and the most recently selected
+dark palette; from Dawn it returns to that dark palette too. The choice is written to `~/.wisp/tui.json` and
 restored on the next run. It is presentation state owned by the TUI client, so it is kept out of
 `settings.json` and never reaches the agent subprocess; an unreadable or unrecognized value falls
 back to Vapor rather than failing to start.
@@ -716,12 +727,15 @@ prompt is running.
 ### Side panel
 
 On a terminal at least 160 columns wide, a side panel beside the transcript summarizes the session:
-its name (or first prompt) and status, the folder and branch, context use, the model and effort,
-the session's cost, the permission mode, Git's changed files with line counts, each prompt's run
-time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
+its name (or first prompt) and status, the folder and branch, where the session sits in its tree
+(`⑂ branched from turn 4 · 2 siblings`, or `⑂ root · 2 branches` on the original line; `Ctrl+T`
+opens the tree), context use, the model and effort, the session's cost, the permission mode, Git's
+changed files with line counts (`◆` marks files Wisp edited this session; in the `Ctrl+B` overlay,
+Enter on one jumps to its edit card), each prompt's run time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
 and model to the panel. `Ctrl+B` hides or shows it. On a narrower terminal, `Ctrl+B` opens the same
 panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
-when the panel appears and after each run, but not while `/diff` is open.
+when the panel appears and after each run, but not while `/diff` is open. On a terminal at least
+160 columns wide, Edit and Write cards in the transcript set old and new side by side.
 
 ## Modes
 

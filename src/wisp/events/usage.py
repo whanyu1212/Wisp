@@ -252,6 +252,24 @@ class CompactionPolicyStatus(BaseModel):
     overflow_recovery_enabled: bool = True
 
 
+class SessionBranchSummary(BaseModel):
+    """Where the active path sits in the session tree.
+
+    At each node with several children, the first child appended is the original
+    line and the later ones are branches. ``branched_from_turn`` is set when the
+    active path takes a branch: it counts the user turns shared with the original
+    line at the deepest such point, and ``siblings`` counts the other children
+    there. On the original line ``branched_from_turn`` is ``None`` and
+    ``branches`` counts every branch that splits off the active path.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    branched_from_turn: int | None = Field(default=None, ge=0)
+    siblings: int = Field(default=0, ge=0)
+    branches: int = Field(default=0, ge=0)
+
+
 class SessionStats(BaseModel):
     """Derived lifetime usage and active-context statistics for one session."""
 
@@ -267,6 +285,7 @@ class SessionStats(BaseModel):
     compaction: CompactionPolicyStatus | None = None
     cost: SessionCostSummary = Field(default_factory=SessionCostSummary)
     context_breakdown: ContextBreakdown | None = None
+    branch: SessionBranchSummary = SessionBranchSummary()
 
 
 class ContextPressure(WispEvent):

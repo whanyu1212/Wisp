@@ -1627,6 +1627,16 @@
    "path": [
     "files",
     0,
+    "edits"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
     "kind"
    ],
    "accepted": false
@@ -1666,6 +1676,53 @@
    "operation": "add_unknown",
    "path": [
     "files",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
+    "entry_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
+    "tool"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "add_unknown",
+   "path": [
+    "files",
+    0,
+    "edits",
     0
    ],
    "accepted": false
@@ -3297,6 +3354,15 @@
    "operation": "remove",
    "path": [
     "stats",
+    "branch"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
     "compaction"
    ],
    "accepted": true
@@ -3378,6 +3444,45 @@
    "operation": "add_unknown",
    "path": [
     "stats"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "branched_from_turn"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "branches"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "remove",
+   "path": [
+    "stats",
+    "branch",
+    "siblings"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.stats",
+   "operation": "add_unknown",
+   "path": [
+    "stats",
+    "branch"
    ],
    "accepted": false
   },

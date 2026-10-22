@@ -743,6 +743,24 @@ impl Transcript {
         self.call_entries.values().any(|binding| !binding.resolved)
     }
 
+    /// The tool card a persisted message was drawn into, live or from history.
+    pub(crate) fn tool_entry_with_origin(
+        &self,
+        durable_entry_id: &str,
+    ) -> Option<TranscriptEntryId> {
+        self.entries
+            .iter()
+            .find(|entry| {
+                entry.tool_card().is_some()
+                    && entry
+                        .live_message_origins
+                        .iter()
+                        .chain(&entry.durable_entry_ids)
+                        .any(|origin| origin == durable_entry_id)
+            })
+            .map(|entry| entry.id)
+    }
+
     pub(crate) fn tool_entry_for_call(&self, call_id: &str) -> Option<TranscriptEntryId> {
         self.call_entries
             .get(call_id)

@@ -15,8 +15,9 @@ use wisp_protocol::events::{
     ContextAccountingMethod, ContextBreakdown, ContextBudget, ContextSource, ContextSourceUsage,
 };
 
-/// Bar cells between the start of the compaction reserve and the window's end.
-const RESERVE_CELL: &str = "╱";
+/// Bar cells between the start of the compaction reserve and the window's end: a
+/// dashed rule as heavy as the used cells, so the reserve reads as part of the bar.
+pub(crate) const RESERVE_CELL: &str = "╍";
 const USED_CELL: &str = "━";
 const MARKER_CELL: &str = "┃";
 const SPARK_LEVELS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
@@ -205,9 +206,21 @@ pub(crate) fn estimated(tokens: u64) -> String {
     format!("~{}", abbreviated(tokens))
 }
 
+impl Split<'_> {
+    /// The free space, marked `~` when the total it is taken from is estimated.
+    pub(crate) fn free_label(&self, free: u64) -> String {
+        if self.approximate {
+            estimated(free)
+        } else {
+            abbreviated(free)
+        }
+    }
+}
+
 /// The window as one row of `width` cells: a run of each source's colour, then
-/// the free space, then the compaction reserve hatched from the threshold, which a
-/// marker in the error colour starts. Without a split the used part is one run.
+/// the free space, then the compaction reserve as a dashed rule from the
+/// threshold, which a marker in the error colour starts. Without a split the used
+/// part is one run.
 pub(crate) fn bar(split: &Split<'_>, width: usize, palette: Palette) -> Line<'static> {
     let Some(window) = split.window else {
         return Line::default();
@@ -218,7 +231,7 @@ pub(crate) fn bar(split: &Split<'_>, width: usize, palette: Palette) -> Line<'st
         .map(|threshold| column(threshold, window, width));
     if let Some(start) = threshold {
         for cell in &mut cells[start..] {
-            *cell = (RESERVE_CELL, palette.muted);
+            *cell = (RESERVE_CELL, palette.rail());
         }
     }
     let sources = split.sources();

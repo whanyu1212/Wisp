@@ -251,6 +251,7 @@ class RpcCommandExecutor:
                     send=self.send,
                     write_event=self.write_event,
                     publish=self.publish_project_files,
+                    session=self.session_state.session,
                 )
             )
         if isinstance(known, GetSkillsCommand):

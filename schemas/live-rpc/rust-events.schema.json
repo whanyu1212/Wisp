@@ -2300,9 +2300,42 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcGitDiffEdit": {
+      "additionalProperties": false,
+      "description": "One successful edit or write call in the active session path that targeted a file.\n\n``entry_id`` names the session entry holding the call's result. It identifies\nthe call even when a provider reuses ``call_id``, so a frontend finds its card.",
+      "properties": {
+        "call_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "RpcGitDiffEditCallId",
+          "type": "string"
+        },
+        "entry_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "RpcGitDiffEditEntryId",
+          "type": "string"
+        },
+        "tool": {
+          "enum": [
+            "edit",
+            "write"
+          ],
+          "title": "RpcGitDiffEditTool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "entry_id",
+        "tool"
+      ],
+      "title": "RpcGitDiffEdit",
+      "type": "object"
+    },
     "RpcGitDiffFile": {
       "additionalProperties": false,
-      "description": "One authorized file pair, or an explicit unavailable-content notice.",
+      "description": "One authorized file pair, or an explicit unavailable-content notice.\n\n``edits`` lists the session's own edit and write calls on this path, oldest\nfirst. An empty tuple means no call in the active session path touched the\nfile, so its changes came from outside this session.",
       "properties": {
         "after": {
           "maxLength": 50000,
@@ -2313,6 +2346,15 @@
           "maxLength": 50000,
           "title": "RpcGitDiffFileBefore",
           "type": "string"
+        },
+        "edits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcGitDiffEdit"
+          },
+          "maxItems": 16,
+          "title": "RpcGitDiffFileEdits",
+          "type": "array"
         },
         "kind": {
           "enum": [
@@ -2351,7 +2393,8 @@
         "status",
         "before",
         "after",
-        "notice"
+        "notice",
+        "edits"
       ],
       "title": "RpcGitDiffFile",
       "type": "object"
@@ -4987,6 +5030,44 @@
       "title": "RpcWorkspaceReported",
       "type": "object"
     },
+    "SessionBranchSummary": {
+      "additionalProperties": false,
+      "description": "Where the active path sits in the session tree.\n\nAt each node with several children, the first child appended is the original\nline and the later ones are branches. ``branched_from_turn`` is set when the\nactive path takes a branch: it counts the user turns shared with the original\nline at the deepest such point, and ``siblings`` counts the other children\nthere. On the original line ``branched_from_turn`` is ``None`` and\n``branches`` counts every branch that splits off the active path.",
+      "properties": {
+        "branched_from_turn": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SessionBranchSummaryBranchedFromTurn"
+        },
+        "branches": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SessionBranchSummaryBranches",
+          "type": "integer"
+        },
+        "siblings": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SessionBranchSummarySiblings",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branched_from_turn",
+        "siblings",
+        "branches"
+      ],
+      "title": "SessionBranchSummary",
+      "type": "object"
+    },
     "SessionCostSummary": {
       "additionalProperties": false,
       "description": "Cumulative persisted list-price accounting for a session.",
@@ -5077,6 +5158,15 @@
           "title": "SessionStatsActiveMessageCount",
           "type": "integer"
         },
+        "branch": {
+          "$ref": "#/$defs/SessionBranchSummary",
+          "default": {
+            "branched_from_turn": null,
+            "branches": 0,
+            "siblings": 0
+          },
+          "title": "SessionStatsBranch"
+        },
         "compaction": {
           "anyOf": [
             {
@@ -5151,7 +5241,8 @@
         "context",
         "compaction",
         "cost",
-        "context_breakdown"
+        "context_breakdown",
+        "branch"
       ],
       "title": "SessionStats",
       "type": "object"

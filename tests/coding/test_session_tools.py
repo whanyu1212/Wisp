@@ -1158,3 +1158,46 @@ def test_returns_error_result_for_invalid_tool_arguments(tmp_path: Path) -> None
     assert any(
         isinstance(event, MessageCompleted) and event.content == "recovered" for event in events
     )
+
+
+def test_edit_results_record_folder(tmp_path: Path) -> None:
+    class FakeEditTool:
+        name = "edit"
+        safety = "read"
+        description = "Pretend to edit a file."
+        input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            return ToolResult(text="edited")
+
+    calls = [
+        ToolCall(call_id="edit-1", name="edit", arguments={"path": "a.py"}, response_id="r1"),
+        ToolCall(call_id="echo-1", name="echo", arguments={"text": "x"}, response_id="r1"),
+    ]
+    registry = ToolRegistry()
+    registry.register(FakeEditTool())
+    registry.register(EchoTool())
+    project = tmp_path / "project"
+    project.mkdir()
+    store = JsonlSessionStore(tmp_path / "sessions")
+    agent = CodingSession(
+        provider=ToolLoopProvider([calls, ["done"]]),
+        sessions=store,
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=project),
+    )
+    session = store.create()
+
+    async def run_agent() -> None:
+        _ = [event async for event in agent.run("edit", session=session)]
+
+    anyio.run(run_agent)
+    # `/diff` resolves an edit's path against the folder it ran in, even after the
+    # session is resumed from another project; other tools record no folder.
+    results = {
+        entry.message.tool_call_id: entry.tool_result
+        for entry in store.load(session.path).read_entries()
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
+    }
+    assert results["edit-1"] is not None and results["edit-1"].cwd == str(project.resolve())
+    assert results["echo-1"] is not None and results["echo-1"].cwd is None

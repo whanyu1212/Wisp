@@ -5,9 +5,19 @@ import time
 from pathlib import Path
 from threading import Event
 
+import anyio
 import pytest
 
-from wisp.rpc.handlers.git_diff import GitReadUnavailable, _git, collect_git_diff
+from wisp.events import RpcGitDiffEdit, ToolCallSnapshot
+from wisp.messages import Message
+from wisp.rpc.handlers.git_diff import (
+    GitReadUnavailable,
+    _git,
+    collect_git_diff,
+    session_edits,
+)
+from wisp.sessions import JsonlSession, JsonlSessionStore, MessageSessionEntry
+from wisp.sessions.entries import ToolResultPresentationSnapshot
 from wisp.tools.context import ToolContext
 
 
@@ -100,7 +110,6 @@ def test_nested_scope_does_not_read_outside_cwd(repo: Path) -> None:
 
 
 def test_host_correlates_diff_and_gates_policy(repo: Path) -> None:
-    import anyio
 
     from tests.rpc.handlers.test_project_files import running_host, wait_finished
     from wisp.events import RpcGitDiffReported
@@ -238,3 +247,236 @@ def test_deleted_empty_file_remains_visible(repo: Path) -> None:
     git(repo, "commit", "-m", "empty")
     (repo / "empty").unlink()
     assert [(file.path, file.status) for file in snapshot(repo).files] == [("empty", "deleted")]
+
+
+def edit_call(call_id: str, name: str, path: str) -> Message:
+    return Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCallSnapshot(call_id=call_id, name=name, arguments={"path": path}),),
+    )
+
+
+def tool_result(call_id: str, name: str, *, error: bool = False) -> Message:
+    return Message(
+        role="tool", content="done", tool_call_id=call_id, tool_name=name, is_error=error
+    )
+
+
+def ran_in(cwd: Path, messages: list[Message]) -> list[MessageSessionEntry]:
+    """Session entries for `messages`, each tool result recording the folder it ran in."""
+    return [
+        MessageSessionEntry(
+            session_id="s",
+            message=message,
+            tool_result=(
+                ToolResultPresentationSnapshot(cwd=str(cwd)) if message.role == "tool" else None
+            ),
+        )
+        for message in messages
+    ]
+
+
+def calls(edits: tuple[RpcGitDiffEdit, ...]) -> list[tuple[str, str]]:
+    return [(edit.call_id, edit.tool) for edit in edits]
+
+
+def saved_session(directory: Path, entries: list[MessageSessionEntry]) -> JsonlSession:
+    """Write the entries to a session file and reopen it, as resuming does."""
+    store = JsonlSessionStore(directory)
+    session = store.create()
+
+    async def append() -> None:
+        for entry in entries:
+            await session.append_entry(entry.model_copy(update={"session_id": session.session_id}))
+
+    anyio.run(append)
+    return store.load(session.path)
+
+
+def test_marks_only_wisp_edits(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    for name in ("external.py", "failed.py"):
+        (repo / name).write_text("original\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "more")
+    session = saved_session(
+        tmp_path_factory.mktemp("sessions"),
+        ran_in(
+            repo,
+            [
+                edit_call("edit-1", "edit", "file.py"),
+                tool_result("edit-1", "edit"),
+                edit_call("write-1", "write", str(repo / "new.py")),
+                tool_result("write-1", "write"),
+                edit_call("edit-2", "edit", "failed.py"),
+                tool_result("edit-2", "edit", error=True),
+                edit_call("read-1", "read", "external.py"),
+                tool_result("read-1", "read"),
+                edit_call("edit-3", "edit", "file.py"),
+                tool_result("edit-3", "edit"),
+            ],
+        ),
+    )
+    # Wisp's edits land, then the same file and others change outside the session.
+    (repo / "file.py").write_text("by wisp\nand by hand\n")
+    (repo / "new.py").write_text("written\n")
+    (repo / "external.py").write_text("by hand\n")
+    (repo / "failed.py").write_text("by hand\n")
+    context = ToolContext(cwd=repo)
+    edits = session_edits(session.read_active_path(), context)
+    files = {f.path: f for f in collect_git_diff(context, Event(), "d", 1, edits).files}
+    assert calls(files["file.py"].edits) == [("edit-1", "edit"), ("edit-3", "edit")]
+    assert calls(files["new.py"].edits) == [("write-1", "write")]
+    assert files["external.py"].edits == ()
+    assert files["failed.py"].edits == ()
+    # Each edit names the session entry holding its result.
+    results = {
+        entry.message.tool_call_id: entry.id
+        for entry in session.read_active_path()
+        if isinstance(entry, MessageSessionEntry) and entry.message.role == "tool"
+    }
+    assert files["new.py"].edits[0].entry_id == results["write-1"]
+
+
+def test_edit_paths_resolve_from_cwd(repo: Path) -> None:
+    (repo / "sub").mkdir()
+    (repo / "sub" / "local.py").write_text("local\n")
+    entries = ran_in(
+        repo / "sub",
+        [
+            edit_call("inside", "write", "local.py"),
+            tool_result("inside", "write"),
+            edit_call("escape", "write", "../file.py"),
+            tool_result("escape", "write"),
+        ],
+    )
+    context = ToolContext(cwd=repo / "sub")
+    edits = session_edits(entries, context)
+    assert list(edits) == [repo / "sub" / "local.py"]
+    report = collect_git_diff(context, Event(), "d", 1, edits)
+    assert [f.edits[0].call_id for f in report.files] == ["inside"]
+
+
+def test_other_project_marks_nothing(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    # A session resumed here from another project: its relative paths name that
+    # project's files, not this one's.
+    elsewhere = tmp_path_factory.mktemp("elsewhere")
+    entries = ran_in(
+        elsewhere, [edit_call("edit-1", "edit", "file.py"), tool_result("edit-1", "edit")]
+    )
+    (repo / "file.py").write_text("changed\n")
+    context = ToolContext(cwd=repo)
+    report = collect_git_diff(context, Event(), "d", 1, session_edits(entries, context))
+    assert [(f.path, f.edits) for f in report.files] == [("file.py", ())]
+
+
+def test_unrecorded_folder_marks_nothing(repo: Path) -> None:
+    messages = [edit_call("edit-1", "edit", "file.py"), tool_result("edit-1", "edit")]
+    entries = [MessageSessionEntry(session_id="s", message=m) for m in messages]
+    assert session_edits(entries, ToolContext(cwd=repo)) == {}
+
+
+def test_unresolvable_path_is_skipped(repo: Path) -> None:
+    entries = ran_in(
+        repo,
+        [
+            edit_call("home", "write", "~nosuchuser-wisp/x.py"),
+            tool_result("home", "write"),
+            edit_call("ok", "edit", "file.py"),
+            tool_result("ok", "edit"),
+        ],
+    )
+    assert list(session_edits(entries, ToolContext(cwd=repo))) == [repo / "file.py"]
+
+
+def test_reused_call_ids_stay_distinct(repo: Path) -> None:
+    (repo / "other.py").write_text("x\n")
+    both = Message(
+        role="assistant",
+        content="",
+        tool_calls=(
+            ToolCallSnapshot(call_id="same", name="edit", arguments={"path": "file.py"}),
+            ToolCallSnapshot(call_id="same", name="write", arguments={"path": "other.py"}),
+        ),
+    )
+    entries = ran_in(
+        repo,
+        [
+            both,
+            tool_result("same", "edit"),
+            tool_result("same", "write"),
+            edit_call("same", "edit", "file.py"),
+            tool_result("same", "edit", error=True),
+        ],
+    )
+    edits = session_edits(entries, ToolContext(cwd=repo))
+    # Results pair with calls in order, and each edit names its own result entry,
+    # so a reused call ID still finds the right card.
+    assert edits[repo / "file.py"][0].entry_id == entries[1].id
+    assert edits[repo / "other.py"][0].entry_id == entries[2].id
+    assert calls(edits[repo / "file.py"]) == [("same", "edit")]
+
+
+def test_host_reports_session_edits(repo: Path) -> None:
+    from tests.rpc.handlers.test_project_files import running_host, wait_finished
+    from wisp.events import RpcGitDiffReported
+    from wisp.rpc.coordinator import _RpcSessionState
+
+    (repo / "file.py").write_text("changed\n")
+
+    async def scenario() -> None:
+        async with running_host(repo) as (host, command, events):
+            session = host.sessions.create()
+            for entry in ran_in(
+                repo, [edit_call("edit-1", "edit", "file.py"), tool_result("edit-1", "edit")]
+            ):
+                await session.append_entry(
+                    entry.model_copy(update={"session_id": session.session_id})
+                )
+            host.coordinator.session_state = _RpcSessionState(session, (), 2)
+            await command(type="get_git_diff", id="diff")
+            assert (await wait_finished(events, "diff")).ok
+            report = next(e for e in events if isinstance(e, RpcGitDiffReported))
+            changed = next(f for f in report.files if f.path == "file.py")
+            assert [e.call_id for e in changed.edits] == ["edit-1"]
+
+    anyio.run(scenario)
+
+
+def test_marks_survive_compaction(repo: Path, tmp_path_factory: pytest.TempPathFactory) -> None:
+    from wisp.messages import CompactionRecord
+    from wisp.sessions import CompactionSessionEntry
+
+    session = saved_session(
+        tmp_path_factory.mktemp("sessions"),
+        ran_in(
+            repo,
+            [
+                Message(role="user", content="edit file.py"),
+                edit_call("edit-1", "edit", "file.py"),
+                tool_result("edit-1", "edit"),
+                Message(role="assistant", content="Done."),
+                Message(role="user", content="thanks"),
+                Message(role="assistant", content="Welcome."),
+            ],
+        ),
+    )
+    path = session.read_active_path()
+    replaced = tuple(entry.id for entry in path[:4])
+
+    async def compact() -> None:
+        await session.append_compaction_entry(
+            CompactionSessionEntry(
+                session_id=session.session_id,
+                parent_id=path[-1].id,
+                compaction=CompactionRecord(
+                    summary="edited file.py", replaced_entry_ids=replaced, provider="fake"
+                ),
+            ),
+            expected_context_entry_ids=tuple(entry.id for entry in path),
+        )
+
+    anyio.run(compact)
+    assert not any(m.tool_calls for m in session.read_context_messages())
+    edits = session_edits(session.read_active_path(), ToolContext(cwd=repo))
+    assert calls(edits[repo / "file.py"]) == [("edit-1", "edit")]

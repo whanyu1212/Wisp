@@ -157,6 +157,8 @@ const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_COMMAND_ID: &str = "rust-tui-shutdown";
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ACTIVITY_INTERVAL: Duration = Duration::from_millis(125);
+/// How often an open `/diff` repaints the age of its snapshot.
+const DIFF_AGE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -1152,6 +1154,19 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        self.dispatch_session_action_with(action, true, writer, limit)
+            .await
+    }
+
+    /// Dispatch a session action. A slash command clears the composer it was typed
+    /// in (`clear_draft`); a shortcut leaves the draft alone.
+    async fn dispatch_session_action_with(
+        &mut self,
+        action: UiAction,
+        clear_draft: bool,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         let startup = matches!(&action, UiAction::StartupHydration);
         // Loading another tree page is navigation, not a newly submitted command.
         let paging_tree = matches!(
@@ -1172,7 +1187,7 @@ impl LiveUi {
         }
         self.notice = None;
         let control = self.dispatch(action, writer, limit).await?;
-        if !paging_tree && self.notice.is_none() {
+        if clear_draft && !paging_tree && self.notice.is_none() {
             self.editor.clear();
         }
         Ok(control)
@@ -1802,6 +1817,7 @@ impl LiveUi {
                         frame,
                         area,
                         &self.state.git_diff,
+                        &self.state.transcript,
                         palette,
                     );
                     mouse::Rows::default()
@@ -1945,6 +1961,11 @@ impl LiveUi {
 
     fn stream_reveal_pending(&self) -> bool {
         self.state.transcript.unrevealed().is_some()
+    }
+
+    /// Whether `/diff` is showing a snapshot's age, which goes stale between inputs.
+    fn diff_age_shown(&self) -> bool {
+        self.git_diff_view.is_some() && self.state.git_diff.snapshot.is_some()
     }
 
     fn advance_activity_animation(&mut self) -> bool {
@@ -3228,6 +3249,7 @@ impl LiveUi {
                 self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                     .await
             }
+            side_panel::Target::Edit(card) => self.jump_to_edit(card, writer, limit).await,
             side_panel::Target::Queue => {
                 self.queue_view = Some(queue_view::QueueView::default());
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
@@ -3239,6 +3261,45 @@ impl LiveUi {
                 self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
             }
         }
+    }
+
+    /// Show the card of a Wisp edit: close `/diff`, unfold the card and scroll it to
+    /// the top of the transcript. When the card is not in the transcript, such as one
+    /// in history not loaded yet, `/diff` opens at the file instead.
+    async fn jump_to_edit(
+        &mut self,
+        card: git_diff_view::EditCard,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.render_pending = true;
+        let entry =
+            git_diff_view::edit_card_entry(&self.state.transcript, &card.entry_id, &card.call_id);
+        let Some(entry) = entry else {
+            self.notice =
+                Some("That edit's card is not in the transcript; showing the file.".into());
+            if self.git_diff_view.is_some() {
+                return Ok(LoopControl::Continue);
+            }
+            self.git_diff_view = Some(git_diff_view::GitDiffView::opened_at(Some(card.path)));
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
+                .await;
+        };
+        let fold = self.transcript_row_cache.fold_mut();
+        if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+            if !fold.is_run_expanded(&members) {
+                fold.expand_group(start);
+            }
+        }
+        fold.expand(entry);
+        self.transcript_viewport.reveal_entry(entry);
+        if self.git_diff_view.take().is_some() {
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                .await;
+        }
+        Ok(LoopControl::Continue)
     }
 
     async fn poll_session_catalog(
@@ -4073,6 +4134,25 @@ impl LiveUi {
             }
             return Ok(LoopControl::Continue);
         }
+        if matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel))
+            && self.editor_editable()
+            && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::SessionTree))
+        {
+            // As /tree does, but the draft stays; the panel's session-tree line names
+            // this key.
+            self.side_panel.close_overlay();
+            self.render_pending = true;
+            return self
+                .dispatch_session_action_with(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: None,
+                    },
+                    false,
+                    writer,
+                    limit,
+                )
+                .await;
+        }
         if self.active_overlay().is_none()
             && self.editor_editable()
             && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ManageQueue))
@@ -4263,10 +4343,14 @@ impl LiveUi {
                 } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
                     return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
                 } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
-                    self.git_diff_view
+                    let card = self
+                        .git_diff_view
                         .as_mut()
                         .expect("open diff")
                         .key(key.code);
+                    if let Some(card) = card {
+                        return self.jump_to_edit(card, writer, limit).await;
+                    }
                 }
                 Ok(LoopControl::Continue)
             }

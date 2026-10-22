@@ -2,6 +2,7 @@
 
 use super::{BackendEvent, CommandIdSource, CommandKind, UiEffect, UiState};
 use std::sync::Arc;
+use std::time::Instant;
 use wisp_protocol::{ProtocolDecodeError, commands::WispTypedClientRpcCommands};
 
 pub type GitDiffReport = Result<Arc<GitDiffSnapshot>, String>;
@@ -17,6 +18,8 @@ struct Pending {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct GitDiff {
     pub snapshot: Option<Arc<GitDiffSnapshot>>,
+    /// When the snapshot arrived, for the age `/diff` shows.
+    pub received_at: Option<Instant>,
     pub error: Option<String>,
     generation: u64,
     /// `/diff` is open.
@@ -154,6 +157,7 @@ impl GitDiff {
                         Ok(snapshot) => {
                             self.generation = snapshot.generation;
                             self.snapshot = Some(snapshot);
+                            self.received_at = Some(Instant::now());
                         }
                         Err(error) => self.error = Some(error),
                     }
@@ -196,13 +200,51 @@ pub struct GitDiffSnapshot {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct GitDiffFile {
     pub path: String,
     pub status: String,
     pub before: String,
     pub after: String,
     pub notice: String,
+    /// The session's own edit and write calls on this file, oldest first. Empty when
+    /// every change came from outside this session.
+    #[serde(default)]
+    pub edits: Vec<GitDiffEdit>,
+}
+
+impl GitDiffFile {
+    /// Whether an edit or write call in this session changed the file (drawn ◆).
+    pub fn edited_by_wisp(&self) -> bool {
+        !self.edits.is_empty()
+    }
+
+    /// The session's latest call on this file, whose card Enter jumps to.
+    pub fn latest_edit(&self) -> Option<&GitDiffEdit> {
+        self.edits.last()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct GitDiffEdit {
+    pub call_id: String,
+    /// The session entry holding the call's result, which identifies its card even
+    /// when a provider reused the call ID.
+    #[serde(default)]
+    pub entry_id: String,
+    /// `edit` or `write`.
+    pub tool: String,
+}
+
+impl GitDiffEdit {
+    /// The tool as its card names it: `Edit` or `Write`.
+    pub fn tool_label(&self) -> &'static str {
+        if self.tool == "write" {
+            "Write"
+        } else {
+            "Edit"
+        }
+    }
 }
 
 #[cfg(test)]

@@ -494,7 +494,11 @@ pub(crate) fn help_rows(
             Line::raw("Type @ to find paths; ↑↓ select, Enter insert (not submit)."),
             Line::raw("Tab fuzzy/tree; ←/→ folders; Esc close; Tab at a dismissed reference refreshes."),
             Line::raw("Only paths are inserted. Limited snapshots may omit files; discovery stays in Python."),
-            Line::raw(format!("{} toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores.", bindings.label(crate::keybindings::Action::ToggleTheme))),
+            Line::raw(match bindings.label(crate::keybindings::Action::ToggleTheme).as_str() {
+                "Unbound" => "/theme previews; Enter applies, Esc restores. Bind theme.toggle to switch Paper / last dark theme.".to_owned(),
+                key => format!("{key} toggles Paper / last dark theme. /theme previews; Enter applies, Esc restores."),
+            }),
+            Line::raw(format!("{} opens the session tree to switch branches (/tree).", bindings.label(crate::keybindings::Action::SessionTree))),
             Line::raw("Ctrl+G shows the resolved shortcuts for the focused workflow."),
             Line::raw("Mouse navigation is on by default; WISP_TUI_MOUSE=0 disables it."),
             Line::raw("Wheel scrolls; click selects; Enter activates. Outside click closes a popup."),

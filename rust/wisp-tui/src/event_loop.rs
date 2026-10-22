@@ -1,10 +1,10 @@
 //! Bounded FIFO turns: transport outcomes, eight events, one input, one due paint.
 
 use crate::{
-    ACTIVITY_INTERVAL, BackendEvent, ConnectionInfo, Error, FRAME_INTERVAL, Input, LiveUi,
-    LoopControl, OverlayKind, QueuedEvent, ReaderTermination, RenderedDecisionContext, UiAction,
-    WriterMessage, is_ctrl_c, is_escape, mouse, printable_char, receive_reader_outcome,
-    terminal::FrameBackend,
+    ACTIVITY_INTERVAL, BackendEvent, ConnectionInfo, DIFF_AGE_INTERVAL, Error, FRAME_INTERVAL,
+    Input, LiveUi, LoopControl, OverlayKind, QueuedEvent, ReaderTermination,
+    RenderedDecisionContext, UiAction, WriterMessage, is_ctrl_c, is_escape, mouse, printable_char,
+    receive_reader_outcome, terminal::FrameBackend,
 };
 use ratatui::Terminal;
 use tokio::{
@@ -375,6 +375,7 @@ async fn run_with_interrupts<B: FrameBackend>(
     let mut events_open = true;
     let mut next_paint = Instant::now();
     let mut next_activity = Instant::now() + ACTIVITY_INTERVAL;
+    let mut next_age_tick = Instant::now() + DIFF_AGE_INTERVAL;
     loop {
         poll_outcomes(&mut sources, &mut eof)?;
         let mut progressed = false;
@@ -461,6 +462,13 @@ async fn run_with_interrupts<B: FrameBackend>(
             ui.advance_activity_animation();
             next_activity = now + ACTIVITY_INTERVAL;
         }
+        if now >= next_age_tick {
+            // `/diff` counts its snapshot's age in seconds.
+            if ui.diff_age_shown() {
+                ui.render_pending = true;
+            }
+            next_age_tick = now + DIFF_AGE_INTERVAL;
+        }
         if now >= next_paint {
             ui.advance_stream_reveal(now.into_std());
             if ui.render_pending {
@@ -516,6 +524,7 @@ async fn run_with_interrupts<B: FrameBackend>(
             }
             _ = tokio::time::sleep_until(next_paint), if ui.render_pending || ui.stream_reveal_pending() => {}
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() => {}
+            _ = tokio::time::sleep_until(next_age_tick), if ui.diff_age_shown() => {}
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}
         }
     }

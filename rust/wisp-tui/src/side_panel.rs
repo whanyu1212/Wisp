@@ -10,8 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::context_split::{self, SPARK_TURNS, Split, abbreviated};
+use crate::git_diff_view::EditCard;
 use crate::keybindings::{Action as KeyAction, Bindings};
-use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
+use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
 use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
 use crate::transcript::{RunOutcome, TranscriptRole};
@@ -24,7 +25,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::{ContextBreakdown, ContextSource, McpServerStatus};
+use wisp_protocol::events::{
+    ContextBreakdown, ContextSource, McpServerStatus, SessionBranchSummary,
+};
 
 /// The panel's width, its border included.
 pub(crate) const PANEL_WIDTH: u16 = 56;
@@ -90,6 +93,9 @@ struct Cursor {
 pub(crate) enum Target {
     /// `/diff`, at this file when one is named.
     Diff(Option<String>),
+    /// The card of the session's latest edit or write call on a file, or `/diff` at
+    /// the file when that card is not in the transcript.
+    Edit(EditCard),
     Queue,
     Mcp,
 }
@@ -217,7 +223,10 @@ impl SidePanel {
                 let mut targets: Vec<_> = summary
                     .rows
                     .iter()
-                    .map(|row| Target::Diff(Some(row.git_path.clone())))
+                    .map(|row| match &row.edit {
+                        Some(edit) => Target::Edit(EditCard::of(edit, &row.git_path)),
+                        None => Target::Diff(Some(row.git_path.clone())),
+                    })
                     .collect();
                 // The row counting the rest, or the one saying a partial snapshot
                 // omitted every file, opens /diff where it starts.
@@ -334,6 +343,8 @@ struct FileSummary {
     /// The listed files only: the rest are counted, not diffed, so a large
     /// working tree cannot stall a frame.
     rows: Vec<FileRow>,
+    /// How many of all the snapshot's files a Wisp edit in this session changed.
+    by_wisp: usize,
 }
 
 #[derive(Debug)]
@@ -348,6 +359,9 @@ struct FileRow {
     /// Whether line counts are known: an untracked file, or one Git could not read,
     /// shows none.
     counted: bool,
+    /// The session's latest edit or write call on the file; `None` when the file
+    /// changed only outside this session.
+    edit: Option<GitDiffEdit>,
 }
 
 impl FileSummary {
@@ -376,10 +390,20 @@ impl FileSummary {
                     additions,
                     deletions,
                     counted,
+                    edit: file.latest_edit().cloned(),
                 }
             })
             .collect();
-        Self { snapshot, rows }
+        let by_wisp = snapshot
+            .files
+            .iter()
+            .filter(|file| file.edited_by_wisp())
+            .count();
+        Self {
+            snapshot,
+            rows,
+            by_wisp,
+        }
     }
 }
 
@@ -455,13 +479,16 @@ pub(crate) fn render(
     }
 
     let toggle_key = ui::primary_label(bindings, KeyAction::TogglePanel);
+    let tree_key = ui::primary_label(bindings, KeyAction::SessionTree);
     let hint = if overlay {
         "Esc close · Tab sections · Enter open".to_owned()
     } else {
         format!("{toggle_key} hide panel")
     };
+    // The docked panel names the session tree's key at its right, as the mock does.
+    let tree_hint = (!overlay && tree_key != "Unbound").then(|| format!("{tree_key} session tree"));
     let focus = Focus::of(state);
-    let mut sections = vec![header_lines(state, width, palette)];
+    let mut sections = vec![header_lines(state, bindings, width, palette)];
     // Where each focusable section sits in `sections`, and the row its focusable
     // rows start at.
     let mut focusable: Vec<(Section, usize, usize)> = Vec::new();
@@ -499,7 +526,7 @@ pub(crate) fn render(
         model_lines(state, focus, width, palette),
     ]);
     focusable.push((Section::Files, sections.len(), 1));
-    sections.push(file_lines(state, panel, width, palette));
+    sections.push(file_lines(state, panel, overlay, width, palette));
     let mcp = mcp_line(state, width, palette);
     let fixed = |sections: &[Vec<Line<'static>>]| {
         sections.iter().map(|lines| lines.len() + 1).sum::<usize>()
@@ -567,8 +594,16 @@ pub(crate) fn render(
         ..inner
     };
     frame.render_widget(Paragraph::new(lines), inner);
+    let hint_line = match tree_hint {
+        Some(tree_hint) => spread(
+            ui::keycap_hints(&hint, palette).spans,
+            ui::keycap_hints(&tree_hint, palette).spans,
+            width,
+        ),
+        None => ui::keycap_hints(&hint, palette),
+    };
     frame.render_widget(
-        Paragraph::new(ui::keycap_hints(&hint, palette)).style(Style::default().fg(palette.muted)),
+        Paragraph::new(hint_line).style(Style::default().fg(palette.muted)),
         hint_row,
     );
 }
@@ -633,7 +668,12 @@ fn heading(title: &str, palette: Palette) -> Span<'static> {
 }
 
 /// The session's name, or its first prompt before it has one, and where it works.
-fn header_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'static>> {
+fn header_lines(
+    state: &UiState,
+    bindings: &Bindings,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
     let title = state
         .selected_session
         .as_ref()
@@ -666,7 +706,50 @@ fn header_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'st
             Style::default().fg(palette.muted),
         ));
     }
+    if let Some(branch) = state
+        .context
+        .stats
+        .as_ref()
+        .and_then(|stats| branch_text(&stats.branch))
+    {
+        let key = match ui::primary_label(bindings, KeyAction::SessionTree).as_str() {
+            "Unbound" => "/tree".to_owned(),
+            key => key.to_owned(),
+        };
+        lines.push(spread(
+            vec![
+                Span::styled("⑂ ", Style::default().fg(palette.muted)),
+                Span::styled(branch, Style::default().fg(palette.muted)),
+            ],
+            vec![Span::styled(key, palette.keycap())],
+            width,
+        ));
+    }
     lines
+}
+
+/// Where the active path sits in the session tree: `branched from turn 4 · 2
+/// siblings`, or `root · 2 branches` on the original line. A session that never
+/// branched has no line.
+fn branch_text(branch: &SessionBranchSummary) -> Option<String> {
+    let plural = |count: u64, one: &str, many: &str| {
+        format!("{count} {}", if count == 1 { one } else { many })
+    };
+    match branch.branched_from_turn {
+        Some(0) => Some(format!(
+            "branched from the start · {}",
+            plural(branch.siblings, "sibling", "siblings")
+        )),
+        Some(turn) => Some(format!(
+            "branched from turn {turn} · {}",
+            plural(branch.siblings, "sibling", "siblings")
+        )),
+        None if branch.branches > 0 => Some(format!(
+            "root · {}",
+            plural(branch.branches, "branch", "branches")
+        )),
+        None => None,
+    }
 }
 
 fn first_line(text: &str) -> String {
@@ -909,7 +992,7 @@ enum ContextDetail {
 }
 
 /// `Context  198.8k / 272.0k 73%` over the window split by source, with the
-/// compaction reserve hatched after its marker, then as much of the split as
+/// compaction reserve dashed after its marker, then as much of the split as
 /// `detail` allows.
 fn context_lines(
     state: &UiState,
@@ -1055,7 +1138,10 @@ fn source_rows(
     }
     if let Some(free) = split.free() {
         lines.push(row(
-            Span::styled("╱", muted),
+            Span::styled(
+                context_split::RESERVE_CELL,
+                Style::default().fg(palette.rail()),
+            ),
             vec![Span::styled("Compaction reserve", dim)],
             abbreviated(split.reserve),
             percent(split.reserve),
@@ -1063,7 +1149,7 @@ fn source_rows(
         lines.push(row(
             Span::styled("■", Style::default().fg(palette.panel)),
             vec![Span::styled("Free space", dim)],
-            abbreviated(free),
+            split.free_label(free),
             percent(free),
         ));
     }
@@ -1245,6 +1331,7 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
 fn file_lines(
     state: &UiState,
     panel: &SidePanel,
+    overlay: bool,
     width: usize,
     palette: Palette,
 ) -> Vec<Line<'static>> {
@@ -1263,8 +1350,20 @@ fn file_lines(
     let count = summary.snapshot.files.len();
     // A partial snapshot omits files past Git's limits, so its count is a floor.
     let partial = summary.snapshot.truncated;
-    let mut lines = vec![spread(
-        vec![heading("Changed files", palette)],
+    let by_wisp = summary.by_wisp;
+    let trailer = if by_wisp > 0 {
+        let others = count - by_wisp;
+        vec![
+            Span::styled("◆", Style::default().fg(palette.primary)),
+            Span::styled(
+                format!(
+                    " {by_wisp} by Wisp · {others}{} other",
+                    if partial { "+" } else { "" }
+                ),
+                muted,
+            ),
+        ]
+    } else {
         vec![Span::styled(
             match (count, partial) {
                 (0, _) => String::new(),
@@ -1273,7 +1372,11 @@ fn file_lines(
                 (count, true) => format!("{count}+ files"),
             },
             muted,
-        )],
+        )]
+    };
+    let mut lines = vec![spread(
+        vec![heading("Changed files", palette)],
+        trailer,
         width,
     )];
     if count == 0 {
@@ -1294,7 +1397,12 @@ fn file_lines(
             '?' => palette.muted,
             _ => palette.warning,
         });
-        let counts = if row.counted {
+        // Once Wisp edited anything, every row gets the ◆ column, and a file it did
+        // not edit reads as muted with no counts: it changed outside this session.
+        let external = by_wisp > 0 && row.edit.is_none();
+        let counts = if external {
+            vec![Span::styled("not from Wisp", muted)]
+        } else if row.counted {
             let mut counts = vec![Span::styled(
                 format!("+{}", row.additions),
                 Style::default().fg(palette.addition),
@@ -1310,15 +1418,24 @@ fn file_lines(
             Vec::new()
         };
         let counts_width: usize = counts.iter().map(|span| span.content.width()).sum();
-        let path_room = width.saturating_sub(2 + counts_width + usize::from(counts_width > 0));
-        lines.push(spread(
-            vec![
-                Span::styled(format!("{} ", row.status), status_style),
-                Span::raw(clip_path(&row.path, path_room)),
-            ],
-            counts,
-            width,
-        ));
+        let mark_width = if by_wisp > 0 { 2 } else { 0 };
+        let path_room =
+            width.saturating_sub(mark_width + 2 + counts_width + usize::from(counts_width > 0));
+        let mut path = Vec::new();
+        if by_wisp > 0 {
+            path.push(match row.edit {
+                Some(_) => Span::styled("◆ ", Style::default().fg(palette.primary)),
+                None => Span::raw("  "),
+            });
+        }
+        if external {
+            path.push(Span::styled(format!("{} ", row.status), muted));
+            path.push(Span::styled(clip_path(&row.path, path_room), muted));
+        } else {
+            path.push(Span::styled(format!("{} ", row.status), status_style));
+            path.push(Span::raw(clip_path(&row.path, path_room)));
+        }
+        lines.push(spread(path, counts, width));
     }
     if count > MAX_FILE_ROWS {
         lines.push(Line::styled(
@@ -1328,6 +1445,14 @@ fn file_lines(
     }
     if partial {
         lines.push(Line::styled("partial: some files omitted", muted));
+    }
+    // Only the overlay takes keys, so only it offers the jump.
+    if overlay && by_wisp > 0 {
+        lines.push(spread(
+            vec![Span::styled("Enter jumps to the edit", muted)],
+            vec![Span::styled("/diff", palette.keycap())],
+            width,
+        ));
     }
     lines
 }
@@ -1518,6 +1643,7 @@ mod tests {
             before: before.into(),
             after: after.into(),
             notice: String::new(),
+            ..Default::default()
         }
     }
 
@@ -1560,6 +1686,7 @@ mod tests {
                 unpriced_record_count: 0,
             },
             context_breakdown: None,
+            branch: Default::default(),
         }));
         state.permissions.snapshot = Some(Arc::new(PermissionState {
             mode: PermissionMode::Ask,
@@ -1754,6 +1881,90 @@ mod tests {
     }
 
     #[test]
+    fn tree_line_follows_branch() {
+        let line = |branch: SessionBranchSummary| {
+            let mut state = session();
+            state.context.stats.as_mut().unwrap().branch = branch;
+            let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+            panel
+                .lines()
+                .find_map(|line| line.find('⑂').map(|start| line[start..].to_owned()))
+        };
+        // A root session that never branched has no line.
+        assert_eq!(line(SessionBranchSummary::default()), None);
+        let root = line(SessionBranchSummary {
+            branches: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(root.starts_with("⑂ root · 2 branches"), "{root}");
+        assert!(root.ends_with("Ctrl+T"), "{root}");
+        let branched = line(SessionBranchSummary {
+            branched_from_turn: Some(4),
+            siblings: 1,
+            branches: 0,
+        })
+        .unwrap();
+        assert!(
+            branched.starts_with("⑂ branched from turn 4 · 1 sibling "),
+            "{branched}"
+        );
+        let sibling = line(SessionBranchSummary {
+            branched_from_turn: Some(4),
+            siblings: 2,
+            branches: 0,
+        })
+        .unwrap();
+        assert!(
+            sibling.starts_with("⑂ branched from turn 4 · 2 siblings"),
+            "{sibling}"
+        );
+        let rows = screen(&session(), &mut SidePanel::default(), 200);
+        let footer = panel_text(&rows, 200);
+        assert!(footer.contains("Ctrl+T session tree"), "{footer}");
+    }
+
+    #[test]
+    fn wisp_edits_get_marks() {
+        let mut state = session();
+        let mut edited = file("src/lib.rs", "modified", "a\n", "b\n");
+        edited.edits = vec![crate::reducer::git_diff::GitDiffEdit {
+            call_id: "edit-1".into(),
+            entry_id: String::new(),
+            tool: "edit".into(),
+        }];
+        state.git_diff.snapshot = Some(changes(vec![
+            edited,
+            file("src/other.rs", "modified", "a\n", "c\n"),
+        ]));
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(panel.contains("◆ 1 by Wisp · 1 other"), "{panel}");
+        assert!(panel.contains("◆ M src/lib.rs"), "{panel}");
+        assert!(panel.contains("  M src/other.rs"), "{panel}");
+        assert!(panel.contains("not from Wisp"), "{panel}");
+        assert!(
+            !panel.contains("Enter jumps"),
+            "the docked panel takes no keys"
+        );
+        assert!(overlay_text(&state).contains("Enter jumps to the edit"));
+        // Enter on the ◆ file jumps to its edit; on the other, it opens /diff.
+        let mut panel = overlay(&state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Edit(EditCard {
+                call_id: "edit-1".into(),
+                entry_id: String::new(),
+                path: "src/lib.rs".into(),
+            }))
+        );
+        panel.key(KeyCode::Down, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Diff(Some("src/other.rs".into())))
+        );
+    }
+
+    #[test]
     fn small_costs_keep_precision() {
         let cost = |usd: &str| {
             let mut state = session();
@@ -1919,16 +2130,17 @@ mod tests {
         );
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
-        // 85% of the 52-column bar: the marker, then the hatched reserve.
+        // 85% of the 52-column bar: the marker, then the reserve's dashed rule.
         assert_eq!(bar.chars().position(|c| c == '┃'), Some(44), "{panel}");
-        assert!(bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        assert!(bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
         let mut previous = row_of(&panel, "Context");
         for expected in [
             "■ Messages                            ~152.6k  56.1%",
             "tool output 95.2k · assistant 41.0k · user 16.4k",
             "■ MCP tools 4 servers                  ~14.1k   5.2%",
             "■ Project context                       ~5.0k   1.8%",
-            "╱ Compaction reserve                    40.8k  15.0%",
+            "╍ Compaction reserve                    40.8k  15.0%",
+            // An exact total leaves free space exact.
             "■ Free space                            32.4k  11.9%",
             "per turn ▄▆▂█▅▆                     ▏compacts at 85%",
             "turn 6 +38.2k · largest: gh pr checks 766 out… 21.4k",
@@ -2006,7 +2218,7 @@ mod tests {
         // Older statistics have no split: one run, the reserve after its marker.
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
-        assert!(bar.starts_with('━') && bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        assert!(bar.starts_with('━') && bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
         assert!(!panel.contains("Messages"), "{panel}");
     }
 
@@ -2099,6 +2311,7 @@ mod tests {
         let mut panel = SidePanel::default();
         panel.observe_width(140);
         panel.toggle();
+        panel.sync_files(&state.git_diff);
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal
             .draw(|frame| {

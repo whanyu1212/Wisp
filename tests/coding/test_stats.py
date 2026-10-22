@@ -796,3 +796,42 @@ def test_run_stats_without_usage() -> None:
     completed = RunStats().completed(session_id="s", turns=0, outcome="failed")
 
     assert (completed.tool_calls, completed.output_tokens, completed.model_ms) == (0, None, None)
+
+
+def test_branch_summary_places_path(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import anyio
+
+    from wisp.coding.stats import session_branch_summary
+    from wisp.events import SessionBranchSummary
+    from wisp.sessions.jsonl import JsonlSessionStore
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def turn(prompt: str) -> tuple[str, str]:
+        user = await session.append_message(Message(role="user", content=prompt))
+        answer = await session.append_message(Message(role="assistant", content="ok"))
+        return user.id, answer.id
+
+    async def navigate(entry_id: str) -> None:
+        await session.navigate_tree(entry_id, expected_active_leaf_id=session.read_active_leaf_id())
+
+    def summary() -> SessionBranchSummary:
+        return session_branch_summary(session.read_entries())
+
+    async def scenario() -> None:
+        await turn("one")
+        await turn("two")
+        third, original_leaf = await turn("three")
+        assert summary() == SessionBranchSummary()
+        # Re-asking turn three branches after turn two.
+        await navigate(third)
+        await turn("three again")
+        assert summary() == SessionBranchSummary(branched_from_turn=2, siblings=1)
+        await navigate(third)
+        await turn("three once more")
+        assert summary() == SessionBranchSummary(branched_from_turn=2, siblings=2)
+        # Back on the original line, the branches split off it.
+        await navigate(original_leaf)
+        assert summary() == SessionBranchSummary(branches=2)
+
+    anyio.run(scenario)

@@ -65,6 +65,8 @@ pub struct TranscriptSpanStyle {
     pub strong: bool,
     pub emphasis: bool,
     pub struck: bool,
+    /// A tone of its own, over the row's: each side of a side-by-side diff row.
+    pub tone: Option<crate::transcript_view::TranscriptRowTone>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

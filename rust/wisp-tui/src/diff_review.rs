@@ -24,10 +24,19 @@ pub(crate) fn is_diff(detail: &ToolDetailPresentation) -> bool {
 pub(crate) struct DiffReview {
     pub split: bool,
     pub context: bool,
+    /// The `/diff` layout: hunk headers drawn as bars naming their definition, the
+    /// unchanged lines between hunks folded, and context rows always shown (the
+    /// caller widens the context itself). Without it, context rows fold in place.
+    pub hunk_bars: bool,
     top: usize,
     height: usize,
     rows: Vec<ReviewLine>,
     signature: Option<(usize, bool, bool, Palette)>,
+    /// The detail row to put at the top once the next presentation is laid out,
+    /// when the caller swapped presentations whose row keys differ.
+    reopen_key: Option<u64>,
+    /// Whether the last layout set the sides side by side, which needs the width.
+    split_shown: bool,
 }
 
 #[derive(Debug)]
@@ -40,6 +49,32 @@ struct ReviewLine {
 }
 
 impl DiffReview {
+    /// The `/diff` review: hunk bars, and split where there is room, as the wide
+    /// mock reads; `s` switches to unified.
+    pub fn working_tree() -> Self {
+        Self {
+            split: true,
+            hunk_bars: true,
+            ..Self::default()
+        }
+    }
+
+    /// The detail row at the top of the view.
+    pub fn top_key(&self) -> Option<u64> {
+        self.rows.get(self.top).map(|row| row.key)
+    }
+
+    /// Lay out a different presentation next, starting at its row `key`.
+    pub fn reopen_at(&mut self, key: u64) {
+        self.reopen_key = Some(key);
+        self.signature = None;
+    }
+
+    /// Whether the diff on screen is split, which a narrow pane cannot be.
+    pub fn split_shown(&self) -> bool {
+        self.split_shown
+    }
+
     pub fn reset(&mut self) {
         self.top = 0;
         self.signature = None;
@@ -83,6 +118,19 @@ impl DiffReview {
         }
     }
 
+    /// The hunk the top row is in, 1-based, and how many hunks there are; `None`
+    /// before the first frame or for a diff without hunks.
+    pub fn hunk_position(&self) -> Option<(usize, usize)> {
+        let total = self.rows.iter().filter(|row| row.hunk).count();
+        let current = self
+            .rows
+            .iter()
+            .take(self.top + 1)
+            .filter(|row| row.hunk)
+            .count();
+        (total > 0).then_some((current.max(1), total))
+    }
+
     #[cfg(feature = "transcript-benchmark")]
     pub fn visible_key(&self, key: u64) -> bool {
         self.rows
@@ -101,12 +149,17 @@ impl DiffReview {
     ) -> Vec<Line<'static>> {
         let signature = (width, self.split, self.context, palette);
         if self.signature != Some(signature) {
-            let anchor = self.rows.get(self.top).map(|row| (row.key, row.offset));
+            let anchor = match self.reopen_key.take() {
+                Some(key) => Some((key, 0)),
+                None => self.rows.get(self.top).map(|row| (row.key, row.offset)),
+            };
+            self.split_shown = self.split && width >= 100;
             self.rows = render_rows(
                 detail,
                 width,
-                self.split && width >= 100,
-                self.context,
+                self.split_shown,
+                self.context || self.hunk_bars,
+                self.hunk_bars,
                 palette,
             );
             self.top = anchor
@@ -150,6 +203,7 @@ fn chunks(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cell(
     row: Option<&DetailRow>,
     old: bool,
@@ -158,9 +212,15 @@ fn cell(
     emphasis: &[std::ops::Range<usize>],
     language: &str,
     dual: bool,
+    hunk_bars: bool,
 ) -> Vec<(Line<'static>, usize)> {
     let Some(row) = row else {
-        return vec![(Line::raw(" ".repeat(width)), 0)];
+        let filler = if hunk_bars {
+            Style::default().bg(palette.diff_filler())
+        } else {
+            Style::default()
+        };
+        return vec![(Line::styled(" ".repeat(width), filler), 0)];
     };
     let (sign, color, background) = match row.kind {
         DetailRowKind::Addition => ("+", palette.success, palette.addition_background),
@@ -196,15 +256,23 @@ fn cell(
         .map(|(index, text)| {
             let mut spans: Vec<Span<'static>> = Vec::new();
             if gutter > 0 {
-                let label = if index == 0 {
-                    prefix.clone()
+                if index == 0 {
+                    spans.push(Span::styled(
+                        prefix.clone(),
+                        Style::default().fg(color).bg(background),
+                    ));
+                } else if hunk_bars {
+                    // A wrapped line continues under its sign: `↳`.
+                    spans.push(Span::styled(
+                        format!("{}↳ ", " ".repeat(gutter.saturating_sub(2))),
+                        Style::default().fg(palette.dim()).bg(background),
+                    ));
                 } else {
-                    format!("{}↪ ", " ".repeat(gutter.saturating_sub(2)))
-                };
-                spans.push(Span::styled(
-                    label,
-                    Style::default().fg(color).bg(background),
-                ));
+                    spans.push(Span::styled(
+                        format!("{}↪ ", " ".repeat(gutter.saturating_sub(2))),
+                        Style::default().fg(color).bg(background),
+                    ));
+                }
             }
             for (position, grapheme) in text.grapheme_indices(true) {
                 let position = offset + position;
@@ -240,14 +308,57 @@ fn render_rows(
     width: usize,
     split: bool,
     context: bool,
+    hunk_bars: bool,
     palette: Palette,
 ) -> Vec<ReviewLine> {
     let emphasis = crate::diff_card::row_emphasis(&detail.rows);
     let language = detail.title.rsplit('.').next().unwrap_or("");
     let mut output = Vec::new();
     let mut index = 0;
+    let hunks: Vec<&DetailRow> = detail
+        .rows
+        .iter()
+        .filter(|row| row.kind == DetailRowKind::Hunk)
+        .collect();
+    let mut hunk_index = 0;
     while index < detail.rows.len() {
         let row = &detail.rows[index];
+        if hunk_bars && row.kind == DetailRowKind::Hunk {
+            if hunk_index > 0 {
+                let previous = hunks[hunk_index - 1];
+                if let Some(gap) = unchanged_between(previous, row) {
+                    output.push(ReviewLine {
+                        key: row.key,
+                        offset: 0,
+                        paired: None,
+                        hunk: false,
+                        line: fold_line(gap, palette),
+                    });
+                }
+                output.push(ReviewLine {
+                    key: row.key,
+                    offset: 0,
+                    paired: None,
+                    hunk: false,
+                    line: Line::default(),
+                });
+            }
+            let label = match hunk_index {
+                0 if split => "split · s unified".to_owned(),
+                0 => "unified · s split".to_owned(),
+                index => format!("{} of {}", index + 1, hunks.len()),
+            };
+            output.push(ReviewLine {
+                key: row.key,
+                offset: 0,
+                paired: None,
+                hunk: true,
+                line: hunk_bar(&row.text, &label, language, width, palette),
+            });
+            hunk_index += 1;
+            index += 1;
+            continue;
+        }
         if row.kind == DetailRowKind::Context && !context {
             let start = index;
             while index < detail.rows.len() && detail.rows[index].kind == DetailRowKind::Context {
@@ -285,7 +396,10 @@ fn render_rows(
             continue;
         }
         if split {
-            let half = width.saturating_sub(3) / 2;
+            // `/diff` sets the sides a column apart, as its mock does; elsewhere a
+            // rule divides them.
+            let separator = if hunk_bars { " " } else { " │ " };
+            let half = width.saturating_sub(separator.width()) / 2;
             let mut pairs = Vec::new();
             if row.kind == DetailRowKind::Deletion {
                 let deleted = detail.rows[index..]
@@ -323,22 +437,24 @@ fn render_rows(
                     left.map_or(&[], |i| &emphasis[i]),
                     language,
                     false,
+                    hunk_bars,
                 );
                 let rhs = cell(
                     right.map(|i| &detail.rows[i]),
                     false,
-                    width - half - 3,
+                    width - half - separator.width(),
                     palette,
                     right.map_or(&[], |i| &emphasis[i]),
                     language,
                     false,
+                    hunk_bars,
                 );
                 for n in 0..lhs.len().max(rhs.len()) {
                     let mut spans = lhs.get(n).map_or_else(
                         || vec![Span::raw(" ".repeat(half))],
                         |(line, _)| line.spans.clone(),
                     );
-                    spans.push(Span::styled(" │ ", Style::default().fg(palette.muted)));
+                    spans.push(Span::styled(separator, Style::default().fg(palette.muted)));
                     if let Some((line, _)) = rhs.get(n) {
                         spans.extend(line.spans.clone());
                     }
@@ -368,6 +484,7 @@ fn render_rows(
                 &emphasis[index],
                 language,
                 true,
+                hunk_bars,
             ) {
                 output.push(ReviewLine {
                     key: row.key,
@@ -381,6 +498,82 @@ fn render_rows(
         }
     }
     output
+}
+
+/// How many unchanged old-file lines lie between two hunks, read from their headers.
+fn unchanged_between(previous: &DetailRow, next: &DetailRow) -> Option<usize> {
+    let range = |header: &str| -> Option<(usize, usize)> {
+        let old = header.strip_prefix("@@ -")?.split(' ').next()?;
+        let (start, length) = old.split_once(',').unwrap_or((old, "1"));
+        Some((start.parse().ok()?, length.parse().ok()?))
+    };
+    let (previous_start, previous_length) = range(&previous.text)?;
+    let (next_start, _) = range(&next.text)?;
+    let gap = next_start.checked_sub(previous_start + previous_length)?;
+    (gap > 0).then_some(gap)
+}
+
+/// `⋯ 46 unchanged lines · c show context`, set in under the line numbers.
+fn fold_line(gap: usize, palette: Palette) -> Line<'static> {
+    let dim = Style::default().fg(palette.dim());
+    Line::from(vec![
+        Span::styled(
+            format!(
+                "       ⋯ {gap} unchanged line{} · ",
+                if gap == 1 { "" } else { "s" }
+            ),
+            dim,
+        ),
+        Span::styled("c", palette.keycap()),
+        Span::styled(" show context", dim),
+    ])
+}
+
+/// A hunk header as a bar across the pane: the range and the definition it falls
+/// in on the left, `label` on the right.
+fn hunk_bar(
+    header: &str,
+    label: &str,
+    language: &str,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let bar = Style::default().fg(palette.muted).bg(palette.surface);
+    let header = sanitize_for_terminal(header);
+    let (range, definition) = match header.match_indices("@@").nth(1) {
+        Some((end, _)) => header.split_at(end + 2),
+        None => (header.as_str(), ""),
+    };
+    let mut left = vec![Span::styled(format!(" {range}"), bar)];
+    let definition = definition.trim_start();
+    if !definition.is_empty() {
+        left.push(Span::styled(" ", bar));
+        let tokens = crate::syntax::highlight_fence(language, definition)
+            .map(|highlight| highlight.tokens)
+            .unwrap_or_default();
+        for (position, grapheme) in definition.grapheme_indices(true) {
+            let class = tokens
+                .iter()
+                .find(|token| token.range.contains(&position))
+                .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class);
+            let style = palette.syntax(bar.fg(palette.foreground), class);
+            if let Some(last) = left.last_mut().filter(|span| span.style == style) {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                left.push(Span::styled(grapheme.to_owned(), style));
+            }
+        }
+    }
+    let right = format!("{label} ");
+    let right_width = right.width();
+    let mut spans = crate::side_panel::clip_spans(left, width.saturating_sub(right_width + 1));
+    let used: usize = spans.iter().map(|span| span.content.width()).sum();
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used + right_width)),
+        bar,
+    ));
+    spans.push(Span::styled(right, bar.fg(palette.dim())));
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -422,7 +615,7 @@ mod tests {
     #[test]
     fn split_pairs_replacements_and_narrow_review_preserves_both_sides() {
         let detail = presentation();
-        let split = render_rows(&detail, 120, true, true, Palette::default());
+        let split = render_rows(&detail, 120, true, true, false, Palette::default());
         assert!(split.iter().any(|row| {
             let text = row.line.to_string();
             text.contains("wait 30") && text.contains("wait 60")

@@ -68,6 +68,11 @@ fn ui(home: &TestHome) -> LiveUi {
     LiveUi {
         theme: home.store().load(),
         theme_preferences: Some(home.store()),
+        // The theme toggle has no default chord; these tests bind it as users do.
+        bindings: crate::keybindings::Bindings::from_json(
+            r#"{"theme.toggle":["Ctrl+T"],"session.tree":[]}"#,
+        )
+        .unwrap(),
         ..LiveUi::default()
     }
 }

@@ -907,6 +907,7 @@ class CodingSession:
                             event,
                             operation_id=operation_id,
                             tool_status=tool_status,
+                            tool_cwd=operation_context.cwd,
                         )
                     if (
                         isinstance(event, MessageCompleted)
@@ -1891,6 +1892,7 @@ class CodingSession:
         *,
         operation_id: str | None = None,
         tool_status: ToolPresentationStatus | None = None,
+        tool_cwd: Path | None = None,
     ) -> str:
         tool_result = (
             ToolResultPresentationSnapshot(
@@ -1904,6 +1906,12 @@ class CodingSession:
                 duration_ms=event.duration_ms,
                 process_started_at=event.process_started_at,
                 process_ended_at=event.process_ended_at,
+                # `/diff` attributes files to these calls by the folder they ran in.
+                cwd=(
+                    str(tool_cwd.resolve(strict=False))
+                    if tool_cwd is not None and event.name in ("edit", "write")
+                    else None
+                ),
             )
             if isinstance(event, ToolExecutionEnded)
             else None

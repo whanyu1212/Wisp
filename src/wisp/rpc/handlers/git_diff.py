@@ -9,12 +9,16 @@ import stat
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from threading import Event, Thread
 from typing import Literal
 
-from wisp.events import RpcGitDiffFile, RpcGitDiffReported
+from wisp.events import RpcGitDiffEdit, RpcGitDiffFile, RpcGitDiffReported
+from wisp.events.rpc import MAX_GIT_DIFF_FILE_EDITS
 from wisp.project_files import ProjectScanCancelled, ProjectScanTimedOut, is_display_safe_path
+from wisp.sessions import MessageSessionEntry, SessionEntry
 from wisp.tools.context import ToolContext
 from wisp.tools.files.secure_fs import open_file, secure_tool_path
 from wisp.tools.result import ToolError
@@ -99,8 +103,70 @@ def _text(data: bytes) -> str:
     return data.decode("utf-8")
 
 
+def session_edits(
+    entries: Iterable[SessionEntry], context: ToolContext
+) -> dict[Path, tuple[RpcGitDiffEdit, ...]]:
+    """Find the files the session's own edit and write calls changed.
+
+    A call counts only once its tool result is recorded without an error, so a
+    rejected or failed edit never marks a file. Paths resolve the way the tools
+    resolve them, lexically against the folder the call ran in, which the result
+    records; sessions live in one folder for every project, so a session resumed in
+    another project marks nothing there. A result recorded without its folder is
+    left out rather than guessed.
+
+    Args:
+        entries (Iterable[SessionEntry]): The active session path, oldest first.
+            Compacted messages stay on this path, so attribution outlives compaction.
+        context (ToolContext): The current protection policy, applied with each
+            call's own folder.
+
+    Returns:
+        dict[Path, tuple[RpcGitDiffEdit, ...]]: Each edited file's most recent
+        calls, oldest first.
+    """
+    # Calls awaiting a result, by call ID. A provider may reuse an ID within one
+    # message, so each ID keeps its calls in order and results pair first to first.
+    requested: dict[str, list[tuple[str, Literal["edit", "write"]]]] = {}
+    edits: dict[Path, list[RpcGitDiffEdit]] = {}
+    for entry in entries:
+        if not isinstance(entry, MessageSessionEntry):
+            continue
+        message = entry.message
+        for call in message.tool_calls or ():
+            target = call.arguments.get("path")
+            if call.name not in ("edit", "write") or not isinstance(target, str):
+                continue
+            if not 0 < len(call.call_id) <= 256:
+                continue
+            tool: Literal["edit", "write"] = "edit" if call.name == "edit" else "write"
+            requested.setdefault(call.call_id, []).append((target, tool))
+        if message.role != "tool" or message.tool_call_id not in requested:
+            continue
+        pending = requested[message.tool_call_id]
+        target, tool = pending.pop(0)
+        if not pending:
+            del requested[message.tool_call_id]
+        ran_in = entry.tool_result.cwd if entry.tool_result is not None else None
+        if message.is_error or ran_in is None or len(entry.id) > 256:
+            continue
+        try:
+            path = secure_tool_path(target, replace(context, cwd=Path(ran_in))).path
+        except (ToolError, OSError, ValueError, RuntimeError):
+            # Model-chosen paths include ones `~user` expansion cannot resolve.
+            continue
+        edits.setdefault(path, []).append(
+            RpcGitDiffEdit(call_id=message.tool_call_id, entry_id=entry.id, tool=tool)
+        )
+    return {path: tuple(calls[-MAX_GIT_DIFF_FILE_EDITS:]) for path, calls in edits.items()}
+
+
 def collect_git_diff(
-    context: ToolContext, cancelled: Event, command_id: str, generation: int
+    context: ToolContext,
+    cancelled: Event,
+    command_id: str,
+    generation: int,
+    edits: Mapping[Path, tuple[RpcGitDiffEdit, ...]] | None = None,
 ) -> RpcGitDiffReported:
     """Capture authorized tracked file pairs and separate untracked metadata.
 
@@ -109,6 +175,9 @@ def collect_git_diff(
         cancelled (Event): Cancellation signal checked between reads.
         command_id (str): Request correlation identifier.
         generation (int): Policy generation checked again at publication.
+        edits (Mapping[Path, tuple[RpcGitDiffEdit, ...]] | None): The session's own
+            calls by file, from `session_edits`; files without any are reported as
+            changed outside the session.
 
     Returns:
         RpcGitDiffReported: Bounded snapshot; omissions are explicitly marked.
@@ -305,7 +374,13 @@ def collect_git_diff(
                     "submodule, or unreadable file"
                 )
         entry = RpcGitDiffFile(
-            path=path, kind="file", status=status, before=before, after=after, notice=notice
+            path=path,
+            kind="file",
+            status=status,
+            before=before,
+            after=after,
+            notice=notice,
+            edits=(edits or {}).get(selected.path, ()),
         )
         candidate = RpcGitDiffReported(
             command_id=command_id,

@@ -10,6 +10,8 @@
 use std::ops::Range;
 
 use similar::{ChangeTag, TextDiff};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::tool_detail::{
     DETAIL_COLLAPSED_MAX_BYTES, DetailRow, DetailRowKind, ToolDetailPresentation,
@@ -100,6 +102,195 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
     preview
 }
 
+/// The card preview with old and new side by side in `width` columns, as `/diff`
+/// lays out its split: the old line and its number on the left, the new on the
+/// right, a column apart, with a blank side where only one side changed. The hunk
+/// header leads, later hunks are separated by `⋯`, and long lines wrap within their
+/// side under a `↳`.
+pub(crate) fn side_by_side_preview(
+    detail: &ToolDetailPresentation,
+    width: usize,
+) -> DiffCardPreview {
+    let mut rows = coherent_preview_rows(
+        &card_rows(&detail.rows),
+        detail.additions.saturating_add(detail.deletions),
+    );
+    // Tabs and controls become what the transcript draws, so the sides keep their
+    // columns.
+    for row in &mut rows {
+        row.text = displayable(&row.text);
+    }
+    let emphasis = row_emphasis(&rows);
+    let language = detail.title.rsplit('.').next().unwrap_or("");
+    let mut preview = DiffCardPreview {
+        text: String::new(),
+        tones: Vec::new(),
+        emphasis: Vec::new(),
+        syntax: Vec::new(),
+        gutters: Vec::new(),
+    };
+    if let Some(hunk) = detail
+        .rows
+        .iter()
+        .find(|row| row.kind == DetailRowKind::Hunk && row.text.starts_with("@@ -"))
+    {
+        // A file range leads, as in `/diff`; an edit's fragment-relative hunk does
+        // not, since its action line already says the numbers are the fragment's.
+        preview.push_line(
+            &format!("       {}", displayable(&hunk.text)),
+            TranscriptRowTone::SurfaceNote,
+        );
+    }
+    let left_width = width.saturating_sub(1) / 2;
+    let right_width = width.saturating_sub(1 + left_width);
+    let mut index = 0;
+    while index < rows.len() {
+        let row = &rows[index];
+        let pairs: Vec<(Option<usize>, Option<usize>)> = match row.kind {
+            DetailRowKind::Deletion => {
+                let deleted = run_length(&rows[index..], DetailRowKind::Deletion);
+                let added = run_length(&rows[index + deleted..], DetailRowKind::Addition);
+                let pairs = (0..deleted.max(added))
+                    .map(|n| {
+                        (
+                            (n < deleted).then_some(index + n),
+                            (n < added).then_some(index + deleted + n),
+                        )
+                    })
+                    .collect();
+                index += deleted + added;
+                pairs
+            }
+            DetailRowKind::Addition => {
+                index += 1;
+                vec![(None, Some(index - 1))]
+            }
+            DetailRowKind::Context => {
+                index += 1;
+                vec![(Some(index - 1), Some(index - 1))]
+            }
+            _ => {
+                // Separators, the trailing-newline row and the omission span the card.
+                let (line, _) = format_row(row, false);
+                preview.push_line(&line, row_tone(row.kind));
+                index += 1;
+                continue;
+            }
+        };
+        for (left, right) in pairs {
+            let left = left.map(|i| side_cell(&rows[i], &emphasis[i], true, left_width));
+            let right = right.map(|i| side_cell(&rows[i], &emphasis[i], false, right_width));
+            let lines = left
+                .as_ref()
+                .map_or(0, |cell| cell.len())
+                .max(right.as_ref().map_or(0, |cell| cell.len()));
+            for line in 0..lines {
+                if !preview.text.is_empty() {
+                    preview.text.push('\n');
+                }
+                preview.push_cell(
+                    left.as_ref().and_then(|cell| cell.get(line)),
+                    left_width,
+                    language,
+                );
+                preview.text.push(' ');
+                preview.push_cell(
+                    right.as_ref().and_then(|cell| cell.get(line)),
+                    right_width,
+                    language,
+                );
+            }
+        }
+    }
+    if detail.truncated {
+        preview.push_line(
+            "⋯ retained detail is incomplete",
+            TranscriptRowTone::Warning,
+        );
+    }
+    preview
+}
+
+/// One wrapped line of one side: its gutter, its text, the changed words within
+/// it, and its tone.
+struct SideLine {
+    gutter: String,
+    text: String,
+    emphasis: Vec<Range<usize>>,
+    tone: TranscriptRowTone,
+    /// Whether `text` starts at its row's beginning, so syntax can be highlighted
+    /// from the line's own start.
+    first: bool,
+}
+
+/// A row's old or new side, wrapped to `width` columns: `  15 − text`, then
+/// `     ↳ rest` for each continuation.
+fn side_cell(row: &DetailRow, emphasis: &[Range<usize>], old: bool, width: usize) -> Vec<SideLine> {
+    let sign = match row.kind {
+        DetailRowKind::Addition => "+",
+        DetailRowKind::Deletion => "−",
+        _ => " ",
+    };
+    let number = if old { row.old_line } else { row.new_line };
+    let gutter = format!(
+        "{:>4} {sign} ",
+        number.map_or(String::new(), |n| n.to_string())
+    );
+    let room = width.saturating_sub(gutter.width()).max(1);
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut columns = 0;
+    let mut chunk = String::new();
+    for (offset, grapheme) in row.text.grapheme_indices(true) {
+        let size = grapheme.width();
+        if columns > 0 && columns + size > room {
+            lines.push((start, std::mem::take(&mut chunk)));
+            start = offset;
+            columns = 0;
+        }
+        chunk.push_str(grapheme);
+        columns += size;
+    }
+    lines.push((start, chunk));
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start, text))| {
+            let end = start + text.len();
+            SideLine {
+                gutter: if index == 0 {
+                    gutter.clone()
+                } else {
+                    format!("{:>6} ", "↳")
+                },
+                emphasis: emphasis
+                    .iter()
+                    .filter_map(|range| {
+                        let (from, to) = (range.start.max(start), range.end.min(end));
+                        (from < to).then(|| from - start..to - start)
+                    })
+                    .collect(),
+                text,
+                tone: row_tone(row.kind),
+                first: index == 0,
+            }
+        })
+        .collect()
+}
+
+/// `text` as the transcript draws it: tabs to the next four-column stop, and
+/// controls as `�`.
+fn displayable(text: &str) -> String {
+    let mut shown = String::with_capacity(text.len());
+    let mut column = 0;
+    for grapheme in text.graphemes(true) {
+        let sanitized = crate::transcript_view::sanitize_grapheme(grapheme, column);
+        column += sanitized.width();
+        shown.push_str(&sanitized);
+    }
+    shown
+}
+
 /// Keep short hunks intact. Larger previews end at a hunk boundary when possible;
 /// never splice the tail of a function onto its beginning across hidden changes.
 fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRow> {
@@ -145,6 +336,39 @@ fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRo
 }
 
 impl DiffCardPreview {
+    /// Append one side of a split line, padded to `width` so its tone fills the side;
+    /// a missing side is blank.
+    fn push_cell(&mut self, line: Option<&SideLine>, width: usize, language: &str) {
+        let start = self.text.len();
+        let Some(line) = line else {
+            self.text.push_str(&" ".repeat(width));
+            self.tones
+                .push((start..self.text.len(), TranscriptRowTone::Surface));
+            return;
+        };
+        self.text.push_str(&line.gutter);
+        let content = self.text.len();
+        self.gutters.push(start..content);
+        self.text.push_str(&line.text);
+        if line.first {
+            if let Ok(highlight) = crate::syntax::highlight_fence(language, &line.text) {
+                self.syntax
+                    .extend(highlight.tokens.into_iter().map(|mut token| {
+                        token.range = content + token.range.start..content + token.range.end;
+                        token
+                    }));
+            }
+        }
+        self.emphasis.extend(
+            line.emphasis
+                .iter()
+                .map(|range| content + range.start..content + range.end),
+        );
+        let used = line.gutter.width() + line.text.width();
+        self.text.push_str(&" ".repeat(width.saturating_sub(used)));
+        self.tones.push((start..self.text.len(), line.tone));
+    }
+
     fn push_line(&mut self, line: &str, tone: TranscriptRowTone) {
         if !self.text.is_empty() {
             self.text.push('\n');
