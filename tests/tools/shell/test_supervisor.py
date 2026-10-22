@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -290,6 +291,62 @@ def test_cleanup_retry_restores_stream_reader_failure(
     assert retried.state == "failed"
     assert retried.exit_code is None
     assert retried.error == "Failed to read process output"
+    # The retry revises the state but not when the process first ended.
+    assert cleanup_failed.ended_at is not None
+    assert retried.ended_at == cleanup_failed.ended_at
+
+
+@pytest.mark.process
+def test_process_reports_start_and_end(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; time.sleep(0.3)"),
+                cwd=tmp_path,
+                timeout=5,
+            )
+            running = await supervisor.poll(process_id)
+            return running, (await poll_until_terminal(supervisor, process_id))[-1]
+        finally:
+            await supervisor.aclose()
+
+    before = datetime.now(UTC)
+    running, finished = anyio.run(run)
+    after = datetime.now(UTC)
+
+    assert running.state == "running"
+    assert running.ended_at is None
+    assert finished.state == "completed"
+    assert finished.started_at == running.started_at
+    assert finished.started_at is not None and finished.ended_at is not None
+    assert before <= finished.started_at < finished.ended_at <= after
+    assert finished.ended_at - finished.started_at >= timedelta(seconds=0.25)
+
+
+@pytest.mark.process
+def test_cancel_records_process_end(tmp_path: Path) -> None:
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=60,
+            )
+            cancelled = await supervisor.cancel(process_id)
+            return cancelled, await supervisor.poll(process_id)
+        finally:
+            await supervisor.aclose()
+
+    cancelled, polled = anyio.run(run)
+
+    assert cancelled.state == "cancelled"
+    assert cancelled.started_at is not None and cancelled.ended_at is not None
+    assert cancelled.started_at <= cancelled.ended_at
+    assert cancelled.ended_at - cancelled.started_at < timedelta(seconds=30)
+    # Polling a finished process later reports the same end, not the poll time.
+    assert polled.ended_at == cancelled.ended_at
 
 
 @pytest.mark.parametrize("separator", ["\n", "\r", "\r\n", "\u2028"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Self
 
@@ -122,6 +123,9 @@ class _ToolResultEvent(_MessageOriginEvent):
     # too; None only for results the loop settles itself, such as interrupted calls
     # and calls from a truncated response.
     duration_ms: int | None = Field(default=None, ge=0)
+    # When the executor began the call, on the same terms as `duration_ms`: set
+    # together with it, so a frontend can place parallel calls on one timeline.
+    started_at: datetime | None = None
     # Resumable Bash metadata promoted from ToolResult.data for live JSON/RPC
     # consumers. These are bounded scalars/chunks, not the raw result mapping.
     process_id: str | None = None
@@ -133,6 +137,10 @@ class _ToolResultEvent(_MessageOriginEvent):
     stderr_truncated: bool = False
     stdout_dropped_bytes: int = Field(default=0, ge=0)
     stderr_dropped_bytes: int = Field(default=0, ge=0)
+    # When the managed process started, and when it reached a terminal state; the
+    # end is None while it still runs.
+    process_started_at: datetime | None = None
+    process_ended_at: datetime | None = None
 
     @model_validator(mode="after")
     def _validate_failure_metadata(self) -> Self:

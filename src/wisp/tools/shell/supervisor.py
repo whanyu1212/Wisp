@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeVar, cast
@@ -56,6 +58,10 @@ class ProcessUpdate:
     stderr_retained_bytes: int | None = None
     stdout_source_byte_lengths: tuple[int, ...] | None = None
     stderr_source_byte_lengths: tuple[int, ...] | None = None
+    # When the process started, and when it reached a terminal state (None while it
+    # runs). Both are UTC wall-clock times.
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
 
 
 @dataclass
@@ -335,6 +341,20 @@ class _ManagedProcess:
     stderr_task: asyncio.Task[None] | None = None
     completion_task: asyncio.Task[None] | None = None
     terminal_reported: bool = False
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    started_monotonic: float = field(default_factory=time.monotonic)
+    ended_at: datetime | None = None
+
+    def mark_ended(self) -> None:
+        """Record when the process first reached a terminal state.
+
+        The end is measured from the start on the monotonic clock, so a wall-clock
+        change while the process runs cannot skew its elapsed time. A later cleanup
+        retry that revises the state keeps the original end.
+        """
+        if self.ended_at is None:
+            elapsed = time.monotonic() - self.started_monotonic
+            self.ended_at = self.started_at + timedelta(seconds=elapsed)
 
     def has_pending_output(self) -> bool:
         return bool(
@@ -921,6 +941,7 @@ class ProcessSupervisor:
                 managed.state = "failed"
             else:
                 managed.state = "completed"
+            managed.mark_ended()
         finally:
             if not completion.done():
                 completion.cancel()
@@ -976,6 +997,7 @@ class ProcessSupervisor:
         if not cleanup_succeeded:
             managed.error = PROCESS_TREE_CLEANUP_ERROR
             managed.state = "failed"
+            managed.mark_ended()
             managed.changed.set()
         elif was_cleanup_failed:
             recovered_error = managed.error_after_cleanup
@@ -1015,6 +1037,8 @@ class ProcessSupervisor:
             stderr_retained_bytes=stderr_retained,
             stdout_source_byte_lengths=stdout_source_byte_lengths,
             stderr_source_byte_lengths=stderr_source_byte_lengths,
+            started_at=managed.started_at,
+            ended_at=managed.ended_at if managed.state != "running" else None,
         )
 
     def _evict_terminals_for_capacity(self) -> None:

@@ -49,6 +49,8 @@ class RpcMessageToolResultSnapshot(BaseModel):
     summary: str | None = None
     truncated: bool = False
     duration_ms: int | None = Field(default=None, ge=0)
+    process_started_at: datetime | None = None
+    process_ended_at: datetime | None = None
 
 
 class RpcSkillInvocationSnapshot(BaseModel):

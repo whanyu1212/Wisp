@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from datetime import timedelta
 from types import TracebackType
 
 import anyio
@@ -24,6 +25,7 @@ from wisp.events import (
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
+    utc_now,
 )
 from wisp.providers.events import ToolCall
 
@@ -180,11 +182,12 @@ def with_execution_duration(terminal: ToolExecutionEnded, started: float) -> Too
         started (float): `time.monotonic()` reading taken when execution began.
 
     Returns:
-        ToolExecutionEnded: A copy carrying `duration_ms`; the executor's own event is
-            left untouched.
+        ToolExecutionEnded: A copy carrying `duration_ms` and the `started_at` it
+            implies; the executor's own event is left untouched.
     """
     elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
-    return terminal.model_copy(update={"duration_ms": elapsed_ms})
+    started_at = utc_now() - timedelta(milliseconds=elapsed_ms)
+    return terminal.model_copy(update={"duration_ms": elapsed_ms, "started_at": started_at})
 
 
 @dataclass(slots=True)

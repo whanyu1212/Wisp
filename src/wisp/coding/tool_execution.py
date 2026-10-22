@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import cast
 
 from wisp.agent.tool_contracts import (
@@ -79,6 +80,8 @@ _RESULT_DATA_KEYS = {
         "stderr_truncated",
         "stdout_dropped_bytes",
         "stderr_dropped_bytes",
+        "process_started_at",
+        "process_ended_at",
     ),
     "write": ("before_text", "created"),
     "read": ("line_count", "selected_count", "path"),
@@ -120,6 +123,8 @@ class _ToolRunOutcome:
     stderr_truncated: bool = False
     stdout_dropped_bytes: int = 0
     stderr_dropped_bytes: int = 0
+    process_started_at: datetime | None = None
+    process_ended_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -375,6 +380,12 @@ class ConfiguredToolExecutor:
                     snapshot.data,
                     "stderr_dropped_bytes",
                 ),
+                process_started_at=_promote_process_time(
+                    tool_name, snapshot.data, "process_started_at"
+                ),
+                process_ended_at=_promote_process_time(
+                    tool_name, snapshot.data, "process_ended_at"
+                ),
             )
         except _MalformedToolResultError:
             return _failure_outcome(
@@ -408,6 +419,8 @@ def _execution_ended(tool_call: ToolCall, outcome: _ToolRunOutcome) -> ToolExecu
         stderr_truncated=outcome.stderr_truncated,
         stdout_dropped_bytes=outcome.stdout_dropped_bytes,
         stderr_dropped_bytes=outcome.stderr_dropped_bytes,
+        process_started_at=outcome.process_started_at,
+        process_ended_at=outcome.process_ended_at,
     )
 
 
@@ -542,6 +555,11 @@ def _copy_bash_process_data(
         target["stderr_truncated"] = True
     _copy_result_count(source, target, "stdout_dropped_bytes")
     _copy_result_count(source, target, "stderr_dropped_bytes")
+    for key in ("process_started_at", "process_ended_at"):
+        value = source.get(key)
+        # Only timezone-aware times are comparable with the frontend's clock.
+        if type(value) is datetime and value.tzinfo is not None:
+            target[key] = value
 
 
 def _bash_managed_process_text_overhead(
@@ -803,6 +821,13 @@ def _promote_process_error(name: str, data: Mapping[str, object]) -> str | None:
         return None
     error = data.get("process_error")
     return error if isinstance(error, str) else None
+
+
+def _promote_process_time(name: str, data: Mapping[str, object], key: str) -> datetime | None:
+    if name != "bash":
+        return None
+    value = data.get(key)
+    return value if isinstance(value, datetime) else None
 
 
 def _promote_process_output(
