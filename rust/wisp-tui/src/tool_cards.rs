@@ -233,6 +233,8 @@ pub struct ToolCardSnapshot {
     pub name: String,
     pub action_arguments: String,
     pub command_summary: Option<CommandSummary>,
+    /// The primary MCP subject; full bounded arguments remain in `action_arguments`.
+    pub mcp_subject: Option<String>,
     pub process_id: Option<String>,
     pub status: ToolStatus,
     pub arguments_available: bool,
@@ -261,6 +263,7 @@ impl ToolCardSnapshot {
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
             command_summary: command_summary(input),
+            mcp_subject: mcp_subject(input),
             process_id: None,
             status,
             arguments_available: true,
@@ -316,6 +319,7 @@ impl ToolCardSnapshot {
         self.name = name;
         self.action_arguments = action_arguments;
         self.command_summary = command_summary(input);
+        self.mcp_subject = mcp_subject(input);
         self.arguments_available = true;
         true
     }
@@ -569,6 +573,9 @@ impl ToolCardSnapshot {
     /// run used. Before the backend has reported one, the TUI's own working directory
     /// stands in: the launcher starts the TUI and its backend in the same folder.
     pub fn display_arguments(&self) -> String {
+        if let Some(subject) = &self.mcp_subject {
+            return subject.clone();
+        }
         let cwd = self.display_base.as_deref().map(str::to_owned).or_else(|| {
             std::env::current_dir()
                 .ok()
@@ -950,12 +957,13 @@ impl ProcessCardSnapshot {
     }
 
     /// The state the action line spells out beyond what its marker says. Plain
-    /// running, completion and failure need no words; the marker shows them.
+    /// running and terminal outcomes are spelled out so process rows scan as tasks.
     pub fn status_note(&self) -> Option<&'static str> {
         match self.display_state {
-            ProcessDisplayState::Running
-            | ProcessDisplayState::Completed
-            | ProcessDisplayState::Failed => None,
+            ProcessDisplayState::Running => Some("running"),
+            ProcessDisplayState::Completed if self.exit_code == Some(0) => Some("passed"),
+            ProcessDisplayState::Completed => Some("completed"),
+            ProcessDisplayState::Failed => Some("failed"),
             ProcessDisplayState::PollAwaitingApproval => Some("poll awaiting approval"),
             ProcessDisplayState::CancelAwaitingApproval => Some("cancellation awaiting approval"),
             ProcessDisplayState::Polling => Some("polling"),
@@ -1336,7 +1344,7 @@ fn format_find(arguments: &Map<String, Value>) -> String {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CommandSummary(u8);
+pub struct CommandSummary(u16);
 
 impl CommandSummary {
     fn label(self) -> String {
@@ -1346,12 +1354,15 @@ impl CommandSummary {
             "Rust tests",
             "Rust build",
             "Rust lint checks",
+            "npm test",
+            "npm run check",
+            "Browser tests",
         ]
         .into_iter()
         .enumerate()
         .filter_map(|(index, label)| (self.0 & (1 << index) != 0).then_some(label))
         .collect::<Vec<_>>()
-        .join(" + ")
+        .join(" · ")
     }
 }
 
@@ -1380,6 +1391,9 @@ fn summarize_command(command: &str) -> Option<CommandSummary> {
             ["cargo", "test", ..] => 4,
             ["cargo", "build", ..] => 8,
             ["cargo", "clippy", ..] => 16,
+            ["npm", "test", ..] => 32,
+            ["npm", "run", "check", ..] => 64,
+            ["npm", "run", "test:browser", ..] | ["npx", "playwright", "test", ..] => 128,
             ["cd", _] => continue,
             _ => return None,
         };
@@ -1407,6 +1421,31 @@ fn format_bash(arguments: &Map<String, Value>) -> String {
     } else {
         clip_chars(&one_line(&command), 190)
     }
+}
+
+fn mcp_subject(input: &ToolCallInput) -> Option<String> {
+    let (server, tool) = input.name.strip_prefix("mcp__")?.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    let object = input.arguments.as_object()?;
+    let arguments = object
+        .get(GENERIC_ITEMS_KEY)
+        .and_then(Value::as_object)
+        .unwrap_or(object);
+    // Prefer the thing being looked up over pagination and transport options.
+    // Unknown argument shapes keep the existing generic summary.
+    [
+        "query", "id", "issueId", "issue_id", "number", "path", "url", "name",
+    ]
+    .into_iter()
+    .find_map(|key| match arguments.get(key)? {
+        Value::String(value) if !value.trim().is_empty() => {
+            Some(clip_chars(&one_line(value), GENERIC_VALUE_MAX_CHARS))
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    })
 }
 
 fn format_generic_value(arguments: &Value) -> String {
@@ -1836,6 +1875,18 @@ mod tests {
     #[test]
     fn command_summaries_only_label_known_invocations() {
         assert_eq!(
+            summarize_command("cd site && npm test && npm run check")
+                .unwrap()
+                .label(),
+            "npm test · npm run check"
+        );
+        for command in [
+            "cd site && npm run test:browser",
+            "npx playwright test --project=chromium",
+        ] {
+            assert_eq!(summarize_command(command).unwrap().label(), "Browser tests");
+        }
+        assert_eq!(
             summarize_command("cd /project && uv run pytest -q")
                 .unwrap()
                 .label(),
@@ -1852,9 +1903,42 @@ mod tests {
             "cargo test && rm -rf cache",
             "pytest; deploy",
             "start cargo test",
+            "npm run deploy",
+            "npm test && npm run deploy",
         ] {
             assert!(summarize_command(command).is_none());
         }
+    }
+
+    #[test]
+    fn mcp_subjects_hide_options_but_keep_original_bounded_arguments() {
+        for arguments in [
+            serde_json::json!({"query": "astro", "limit": 100}),
+            bounded_tool_arguments(
+                "mcp__linear__list_issues",
+                &serde_json::json!({"query": "astro", "limit": 100}),
+            ),
+        ] {
+            let card = ToolCardSnapshot::requested(
+                &ToolCallInput {
+                    call_id: "search".into(),
+                    name: "mcp__linear__list_issues".into(),
+                    arguments,
+                    detail_source: ToolDetailSource::None,
+                },
+                ToolStatus::Requested,
+            );
+            assert_eq!(card.display_arguments(), "astro");
+            assert_eq!(card.action_arguments, "limit=100 query=astro");
+        }
+        let input = ToolCallInput {
+            call_id: "custom".into(),
+            name: "mcp__custom__action".into(),
+            arguments: serde_json::json!({"unknown": true}),
+            detail_source: ToolDetailSource::None,
+        };
+        let card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
+        assert_eq!(card.display_arguments(), "unknown=true");
     }
 
     #[test]

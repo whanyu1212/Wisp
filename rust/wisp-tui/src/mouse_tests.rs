@@ -2058,6 +2058,7 @@ async fn keyboard_browse_distinguishes_group_header_from_first_member() {
                 }
             }
             BrowseTarget::Entry(_) => "echo one",
+            BrowseTarget::Output(_) => unreachable!("this fixture has no folded output"),
         };
         let selected_line = row_text(&buffer, cell_of(&buffer, text).1);
         assert!(selected_line.contains("(click to"), "{selected_line}");

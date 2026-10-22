@@ -120,6 +120,20 @@ def test_response_markers_survive_blank_cells_skipped_by_incremental_repaint() -
     )
 
 
+def test_response_markers_survive_interleaved_frame_borders() -> None:
+    # Linux CI painted composer borders between wrapped response rows. Stripping
+    # cursor escapes leaves these decorations in the response's start marker.
+    echo = f"you{rust_tui_e2e.START_TOKEN}payload{rust_tui_e2e.FINAL_TOKEN}"
+    prefix = "◓│wisp│working…turn 1 0 tools · <0.1s7fake responseto:││"
+    response = f"{prefix}{rust_tui_e2e.START_TOKEN}payload│payload{rust_tui_e2e.FINAL_TOKEN}"
+
+    assert rust_tui_e2e._response_tail(echo) is None
+    assert rust_tui_e2e._response_tail(echo + prefix) is None
+    assert rust_tui_e2e._response_tail(echo + response) == (
+        f"payloadpayload{rust_tui_e2e.FINAL_TOKEN}"
+    )
+
+
 def test_ready_ignores_cursor_gaps() -> None:
     # The status line as Linux CI painted it: cursor moves, no spaces.
     status = "\x1b[24;40Hidle\x1b[24;45H·ctx\x1b[24;50H▰▰▰▱▱▱▱▱▱▱~35%".encode()

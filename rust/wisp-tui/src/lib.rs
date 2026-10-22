@@ -1310,7 +1310,7 @@ impl LiveUi {
             }
             if self
                 .browse_selected
-                .is_some_and(|target| retained_detail(&self.state, target.entry_id()).is_none())
+                .is_some_and(|target| self.state.transcript.entry(target.entry_id()).is_none())
             {
                 self.browse_selected = None;
             }
@@ -2502,6 +2502,10 @@ impl LiveUi {
                 }
             }
             BrowseTarget::Entry(entry) => self.transcript_row_cache.fold_mut().expand(entry),
+            BrowseTarget::Output(entry) => {
+                self.transcript_row_cache.fold_mut().expand_output(entry);
+                self.transcript_viewport.reveal_output(entry);
+            }
         }
         self.notice = Some(Self::browse_notice());
         self.render_pending = true;
@@ -2511,10 +2515,18 @@ impl LiveUi {
     /// click moves an existing browse selection to that row but never starts browsing,
     /// so typing still reaches the prompt. A collapsed group opens even when its first
     /// card was expanded on its own.
-    fn toggle_clicked_fold(&mut self, entry: TranscriptEntryId, group: bool) {
+    fn toggle_clicked_fold(&mut self, target: BrowseTarget) {
+        let entry = target.entry_id();
         let fold = self.transcript_row_cache.fold_mut();
         let mut selected = entry;
-        if group {
+        if matches!(target, BrowseTarget::Output(_)) {
+            if fold.is_output_expanded(entry) {
+                fold.collapse_output(entry);
+            } else {
+                fold.expand_output(entry);
+            }
+            self.transcript_viewport.reveal_output(entry);
+        } else if matches!(target, BrowseTarget::Group(_)) {
             if let Some((start, members)) = card_run(&self.state.transcript, entry) {
                 if fold.is_run_expanded(&members) {
                     fold.collapse_group(&members);
@@ -2529,10 +2541,9 @@ impl LiveUi {
             fold.expand(entry);
         }
         if self.browse_selected.is_some() {
-            self.browse_selected = Some(if group {
-                BrowseTarget::Group(selected)
-            } else {
-                BrowseTarget::Entry(selected)
+            self.browse_selected = Some(match target {
+                BrowseTarget::Group(_) => BrowseTarget::Group(selected),
+                _ => target,
             });
         }
         self.render_pending = true;
@@ -2543,7 +2554,10 @@ impl LiveUi {
             return;
         };
         let entry = selected.entry_id();
-        if matches!(selected, BrowseTarget::Entry(_))
+        if matches!(selected, BrowseTarget::Output(_)) {
+            self.transcript_row_cache.fold_mut().collapse_output(entry);
+            self.transcript_viewport.reveal_output(entry);
+        } else if matches!(selected, BrowseTarget::Entry(_))
             && self.transcript_row_cache.fold().is_expanded(entry)
         {
             self.transcript_row_cache.fold_mut().collapse(entry);
@@ -2610,7 +2624,7 @@ impl LiveUi {
         match target {
             BrowseTarget::Group(entry) => card_run(&self.state.transcript, entry)
                 .map_or(target, |(start, _)| BrowseTarget::Group(start)),
-            BrowseTarget::Entry(_) => target,
+            BrowseTarget::Entry(_) | BrowseTarget::Output(_) => target,
         }
     }
 
@@ -3557,6 +3571,10 @@ impl LiveUi {
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(target @ BrowseTarget::Output(_)) = self.browse_selected {
+                    self.toggle_clicked_fold(target);
+                    return Ok(LoopControl::Continue);
+                }
                 if matches!(self.browse_selected, Some(BrowseTarget::Group(_))) {
                     if self.selected_closed_group().is_some() {
                         self.expand_selected_fold();
