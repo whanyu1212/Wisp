@@ -758,12 +758,15 @@ fn render_transcript(
         });
         let mut tail_budget = visible_lines.saturating_sub(user_rows.len());
         let anchored_output = !viewport.follows_tail()
-            && rows
-                .first()
-                .is_some_and(|row| matches!(BrowseTarget::for_row(row), BrowseTarget::Output(_)));
+            && rows.first().is_some_and(|row| {
+                let within_output = matches!(row.anchor.position, RowPosition::Card(position)
+                    if matches!(position.section, crate::transcript_view::CardSection::Omission | crate::transcript_view::CardSection::Detail));
+                matches!(BrowseTarget::for_row(row), BrowseTarget::Output(_))
+                    || (within_output && row_cache.fold().is_output_expanded(row.anchor.entry_id))
+            });
         if rows.len() > tail_budget {
             if anchored_output {
-                // Opening retained output pins its control above the revealed lines.
+                // Preserve the output anchor while opening and scrolling retained lines.
                 rows.truncate(tail_budget);
             } else {
                 rows.drain(..rows.len() - tail_budget);

@@ -522,6 +522,42 @@ async fn earlier_output_is_independently_browsable_and_clickable() {
     assert!(!ui.transcript_row_cache.fold().is_output_expanded(process));
 }
 
+#[test]
+fn expanded_output_scrolls_one_line_at_a_time_beneath_the_pinned_prompt() {
+    let mut ui = fixture("tool-activity-long");
+    let process = ui.state.transcript.entries().last().unwrap().id;
+    draw(&mut ui, 80, 24);
+    ui.browse_selected = Some(BrowseTarget::Output(process));
+    ui.expand_selected_fold();
+    let last_check = |buffer: &ratatui::buffer::Buffer| {
+        (0..buffer.area.height)
+            .filter_map(|y| {
+                let text = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                text.split_once("check ")?
+                    .1
+                    .split_whitespace()
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .next_back()
+            .unwrap()
+    };
+    let mut last = last_check(&draw(&mut ui, 80, 24));
+    for _ in 0..8 {
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::ScrollLines(1),
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        let next = last_check(&draw(&mut ui, 80, 24));
+        assert_eq!(next, last + 1);
+        last = next;
+    }
+}
+
 #[tokio::test]
 async fn long_output_stays_anchored_and_browsable_during_process_updates() {
     let mut ui = fixture("tool-activity-long");
