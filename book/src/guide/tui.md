@@ -51,6 +51,12 @@ logo with the installed package version, invites a prompt or `/` commands, and p
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
 terminals.
 
+Wisp's default instructions favor the answer or outcome first, short paragraphs, and a few useful
+bullets. Progress updates focus on findings, blockers, and next steps; final replies summarize related
+checks while retaining failures and uncertainty. Ask for a detailed explanation or walkthrough when
+you need more depth. These writing defaults apply wherever Wisp uses its built-in prompt, including
+the TUI and print mode; they do not truncate responses or rewrite existing history.
+
 Assistant replies render Markdown during streaming and when loading session history: headings,
 emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
 backgrounds, and tables with
