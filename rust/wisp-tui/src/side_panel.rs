@@ -375,8 +375,10 @@ impl SidePanel {
     }
 
     /// Follow a drag or release while a resize is in progress, and say whether it was
-    /// one. A drag to `column` moves the border with the pointer, keeping where it was
-    /// grabbed; a release ends the resize, at `now`.
+    /// one. Both move the border with the pointer at `column`, keeping where it was
+    /// grabbed: a fast drag or sparse motion reports can leave the release as the only
+    /// event at the final column. A release ends the resize, at `now`, and counts as a
+    /// click only when the border never moved.
     pub(crate) fn continue_resize(
         &mut self,
         kind: MouseEventKind,
@@ -386,26 +388,25 @@ impl SidePanel {
         let Some(resize) = self.resize else {
             return false;
         };
-        match kind {
-            MouseEventKind::Up(_) => {
-                self.last_border_click = (!resize.moved).then_some(now);
-                self.resize = None;
-            }
-            _ if self.docked() => {
-                self.resize = Some(Resize {
-                    moved: true,
-                    ..resize
-                });
-                let total = self.width;
-                let width = total.saturating_sub(column.saturating_sub(resize.grab));
-                self.dragged_width = Some(
-                    width
-                        .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
-                        .max(PANEL_WIDTH),
-                );
-            }
-            // The terminal shrank below docking mid-drag; the release still ends it.
-            _ => {}
+        // The terminal shrank below docking mid-drag: drags do nothing, and the
+        // release still ends the resize.
+        let docked = self.docked();
+        let total = self.width;
+        let held_at = total.saturating_sub(self.docked_width(total)) + resize.grab;
+        let moved = resize.moved || (docked && column != held_at);
+        if moved && docked {
+            let width = total.saturating_sub(column.saturating_sub(resize.grab));
+            self.dragged_width = Some(
+                width
+                    .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
+                    .max(PANEL_WIDTH),
+            );
+        }
+        if matches!(kind, MouseEventKind::Up(_)) {
+            self.last_border_click = (!moved).then_some(now);
+            self.resize = None;
+        } else {
+            self.resize = Some(Resize { moved, ..resize });
         }
         true
     }
@@ -2052,6 +2053,21 @@ mod tests {
         panel.continue_resize(DRAG, 125, now);
         assert_eq!(panel.docked_width(200), 76);
         panel.continue_resize(DRAG, 111, now);
+        assert_eq!(panel.docked_width(200), 90);
+    }
+
+    #[test]
+    fn release_moves_border() {
+        let start = Instant::now();
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        // No drag reported between the press at the border and the release at 110.
+        panel.press_border(start, 0);
+        panel.continue_resize(RELEASE, 110, start);
+        assert_eq!(panel.docked_width(200), 90);
+        // That release moved the border, so it is not the first click of a double-click.
+        panel.press_border(start + Duration::from_millis(100), 0);
+        assert!(panel.resizing());
         assert_eq!(panel.docked_width(200), 90);
     }
 
