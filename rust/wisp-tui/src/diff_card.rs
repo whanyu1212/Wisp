@@ -33,6 +33,9 @@ pub(crate) struct DiffCardPreview {
     pub emphasis: Vec<Range<usize>>,
     pub syntax: Vec<crate::syntax::SyntaxToken>,
     pub gutters: Vec<Range<usize>>,
+    /// The lines above a cut-off preview's "more changed lines" row, and how far each
+    /// fades.
+    pub fades: Vec<(Range<usize>, u8)>,
 }
 
 /// Build the collapsed card preview for a diff presentation.
@@ -55,12 +58,15 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
         emphasis: Vec::new(),
         syntax: Vec::new(),
         gutters: Vec::new(),
+        fades: Vec::new(),
     };
+    let mut last_start = 0;
     for (row, emphasis) in rows.iter().zip(emphasis) {
         if !preview.text.is_empty() {
             preview.text.push('\n');
         }
         let start = preview.text.len();
+        last_start = start;
         let (line, content_start) = format_row(row, gutter);
         preview.text.push_str(&line);
         let end = preview.text.len();
@@ -93,6 +99,7 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
                 .map(|range| offset + range.start..offset + range.end),
         );
     }
+    preview.fade_before_omission(&rows, last_start);
     if detail.truncated {
         preview.push_line(
             "⋯ retained detail is incomplete",
@@ -128,7 +135,9 @@ pub(crate) fn side_by_side_preview(
         emphasis: Vec::new(),
         syntax: Vec::new(),
         gutters: Vec::new(),
+        fades: Vec::new(),
     };
+    let mut last_start = 0;
     if let Some(hunk) = detail
         .rows
         .iter()
@@ -173,6 +182,7 @@ pub(crate) fn side_by_side_preview(
                 // Separators, the trailing-newline row and the omission span the card.
                 let (line, _) = format_row(row, false);
                 preview.push_line(&line, row_tone(row.kind));
+                last_start = preview.text.len() - line.len();
                 index += 1;
                 continue;
             }
@@ -202,6 +212,7 @@ pub(crate) fn side_by_side_preview(
             }
         }
     }
+    preview.fade_before_omission(&rows, last_start);
     if detail.truncated {
         preview.push_line(
             "⋯ retained detail is incomplete",
@@ -367,6 +378,17 @@ impl DiffCardPreview {
         let used = line.gutter.width() + line.text.width();
         self.text.push_str(&" ".repeat(width.saturating_sub(used)));
         self.tones.push((start..self.text.len(), line.tone));
+    }
+
+    /// Fade the lines above the preview's last row when that row says more changes are
+    /// hidden; `last_start` is where that row starts in `text`.
+    fn fade_before_omission(&mut self, rows: &[DetailRow], last_start: usize) {
+        if rows
+            .last()
+            .is_some_and(|row| row.kind == DetailRowKind::Omission)
+        {
+            self.fades = crate::transcript_view::fade_before_cut(&self.text, last_start);
+        }
     }
 
     fn push_line(&mut self, line: &str, tone: TranscriptRowTone) {
@@ -588,6 +610,44 @@ mod tests {
             "▸ 14 more changed lines · Enter to review"
         );
         assert!(!preview.iter().any(|row| row.text == "line 29"));
+    }
+
+    #[test]
+    fn cut_preview_fades_last_lines() {
+        use crate::tool_detail::DetailPresentationKind;
+        let detail = |lines: u64| ToolDetailPresentation {
+            kind: DetailPresentationKind::DiffModify,
+            title: "M file.txt".into(),
+            summary: String::new(),
+            additions: lines,
+            deletions: 0,
+            rows: (0..lines)
+                .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
+                .collect(),
+            truncated: false,
+        };
+        let faded = |preview: &DiffCardPreview| {
+            preview
+                .fades
+                .iter()
+                .map(|(range, level)| (preview.text[range.clone()].trim().to_owned(), *level))
+                .collect::<Vec<_>>()
+        };
+        // The three lines above the "more changed lines" row fade, the nearest most.
+        for preview in [preview(&detail(30)), side_by_side_preview(&detail(30), 80)] {
+            let fades = faded(&preview);
+            assert_eq!(fades.len(), 3, "{}", preview.text);
+            for ((text, level), (line, expected)) in
+                fades
+                    .iter()
+                    .zip([("line 15", 3), ("line 14", 2), ("line 13", 1)])
+            {
+                assert!(text.ends_with(line), "{text}");
+                assert_eq!(*level, expected);
+            }
+        }
+        // A preview showing every change has no cut to fade toward.
+        assert!(preview(&detail(12)).fades.is_empty());
     }
 
     #[test]

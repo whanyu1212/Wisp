@@ -227,6 +227,34 @@ fn no_color_chip_bolds() {
 }
 
 #[test]
+fn fade_cell_nears_surface() {
+    let palette = crate::theme::themes()[0].palette(false);
+    let cell = || {
+        let mut cell = ratatui::buffer::Cell::default();
+        cell.set_fg(palette.foreground)
+            .set_bg(palette.addition_background);
+        cell
+    };
+    let mut unchanged = cell();
+    palette.fade_cell(&mut unchanged, 0);
+    assert_eq!(unchanged, cell());
+    // Each level keeps less of the cell's colour, so text loses contrast against the
+    // surface step by step and the tint gives way to the surface.
+    let contrast = |level| {
+        let mut faded = cell();
+        palette.fade_cell(&mut faded, level);
+        assert_ne!(faded.bg, palette.addition_background);
+        crate::theme::contrast_ratio(faded.fg, palette.surface)
+    };
+    assert!(contrast(1) > contrast(2) && contrast(2) > contrast(3));
+
+    let monochrome = crate::theme::themes()[0].palette(true);
+    let mut dimmed = ratatui::buffer::Cell::default();
+    monochrome.fade_cell(&mut dimmed, 3);
+    assert!(dimmed.modifier.contains(Modifier::DIM));
+}
+
+#[test]
 fn preferences_round_trip_dark_history_and_preserve_unrelated_fields() {
     let home = TestHome::new();
     let store = home.store();

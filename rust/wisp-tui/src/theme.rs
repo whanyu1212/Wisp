@@ -1,5 +1,6 @@
 //! Presentation-only palettes, generated from the existing Python theme catalog.
 
+use ratatui::buffer::Cell;
 use ratatui::style::{Color, Modifier, Style};
 use serde::{Deserialize, Deserializer};
 use std::sync::OnceLock;
@@ -285,6 +286,36 @@ impl Palette {
 
     pub fn border(self) -> Style {
         Style::default().fg(self.muted)
+    }
+
+    /// Blend a cell of a row beside a cut-off preview toward the preview's surface.
+    /// `level` 1, 2 or 3 keeps 70%, 45% or 25% of the cell's colour, so the row nearest
+    /// the cut is the faintest; a monochrome palette dims the cell instead.
+    pub fn fade_cell(self, cell: &mut Cell, level: u8) {
+        if level == 0 {
+            return;
+        }
+        if self.monochrome {
+            cell.modifier.insert(Modifier::DIM);
+            return;
+        }
+        let keep = match level {
+            1 => 0.7,
+            2 => 0.45,
+            _ => 0.25,
+        };
+        let fg = if cell.fg == Color::Reset {
+            self.foreground
+        } else {
+            cell.fg
+        };
+        let bg = if cell.bg == Color::Reset {
+            self.surface
+        } else {
+            cell.bg
+        };
+        cell.fg = mix(fg, self.surface, keep);
+        cell.bg = mix(bg, self.surface, keep);
     }
 
     pub fn selection(self) -> Style {

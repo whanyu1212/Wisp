@@ -1523,6 +1523,14 @@ fn render_transcript_row(
             Rect::new(content.right() - columns, content.y, columns, 1),
         );
     }
+    // A row beside a cut-off preview fades toward the preview's surface, so the
+    // preview reads as continuing past what it shows.
+    if row.fade > 0 {
+        let buffer = frame.buffer_mut();
+        for x in content.left()..content.right() {
+            palette.fade_cell(&mut buffer[(x, content.y)], row.fade);
+        }
+    }
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
@@ -6040,7 +6048,7 @@ mod tests {
 
     #[test]
     fn shell_output_is_framed() {
-        let draw = |lines: usize| {
+        let draw = |lines: usize, truncated: bool| {
             let mut state = UiState::unconfigured();
             state.transcript.append_prompt("run".into());
             let card = state
@@ -6059,6 +6067,7 @@ mod tests {
             result.name = "bash".into();
             result.exit_code = Some(3);
             result.output_has_exit_status = true;
+            result.truncated = truncated;
             if lines > 500 {
                 // Like the live event: the output and its tail are both cut to 500
                 // lines, while the source counts still describe all of it.
@@ -6093,7 +6102,7 @@ mod tests {
         let palette = Palette::default();
 
         // Short output loses the completion envelope and closes with the exit status.
-        let short = draw(3);
+        let short = draw(3, false);
         let text = short.to_string();
         assert!(!text.contains("Command exited"), "{text}");
         assert!(text.contains("│  line 0"), "{text}");
@@ -6101,15 +6110,50 @@ mod tests {
         assert_eq!(style_at_text(&short, "exit 3").unwrap().1, palette.surface);
 
         // A long tail counts the lines above it instead of the bytes.
-        let long = draw(40);
+        let long = draw(40, false);
         let text = long.to_string();
         assert!(text.contains("(32 earlier lines)"), "{text}");
         assert!(!text.contains("bytes omitted"), "{text}");
         assert!(text.contains("line 39"), "{text}");
         assert!(text.contains("exit 3"), "{text}");
+        // The first lines under the note fade in from the surface; later lines and the
+        // note stay at full strength.
+        let faded = |level| {
+            let mut cell = ratatui::buffer::Cell::default();
+            cell.set_fg(palette.foreground).set_bg(palette.surface);
+            palette.fade_cell(&mut cell, level);
+            cell.fg
+        };
+        for (line, level) in [("line 32", 3), ("line 33", 2), ("line 34", 1)] {
+            assert_eq!(
+                style_at_text(&long, line).unwrap().0,
+                faded(level),
+                "{line}"
+            );
+        }
+        assert_eq!(
+            style_at_text(&long, "line 35").unwrap().0,
+            palette.foreground
+        );
+        assert_eq!(
+            style_at_text(&long, "(32 earlier lines)").unwrap().0,
+            palette.muted
+        );
+        // Short output shows every line, so nothing fades.
+        assert_eq!(
+            style_at_text(&short, "line 0").unwrap().0,
+            palette.foreground
+        );
+        // Output the backend truncated keeps its start, so its first line stays whole.
+        let reported = draw(8, true);
+        assert_eq!(
+            style_at_text(&reported, "line 0").unwrap().0,
+            palette.foreground,
+            "{reported}"
+        );
 
         // Lines the projected tail already dropped still count.
-        let projected = draw(600).to_string();
+        let projected = draw(600, false).to_string();
         assert!(projected.contains("(592 earlier lines)"), "{projected}");
     }
 
@@ -6264,6 +6308,7 @@ mod tests {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            fade: 0,
         };
         let prompts = TurnBounds {
             first: Some(0),
@@ -6975,6 +7020,7 @@ mod tests {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            fade: 0,
         };
         let action = row(
             TranscriptRowKind::CardAction,
@@ -7079,6 +7125,7 @@ mod tests {
                 fold_arrow: None,
                 trailing: None,
                 live_timer: false,
+                fade: 0,
             };
             // Browse marks a selection only with a fold hint; this row has none, so the
             // selected and unselected renders match cell for cell.
