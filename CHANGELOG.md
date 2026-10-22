@@ -10,6 +10,66 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.3.0 — Unreleased
+
+0.3.0 is a feature release centered on reading, reviewing, and following work in the terminal.
+Native platforms remain macOS arm64 and Linux glibc 2.28+ x86_64, with a pure wheel for other
+platforms. Python 3.12+ remains required. The Python backend and Rust frontend must be upgraded
+together to exactly the same release.
+
+### Terminal UI
+
+- A docked, resizable sidebar on wide terminals and a Ctrl+B overlay on smaller terminals show
+  the workspace, context budget, recent turns, changed files, and visible MCP/skill inventories.
+  Context details remain expandable; running and approval states have dedicated presentations.
+  (#773, #776, #778, #779, #786, #790, #791, #797)
+- `/diff` reviews the working tree against HEAD, including staged and unstaged tracked changes,
+  with untracked files listed separately. It identifies files edited by Wisp in the session.
+  Retained edit/write previews use a full-width unified layout, a compact gutter, and explicit
+  omission counts; the review overlay keeps its unified/split controls. (#769, #789, #795, #799)
+- Assistant prose has an 88-column reading width, paragraph and list spacing, and aligned wrapped
+  list items. The composer, footer, turn rail, and streamed activity have clearer spacing and
+  status. Shift+Enter is distinguished from Enter when the terminal supports the kitty keyboard
+  protocol. (#771, #774, #775, #777, #781, #782, #798)
+- Tool activity shows concise command/MCP subjects, grouped call counts, execution times, and
+  named process outcomes. Shell and process output has a readable surface and independently
+  expandable earlier lines. Hidden retained output and unavailable output have separate counts;
+  previews keep normal contrast without fading. (#770, #772, #787, #788, #792, #795, #800)
+- The default agent prompt leads with outcomes, keeps progress updates brief, and groups related
+  check results while retaining failures and uncertainty. Requested detail remains available;
+  there is no hard response-length limit. (#801)
+
+### RPC, SDK, and context
+
+- Add `get_git_diff`, `RpcController.get_git_diff()`, and the `rpc.git_diff` event for a bounded,
+  backend-owned working-tree review. Add `rpc.workspace` for the current folder and branch.
+  External clients must use the matching 0.3.0 schema bundle. (#769, #773, #789)
+- Session stats expose a source-attributed context breakdown, including messages, tools,
+  instructions, per-turn contributions, and the largest items. Estimated splits remain identified
+  as estimates; `/context` and the sidebar show the same backend data. (#784, #786)
+- Tool and process timing and completed-run totals now survive reopening a session. RPC history
+  snapshots expose the corresponding timing and run-completion metadata. (#772, #787, #788)
+
+### Compatibility and rollback
+
+0.3.0 reads 0.2.4 sessions without rewriting them. Entry schema v6, event-envelope v1, and
+compaction v4 remain unchanged: the additions are defaulted metadata, not a migration.
+**Backward readability is not guaranteed.** 0.2.4 may reject sessions containing the new tool
+presentation fields, and its typed event reader rejects new event fields. Back up sessions before
+upgrading; use a pre-upgrade backup or new sessions if returning to 0.2.4. Keep sessions written by
+0.3.0 for reopening with 0.3.0; do not remove fields from JSONL files to force a downgrade.
+Settings, credentials, and trust formats are unchanged. See the
+[0.3 upgrade guide](book/src/guide/upgrading-to-0.3.md) for commands and compatibility details.
+
+### Development and documentation
+
+- CI selects checks from the complete change set, runs independent jobs concurrently, and
+  retains a required final gate. PTY checks handle incremental repainting and resize boundaries
+  more reliably. (#785, #794, #796, #800)
+- Astro documentation gains content/navigation foundations, responsive layouts, light/dark/system
+  themes, accessible code/diagram presentation, and built-site browser checks. Production docs
+  still deploy through mdBook; search and the final cutover are follow-up work. (#780, #783)
+
 ## 0.2.4 — 2026-10-20
 
 0.2.4 is a patch release on 0.2.3 with Codex transport diagnostics and terminal UI improvements.

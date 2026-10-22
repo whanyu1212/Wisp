@@ -1,5 +1,8 @@
 # Upgrading from Wisp 0.1 to 0.2
 
+For the next upgrade, see [Upgrading from Wisp 0.2 to 0.3](./upgrading-to-0.3).
+The instructions below describe the historical 0.2 upgrade.
+
 Wisp 0.2 is a minor release with announced breaking changes. What you need to do depends on how you
 use Wisp:
 
@@ -16,7 +19,7 @@ release candidate by release candidate.
 Back up `~/.wisp/sessions` (or your configured session directory), then install 0.2:
 
 ```bash
-uv tool install --force --python 3.12 wisp-ai
+uv tool install --force --python 3.12 "wisp-ai==0.2.4"
 wisp --version       # wisp 0.2.4
 wisp-tui --version   # wisp-tui 0.2.4, on platforms with a native wheel
 ```
