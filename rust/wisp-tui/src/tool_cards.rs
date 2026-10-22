@@ -1501,7 +1501,7 @@ fn normalize_newlines(source: &str) -> String {
     source.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-fn pad_chip_label(mut label: String) -> String {
+pub(crate) fn pad_chip_label(mut label: String) -> String {
     let padding = CHIP_LABEL_CHARS.saturating_sub(label.chars().count());
     label.push_str(&" ".repeat(padding));
     label

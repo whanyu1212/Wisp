@@ -14,7 +14,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from pydantic import ValidationError
+
 from wisp.events import (
+    AgentCompleted,
     JsonObject,
     RpcMessageSnapshot,
     RpcMessageToolCallSnapshot,
@@ -69,6 +72,8 @@ class MessagePageIndex:
     messages: tuple[MessageSessionEntry, ...]
     positions: dict[str, int]
     web_searches: dict[str, tuple[WebSearchPerformed, ...]]
+    # A run's totals, keyed by the last message the run persisted.
+    run_totals: dict[str, AgentCompleted]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +122,10 @@ def message_page_index_from_entries(
     messages = tuple(entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry))
     searches: dict[str, tuple[WebSearchPerformed, ...]] = {}
     pending: list[WebSearchPerformed] = []
+    run_totals: dict[str, AgentCompleted] = {}
+    # The run's latest message, which its `agent.completed` closes. A run that persisted
+    # no message of its own (its prompt rolled back) must not claim an earlier run's.
+    run_last_message: str | None = None
     operation_id: str | None = None
     # Searches precede their assistant completion on the active branch. Never
     # carry evidence from an interrupted response into a later run or message.
@@ -130,18 +139,32 @@ def message_page_index_from_entries(
             pending.clear()
         if entry.operation_id != operation_id:
             pending.clear()
+            run_last_message = None
             operation_id = entry.operation_id
+        if isinstance(entry, MessageSessionEntry):
+            run_last_message = entry.id
         if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") == "web.search":
             if len(pending) < 32:
                 pending.append(WebSearchPerformed.model_validate(entry.event.payload))
         elif isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant":
             searches[entry.id] = tuple(pending)
             pending.clear()
+        elif (
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "agent.completed"
+            and run_last_message is not None
+        ):
+            try:
+                run_totals[run_last_message] = AgentCompleted.model_validate(entry.event.payload)
+            except ValidationError:
+                pass
+            run_last_message = None
     return MessagePageIndex(
         active_leaf_id=tree.active_leaf_id,
         messages=messages,
         positions={entry.id: index for index, entry in enumerate(messages)},
         web_searches=searches,
+        run_totals=run_totals,
     )
 
 
@@ -205,6 +228,7 @@ def message_page_from_index(
             entry,
             text_budget=text_budget,
             web_searches=index.web_searches.get(entry.id, ()),
+            run_completed=index.run_totals.get(entry.id),
             complete_structure=complete_structure or full_content,
         )
         for entry in reversed(selected)
@@ -234,6 +258,7 @@ def _rpc_message_snapshot(
     text_budget: _MessagePageTextBudget | None,
     complete_structure: bool = False,
     web_searches: tuple[WebSearchPerformed, ...] = (),
+    run_completed: AgentCompleted | None = None,
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
@@ -283,6 +308,7 @@ def _rpc_message_snapshot(
         usage=message.usage,
         cost=message.cost,
         web_searches=tuple(_bounded_search(search, text_budget) for search in web_searches),
+        run_completed=run_completed,
         tool_result=tool_result,
         skill_invocation=skill_invocation,
     )

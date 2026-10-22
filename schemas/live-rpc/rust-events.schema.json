@@ -16,6 +16,42 @@
           "default": null,
           "title": "AgentCompletedDurationMs"
         },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedEffort"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedMode"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentCompletedModel"
+        },
         "model_ms": {
           "anyOf": [
             {
@@ -86,7 +122,10 @@
         "duration_ms",
         "tool_calls",
         "output_tokens",
-        "model_ms"
+        "model_ms",
+        "mode",
+        "model",
+        "effort"
       ],
       "title": "AgentCompleted",
       "type": "object"
@@ -2836,6 +2875,18 @@
           "title": "RpcMessageSnapshotRole",
           "type": "string"
         },
+        "run_completed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentCompleted"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageSnapshotRunCompleted"
+        },
         "skill_invocation": {
           "anyOf": [
             {
@@ -2944,6 +2995,7 @@
         "usage",
         "cost",
         "web_searches",
+        "run_completed",
         "tool_result",
         "skill_invocation"
       ],

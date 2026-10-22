@@ -387,7 +387,7 @@ impl BackendEvent {
             }
             "web.search" => Self::WebSearch {
                 turn: u64_field(value, &event_type, "turn")?,
-                text: crate::web_search::search(value),
+                search: crate::web_search::search(value),
             },
             "rpc.workspace" => Self::WorkspaceReported {
                 cwd: string_field(value, &event_type, "cwd")?,
@@ -396,13 +396,16 @@ impl BackendEvent {
                     .and_then(Value::as_str)
                     .map(str::to_owned),
             },
-            "agent.completed" => Self::RunCompleted {
+            "agent.completed" => Self::RunCompleted(crate::transcript::RunTotals {
                 outcome: string_field(value, &event_type, "outcome")?,
                 duration_ms: optional_u64_field(value, &event_type, "duration_ms")?,
                 tool_calls: u64_field_or(value, &event_type, "tool_calls", 0)?,
                 output_tokens: optional_u64_field(value, &event_type, "output_tokens")?,
                 model_ms: optional_u64_field(value, &event_type, "model_ms")?,
-            },
+                mode: optional_string_field(value, &event_type, "mode")?,
+                model: optional_string_field(value, &event_type, "model")?,
+                effort: optional_string_field(value, &event_type, "effort")?,
+            }),
             "message.completed" => Self::MessageCompleted {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,

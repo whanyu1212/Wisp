@@ -14,6 +14,30 @@
    "event": "agent.completed",
    "operation": "remove",
    "path": [
+    "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.completed",
+   "operation": "remove",
+   "path": [
     "model_ms"
    ],
    "accepted": true

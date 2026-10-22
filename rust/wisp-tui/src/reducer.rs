@@ -1148,7 +1148,7 @@ pub enum BackendEvent {
     },
     WebSearch {
         turn: u64,
-        text: String,
+        search: crate::web_search::WebSearch,
     },
     MessageCompleted {
         turn: u64,
@@ -1161,14 +1161,7 @@ pub enum BackendEvent {
         git_branch: Option<String>,
     },
     /// A run finished; its totals close the run's last reply.
-    RunCompleted {
-        outcome: String,
-        duration_ms: Option<u64>,
-        tool_calls: u64,
-        output_tokens: Option<u64>,
-        /// Time the run's model responses spent streaming, which throughput uses.
-        model_ms: Option<u64>,
-    },
+    RunCompleted(crate::transcript::RunTotals),
     ToolCall(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
     ToolApprovalResolved {
@@ -4607,8 +4600,8 @@ fn handle_backend_event(
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::WebSearch { turn, text } => {
-            state.transcript.observe_search(turn, text);
+        BackendEvent::WebSearch { turn, search } => {
+            state.transcript.observe_search(turn, search);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::MessageDelta { .. }
@@ -4630,25 +4623,12 @@ fn handle_backend_event(
             state.git_branch = git_branch;
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::RunCompleted {
-            outcome,
-            duration_ms,
-            tool_calls,
-            output_tokens,
-            model_ms,
-        } => {
-            let summary = run_summary_line(
-                state,
-                &outcome,
-                duration_ms,
-                tool_calls,
-                output_tokens,
-                model_ms,
-            );
+        BackendEvent::RunCompleted(totals) => {
             let result = crate::transcript::RunResult {
-                duration_ms,
-                outcome: crate::transcript::RunOutcome::parse(&outcome),
+                duration_ms: totals.duration_ms,
+                outcome: crate::transcript::RunOutcome::parse(&totals.outcome),
             };
+            let summary = with_session_settings(state, totals).summary_line();
             // Total the run while its prompt id still finds its replies, steers and
             // follow-ups included.
             state.finished_run_cost = state
@@ -4909,66 +4889,26 @@ fn handle_backend_event(
     }
 }
 
-/// The run's summary line, such as `╰ Build · gpt-6-astra · high · 6m 41s · 14 tools ·
-/// 31k tokens`. Mode, model, and effort are the session's settings when the run ends;
-/// parts that are unknown are left out, and a run that did not complete says how it
-/// ended.
-fn run_summary_line(
+/// Fill the mode, model and effort a backend did not report from what the UI shows,
+/// so the summary line still names them.
+fn with_session_settings(
     state: &UiState,
-    outcome: &str,
-    duration_ms: Option<u64>,
-    tool_calls: u64,
-    output_tokens: Option<u64>,
-    model_ms: Option<u64>,
-) -> String {
-    let mut parts = Vec::new();
-    if state.mode_confirmed {
-        parts.push(match state.mode {
-            AgentMode::Build => "Build".to_owned(),
-            AgentMode::Plan => "Plan".to_owned(),
-        });
+    mut totals: crate::transcript::RunTotals,
+) -> crate::transcript::RunTotals {
+    if totals.mode.is_none() && state.mode_confirmed {
+        totals.mode = Some(state.mode.as_str().to_owned());
     }
-    if let Some(model) = state
-        .model_catalog
-        .as_ref()
-        .and_then(|catalog| catalog.selection.effective_model.as_deref())
-        .or(state.model.as_deref())
-    {
-        parts.push(model.to_owned());
+    if totals.model.is_none() {
+        totals.model = state
+            .model_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.selection.effective_model.clone())
+            .or_else(|| state.model.clone());
     }
-    if let Some(effort) = state.effort.as_deref() {
-        parts.push(effort.to_owned());
+    if totals.effort.is_none() {
+        totals.effort = state.effort.clone();
     }
-    if let Some(duration_ms) = duration_ms {
-        parts.push(crate::tool_cards::format_duration(duration_ms));
-    }
-    match tool_calls {
-        0 => {}
-        1 => parts.push("1 tool".to_owned()),
-        count => parts.push(format!("{count} tools")),
-    }
-    // Throughput over the time the model streamed, so tool time does not dilute it.
-    if let (Some(tokens), Some(model_ms)) = (
-        output_tokens.filter(|tokens| *tokens > 0),
-        model_ms.filter(|milliseconds| *milliseconds > 0),
-    ) {
-        parts.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
-    }
-    if outcome != "completed" {
-        parts.push(outcome.to_owned());
-    }
-    // The turn's rail draws the closing `╰`.
-    parts.join(" · ")
-}
-
-/// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
-fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
-    let rate = tokens as f64 * 1000.0 / model_ms as f64;
-    if rate < 10.0 {
-        format!("{rate:.1}")
-    } else {
-        format!("{rate:.0}")
-    }
+    totals
 }
 
 #[cfg(test)]
@@ -5296,13 +5236,11 @@ mod tests {
         state.transcript.append_prompt("and the docs".into());
         reduce(
             &mut state,
-            UiAction::BackendEvent(BackendEvent::RunCompleted {
+            UiAction::BackendEvent(BackendEvent::RunCompleted(crate::transcript::RunTotals {
                 outcome: "cancelled".into(),
                 duration_ms: Some(4_000),
-                tool_calls: 0,
-                output_tokens: None,
-                model_ms: None,
-            }),
+                ..Default::default()
+            })),
             &mut ids,
         )
         .unwrap();
@@ -6385,12 +6323,6 @@ mod tests {
     }
 
     #[test]
-    fn throughput_keeps_a_digit() {
-        assert_eq!(tokens_per_second(1_234, 40_000), "31");
-        assert_eq!(tokens_per_second(42, 5_000), "8.4");
-    }
-
-    #[test]
     fn cancelled_run_closes_on_card() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
@@ -6406,13 +6338,12 @@ mod tests {
         });
         let effects = reduce(
             &mut state,
-            UiAction::BackendEvent(BackendEvent::RunCompleted {
+            UiAction::BackendEvent(BackendEvent::RunCompleted(crate::transcript::RunTotals {
                 outcome: "cancelled".into(),
                 duration_ms: Some(4_000),
                 tool_calls: 1,
-                output_tokens: None,
-                model_ms: None,
-            }),
+                ..Default::default()
+            })),
             &mut ids,
         )
         .unwrap();
@@ -6428,6 +6359,31 @@ mod tests {
     }
 
     #[test]
+    fn reported_settings_name_the_run() {
+        let mut state = UiState::new("fake".into(), Some("ui-model".into()), None);
+        let mut ids = DeterministicIds::default();
+        state.transcript.append_prompt("hi".into());
+        state.transcript.complete_message(1, "hello".into());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::RunCompleted(crate::transcript::RunTotals {
+                outcome: "completed".into(),
+                duration_ms: Some(2_000),
+                mode: Some("plan".into()),
+                model: Some("run-model".into()),
+                effort: Some("low".into()),
+                ..Default::default()
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state.transcript.entries().last().unwrap().run_summary(),
+            Some("Plan · run-model · low · 2.0s")
+        );
+    }
+
+    #[test]
     fn empty_run_keeps_no_summary() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
@@ -6435,13 +6391,10 @@ mod tests {
         state.transcript.complete_message(1, "hello".into());
         let effects = reduce(
             &mut state,
-            UiAction::BackendEvent(BackendEvent::RunCompleted {
+            UiAction::BackendEvent(BackendEvent::RunCompleted(crate::transcript::RunTotals {
                 outcome: "completed".into(),
-                duration_ms: None,
-                tool_calls: 0,
-                output_tokens: None,
-                model_ms: None,
-            }),
+                ..Default::default()
+            })),
             &mut ids,
         )
         .unwrap();

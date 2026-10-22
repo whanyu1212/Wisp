@@ -11,8 +11,10 @@ from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from wisp.events import (
+    AgentCompleted,
     ErrorEvent,
     RpcMessageToolResultSnapshot,
+    RunOutcome,
     ToolCallSnapshot,
 )
 from wisp.messages import Message
@@ -705,3 +707,62 @@ def test_enforces_aggregate_text_budget(tmp_path: Path) -> None:
         for tool_call in message.tool_calls
     )
     assert _message_page_text_bytes(page) <= pagination.MESSAGE_PAGE_TEXT_BYTE_LIMIT
+
+
+def _completed(outcome: RunOutcome = "completed") -> AgentCompleted:
+    return AgentCompleted(
+        session_id="s",
+        turns=1,
+        outcome=outcome,
+        duration_ms=4000,
+        tool_calls=2,
+        mode="build",
+        model="m",
+        effort="high",
+    )
+
+
+def test_run_totals_close_last_message(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run() -> None:
+        await session.append_message(Message(role="user", content="ask"), operation_id="a")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="a")
+        await session.append_message(Message(role="tool", content="out"), operation_id="a")
+        await session.append_event(_completed(), operation_id="a")
+
+    anyio.run(run)
+    page = session.read_message_page()
+    assert [message.run_completed for message in page.messages[:2]] == [None, None]
+    assert page.messages[-1].run_completed == _completed().model_copy(
+        update={"timestamp": page.messages[-1].run_completed.timestamp}
+    )
+
+
+def test_run_totals_stay_in_their_run(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run() -> None:
+        await session.append_message(Message(role="user", content="one"), operation_id="a")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="a")
+        await session.append_event(_completed(), operation_id="a")
+        # A run whose prompt rolled back persisted no message of its own, and a
+        # second terminal never replaces the first.
+        await session.append_event(_completed("failed"), operation_id="b")
+        await session.append_event(_completed("failed"), operation_id="a")
+
+    anyio.run(run)
+    page = session.read_message_page()
+    totals = page.messages[-1].run_completed
+    assert totals is not None and totals.outcome == "completed"
+
+
+def test_older_runs_have_no_totals(tmp_path: Path) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def run() -> None:
+        await session.append_message(Message(role="user", content="ask"), operation_id="a")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="a")
+
+    anyio.run(run)
+    assert all(message.run_completed is None for message in session.read_message_page().messages)
