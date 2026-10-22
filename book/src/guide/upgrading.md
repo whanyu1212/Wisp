@@ -1,6 +1,6 @@
 # Upgrading from Wisp 0.1 to 0.2
 
-For the next upgrade, see [Upgrading from Wisp 0.2 to 0.3](./upgrading-to-0.3).
+For the next upgrade, see [Upgrading from Wisp 0.2 to 0.3](./upgrading-to-0.3.md).
 The instructions below describe the historical 0.2 upgrade.
 
 Wisp 0.2 is a minor release with announced breaking changes. What you need to do depends on how you

@@ -87,7 +87,7 @@ with the backend and use the 0.3.0 schema bundle.
 0.3.0 reads 0.2.4 sessions using the existing entry v6, event-envelope v1, and compaction v4
 formats. This does not guarantee that an older package can read newer records: 0.2.4 may reject
 the added tool presentation fields, while its typed event reader rejects new event fields.
-Keep a pre-upgrade session backup. See [Upgrading to 0.3](../guide/upgrading-to-0.3) for the
+Keep a pre-upgrade session backup. See [Upgrading to 0.3](../guide/upgrading-to-0.3.md) for the
 supported rollback procedure. Settings, credentials, and trust formats are unchanged.
 
 ## Deprecation and removal

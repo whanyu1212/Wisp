@@ -27,7 +27,7 @@ RPC, and SDK use work, but interactive `wisp` and `wisp tui` report how to obtai
 matching Rust binary. Source checkouts build the binary separately; see
 [Development setup](../contributing/development#rust-tui-scaffold). Upgrading from 0.1? Read the
 [upgrade guide](./upgrading) first. For the 0.3 release, see
-[Upgrading from Wisp 0.2 to 0.3](./upgrading-to-0.3), including session rollback guidance.
+[Upgrading from Wisp 0.2 to 0.3](./upgrading-to-0.3.md), including session rollback guidance.
 
 ## The TUI does not start after installing
 
