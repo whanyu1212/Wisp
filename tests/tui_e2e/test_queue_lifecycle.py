@@ -233,6 +233,13 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"follow-up-via-enter\r")
                 phase = "follow-up sent"
             elif phase == "follow-up sent" and "follow_up" in command_types:
+                # Logging the command precedes its QueueUpdated response. Wait
+                # until the TUI has applied and painted both queued messages
+                # before asking it to restore the newest one.
+                phase_output_offset = len(output)
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 104, 0, 0))
+                phase = "follow-up frame"
+            elif phase == "follow-up frame" and screen_shows(output, "2 queued"):
                 restore_output_offset = len(output)
                 os.write(terminal_fd, b"\x1b[1;3A")
                 phase = "restore sent"

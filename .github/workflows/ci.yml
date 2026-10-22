@@ -18,7 +18,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Select required checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.select.outputs.python }}
+      rust: ${{ steps.select.outputs.rust }}
+      handoff: ${{ steps.select.outputs.handoff }}
+      package: ${{ steps.select.outputs.package }}
+      contracts: ${{ steps.select.outputs.contracts }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test check selection and required-check enforcement
+        run: python3 -m unittest discover -s tests/scripts -p test_ci_jobs.py
+      - name: Select checks from the complete Git diff
+        id: select
+        run: python3 scripts/ci_jobs.py select
+
   quality:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     name: Format, lint, and type-check
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -55,6 +77,8 @@ jobs:
         run: uv run mypy
 
   rust-workspace:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: Rust workspace (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -104,6 +128,8 @@ jobs:
   # macOS runs them only on main: they flake on GitHub's macOS runners (HY-29) and
   # never gate there, so pull requests skip that wait.
   tui-handoff:
+    needs: changes
+    if: needs.changes.outputs.handoff == 'true'
     name: TUI handoff (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -179,6 +205,8 @@ jobs:
           if-no-files-found: warn
 
   package:
+    needs: changes
+    if: needs.changes.outputs.package == 'true'
     name: Build and verify package
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -221,6 +249,8 @@ jobs:
           popd
 
   python-tests:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     name: Python tests (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -268,6 +298,8 @@ jobs:
           if-no-files-found: error
 
   macos-smoke:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
     name: Platform smoke (macOS)
     runs-on: macos-latest
     timeout-minutes: 20
@@ -315,21 +347,34 @@ jobs:
           WISP_TRUST: "1"
         run: uv run wisp -p "hello" --provider fake
 
-  # The one required status check: it passes only when every job above
-  # succeeds, so adding or renaming a job never needs a ruleset change.
+  contracts:
+    name: Documentation and repository contracts
+    needs: changes
+    if: needs.changes.outputs.contracts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - run: uv sync --locked
+      - run: uv run pytest tests/docs tests/repository --durations=20
+
+  # Always report the required status, including when selection fails. Only jobs
+  # explicitly excluded by the successful plan may be skipped.
   ci-passed:
     name: CI passed
     if: ${{ always() }}
-    needs: [quality, rust-workspace, tui-handoff, package, python-tests, macos-smoke]
+    needs: [changes, quality, rust-workspace, tui-handoff, package, python-tests, macos-smoke, contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 5
-
     steps:
-      - name: Require every job to succeed
+      - uses: actions/checkout@v4
+      - name: Require every selected job to succeed
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          echo "Job results: $RESULTS"
-          for result in $RESULTS; do
-            test "$result" = success
-          done
+          CI_NEEDS: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_jobs.py verify

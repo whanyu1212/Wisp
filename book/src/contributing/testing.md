@@ -118,14 +118,40 @@ change, while geometry and style regressions are already checked by Rust buffer 
 CI runs for pull requests targeting `main` or `develop`, for direct updates to `main`, and by manual
 dispatch.
 
-Linux is authoritative for the complete locked-environment quality and test suite: Ruff formatting
-and lint, configured `uv run mypy`, and the `tests/` suite.
+CI selects jobs from the complete Git diff: pull requests use the merge base, and pushes use
+`before..after`. Renames include both paths. Manual runs, missing comparison commits, unknown paths,
+CI changes, dependencies, schemas, and shared fixtures run all checks.
 
-The `CI passed` job is the only required status check. It succeeds only when every other job in the
-CI workflow succeeds, so adding or renaming a job never needs a repository settings change.
+| Change | Checks in the CI workflow |
+| -- | -- |
+| Book, site, or assets only | Documentation and repository contract tests |
+| README | Contract tests and package build/installed SDK verification |
+| Rust TUI source only | Linux/macOS Rust workspace, Linux TUI handoff, contract tests |
+| Python runtime | Quality, both Python suites, macOS platform smoke, package, TUI handoff |
+| RPC/events, shared inputs, native crates, or unclassified changes | Full CI |
 
-A separate Rust workspace job runs the schema check, Rust formatting, check, Clippy, workspace tests,
-build, and cross-language handoff smoke test on both Linux and macOS.
+Mixed changes take the union of their checks. Contract tests run separately only when the full
+Python suite is not selected; the full suite already includes them. Documentation builds and
+Astro browser checks retain their own workflow path filters.
+
+Linux is authoritative for the complete locked-environment Python quality and test suite: Ruff
+formatting and lint, configured `uv run mypy`, live RPC schema verification, and the `tests/` suite.
+Rust formatting runs on Linux; Clippy and workspace tests run on both Linux and macOS because
+platform-specific code needs coverage on each. The TUI handoff and benchmark harnesses run on Linux
+for relevant PRs; main and manual runs also exercise macOS handoff as a nonblocking diagnostic.
+
+The `CI passed` job is the only required status check. It always runs and requires successful check
+selection, every selected job to succeed, and every unselected job to be explicitly skipped. A
+failed, cancelled, missing, or unexpectedly skipped job cannot make it pass. Selection and status
+validation live in `scripts/ci_jobs.py`; their dependency-free tests run before job selection:
+
+```bash
+python3 -m unittest discover -s tests/scripts -p test_ci_jobs.py
+```
+
+Astro uses a pinned Playwright container with browsers and OS dependencies already installed, so
+browser checks do not depend on fresh Ubuntu package downloads. Update the image and its version
+check in `.github/workflows/astro.yml` with `@playwright/test` in `site/package-lock.json`.
 
 The reusable `Rust TUI wheel candidates` workflow builds `wisp-ai` platform wheels for manylinux
 x86_64 and macOS arm64. It compares Python package files with the current `uv_build` wheel, verifies
@@ -134,9 +160,11 @@ exercises an installed fake-provider Rust TUI prompt, the managed-output extensi
 replacement with an actionable missing-binary error, corruption, offline reinstall, and uninstall;
 it uploads checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
-It runs on every push to `main`, and on pull requests only when they change Rust crates, packaging
-files, the wheel scripts or tests, or the Python modules that load a native binary (the TUI
-launcher and the search and shell tools). Pull requests, `main` pushes, and manual workflow runs
+It runs on runtime pushes to `main`, skipping changes confined to book/site content, assets, agent
+instructions, and the changelog. Pull requests build candidates for native crates, shared build and
+protocol inputs, packaging files, wheel scripts/tests, and Python modules that load a native binary
+(the TUI launcher and the search and shell tools). TUI-only PRs use workspace and handoff checks;
+their merged code still gets an installed-wheel build. Pull requests, `main` pushes, and manual runs
 only upload candidates. The tag-gated release workflow calls the same reusable builder, verifies the
 complete downloaded distribution set, and requires provenance attestation before trusted
 publication.

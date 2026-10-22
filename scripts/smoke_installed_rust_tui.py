@@ -29,6 +29,13 @@ _ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 _CONTEXT_READING = re.compile(rb"[0-9]%|[0-9](?:\.[0-9])?[km](?![A-Za-z])")
 
 
+def _full_repaint_after(output: bytearray, offset: int) -> bytes | None:
+    """Return a complete screen-clearing frame received after a resize request."""
+    start = output.find(b"\x1b[?2026h\x1b[2J", offset)
+    end = output.find(b"\x1b[?2026l", start) if start >= 0 else -1
+    return bytes(output[start:end]) if end >= 0 else None
+
+
 def _seed_history(session_dir: Path, count: int) -> int:
     """Write a disposable active path with conversation and completed read tools.
 
@@ -137,6 +144,7 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
     response_seen = False
     settled_redraw_offset: int | None = None
     settled_at: float | None = None
+    settled_width = 82
     quit_sent = False
     status: int | None = None
     deadline = time.monotonic() + (120 if history_messages else 30)
@@ -173,40 +181,47 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
                 prompt_sent = True
             if prompt_sent and b"response" in output:
                 response_seen = True
-            if (
-                response_seen
-                and settled_redraw_offset is None
-                and output.rfind(b"idle") > output.rfind(b"working")
-            ):
-                # The first differential idle paint can share a scheduling turn
-                # with final prompt cleanup. Require one complete settled frame
-                # before testing graceful installed-package shutdown.
-                settled_redraw_offset = len(output)
-                settled_at = time.monotonic()
-                fcntl.ioctl(
-                    terminal_fd,
-                    termios.TIOCSWINSZ,
-                    struct.pack("HHHH", 24, 83, 0, 0),
+            if response_seen and not quit_sent:
+                # Incremental output may repaint only "dle" when the existing
+                # cell already contains "i". Never wait for a fresh literal
+                # "idle" before requesting the frame that proves readiness.
+                frame = (
+                    _full_repaint_after(output, settled_redraw_offset)
+                    if settled_redraw_offset is not None
+                    else None
                 )
-                continue
-            if (
-                settled_redraw_offset is not None
-                and settled_at is not None
-                and not quit_sent
-                and b"fake response to: installed wheel smoke" in output[settled_redraw_offset:]
-                and b"idle" in output[settled_redraw_offset:]
-                and time.monotonic() - settled_at >= 0.25
-            ):
-                os.write(terminal_fd, b"\x03")
-                quit_sent = True
+                redraw_due = settled_at is None or time.monotonic() - settled_at >= 0.25
+                if (
+                    frame is not None
+                    and b"fake response to: installed wheel smoke" in frame
+                    and b"idle" in frame
+                    and redraw_due
+                ):
+                    os.write(terminal_fd, b"\x03")
+                    quit_sent = True
+                elif redraw_due:
+                    # The first repaint can precede the final response/cleanup.
+                    # Keep requesting complete frames until the run settles.
+                    settled_redraw_offset = len(output)
+                    settled_at = time.monotonic()
+                    settled_width = 83 if settled_width == 82 else 82
+                    fcntl.ioctl(
+                        terminal_fd,
+                        termios.TIOCSWINSZ,
+                        struct.pack("HHHH", 24, settled_width, 0, 0),
+                    )
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
                 status = waited_status
                 break
         if status is None:
-            raise RuntimeError(f"installed Rust TUI smoke timed out: {bytes(output[-8000:])!r}")
+            raise RuntimeError(
+                "installed Rust TUI smoke timed out "
+                f"(prompt_sent={prompt_sent}, response_seen={response_seen}, "
+                f"quit_sent={quit_sent}): {bytes(output[-8000:])!r}"
+            )
         exit_code = os.waitstatus_to_exitcode(status)
-        if exit_code != 0 or not response_seen:
+        if exit_code != 0 or not response_seen or not quit_sent:
             raise RuntimeError(
                 f"installed Rust TUI smoke failed with {exit_code}: {bytes(output[-8000:])!r}"
             )
