@@ -733,7 +733,9 @@ opens the tree), context use, the model and effort, the session's cost, the perm
 changed files with line counts (`◆` marks files Wisp edited this session; in the `Ctrl+B` overlay,
 Enter on one jumps to its edit card), each prompt's run time and outcome, and MCP server status. The footer then leaves the folder, queue counts, context
 and model to the panel. The panel is 56 columns wide at 160 columns and takes half of any extra
-width, up to 76 columns at 200 columns or more. `Ctrl+B` hides or shows it. On a narrower terminal,
+width, up to 76 columns at 200 columns or more. Drag its left border to set another width, from
+56 columns up to what leaves the transcript 104; double-click the border to return to the automatic
+width. A dragged width lasts until Wisp exits. `Ctrl+B` hides or shows it. On a narrower terminal,
 `Ctrl+B` opens the same 56-column panel over the right of the transcript, and `Esc` or `Ctrl+B` closes it. The changed files refresh
 when the panel appears and after each run, but not while `/diff` is open. On a terminal at least
 160 columns wide, Edit and Write cards in the transcript set old and new side by side.

@@ -264,7 +264,7 @@ pub fn render_interactive(
     // the column beside it.
     let column = match side_panel.filter(|panel| panel.docked()) {
         Some(panel) => {
-            let (column, panel_area) = side_panel::split(area);
+            let (column, panel_area) = panel.split(area);
             side_panel::render(
                 frame,
                 panel_area,

@@ -1594,6 +1594,7 @@ impl LiveUi {
         let mut painted = mouse::Frame {
             layer: self.mouse_layer(),
             conversation: mouse::Conversation::default(),
+            panel_border: None,
             popup: None,
             rows: mouse::Rows::default(),
         };
@@ -1653,7 +1654,9 @@ impl LiveUi {
             // Popups docked to the composer lay out in the conversation's column, beside
             // a docked side panel; centred popups still centre on the whole screen.
             let column = if self.side_panel.docked() {
-                side_panel::split(frame.area()).0
+                let (column, panel) = self.side_panel.split(frame.area());
+                painted.panel_border = Some(side_panel::border_hit_area(panel));
+                column
             } else {
                 frame.area()
             };
@@ -3864,12 +3867,23 @@ impl LiveUi {
             ) {
                 // Ahead of every other route: a drag must end even if help or a popup opened
                 // meanwhile, and a release is never a second click.
-                self.continue_transcript_selection(*event);
+                if self.side_panel.continue_resize(
+                    event.kind,
+                    event.column,
+                    std::time::Instant::now(),
+                ) {
+                    self.render_pending = true;
+                } else {
+                    self.continue_transcript_selection(*event);
+                }
                 return Ok(LoopControl::Continue);
             }
-            // Every press ends an earlier selection, including presses that popups, approvals,
-            // or gates consume; a lost release must not let a later one copy stale cells.
-            if self.transcript_selection.take().is_some() {
+            // Every press ends an earlier selection or panel resize, including presses that
+            // popups, approvals, or gates consume; a lost release must not let a later one
+            // copy stale cells or move the panel's border.
+            let ended_selection = self.transcript_selection.take().is_some();
+            let ended_resize = self.side_panel.cancel_resize();
+            if ended_selection || ended_resize {
                 self.render_pending = true;
             }
         }

@@ -1224,6 +1224,98 @@ async fn dragging_over_the_transcript_highlights_and_copies_the_painted_text() {
 }
 
 #[tokio::test]
+async fn border_drag_resizes_panel() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    draw(&mut ui, 200, 30);
+    let border = 200 - side_panel::auto_width(200);
+    for input in [
+        click(border, 5),
+        drag(MouseEventKind::Drag(MouseButton::Left), 110, 5),
+        drag(MouseEventKind::Up(MouseButton::Left), 110, 5),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.side_panel.docked_width(200), 90);
+    assert!(ui.transcript_selection.is_none());
+    assert!(copied.lock().unwrap().copied.is_empty());
+
+    // The next paint moves the border, and a double-click there returns to auto.
+    draw(&mut ui, 200, 30);
+    let border_area = ui.mouse_frame.as_ref().unwrap().panel_border.unwrap();
+    assert_eq!(border_area.x, 110);
+    for input in [
+        click(110, 5),
+        drag(MouseEventKind::Up(MouseButton::Left), 110, 5),
+        click(111, 5),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.side_panel.docked_width(200), side_panel::auto_width(200));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn transcript_drag_skips_resize() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 200, 30);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    draw(&mut ui, 200, 30);
+    for input in [
+        drag(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+        drag(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(copied.lock().unwrap().copied, ["alpha"]);
+    assert_eq!(ui.side_panel.docked_width(200), side_panel::auto_width(200));
+}
+
+#[tokio::test]
+async fn lost_release_ends_resize() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    let buffer = draw(&mut ui, 200, 30);
+    let (x, y) = cell_of(&buffer, "alpha line");
+    // The border's release never arrives, so the next press must end the resize.
+    let border = 200 - side_panel::auto_width(200);
+    ui.handle_input(click(border, 5), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(!ui.side_panel.resizing());
+    draw(&mut ui, 200, 30);
+    for input in [
+        drag(MouseEventKind::Drag(MouseButton::Left), x + 4, y),
+        drag(MouseEventKind::Up(MouseButton::Left), x + 4, y),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(copied.lock().unwrap().copied, ["alpha"]);
+    assert_eq!(ui.side_panel.docked_width(200), side_panel::auto_width(200));
+}
+
+#[tokio::test]
+async fn border_drag_during_approval() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let (mut ui, _copied) = transcript_ui();
+    draw(&mut ui, 200, 30);
+    ui.state.view_status = ViewStatus::WaitingForApproval;
+    let border = 200 - side_panel::auto_width(200);
+    for input in [
+        click(border, 5),
+        drag(MouseEventKind::Drag(MouseButton::Left), 110, 5),
+        drag(MouseEventKind::Up(MouseButton::Left), 110, 5),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.side_panel.docked_width(200), 90);
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn dragging_upward_selects_in_reading_order() {
     let (writer, _receiver) = mpsc::channel(16);
     let (mut ui, copied) = transcript_ui();
