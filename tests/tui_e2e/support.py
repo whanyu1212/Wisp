@@ -102,6 +102,26 @@ def frame_cursor(output: bytes | bytearray) -> tuple[int, int] | None:
     return int(placed.group(1)), int(placed.group(2))
 
 
+def full_repaint_after(output: bytes | bytearray, offset: int) -> bytes | None:
+    """Return the first complete full-screen repaint that starts at or after ``offset``.
+
+    A frame painted at the old size can still arrive after a resize, and an
+    incremental frame can split text across cursor moves. The first draw that sees
+    the new size clears the screen inside its synchronized frame and paints every
+    cell, so only that frame proves what the whole screen shows after a resize.
+
+    Args:
+        output (bytes | bytearray): Raw PTY output so far.
+        offset (int): Output length when the resize was requested.
+
+    Returns:
+        bytes | None: The repaint's bytes, or None until one has been received whole.
+    """
+    start = output.find(b"\x1b[?2026h\x1b[2J", offset)
+    end = output.find(_FRAME_END, start) if start >= 0 else -1
+    return bytes(output[start:end]) if end >= 0 else None
+
+
 def display_width(text: str) -> int:
     """Return the terminal cells ``text`` occupies, counting wide East Asian characters as two."""
     return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
