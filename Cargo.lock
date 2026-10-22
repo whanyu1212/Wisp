@@ -2608,6 +2608,7 @@ dependencies = [
  "base64",
  "bytes",
  "caseless",
+ "chrono",
  "clap",
  "crossterm",
  "jsonschema",

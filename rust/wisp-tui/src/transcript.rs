@@ -859,6 +859,9 @@ impl Transcript {
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
                             duration_ms: None,
+                            started_at_ms: None,
+                            process_started_at_ms: None,
+                            process_ended_at_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -923,6 +926,9 @@ impl Transcript {
                             stdout_dropped_bytes: 0,
                             stderr_dropped_bytes: 0,
                             duration_ms: None,
+                            started_at_ms: None,
+                            process_started_at_ms: None,
+                            process_ended_at_ms: None,
                             is_error: true,
                             ..input.clone()
                         },
@@ -2690,6 +2696,9 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
             duration_ms: None,
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
         }
     }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import shlex
 import sys
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -148,6 +149,9 @@ def test_projection_keeps_the_complete_wire_payload() -> None:
         "stderr_truncated": True,
         "stdout_dropped_bytes": 11,
         "stderr_dropped_bytes": 12,
+        "started_at": None,
+        "process_started_at": None,
+        "process_ended_at": None,
     }
 
     envelope_fields = {"type", "schema_version", "timestamp"}
@@ -680,6 +684,11 @@ def test_duration_skips_approval_wait() -> None:
     assert ended.duration_ms is not None
     assert 30 <= ended.duration_ms < 250
     assert result.duration_ms == ended.duration_ms
+    # The start falls after the approval, not when the executor was first called.
+    approved = next(event for event in emitted if isinstance(event, ToolApprovalResolved))
+    assert ended.started_at is not None
+    assert result.started_at == ended.started_at
+    assert approved.timestamp - timedelta(milliseconds=5) <= ended.started_at <= result.timestamp
 
 
 def test_interrupted_results_have_no_duration() -> None:

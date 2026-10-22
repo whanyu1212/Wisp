@@ -1328,6 +1328,7 @@ impl TranscriptRowCache {
             } else {
                 (width, FoldHint::None)
             };
+            let (row_width, trailing) = group_span_trailing(transcript, &members, row_width);
             // An open group lists its members below, so only a closed one previews them.
             if !expanded {
                 let budget = row_width.saturating_sub(self.action_columns(&source));
@@ -1356,6 +1357,7 @@ impl TranscriptRowCache {
             row.tone = tone;
             row.fold_hint = fold_hint;
             row.fold_arrow = Some(self.fold_arrow_after(&format!("{marker}{label}"), expanded));
+            row.trailing = trailing;
             return Some(ProjectedRow { row, next });
         }
         // A repeated MCP call reads like one card's action line, with a count after its
@@ -1365,6 +1367,7 @@ impl TranscriptRowCache {
         } else {
             (width, FoldHint::None)
         };
+        let (row_width, trailing) = group_span_trailing(transcript, &members, row_width);
         let mut header = McpGroupHeader::new(transcript, &members, false)?;
         if self.action_columns(&header.source[..header.count_end]) > row_width {
             header = McpGroupHeader::new(transcript, &members, true)?;
@@ -1382,6 +1385,7 @@ impl TranscriptRowCache {
         row.tone = header.tone;
         row.fold_hint = fold_hint;
         row.fold_arrow = Some(self.fold_arrow_after(&header.source[..header.label_end], expanded));
+        row.trailing = trailing;
         Some(ProjectedRow { row, next })
     }
 
@@ -1564,6 +1568,7 @@ impl TranscriptRowCache {
                     let duration = entry
                         .tool_card()
                         .and_then(|card| card.duration_label())
+                        .or_else(|| entry.process_card()?.elapsed_label())
                         .map(|duration| {
                             let reserved = duration.width() + TRAILING_GAP;
                             (duration, reserved)
@@ -3545,14 +3550,14 @@ fn shown_arguments(card: &crate::tool_cards::ToolCardSnapshot) -> Option<&str> {
 
 /// Identifies the content of a collapsed group independently of its clipped display.
 fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
     let (start, members) = card_run(transcript, entry.id)?;
     if start != entry.id {
         return None;
     }
-    match card_group_key(entry)? {
+    let header = match card_group_key(entry)? {
         CardGroupKey::Explore | CardGroupKey::Tool(_) => {
             // A closed group previews its members, so their arguments key the row too.
-            use std::hash::{Hash, Hasher};
             let key = card_group_key(entry)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             members.len().hash(&mut hasher);
@@ -3562,6 +3567,46 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
         CardGroupKey::Mcp(_) => {
             McpGroupHeader::new(transcript, &members, false).map(|header| header.signature())
         }
+    }?;
+    // The header's span changes as members finish, apart from what the row shows.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    header.hash(&mut hasher);
+    group_span_ms(transcript, &members).hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The wall-clock time a group's calls took together, from the first start to the
+/// last end. Calls can run side by side, so this is not the sum of their durations.
+/// `None` until every member has finished with a known start and duration.
+fn group_span_ms(transcript: &Transcript, members: &[TranscriptEntryId]) -> Option<u64> {
+    let mut first_start = i64::MAX;
+    let mut last_end = i64::MIN;
+    for id in members {
+        let card = transcript.entry(*id)?.tool_card()?;
+        let start = card.started_at_ms?;
+        let end = start.saturating_add(i64::from(card.duration_ms?));
+        first_start = first_start.min(start);
+        last_end = last_end.max(end);
+    }
+    u64::try_from(last_end.checked_sub(first_start)?).ok()
+}
+
+/// A group header's span in the trailing column, and the columns left for the rest
+/// of the row. Like a single call's duration, a narrow row drops it first.
+fn group_span_trailing(
+    transcript: &Transcript,
+    members: &[TranscriptEntryId],
+    row_width: usize,
+) -> (usize, Option<String>) {
+    let Some(span) = group_span_ms(transcript, members).map(crate::tool_cards::format_duration)
+    else {
+        return (row_width, None);
+    };
+    let reserved = span.width() + TRAILING_GAP;
+    if row_width >= ACTION_COLUMNS_BESIDE_HINT + reserved {
+        (row_width - reserved, Some(span))
+    } else {
+        (row_width, None)
     }
 }
 
@@ -5136,6 +5181,9 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
             duration_ms: None,
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
         }
     }
 
@@ -5776,6 +5824,116 @@ mod tests {
         assert!(projection.footer.is_none());
         let omission = projection.omission.unwrap();
         assert!(omission.ends_with("earlier lines) · live"), "{omission}");
+    }
+
+    #[test]
+    fn group_shows_span_not_sum() {
+        let mut transcript = Transcript::default();
+        // The second call starts while the first still runs: together they take 9s,
+        // though their durations add up to 11s.
+        for (index, started_at_ms, duration_ms) in [(0, 0, 4_000), (1, 2_000, 7_000)] {
+            let call_id = format!("call-{index}");
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.clone(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"command": format!("sleep {index}")}),
+            });
+            let mut result = tool_result(&call_id, "done");
+            result.name = "bash".into();
+            result.started_at_ms = Some(1_700_000_000_000 + started_at_ms);
+            result.duration_ms = Some(duration_ms);
+            transcript.observe_tool_result(result);
+        }
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+        let group = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .find(|row| row.kind == TranscriptRowKind::CardGroup)
+            .unwrap();
+
+        assert!(group.plain_text().contains("Bash      2 commands"));
+        assert_eq!(group.trailing.as_deref(), Some("9.0s"));
+    }
+
+    #[test]
+    fn group_span_follows_last_result() {
+        let mut transcript = Transcript::default();
+        for index in 0..2 {
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: format!("read-{index}"),
+                name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"path": format!("file-{index}.md")}),
+            });
+        }
+        let finish = |transcript: &mut Transcript, index: i64| {
+            let mut result = tool_result(&format!("read-{index}"), "done");
+            result.started_at_ms = Some(1_700_000_000_000 + index * 1_000);
+            result.duration_ms = Some(1_500);
+            transcript.observe_tool_result(result);
+        };
+        let header = |transcript: &Transcript, cache: &mut TranscriptRowCache, width| {
+            let mut viewport = TranscriptViewport::default();
+            viewport.set_geometry(transcript, cache, width, 20);
+            viewport
+                .visible_rows(transcript, cache)
+                .into_iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap()
+        };
+        let mut cache = TranscriptRowCache::default();
+        finish(&mut transcript, 0);
+        // A member still reading leaves the span unknown.
+        assert_eq!(header(&transcript, &mut cache, 80).trailing, None);
+
+        // Only the second member changes, yet the cached header picks up the span.
+        finish(&mut transcript, 1);
+        assert_eq!(
+            header(&transcript, &mut cache, 80).trailing.as_deref(),
+            Some("2.5s")
+        );
+        assert_eq!(header(&transcript, &mut cache, 28).trailing, None);
+    }
+
+    #[test]
+    fn finished_process_shows_elapsed() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-1".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        });
+        let mut result = tool_result("poll-1", "");
+        result.name = "bash".into();
+        result.process_id = Some("process-1".into());
+        result.process_state = Some("completed".into());
+        result.exit_code = Some(2);
+        result.process_started_at_ms = Some(1_700_000_000_000);
+        result.process_ended_at_ms = Some(1_700_000_252_000);
+        transcript.observe_tool_result(result);
+
+        let action_at = |width| {
+            let mut cache = TranscriptRowCache::default();
+            let mut viewport = TranscriptViewport::default();
+            viewport.set_geometry(&transcript, &mut cache, width, 20);
+            viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .find(|row| {
+                    row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction
+                })
+                .unwrap()
+        };
+        let action = action_at(80);
+        assert!(action.plain_text().contains("exit 2"), "{action:?}");
+        assert_eq!(action.trailing.as_deref(), Some("4m 12s"));
+        // A narrow row drops the time first.
+        assert_eq!(action_at(30).trailing, None);
     }
 
     #[test]

@@ -212,6 +212,13 @@ pub struct ToolResultInput {
     /// How long the tool ran, as the backend measured it; `None` for results that
     /// never ran or were recorded before durations were kept.
     pub duration_ms: Option<u64>,
+    /// When the tool started running, in Unix milliseconds. Live results carry the
+    /// backend's own start; history derives it from when the result was saved.
+    pub started_at_ms: Option<i64>,
+    /// When a background process started and, once finished, ended, in Unix
+    /// milliseconds.
+    pub process_started_at_ms: Option<i64>,
+    pub process_ended_at_ms: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -238,6 +245,9 @@ pub struct ToolCardSnapshot {
     pub structured_detail: DetailAvailability,
     /// Kept as 32 bits, which spans 49 days, so the card stays compact.
     pub duration_ms: Option<u32>,
+    /// When the call started running, in Unix milliseconds, so a group of calls
+    /// that ran side by side can show the time they spanned together.
+    pub started_at_ms: Option<i64>,
     /// The folder this call's run used, which its paths are shown relative to.
     pub display_base: Option<std::sync::Arc<str>>,
     /// A shell's exit status, when its output opens with Wisp's completion envelope.
@@ -262,6 +272,7 @@ impl ToolCardSnapshot {
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
             duration_ms: None,
+            started_at_ms: None,
             display_base: None,
             exit_code: None,
         }
@@ -343,6 +354,7 @@ impl ToolCardSnapshot {
         self.duration_ms = input
             .duration_ms
             .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
+        self.started_at_ms = input.started_at_ms;
         self.exit_code = input
             .exit_code
             .filter(|_| input.output_has_exit_status)
@@ -615,6 +627,8 @@ pub struct ProcessCardSnapshot {
     pub backend_dropped_bytes: u64,
     /// The finished process's exit code; background output carries no exit line.
     pub exit_code: Option<i32>,
+    /// How long the finished process ran, from its start to its exit.
+    pub elapsed_ms: Option<u64>,
     last_stream_label: Option<&'static str>,
     last_sequence: Option<u64>,
     approval_sequence: Option<u64>,
@@ -633,6 +647,7 @@ impl ProcessCardSnapshot {
             backend_truncated: false,
             backend_dropped_bytes: 0,
             exit_code: None,
+            elapsed_ms: None,
             last_stream_label: None,
             last_sequence: None,
             approval_sequence: None,
@@ -800,6 +815,11 @@ impl ProcessCardSnapshot {
                         ProcessDisplayState::Completed | ProcessDisplayState::Failed
                     )
                 });
+            self.elapsed_ms = result
+                .process_started_at_ms
+                .zip(result.process_ended_at_ms)
+                .filter(|_| self.display_state.terminal())
+                .and_then(|(started, ended)| u64::try_from(ended.checked_sub(started)?).ok());
         }
         true
     }
@@ -863,6 +883,7 @@ impl ProcessCardSnapshot {
         self.task_label = newer.task_label.clone().or_else(|| self.task_label.clone());
         self.display_state = newer.display_state;
         self.exit_code = newer.exit_code;
+        self.elapsed_ms = newer.elapsed_ms;
         self.poll_count = self.poll_count.saturating_add(newer.poll_count);
         self.call_count = self.call_count.saturating_add(newer.call_count);
         self.retained_output = retained;
@@ -921,6 +942,11 @@ impl ProcessCardSnapshot {
 
     pub fn action_label(&self) -> &'static str {
         "Process"
+    }
+
+    /// How long the finished process ran, for its action line.
+    pub fn elapsed_label(&self) -> Option<String> {
+        self.elapsed_ms.map(format_duration)
     }
 
     /// The state the action line spells out beyond what its marker says. Plain
@@ -1682,6 +1708,14 @@ fn strip_redundant_cd<'a>(command: &'a str, cwd: &str) -> Option<&'a str> {
     (unquoted == cwd).then_some(rest)
 }
 
+/// Read an RFC 3339 time, as the backend writes event and history times, as Unix
+/// milliseconds.
+pub(crate) fn timestamp_ms(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.timestamp_millis())
+}
+
 /// Format a duration compactly: `<0.1s`, `0.2s`, `4.5s`, `12s`, `4m 12s`, `1h 05m`.
 /// Each unit is chosen after rounding, so 9.96 s reads `10s` rather than `10.0s`.
 pub(crate) fn format_duration(milliseconds: u64) -> String {
@@ -1885,6 +1919,9 @@ mod tests {
             stdout_dropped_bytes: 0,
             stderr_dropped_bytes: 0,
             duration_ms: None,
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
         }
     }
 
