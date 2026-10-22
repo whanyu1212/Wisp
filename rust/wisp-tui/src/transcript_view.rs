@@ -55,6 +55,10 @@ pub enum RowPosition {
     Content(usize),
     Markdown(MarkdownPosition),
     Card(CardPosition),
+    /// The rule between an open group's header and its first member, matching the rules
+    /// between later members so the first member's chip does not sit against the header's.
+    /// The first member owns it, between its group header and its action row.
+    GroupGap,
     Spacer,
     /// Highlighted padding above the next user's prompt. The preceding entry owns it so its
     /// `Spacer` stays a plain gap and every entry still starts at `Header`.
@@ -1074,6 +1078,17 @@ impl TranscriptRowCache {
                     next: spacer_after(transcript, entry),
                 }
             }
+            RowPosition::GroupGap if !opens_group(&self.fold, transcript, entry.id) => return None,
+            RowPosition::GroupGap => ProjectedRow {
+                row: TranscriptRow::plain(
+                    anchor,
+                    entry.role,
+                    TranscriptRowKind::Rule,
+                    String::new(),
+                    0,
+                ),
+                next: Some(card_action_anchor(entry.id)),
+            },
             RowPosition::Spacer if next_entry().is_some() => {
                 let rule = transcript
                     .entry_after(entry.id)
@@ -1416,7 +1431,7 @@ impl TranscriptRowCache {
         let expanded = self.fold.is_run_expanded(&members);
         let last = transcript.entry(*members.last()?)?;
         let next = if expanded {
-            Some(card_action_anchor(entry.id))
+            Some(group_gap_anchor(entry.id))
         } else {
             separator_after(transcript, last)
         };
@@ -2696,7 +2711,7 @@ impl TranscriptRowCache {
                     }
                 })
             }
-            RowPosition::Thought => Some(RowAnchor {
+            RowPosition::Thought | RowPosition::GroupGap => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Header,
             }),
@@ -3812,6 +3827,20 @@ fn explore_tone_rank(tone: TranscriptRowTone) -> u8 {
     }
 }
 
+/// The gap below an open group's header, owned by the group's first member.
+fn group_gap_anchor(entry_id: TranscriptEntryId) -> RowAnchor {
+    RowAnchor {
+        entry_id,
+        position: RowPosition::GroupGap,
+    }
+}
+
+/// Whether `entry_id` starts a run of cards that is open, so its header is followed by a gap.
+fn opens_group(fold: &FoldState, transcript: &Transcript, entry_id: TranscriptEntryId) -> bool {
+    card_run(transcript, entry_id)
+        .is_some_and(|(start, members)| start == entry_id && fold.is_run_expanded(&members))
+}
+
 fn card_action_anchor(entry_id: TranscriptEntryId) -> RowAnchor {
     RowAnchor {
         entry_id,
@@ -3843,7 +3872,7 @@ fn card_header_cache_valid(
                 return false;
             };
             let next = if fold.is_run_expanded(&members) {
-                Some(card_action_anchor(entry.id))
+                Some(group_gap_anchor(entry.id))
             } else {
                 separator_after(transcript, last)
             };
@@ -4379,6 +4408,11 @@ fn cached_row_valid(
     ) {
         return card_header_cache_valid(transcript, fold, entry, cached);
     }
+    // Folding or a run's new start can close the group a cached gap was built for.
+    if cached.row.anchor.position == RowPosition::GroupGap {
+        return cached.entry_revision == entry.revision()
+            && opens_group(fold, transcript, entry.id);
+    }
     if cached.entry_revision == entry.revision() {
         return true;
     }
@@ -4546,6 +4580,15 @@ fn normalize_anchor(
                 .map_or(clamped, |character| clamped + character.len_utf8());
             cache.content_anchor_before(transcript, entry, target, width)
         }
+        // A gap whose group closed, or whose run gained an earlier start, gives way to the
+        // row that now leads the entry: its collapsed group's header, or its own card.
+        RowPosition::GroupGap if !opens_group(&cache.fold, transcript, entry.id) => {
+            Some(RowAnchor {
+                entry_id: collapsed_group_start(&cache.fold, transcript, entry.id)
+                    .unwrap_or(entry.id),
+                position: RowPosition::Header,
+            })
+        }
         RowPosition::Card(position) => {
             let collapsed_group = collapsed_group_start(&cache.fold, transcript, entry.id);
             let action = if card_run(transcript, entry.id).is_some_and(|(start, members)| {
@@ -4683,6 +4726,7 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Evidence(_)
         | RowPosition::Thought
         | RowPosition::Card(_)
+        | RowPosition::GroupGap
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
         | RowPosition::UserLeadOut
@@ -6977,6 +7021,55 @@ mod tests {
     }
 
     #[test]
+    fn open_group_gap_stays_valid() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("check".into());
+        let mut members = Vec::new();
+        for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo test")] {
+            members.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"command": command}),
+                }),
+            );
+            let mut result = tool_result(call_id, "ok");
+            result.name = "bash".into();
+            transcript.observe_tool_result(result);
+        }
+        let first = members[0];
+        let header = RowAnchor {
+            entry_id: first,
+            position: RowPosition::Header,
+        };
+        let gap = group_gap_anchor(first);
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand_group(first);
+        assert!(cache.row_at(&transcript, header, 60).is_some());
+        assert!(cache.row_at(&transcript, gap, 60).is_some());
+        // An open group's header leads to its gap, so the cached header is reused.
+        cache.reset_work();
+        assert!(cache.row_at(&transcript, header, 60).is_some());
+        assert_eq!(cache.work().rows_built, 0, "open group header was rebuilt");
+
+        // Once the group closes, its gap is gone and a viewport resting there moves to
+        // the group's header.
+        cache.fold_mut().collapse_group(&members);
+        assert!(cache.row_at(&transcript, gap, 60).is_none());
+        assert_eq!(
+            normalize_anchor(
+                &transcript,
+                &mut cache,
+                gap,
+                60,
+                AnchorNormalization::Content
+            ),
+            Some(header)
+        );
+    }
+
+    #[test]
     fn cards_stack_between_rules() {
         let mut transcript = Transcript::default();
         let prompt = transcript.append_prompt("tidy up".into());
@@ -7016,7 +7109,9 @@ mod tests {
         assert_eq!(
             tool_rows,
             [
+                // An open group's header is ruled off from its first member.
                 TranscriptRowKind::CardGroup,
+                TranscriptRowKind::Rule,
                 TranscriptRowKind::CardAction,
                 TranscriptRowKind::CardDetail,
                 TranscriptRowKind::CardDetail,
@@ -7025,10 +7120,21 @@ mod tests {
                 TranscriptRowKind::CardAction,
                 TranscriptRowKind::Rule,
                 TranscriptRowKind::CardGroup,
-                TranscriptRowKind::Rule,
             ]
         );
         assert!(rows.iter().any(|row| row.anchor.entry_id == group));
+        // Scrolling up from the first member crosses its gap, then reaches the header.
+        let gap = cache
+            .previous_anchor(&transcript, card_action_anchor(first), 60)
+            .unwrap();
+        assert_eq!(gap.position, RowPosition::GroupGap);
+        assert_eq!(
+            cache.previous_anchor(&transcript, gap, 60),
+            Some(RowAnchor {
+                entry_id: first,
+                position: RowPosition::Header,
+            })
+        );
         // The prompt's surface padding is followed by a plain gap before the first card.
         let after_prompt = rows
             .iter()

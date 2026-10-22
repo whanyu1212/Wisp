@@ -917,7 +917,7 @@ fn now_lines(
         Some(item) => spread(
             vec![
                 spinner,
-                Span::styled(format!(" {} ", item.label), palette.chip(&item.label)),
+                Span::styled(item.label.clone(), palette.chip(&item.label)),
                 Span::raw(" "),
                 Span::raw(item.detail),
             ],
@@ -1084,11 +1084,11 @@ fn approval_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec
             width,
         ),
         Line::from(vec![
-            Span::styled(format!(" {label} "), palette.chip(&label)),
+            Span::styled(label.clone(), palette.chip(&label)),
             Span::raw(" "),
             Span::raw(ui::clip_columns(
                 &detail,
-                width.saturating_sub(label.width() + 3),
+                width.saturating_sub(label.width() + 1),
             )),
         ]),
     ];
@@ -2500,7 +2500,7 @@ mod tests {
         let panel = panel_text(&screen(&running(), &mut SidePanel::default(), 200), 200);
         for expected in [
             "working",
-            "Bash  git push -u origin fix/timeouts",
+            "Bash git push -u origin fix/timeouts",
             "turn 6 · 1 tool",
             "Esc interrupt",
             "▸ Turns 3",
@@ -2554,7 +2554,7 @@ mod tests {
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
         for expected in [
             "Needs approval",
-            "Bash  git push -u origin fix/timeouts",
+            "Bash git push -u origin fix/timeouts",
             "command · turn 6 paused",
             "permissions ask · YOLO skips prompts like this",
             "Queue 1",
