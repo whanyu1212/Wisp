@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from pathlib import Path
 from threading import Event, Lock
 
 import anyio
@@ -12,6 +13,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.events import (
     ProjectFilesInvalidated,
+    RpcGitDiffEdit,
     RpcGitDiffReported,
     RpcProjectFile,
     RpcProjectFilesReported,
@@ -27,8 +29,9 @@ from wisp.project_files import (
 )
 from wisp.rpc.commands import GetGitDiffCommand, GetProjectFilesCommand
 from wisp.rpc.coordinator import _RpcCommandCompleted, _RpcControlEvent, _RpcRunningCommand
-from wisp.rpc.handlers.git_diff import collect_git_diff
+from wisp.rpc.handlers.git_diff import collect_git_diff, session_edits
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
+from wisp.sessions import JsonlSession
 from wisp.tools.context import ToolContext
 
 type ProjectFilesPublisher = Callable[
@@ -146,6 +149,7 @@ class RpcProjectFiles:
         send: MemoryObjectSendStream[_RpcControlEvent],
         write_event: RpcEventWriter,
         publish: ProjectFilesPublisher,
+        session: JsonlSession | None = None,
     ) -> _RpcRunningCommand | None:
         """Start one cancellable auxiliary request, or report bounded busy failure.
 
@@ -155,6 +159,8 @@ class RpcProjectFiles:
             send (MemoryObjectSendStream): Coordinator completion channel.
             write_event (RpcEventWriter): Started and terminal lifecycle event sink.
             publish (ProjectFilesPublisher): Host publication gate checking current policy.
+            session (JsonlSession | None): The selected session, whose edit and write
+                calls a Git diff attributes files to.
 
         Returns:
             _RpcRunningCommand | None: Cancellable request, or None after busy rejection.
@@ -166,7 +172,7 @@ class RpcProjectFiles:
             return None
         scope = anyio.CancelScope()
         self._request_scope = scope
-        task_group.start_soon(self._run, lifecycle, scope, send.clone(), publish, command)
+        task_group.start_soon(self._run, lifecycle, scope, send.clone(), publish, command, session)
         return _RpcRunningCommand(
             command_id=lifecycle.command_id, command_type=command.type, cancel_scope=scope
         )
@@ -178,6 +184,7 @@ class RpcProjectFiles:
         command_id: str,
         generation: int,
         command: GetProjectFilesCommand | GetGitDiffCommand,
+        session: JsonlSession | None,
     ) -> RpcProjectFilesReported | RpcGitDiffReported:
         if cancelled.is_set():
             raise ProjectScanCancelled
@@ -187,7 +194,13 @@ class RpcProjectFiles:
             raise ProjectScanCancelled
         try:
             if isinstance(command, GetGitDiffCommand):
-                return collect_git_diff(config.context, cancelled, command_id, generation)
+                return collect_git_diff(
+                    config.context,
+                    cancelled,
+                    command_id,
+                    generation,
+                    _read_session_edits(session, config.context),
+                )
             snapshot = collect_project_snapshot(config, cancelled=cancelled)
             report = project_files_report(snapshot, command_id=command_id, generation=generation)
             if cancelled.is_set():
@@ -203,6 +216,7 @@ class RpcProjectFiles:
         send: MemoryObjectSendStream[_RpcControlEvent],
         publish: ProjectFilesPublisher,
         command: GetProjectFilesCommand | GetGitDiffCommand,
+        session: JsonlSession | None,
     ) -> None:
         cancelled = Event()
         ok = False
@@ -224,6 +238,7 @@ class RpcProjectFiles:
                         lifecycle.command_id,
                         generation,
                         command,
+                        session,
                         abandon_on_cancel=True,
                     )
                 ok = await publish(report, scope)
@@ -258,3 +273,17 @@ class RpcProjectFiles:
                             entry_count=0,
                         )
                     )
+
+
+def _read_session_edits(
+    session: JsonlSession | None, context: ToolContext
+) -> dict[Path, tuple[RpcGitDiffEdit, ...]]:
+    # Attribution only labels the snapshot: a session not yet written, or one that
+    # cannot be read or attributed, leaves every file unmarked rather than failing
+    # the diff for the rest of the session.
+    if session is None or not session.path.is_file():
+        return {}
+    try:
+        return session_edits(session.read_active_path(), context)
+    except Exception:
+        return {}

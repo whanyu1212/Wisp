@@ -1008,6 +1008,7 @@ async fn panel_enter_opens_diff() {
             before: "a\n".into(),
             after: "b\n".into(),
             notice: String::new(),
+            ..Default::default()
         }],
     }));
     draw(&mut ui, &mut terminal);
@@ -1087,4 +1088,183 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
     draw(&mut ui, &mut terminal);
     ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
     assert!(!ui.side_panel.overlay_open());
+}
+
+fn edited_snapshot() -> std::sync::Arc<reducer::git_diff::GitDiffSnapshot> {
+    use reducer::git_diff::{GitDiffEdit, GitDiffFile, GitDiffSnapshot};
+    std::sync::Arc::new(GitDiffSnapshot {
+        generation: 1,
+        head: "abc".into(),
+        truncated: false,
+        files: vec![GitDiffFile {
+            path: "src/lib.rs".into(),
+            status: "modified".into(),
+            before: "a\n".into(),
+            after: "b\n".into(),
+            edits: vec![GitDiffEdit {
+                call_id: "edit-1".into(),
+                tool: "edit".into(),
+            }],
+            ..Default::default()
+        }],
+    })
+}
+
+#[tokio::test]
+async fn diff_enter_jumps_to_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    let card = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"path": "src/lib.rs", "edits": []}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    draw(&mut ui, &mut terminal);
+    // Tree focus: Enter opens the file in the diff pane; there, Enter jumps.
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), None);
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+    assert_eq!(
+        ui.transcript_viewport
+            .scrolled_top()
+            .map(|top| top.entry_id),
+        Some(card)
+    );
+}
+
+#[tokio::test]
+async fn missing_card_opens_diff() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "gone".into(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(
+        ui.notice
+            .as_deref()
+            .unwrap()
+            .contains("not in the transcript")
+    );
+}
+
+fn finished_edit(ui: &mut LiveUi, call_id: &str) -> crate::transcript::TranscriptEntryId {
+    let card = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: call_id.into(),
+            name: "edit".into(),
+            arguments: json!({"path": "src/lib.rs", "edits": []}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    ui.state
+        .transcript
+        .observe_tool_result(tool_cards::ToolResultInput {
+            call_id: call_id.into(),
+            name: "edit".into(),
+            output: "Applied 1 edit(s) to src/lib.rs".into(),
+            output_tail: None,
+            output_source_bytes: 0,
+            output_source_lines: 1,
+            output_projection_cut_mid_line: false,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: None,
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+            duration_ms: None,
+        });
+    card
+}
+
+#[tokio::test]
+async fn jump_opens_folded_group() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    finished_edit(&mut ui, "edit-0");
+    let card = finished_edit(&mut ui, "edit-1");
+    let (_, members) = card_run(&ui.state.transcript, card).expect("edits group");
+    assert!(!ui.transcript_row_cache.fold().is_run_expanded(&members));
+    draw(&mut ui, &mut terminal);
+    ui.open_from_panel(
+        side_panel::Target::Edit(git_diff_view::EditCard {
+            call_id: "edit-1".into(),
+            path: "src/lib.rs".into(),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.transcript_row_cache.fold().is_run_expanded(&members));
+    assert!(ui.transcript_row_cache.fold().is_expanded(card));
+    draw(&mut ui, &mut terminal);
+    assert_eq!(
+        ui.transcript_viewport
+            .scrolled_top()
+            .map(|top| top.entry_id),
+        Some(card)
+    );
+}
+
+#[tokio::test]
+async fn diff_keeps_open_without_card() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    draw(&mut ui, &mut terminal);
+    for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Enter] {
+        ui.handle_input(key(code), &writer, 8192).await.unwrap();
+    }
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+    assert!(
+        ui.notice
+            .as_deref()
+            .unwrap()
+            .contains("not in the transcript")
+    );
 }

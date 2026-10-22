@@ -1802,6 +1802,7 @@ impl LiveUi {
                         frame,
                         area,
                         &self.state.git_diff,
+                        &self.state.transcript,
                         palette,
                     );
                     mouse::Rows::default()
@@ -3228,6 +3229,7 @@ impl LiveUi {
                 self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                     .await
             }
+            side_panel::Target::Edit(card) => self.jump_to_edit(card, writer, limit).await,
             side_panel::Target::Queue => {
                 self.queue_view = Some(queue_view::QueueView::default());
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
@@ -3239,6 +3241,44 @@ impl LiveUi {
                 self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
             }
         }
+    }
+
+    /// Show the card of a Wisp edit: close `/diff`, unfold the card and scroll it to
+    /// the top of the transcript. When the card is not in the transcript, such as one
+    /// in history not loaded yet, `/diff` opens at the file instead.
+    async fn jump_to_edit(
+        &mut self,
+        card: git_diff_view::EditCard,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.render_pending = true;
+        let entry = git_diff_view::edit_card_entry(&self.state.transcript, &card.call_id);
+        let Some(entry) = entry else {
+            self.notice =
+                Some("That edit's card is not in the transcript; showing the file.".into());
+            if self.git_diff_view.is_some() {
+                return Ok(LoopControl::Continue);
+            }
+            self.git_diff_view = Some(git_diff_view::GitDiffView::opened_at(Some(card.path)));
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
+                .await;
+        };
+        let fold = self.transcript_row_cache.fold_mut();
+        if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+            if !fold.is_run_expanded(&members) {
+                fold.expand_group(start);
+            }
+        }
+        fold.expand(entry);
+        self.transcript_viewport.reveal_entry(entry);
+        if self.git_diff_view.take().is_some() {
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                .await;
+        }
+        Ok(LoopControl::Continue)
     }
 
     async fn poll_session_catalog(
@@ -4263,10 +4303,14 @@ impl LiveUi {
                 } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
                     return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
                 } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
-                    self.git_diff_view
+                    let card = self
+                        .git_diff_view
                         .as_mut()
                         .expect("open diff")
                         .key(key.code);
+                    if let Some(card) = card {
+                        return self.jump_to_edit(card, writer, limit).await;
+                    }
                 }
                 Ok(LoopControl::Continue)
             }

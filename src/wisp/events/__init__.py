@@ -42,6 +42,7 @@ from wisp.events._base import (
 from wisp.events.errors import ErrorEvent
 from wisp.events.rpc import (
     DEFAULT_AGENT_MODE,
+    MAX_GIT_DIFF_FILE_EDITS,
     MAX_RPC_CONNECTION_LABEL_CHARS,
     MAX_RPC_CONNECTION_METHODS,
     MAX_RPC_CONNECTION_PROVIDERS,
@@ -73,6 +74,7 @@ from wisp.events.rpc import (
     RpcConnectionProviderSnapshot,
     RpcDeviceCodeProgressReported,
     RpcDeviceCodeReported,
+    RpcGitDiffEdit,
     RpcGitDiffFile,
     RpcGitDiffReported,
     RpcMcpHeaderFrom,
@@ -191,6 +193,7 @@ __all__ = [
     "MAX_RPC_MODEL_CATALOG_MODELS_PER_PROVIDER",
     "MAX_RPC_MODEL_CATALOG_PROVIDERS",
     "MAX_RPC_MODEL_DISPLAY_CHARS",
+    "MAX_GIT_DIFF_FILE_EDITS",
     "MAX_RPC_MODEL_EFFORT_CHARS",
     "MAX_RPC_MODEL_ID_CHARS",
     "MAX_RPC_OAUTH_EXPIRY_CHARS",
@@ -272,6 +275,7 @@ __all__ = [
     "RpcModelProviderSnapshot",
     "RpcModelSelectionSnapshot",
     "RpcPermissionsReported",
+    "RpcGitDiffEdit",
     "RpcGitDiffFile",
     "RpcGitDiffReported",
     "RpcProjectFile",

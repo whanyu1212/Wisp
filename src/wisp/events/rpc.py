@@ -41,6 +41,8 @@ MAX_RPC_PROVIDER_ID_CHARS = 128
 MAX_RPC_MODEL_ID_CHARS = 256
 MAX_RPC_MODEL_DISPLAY_CHARS = 256
 MAX_RPC_MODEL_EFFORT_CHARS = 64
+# The most recent calls kept per file; the TUI jumps to the latest one.
+MAX_GIT_DIFF_FILE_EDITS = 16
 
 
 class CodingSessionState(BaseModel):
@@ -478,13 +480,31 @@ class RpcProjectFilesReported(WispEvent):
     truncated: bool
 
 
+class RpcGitDiffEdit(BaseModel):
+    """One successful edit or write call in the active session path that targeted a file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    call_id: str = Field(min_length=1, max_length=256)
+    tool: Literal["edit", "write"]
+
+
 class RpcGitDiffFile(RpcProjectFile):
-    """One authorized file pair, or an explicit unavailable-content notice."""
+    """One authorized file pair, or an explicit unavailable-content notice.
+
+    ``edits`` lists the session's own edit and write calls on this path, oldest
+    first. An empty tuple means no call in the active session path touched the
+    file, so its changes came from outside this session.
+    """
 
     status: Literal["modified", "added", "deleted", "untracked"]
     before: str = Field(max_length=50_000)
     after: str = Field(max_length=50_000)
     notice: str = Field(max_length=256)
+    # Lax so a decoded JSON array is accepted as the tuple, as for the event's files.
+    edits: tuple[RpcGitDiffEdit, ...] = Field(
+        default=(), max_length=MAX_GIT_DIFF_FILE_EDITS, strict=False
+    )
 
 
 class RpcGitDiffReported(WispEvent):

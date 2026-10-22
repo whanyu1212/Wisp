@@ -196,13 +196,47 @@ pub struct GitDiffSnapshot {
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Deserialize)]
 pub struct GitDiffFile {
     pub path: String,
     pub status: String,
     pub before: String,
     pub after: String,
     pub notice: String,
+    /// The session's own edit and write calls on this file, oldest first. Empty when
+    /// every change came from outside this session.
+    #[serde(default)]
+    pub edits: Vec<GitDiffEdit>,
+}
+
+impl GitDiffFile {
+    /// Whether an edit or write call in this session changed the file (drawn ◆).
+    pub fn edited_by_wisp(&self) -> bool {
+        !self.edits.is_empty()
+    }
+
+    /// The session's latest call on this file, whose card Enter jumps to.
+    pub fn latest_edit(&self) -> Option<&GitDiffEdit> {
+        self.edits.last()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+pub struct GitDiffEdit {
+    pub call_id: String,
+    /// `edit` or `write`.
+    pub tool: String,
+}
+
+impl GitDiffEdit {
+    /// The tool as its card names it: `Edit` or `Write`.
+    pub fn tool_label(&self) -> &'static str {
+        if self.tool == "write" {
+            "Write"
+        } else {
+            "Edit"
+        }
+    }
 }
 
 #[cfg(test)]

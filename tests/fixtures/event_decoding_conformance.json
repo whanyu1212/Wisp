@@ -1603,6 +1603,16 @@
    "path": [
     "files",
     0,
+    "edits"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
     "kind"
    ],
    "accepted": false
@@ -1642,6 +1652,41 @@
    "operation": "add_unknown",
    "path": [
     "files",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "remove",
+   "path": [
+    "files",
+    0,
+    "edits",
+    0,
+    "tool"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.git_diff",
+   "operation": "add_unknown",
+   "path": [
+    "files",
+    0,
+    "edits",
     0
    ],
    "accepted": false

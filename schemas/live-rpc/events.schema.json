@@ -2422,9 +2422,35 @@
       "title": "RpcDeviceCodeReported",
       "type": "object"
     },
+    "RpcGitDiffEdit": {
+      "additionalProperties": false,
+      "description": "One successful edit or write call in the active session path that targeted a file.",
+      "properties": {
+        "call_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Call Id",
+          "type": "string"
+        },
+        "tool": {
+          "enum": [
+            "edit",
+            "write"
+          ],
+          "title": "Tool",
+          "type": "string"
+        }
+      },
+      "required": [
+        "call_id",
+        "tool"
+      ],
+      "title": "RpcGitDiffEdit",
+      "type": "object"
+    },
     "RpcGitDiffFile": {
       "additionalProperties": false,
-      "description": "One authorized file pair, or an explicit unavailable-content notice.",
+      "description": "One authorized file pair, or an explicit unavailable-content notice.\n\n``edits`` lists the session's own edit and write calls on this path, oldest\nfirst. An empty tuple means no call in the active session path touched the\nfile, so its changes came from outside this session.",
       "properties": {
         "after": {
           "maxLength": 50000,
@@ -2435,6 +2461,15 @@
           "maxLength": 50000,
           "title": "Before",
           "type": "string"
+        },
+        "edits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcGitDiffEdit"
+          },
+          "maxItems": 16,
+          "title": "Edits",
+          "type": "array"
         },
         "kind": {
           "enum": [
@@ -2473,7 +2508,8 @@
         "status",
         "before",
         "after",
-        "notice"
+        "notice",
+        "edits"
       ],
       "title": "RpcGitDiffFile",
       "type": "object"
@@ -7581,6 +7617,12 @@
         {
           "after": "new\n",
           "before": "old\n",
+          "edits": [
+            {
+              "call_id": "call-1",
+              "tool": "edit"
+            }
+          ],
           "kind": "file",
           "notice": "",
           "path": "src/example.py",

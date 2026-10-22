@@ -3734,6 +3734,16 @@ impl TranscriptViewport {
         }
     }
 
+    /// Scroll so an entry's first row is the top of the view, as a jump to a card does.
+    pub(crate) fn reveal_entry(&mut self, entry_id: TranscriptEntryId) {
+        self.top = Some(RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        });
+        self.follow_tail = false;
+        self.reader_generation = self.reader_generation.wrapping_add(1);
+    }
+
     pub fn follows_tail(&self) -> bool {
         self.follow_tail
     }
