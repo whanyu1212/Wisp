@@ -992,7 +992,7 @@ enum ContextDetail {
 }
 
 /// `Context  198.8k / 272.0k 73%` over the window split by source, with the
-/// compaction reserve hatched after its marker, then as much of the split as
+/// compaction reserve dashed after its marker, then as much of the split as
 /// `detail` allows.
 fn context_lines(
     state: &UiState,
@@ -1138,7 +1138,10 @@ fn source_rows(
     }
     if let Some(free) = split.free() {
         lines.push(row(
-            Span::styled("╱", muted),
+            Span::styled(
+                context_split::RESERVE_CELL,
+                Style::default().fg(palette.rail()),
+            ),
             vec![Span::styled("Compaction reserve", dim)],
             abbreviated(split.reserve),
             percent(split.reserve),
@@ -1146,7 +1149,7 @@ fn source_rows(
         lines.push(row(
             Span::styled("■", Style::default().fg(palette.panel)),
             vec![Span::styled("Free space", dim)],
-            abbreviated(free),
+            split.free_label(free),
             percent(free),
         ));
     }
@@ -2127,16 +2130,17 @@ mod tests {
         );
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
-        // 85% of the 52-column bar: the marker, then the hatched reserve.
+        // 85% of the 52-column bar: the marker, then the reserve's dashed rule.
         assert_eq!(bar.chars().position(|c| c == '┃'), Some(44), "{panel}");
-        assert!(bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        assert!(bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
         let mut previous = row_of(&panel, "Context");
         for expected in [
             "■ Messages                            ~152.6k  56.1%",
             "tool output 95.2k · assistant 41.0k · user 16.4k",
             "■ MCP tools 4 servers                  ~14.1k   5.2%",
             "■ Project context                       ~5.0k   1.8%",
-            "╱ Compaction reserve                    40.8k  15.0%",
+            "╍ Compaction reserve                    40.8k  15.0%",
+            // An exact total leaves free space exact.
             "■ Free space                            32.4k  11.9%",
             "per turn ▄▆▂█▅▆                     ▏compacts at 85%",
             "turn 6 +38.2k · largest: gh pr checks 766 out… 21.4k",
@@ -2214,7 +2218,7 @@ mod tests {
         // Older statistics have no split: one run, the reserve after its marker.
         let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
         let bar = bar.trim_start_matches(['│', ' ']);
-        assert!(bar.starts_with('━') && bar.ends_with("┃╱╱╱╱╱╱╱"), "{panel}");
+        assert!(bar.starts_with('━') && bar.ends_with("┃╍╍╍╍╍╍╍"), "{panel}");
         assert!(!panel.contains("Messages"), "{panel}");
     }
 

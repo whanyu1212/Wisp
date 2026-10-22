@@ -537,7 +537,10 @@ impl ContextView {
             lines.push(table_row(
                 Span::raw("  "),
                 vec![
-                    Span::styled("╱ ", muted),
+                    Span::styled(
+                        format!("{} ", crate::context_split::RESERVE_CELL),
+                        Style::default().fg(palette.rail()),
+                    ),
                     Span::styled("Compaction reserve", muted),
                 ],
                 (
@@ -555,7 +558,7 @@ impl ContextView {
                     Span::styled("Free space", muted),
                 ],
                 (
-                    abbreviated(free),
+                    split.free_label(free),
                     percent(free),
                     if over {
                         "over budget"
@@ -931,13 +934,14 @@ mod tests {
         let text = screen(&mut ContextView::default(), &state(), 100, 50);
         for expected in [
             "~3.0k / 10.0k ~30%",
-            "┃╱╱╱╱╱╱╱╱╱│",
+            "┃╍╍╍╍╍╍╍╍╍│",
             "▏compacts at 90% (9.0k)",
             "▾ ■ Messages                                      ~2.4k   24.0%   4 messages",
             "     tool output                                  ~1.6k   16.0%   1 message",
             "▸ ■ MCP tools                                      ~150    1.5%   1 server · 3 tools",
-            "  ╱ Compaction reserve                             1.0k   10.0%",
-            "  ■ Free space                                     6.0k   60.0%",
+            "  ╍ Compaction reserve                             1.0k   10.0%",
+            // Free space is taken from the estimated total, so it is estimated too.
+            "  ■ Free space                                    ~6.0k   60.0%",
             "1 bash gh pr checks 766 output · turn 2",
             "  2 █",
             "Session tokens: 2900 input",
