@@ -8,6 +8,7 @@ use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::Modifier;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
@@ -315,6 +316,8 @@ pub(crate) struct Conversation {
 pub(crate) struct Frame {
     pub layer: Layer,
     pub conversation: Conversation,
+    /// Where a press starts resizing the docked side panel, when one is docked.
+    pub panel_border: Option<Rect>,
     pub popup: Option<Rect>,
     pub rows: Rows,
 }
@@ -391,6 +394,11 @@ impl LiveUi {
                 .await?;
             self.reconcile_browse_selection();
             return Ok(control);
+        }
+        // Ahead of the decision guard: resizing the panel answers nothing, and the
+        // panel leads with the pending decision.
+        if self.press_panel_border(event) {
+            return Ok(LoopControl::Continue);
         }
         if matches!(
             self.state.view_status,
@@ -552,6 +560,29 @@ impl LiveUi {
             }
         }
         Ok(LoopControl::Continue)
+    }
+
+    /// Start resizing the docked side panel on a left press over its border, or return it
+    /// to its automatic width on a double-click, and say whether the press was there. Only
+    /// the conversation layer counts, since a centred popup may cover the border.
+    fn press_panel_border(&mut self, event: MouseEvent) -> bool {
+        let border = self
+            .mouse_frame
+            .as_ref()
+            .filter(|frame| frame.layer == Layer::Conversation && frame.layer == self.mouse_layer())
+            .and_then(|frame| frame.panel_border)
+            .filter(|area| {
+                matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                    && contains(*area, event)
+            });
+        let Some(border) = border else {
+            self.side_panel.forget_border_click();
+            return false;
+        };
+        self.side_panel
+            .press_border(Instant::now(), event.column - border.x);
+        self.render_pending = true;
+        true
     }
 
     /// Extend the transcript selection on a drag, or copy and clear it on release.

@@ -7,7 +7,7 @@
 
 use std::cell::Cell;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::context_split::{self, SPARK_TURNS, Split, abbreviated};
 use crate::git_diff_view::EditCard;
@@ -17,7 +17,7 @@ use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
 use crate::transcript::{RunOutcome, TranscriptRole};
 use crate::ui::{self, sanitize_for_terminal};
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -33,9 +33,16 @@ use wisp_protocol::events::{
 /// panel's on the narrowest terminal that docks it.
 pub(crate) const PANEL_WIDTH: u16 = 56;
 
-/// The widest a docked panel grows, so long paths and names fit without the
-/// panel becoming a second transcript.
+/// The widest a docked panel grows on its own, so long paths and names fit without
+/// the panel becoming a second transcript. Dragging its border can go wider.
 const MAX_PANEL_WIDTH: u16 = 76;
+
+/// Columns from the panel's left edge that start a resize: the border and the gap
+/// beside it, so the press need not land on a one-column line.
+const BORDER_HIT_WIDTH: u16 = 2;
+
+/// Two clicks on the border this close together are a double-click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// What the transcript keeps beside a docked panel: replies wrap at 100 columns,
 /// plus the turn rail and the conversation margins.
@@ -62,6 +69,13 @@ pub(crate) struct SidePanel {
     width: u16,
     /// The visibility last reported to the reducer.
     reported_visible: bool,
+    /// The width the user dragged the docked panel to, for this process only; `None`
+    /// follows [`auto_width`]. Clamped to the terminal at layout, so it returns when a
+    /// terminal that shrank grows back.
+    dragged_width: Option<u16>,
+    resize: Option<Resize>,
+    /// When the last click on the border that resized nothing was released.
+    last_border_click: Option<Instant>,
     files: Option<FileSummary>,
     /// The overlay's keyboard focus, when it has moved off the first row it can act
     /// on. Clamped to what the panel shows, since queues drain and files refresh.
@@ -70,6 +84,17 @@ pub(crate) struct SidePanel {
     /// `Section::index`: a short panel cuts off its last sections, and focus must
     /// not land where the user cannot see it. `None` before the first frame.
     drawn: Cell<Option<[usize; 3]>>,
+}
+
+/// A drag of the docked panel's border in progress.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Resize {
+    /// How far right of the border the press landed, kept while dragging so the
+    /// border does not jump to the pointer.
+    grab: u16,
+    /// Whether the pointer has moved since the press: a press and release in place
+    /// is a click, which can make a double-click.
+    moved: bool,
 }
 
 /// A section of the overlay that focus can land on. Each opens the view it
@@ -286,6 +311,105 @@ impl SidePanel {
         self.width = width;
     }
 
+    /// The docked panel's width on a terminal `total` columns wide, its border included:
+    /// the dragged width, kept to between [`PANEL_WIDTH`] and what leaves the transcript
+    /// its minimum, or [`auto_width`] when nothing was dragged.
+    pub(crate) fn docked_width(&self, total: u16) -> u16 {
+        self.dragged_width.map_or_else(
+            || auto_width(total),
+            |width| {
+                width
+                    .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
+                    .max(PANEL_WIDTH)
+            },
+        )
+    }
+
+    /// Split a frame into the conversation and the docked panel at its right.
+    pub(crate) fn split(&self, area: Rect) -> (Rect, Rect) {
+        let width = self.docked_width(area.width).min(area.width);
+        (
+            Rect {
+                width: area.width - width,
+                ..area
+            },
+            Rect {
+                x: area.right() - width,
+                width,
+                ..area
+            },
+        )
+    }
+
+    /// Whether a drag of the border is in progress, which highlights it.
+    pub(crate) fn resizing(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    /// A left press on the docked panel's border at `now`, `grab` columns right of the
+    /// border line: start a resize, or, as the second click of a double-click, return
+    /// the panel to [`auto_width`] instead.
+    pub(crate) fn press_border(&mut self, now: Instant, grab: u16) {
+        let double_click = self
+            .last_border_click
+            .take()
+            .is_some_and(|click| now.saturating_duration_since(click) <= DOUBLE_CLICK);
+        if double_click {
+            self.dragged_width = None;
+            self.resize = None;
+        } else {
+            self.resize = Some(Resize { grab, moved: false });
+        }
+    }
+
+    /// A press anywhere ends a resize whose release was lost, so the next drag selects
+    /// text instead of moving the border. Says whether one ended, which repaints the
+    /// border.
+    pub(crate) fn cancel_resize(&mut self) -> bool {
+        self.resize.take().is_some()
+    }
+
+    /// A press off the border: the next border click starts a new double-click.
+    pub(crate) fn forget_border_click(&mut self) {
+        self.last_border_click = None;
+    }
+
+    /// Follow a drag or release while a resize is in progress, and say whether it was
+    /// one. A drag to `column` moves the border with the pointer, keeping where it was
+    /// grabbed; a release ends the resize, at `now`.
+    pub(crate) fn continue_resize(
+        &mut self,
+        kind: MouseEventKind,
+        column: u16,
+        now: Instant,
+    ) -> bool {
+        let Some(resize) = self.resize else {
+            return false;
+        };
+        match kind {
+            MouseEventKind::Up(_) => {
+                self.last_border_click = (!resize.moved).then_some(now);
+                self.resize = None;
+            }
+            _ if self.docked() => {
+                self.resize = Some(Resize {
+                    moved: true,
+                    ..resize
+                });
+                let total = self.width;
+                let width = total.saturating_sub(column.saturating_sub(resize.grab));
+                self.dragged_width = Some(
+                    width
+                        .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
+                        .max(PANEL_WIDTH),
+                );
+            }
+            // The terminal shrank below docking mid-drag; the release still ends it.
+            _ => {}
+        }
+        true
+    }
+
     /// The visibility to report to the reducer, once, after it changes.
     pub(crate) fn take_visibility_change(&mut self) -> Option<bool> {
         let visible = self.visible();
@@ -326,29 +450,21 @@ pub(crate) fn overlay_area(above_composer: Rect) -> Rect {
     }
 }
 
-/// The docked panel's width on a terminal `total` columns wide, its border included.
-/// The panel and the transcript share the columns beyond the docking threshold
-/// evenly, up to [`MAX_PANEL_WIDTH`]: 160 columns give 56, 180 give 66, and 200 or
-/// more give 76.
-pub(crate) fn docked_width(total: u16) -> u16 {
+/// The docked panel's width on a terminal `total` columns wide when its border was
+/// not dragged, its border included. The panel and the transcript share the columns
+/// beyond the docking threshold evenly, up to [`MAX_PANEL_WIDTH`]: 160 columns give
+/// 56, 180 give 66, and 200 or more give 76.
+pub(crate) fn auto_width(total: u16) -> u16 {
     let spare = total.saturating_sub(PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH);
     (PANEL_WIDTH + spare / 2).min(MAX_PANEL_WIDTH)
 }
 
-/// Split a frame into the conversation and the docked panel at its right.
-pub(crate) fn split(area: Rect) -> (Rect, Rect) {
-    let width = docked_width(area.width).min(area.width);
-    (
-        Rect {
-            width: area.width - width,
-            ..area
-        },
-        Rect {
-            x: area.right() - width,
-            width,
-            ..area
-        },
-    )
+/// The cells of a docked panel at `panel` where a left press starts a resize.
+pub(crate) fn border_hit_area(panel: Rect) -> Rect {
+    Rect {
+        width: BORDER_HIT_WIDTH.min(panel.width),
+        ..panel
+    }
 }
 
 #[derive(Debug)]
@@ -479,9 +595,16 @@ pub(crate) fn render(
             .border_style(palette.border())
             .padding(Padding::horizontal(1))
     } else {
+        // A drag of the border shows it held: the terminal reports no hover to
+        // highlight it before the press.
+        let border = if panel.resizing() {
+            palette.primary
+        } else {
+            palette.rail()
+        };
         Block::default()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(palette.rail()))
+            .border_style(Style::default().fg(border))
             .padding(Padding::new(2, 1, 1, 0))
     };
     let inner = block.inner(area);
@@ -1628,6 +1751,7 @@ mod tests {
     use crate::transcript::RunResult;
     use crate::transcript_view::{TranscriptRowCache, TranscriptViewport};
     use crate::ui::{ComposerLayoutCache, ConnectionInfo};
+    use crossterm::event::MouseButton;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use wisp_protocol::events::{
@@ -1794,7 +1918,7 @@ mod tests {
 
     /// The panel's columns of each row.
     fn panel_text(rows: &[String], width: u16) -> String {
-        let start = usize::from(width - docked_width(width));
+        let start = usize::from(width - auto_width(width));
         rows.iter()
             .map(|row| {
                 row.chars()
@@ -1838,7 +1962,7 @@ mod tests {
         let footer = rows.last().unwrap();
         let conversation: String = footer
             .chars()
-            .take(usize::from(200 - docked_width(200)))
+            .take(usize::from(200 - auto_width(200)))
             .collect();
         assert!(conversation.contains("idle ·"), "{conversation}");
         assert!(!conversation.contains("/srv/wisp"), "{conversation}");
@@ -1848,12 +1972,108 @@ mod tests {
     #[test]
     fn docked_panel_grows_capped() {
         for (total, panel) in [(160, 56), (161, 56), (180, 66), (200, 76), (240, 76)] {
-            assert_eq!(docked_width(total), panel, "{total}");
-            let (conversation, docked) = split(Rect::new(0, 0, total, 10));
+            assert_eq!(auto_width(total), panel, "{total}");
+            let (conversation, docked) = SidePanel::default().split(Rect::new(0, 0, total, 10));
             assert_eq!((conversation.width, docked.width), (total - panel, panel));
         }
         // The overlay on a terminal too narrow to dock keeps the narrowest width.
         assert_eq!(overlay_area(Rect::new(0, 0, 150, 10)).width, PANEL_WIDTH);
+    }
+
+    const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+    const RELEASE: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+
+    #[test]
+    fn dragged_width_clamps() {
+        let now = Instant::now();
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        panel.press_border(now, 0);
+        assert!(panel.resizing());
+        // The border follows the pointer: column 110 leaves 90 columns.
+        assert!(panel.continue_resize(DRAG, 110, now));
+        assert_eq!(panel.docked_width(200), 90);
+        // Never below the narrowest width, and the transcript keeps its minimum.
+        panel.continue_resize(DRAG, 190, now);
+        assert_eq!(panel.docked_width(200), PANEL_WIDTH);
+        panel.continue_resize(DRAG, 10, now);
+        assert_eq!(panel.docked_width(200), 200 - MIN_TRANSCRIPT_WIDTH);
+        panel.continue_resize(DRAG, 110, now);
+        assert!(panel.continue_resize(RELEASE, 110, now));
+        assert!(!panel.resizing());
+        // A terminal that shrinks squeezes the width, and growing back restores it.
+        assert_eq!(panel.docked_width(180), 76);
+        assert_eq!(panel.docked_width(200), 90);
+        // With no resize in progress, drags belong to someone else.
+        assert!(!panel.continue_resize(DRAG, 120, now));
+    }
+
+    #[test]
+    fn double_click_resets_width() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        panel.press_border(at(0), 0);
+        panel.continue_resize(DRAG, 110, at(0));
+        panel.continue_resize(RELEASE, 110, at(0));
+        // A drag's release is not a click, so a quick press after it resizes again.
+        panel.press_border(at(100), 0);
+        assert!(panel.resizing());
+        panel.continue_resize(RELEASE, 110, at(150));
+        // A slow second click is two clicks.
+        panel.press_border(at(1_000), 0);
+        assert!(panel.resizing());
+        panel.continue_resize(RELEASE, 110, at(1_000));
+        assert_eq!(panel.docked_width(200), 90);
+        panel.press_border(at(1_200), 0);
+        assert!(!panel.resizing());
+        assert_eq!(panel.docked_width(200), auto_width(200));
+
+        // A press elsewhere between two border clicks breaks the double-click.
+        panel.press_border(at(2_000), 0);
+        panel.continue_resize(DRAG, 110, at(2_000));
+        panel.continue_resize(RELEASE, 110, at(2_000));
+        panel.press_border(at(2_100), 0);
+        panel.continue_resize(RELEASE, 110, at(2_100));
+        panel.forget_border_click();
+        panel.press_border(at(2_200), 0);
+        assert!(panel.resizing());
+        assert_eq!(panel.docked_width(200), 90);
+    }
+
+    #[test]
+    fn drag_keeps_grab_offset() {
+        let now = Instant::now();
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        // Pressed one column right of the border at 124: moving down only keeps the width.
+        panel.press_border(now, 1);
+        panel.continue_resize(DRAG, 125, now);
+        assert_eq!(panel.docked_width(200), 76);
+        panel.continue_resize(DRAG, 111, now);
+        assert_eq!(panel.docked_width(200), 90);
+    }
+
+    #[test]
+    fn held_border_highlights() {
+        let palette = Palette::default();
+        let border = |panel: &SidePanel| {
+            let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = panel.split(frame.area()).1;
+                    let bindings = Bindings::default();
+                    render(frame, area, &session(), panel, &bindings, 0, None, palette);
+                })
+                .unwrap();
+            terminal.backend().buffer()[(200 - panel.docked_width(200), 5)].fg
+        };
+        let mut panel = SidePanel::default();
+        panel.observe_width(200);
+        assert_eq!(border(&panel), palette.rail());
+        panel.press_border(Instant::now(), 0);
+        assert_eq!(border(&panel), palette.primary);
     }
 
     #[test]
@@ -2470,7 +2690,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let area = if panel.docked() {
-                    split(frame.area()).1
+                    panel.split(frame.area()).1
                 } else {
                     overlay_area(frame.area())
                 };
@@ -2495,7 +2715,9 @@ mod tests {
                     .contains(text)
             })
             .unwrap_or_else(|| panic!("{text}"));
-        buffer[(width - docked_width(width) / 2, y)].style().bg
+        buffer[(width - panel.docked_width(width) / 2, y)]
+            .style()
+            .bg
     }
 
     #[test]
