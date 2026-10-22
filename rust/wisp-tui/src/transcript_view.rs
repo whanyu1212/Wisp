@@ -91,6 +91,9 @@ pub struct CardPosition {
 pub struct MarkdownPosition {
     pub source_offset: usize,
     pub output_offset: usize,
+    /// Offset in a synthetic gap after the block ending at `source_offset`.
+    /// Gap rows have no source byte, so source affinity alone cannot restore them.
+    pub block_gap_offset: Option<u8>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -658,7 +661,13 @@ impl MarkdownSnapshot {
         let mut output_len = 0_usize;
         for (index, block) in document.blocks.iter().enumerate() {
             if index > 0 {
-                output_len = output_len.saturating_add(1);
+                // One blank row between blocks. Fenced code already contributes
+                // its final source newline; prose needs both line boundaries.
+                let previous_ends_line = document.blocks[index - 1]
+                    .spans
+                    .last()
+                    .is_some_and(|span| ends_with_line_break(&span.text));
+                output_len = output_len.saturating_add(if previous_ends_line { 1 } else { 2 });
             }
             block_starts.push(output_len);
             output_len = output_len.saturating_add(
@@ -706,6 +715,7 @@ impl MarkdownSnapshot {
             return MarkdownPosition {
                 source_offset,
                 output_offset,
+                block_gap_offset: None,
             };
         }
         let block_index = self
@@ -730,6 +740,7 @@ impl MarkdownSnapshot {
                         .source_offset
                         .saturating_add(output_within_span.min(source_len)),
                     output_offset,
+                    block_gap_offset: None,
                 };
             }
             span_start = span_end;
@@ -737,7 +748,28 @@ impl MarkdownSnapshot {
         MarkdownPosition {
             source_offset: block.source.end,
             output_offset,
+            block_gap_offset: Some(local.saturating_sub(span_start) as u8),
         }
+    }
+
+    fn output_for_position(&self, position: MarkdownPosition) -> usize {
+        if let Some(gap_offset) = position.block_gap_offset {
+            for (index, block) in self.document.blocks.iter().enumerate() {
+                if block.source.end != position.source_offset {
+                    continue;
+                }
+                if let Some(next_start) = self.block_starts.get(index + 1) {
+                    let block_end = self.block_starts[index]
+                        + block
+                            .spans
+                            .iter()
+                            .map(|span| span.text.len())
+                            .sum::<usize>();
+                    return (block_end + usize::from(gap_offset)).min(next_start - 1);
+                }
+            }
+        }
+        self.output_for_source(position.source_offset, position.output_offset)
     }
 
     fn output_for_source(&self, source_offset: usize, fallback: usize) -> usize {
@@ -2515,6 +2547,8 @@ impl TranscriptRowCache {
         let mut word_break = None::<(usize, usize, usize)>;
         let mut previous_space = false;
         let mut row_full_width = false;
+        let mut needs_indent = true;
+        let mut consumed_text = false;
         while cursor < snapshot.output_len {
             let block_index = snapshot
                 .block_starts
@@ -2528,12 +2562,12 @@ impl TranscriptRowCache {
                 .map(|span| span.text.len())
                 .sum::<usize>();
             let block_end = block_start + block_len;
-            if cursor == block_end && block_index + 1 < snapshot.document.blocks.len() {
-                if spans.is_empty() {
-                    cursor = cursor.saturating_add(1);
-                    continue;
-                }
-                next_offset = Some(cursor + 1);
+            if cursor >= block_end && block_index + 1 < snapshot.document.blocks.len() {
+                next_offset = Some(if spans.is_empty() {
+                    snapshot.block_starts[block_index + 1]
+                } else {
+                    cursor + 1
+                });
                 ended_with_break = true;
                 break;
             }
@@ -2575,6 +2609,37 @@ impl TranscriptRowCache {
                         ended_with_break = true;
                         break;
                     }
+                    if needs_indent
+                        && span.style.inline != crate::markdown::InlineStyle::QuoteMarker
+                    {
+                        needs_indent = false;
+                        if span.style.inline != crate::markdown::InlineStyle::ListMarker
+                            && !block.span_in_table(span_index)
+                        {
+                            // Padding is presentation-only: it shares the following
+                            // source boundary and never advances the Markdown cursor.
+                            // Leave room for a wide grapheme even on tiny terminals.
+                            let indent =
+                                usize::from(span.style.hanging_indent).min(width.saturating_sub(2));
+                            let padding = indent.saturating_sub(column);
+                            if padding > 0 {
+                                spans.push(TranscriptSpan {
+                                    text: " ".repeat(padding),
+                                    style: crate::markdown::TranscriptSpanStyle {
+                                        inline: crate::markdown::InlineStyle::ListMarker,
+                                        ..span.style
+                                    },
+                                    affinity: SourceAffinity {
+                                        source_offset: span.affinity.source_offset,
+                                        source_end: span.affinity.source_offset,
+                                        output_offset: u32::try_from(absolute_offset)
+                                            .unwrap_or(u32::MAX),
+                                    },
+                                });
+                                column += padding;
+                            }
+                        }
+                    }
                     let safe = sanitize_grapheme(grapheme, column);
                     let grapheme_width = UnicodeWidthStr::width(safe.as_str());
                     let space = span.style.block != crate::markdown::BlockStyle::Code
@@ -2606,7 +2671,7 @@ impl TranscriptRowCache {
                     } else {
                         width.min(PROSE_COLUMNS)
                     };
-                    if !spans.is_empty() && column.saturating_add(grapheme_width) > wrap_width {
+                    if consumed_text && column.saturating_add(grapheme_width) > wrap_width {
                         if let Some((offset, count, last_len)) = word_break {
                             spans.truncate(count);
                             if let Some(last) = spans.last_mut() {
@@ -2629,6 +2694,7 @@ impl TranscriptRowCache {
                         },
                     );
                     column = column.saturating_add(grapheme_width);
+                    consumed_text = true;
                     cursor = absolute_offset + grapheme.len();
                     advanced = true;
                     if column >= width && span.style.block == crate::markdown::BlockStyle::Code {
@@ -4546,11 +4612,8 @@ fn normalize_anchor(
                 AnchorNormalization::Geometry if !snapshot.document.has_tables() => {
                     snapshot.normalize_offset(position.output_offset)
                 }
-                AnchorNormalization::Geometry => {
-                    snapshot.output_for_source(position.source_offset, position.output_offset)
-                }
-                AnchorNormalization::Content => {
-                    snapshot.output_for_source(position.source_offset, position.output_offset)
+                AnchorNormalization::Geometry | AnchorNormalization::Content => {
+                    snapshot.output_for_position(position)
                 }
             };
             if output >= snapshot.output_len {
@@ -4735,7 +4798,7 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
 }
 
 /// Assistant prose wraps at a readable measure even on wide terminals.
-const PROSE_COLUMNS: usize = 100;
+const PROSE_COLUMNS: usize = 88;
 
 /// Whether a span keeps the full width: code, raw HTML and tables stay aligned, while
 /// paragraphs, headings and lists wrap at [`PROSE_COLUMNS`].
@@ -4967,6 +5030,196 @@ mod tests {
     use super::*;
     use std::fmt::Write as _;
 
+    fn prose_rows(source: &str, width: usize) -> Vec<TranscriptRow> {
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        transcript.complete_message(1, source.into());
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, width, 200);
+        viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| {
+                row.role == TranscriptRole::Assistant && row.kind == TranscriptRowKind::Content
+            })
+            .collect()
+    }
+
+    #[test]
+    fn reading_prose_separates_headings_paragraphs_and_fences_once() {
+        let rows = prose_rows(
+            "## Heading\nFirst paragraph.\n\nSecond paragraph.\n\n```text\nsample\n```\n\nEnd.",
+            40,
+        );
+        assert_eq!(
+            row_text(&rows),
+            [
+                "Heading",
+                "",
+                "First paragraph.",
+                "",
+                "Second paragraph.",
+                "",
+                "sample",
+                "",
+                "End."
+            ]
+        );
+        assert_eq!(
+            rows[0].spans[0].style.block,
+            crate::markdown::BlockStyle::Heading(2)
+        );
+        // Paragraph gaps are plain transcript background, not extra code surfaces.
+        assert!(
+            rows[7]
+                .spans
+                .iter()
+                .all(|span| span.style.block != crate::markdown::BlockStyle::Code)
+        );
+    }
+
+    #[test]
+    fn numbered_list_continuations_follow_the_marker_width() {
+        let rows = prose_rows("9. alpha beta gamma delta\n10. epsilon zeta eta theta", 12);
+        assert_eq!(
+            row_text(&rows),
+            [
+                "9. alpha",
+                "   beta",
+                "   gamma",
+                "   delta",
+                "",
+                "10. epsilon",
+                "    zeta eta",
+                "    theta"
+            ]
+        );
+        assert!(rows.iter().all(|row| row.plain_text().width() <= 12));
+    }
+
+    #[test]
+    fn nested_lists_and_checkboxes_keep_their_hanging_indent() {
+        let rows = prose_rows(
+            "- parent\n  - nested words wrap\n  - next\n- [x] alpha beta gamma",
+            12,
+        );
+        assert_eq!(
+            row_text(&rows),
+            [
+                "• parent",
+                "  • nested",
+                "    words",
+                "    wrap",
+                "  • next",
+                "",
+                "• ☑ alpha",
+                "    beta",
+                "    gamma"
+            ]
+        );
+        let source = "- **alpha beta** [gamma delta](https://example.test) `epsilon zeta`";
+        let rows = prose_rows(source, 12);
+        assert!(
+            rows.iter()
+                .skip(1)
+                .all(|row| row.plain_text().starts_with("  "))
+        );
+        assert_eq!(
+            rows.iter()
+                .map(TranscriptRow::plain_text)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ["•", "alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+        );
+        assert!(
+            rows.iter()
+                .flat_map(|row| &row.spans)
+                .any(
+                    |span| span.style.inline == crate::markdown::InlineStyle::Link
+                        && span.text.contains("gamma")
+                )
+        );
+        assert!(
+            rows.iter()
+                .flat_map(|row| &row.spans)
+                .any(
+                    |span| span.style.inline == crate::markdown::InlineStyle::Code
+                        && span.text.contains("epsilon")
+                )
+        );
+    }
+
+    #[test]
+    fn list_wrapping_progresses_on_tiny_widths_without_losing_graphemes() {
+        for width in 1..=12 {
+            let source = "123. 界e\u{301}界abcdefgh";
+            let rows = prose_rows(source, width);
+            let visible = rows
+                .iter()
+                .map(TranscriptRow::plain_text)
+                .collect::<Vec<_>>()
+                .concat()
+                .replace(' ', "");
+            assert_eq!(visible, "123.界e\u{301}界abcdefgh", "width={width}");
+            assert!(rows.len() < 30, "width={width}");
+            assert!(
+                rows.iter()
+                    .flat_map(|row| &row.spans)
+                    .all(|span| span.affinity.source_offset <= source.len())
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_reading_layout_matches_fresh_rows_after_resize_and_completion() {
+        let mut transcript = Transcript::default();
+        transcript.append_exchange("prompt".into());
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        let mut source = String::new();
+        for chunk in [
+            "## Plan\n\nStart with **the layout**.\n\n",
+            "9. alpha beta gamma delta\n",
+            "10. epsilon zeta eta theta\n\n",
+            "    More detail for this item.\n\n",
+            "    ```text\n    sample code\n    ```\n\n",
+            "Then check [the result](https://example.test).",
+        ] {
+            source.push_str(chunk);
+            transcript.append_message_delta(1, chunk);
+            for width in [24, 12, 40] {
+                viewport.set_geometry(&transcript, &mut cache, width, 200);
+                let actual = viewport
+                    .visible_rows(&transcript, &mut cache)
+                    .into_iter()
+                    .filter(|row| {
+                        row.role == TranscriptRole::Assistant
+                            && row.kind == TranscriptRowKind::Content
+                    })
+                    .map(|row| row.plain_text())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    row_text(&prose_rows(&source, width)),
+                    "width={width}, source={source:?}"
+                );
+            }
+        }
+        transcript.complete_message(1, source.clone());
+        let actual = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| {
+                row.role == TranscriptRole::Assistant && row.kind == TranscriptRowKind::Content
+            })
+            .map(|row| row.plain_text())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, row_text(&prose_rows(&source, 40)));
+    }
+
     #[test]
     fn user_prose_wraps_at_words_and_long_tokens_still_wrap_safely() {
         let mut transcript = Transcript::default();
@@ -5020,7 +5273,7 @@ mod tests {
         });
         assert!(prose_rows.clone().count() >= 10, "{rows:#?}");
         assert!(
-            prose_rows.clone().all(|row| row.trim_end().width() <= 100),
+            prose_rows.clone().all(|row| row.trim_end().width() <= 88),
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&code)), "{rows:#?}");
@@ -7770,7 +8023,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_width_markdown_boundaries_do_not_create_empty_rows() {
+    fn exact_width_markdown_boundaries_keep_one_paragraph_gap() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());
         transcript.complete_message(1, "1234\n\nnext".into());
@@ -7786,7 +8039,7 @@ mod tests {
             .map(|row| row.plain_text())
             .collect::<Vec<_>>();
 
-        assert_eq!(content, ["1234", "next"]);
+        assert_eq!(content, ["1234", "", "next"]);
     }
 
     #[test]
@@ -7874,7 +8127,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let entry = transcript.entry(assistant).unwrap();
         let snapshot = cache.markdown_snapshot(entry, 80);
-        let code_start = snapshot.document.plain_text().find("fn main").unwrap();
+        let code_start = snapshot.output_for_source(entry.content.find("fn main").unwrap(), 0);
         let anchor = RowAnchor {
             entry_id: assistant,
             position: RowPosition::Markdown(snapshot.position_at(code_start)),
@@ -7915,7 +8168,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let entry = transcript.entry(assistant).unwrap();
         let snapshot = cache.markdown_snapshot(entry, 80);
-        let code_start = snapshot.document.plain_text().find("fn main").unwrap();
+        let code_start = snapshot.output_for_source(entry.content.find("fn main").unwrap(), 0);
         let anchor = RowAnchor {
             entry_id: assistant,
             position: RowPosition::Markdown(snapshot.position_at(code_start)),
@@ -7948,6 +8201,7 @@ mod tests {
             position: RowPosition::Markdown(MarkdownPosition {
                 source_offset: 0,
                 output_offset: 0,
+                block_gap_offset: None,
             }),
         };
         let mut cache = TranscriptRowCache::default();
@@ -7988,6 +8242,7 @@ mod tests {
             position: RowPosition::Markdown(MarkdownPosition {
                 source_offset: 0,
                 output_offset: 0,
+                block_gap_offset: None,
             }),
         };
         let mut cache = TranscriptRowCache::default();
@@ -8032,6 +8287,66 @@ mod tests {
     }
 
     #[test]
+    fn blank_block_rows_keep_their_scroll_anchor_after_updates_and_resize() {
+        for source in [
+            "before\n\nafter",
+            "before\n\n| A long table heading | B |\n| - | - |\n| body | value |\n\nafter",
+            "```text\ncode\n```\n\nafter",
+        ] {
+            let mut transcript = Transcript::default();
+            transcript.start_message(1);
+            transcript.append_message_delta(1, source);
+            let mut cache = TranscriptRowCache::default();
+            let mut viewport = TranscriptViewport::default();
+            viewport.set_geometry(&transcript, &mut cache, 80, 200);
+            viewport.reduce(TranscriptViewAction::Home, &transcript, &mut cache);
+            let gaps = viewport
+                .visible_rows(&transcript, &mut cache)
+                .into_iter()
+                .filter(|row| {
+                    row.kind == TranscriptRowKind::Content
+                        && row.plain_text().is_empty()
+                        && matches!(row.anchor.position, RowPosition::Markdown(position)
+                            if position.block_gap_offset.is_some())
+                })
+                .map(|row| row.anchor)
+                .collect::<Vec<_>>();
+            assert!(!gaps.is_empty(), "{source:?}");
+            transcript.append_message_delta(1, "\n\nNew response");
+
+            for gap in gaps {
+                for action in [
+                    TranscriptViewAction::OutputChanged,
+                    TranscriptViewAction::HistoryChanged,
+                ] {
+                    let mut scrolled = viewport.clone();
+                    scrolled.top = Some(gap);
+                    scrolled.follow_tail = false;
+                    scrolled.reduce(action, &transcript, &mut cache);
+                    for width in [80, 12, 80] {
+                        scrolled.set_geometry(&transcript, &mut cache, width, 200);
+                        let rows = scrolled.visible_rows(&transcript, &mut cache);
+                        assert_eq!(rows[0].kind, TranscriptRowKind::Content);
+                        assert!(rows[0].plain_text().is_empty(), "{source:?}, width {width}");
+                        let RowPosition::Markdown(position) = rows[0].anchor.position else {
+                            panic!("expected a Markdown gap anchor");
+                        };
+                        assert_eq!(
+                            position.source_offset,
+                            match gap.position {
+                                RowPosition::Markdown(original) => original.source_offset,
+                                _ => unreachable!(),
+                            }
+                        );
+                        assert!(position.block_gap_offset.is_some());
+                        assert!(!scrolled.follows_tail());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn markdown_resize_rewraps_without_reparsing_source() {
         let mut transcript = Transcript::default();
         transcript.append_exchange("prompt".into());
@@ -8067,6 +8382,7 @@ mod tests {
             position: RowPosition::Markdown(MarkdownPosition {
                 source_offset: 0,
                 output_offset: 0,
+                block_gap_offset: None,
             }),
         };
         let mut cache = TranscriptRowCache::default();

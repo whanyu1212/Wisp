@@ -55,7 +55,12 @@ Assistant replies render Markdown during streaming and when loading session hist
 emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
 backgrounds, and tables with
 aligned columns, borders, and bold headers. Descriptions wrap at word boundaries inside their cells;
-very narrow layouts stack cells within each row. Ordinary prose also wraps at word boundaries.
+very narrow layouts stack cells within each row. Ordinary prose wraps at word boundaries within
+an 88-column reading width. Paragraphs and headings have one blank line between them; top-level
+list items have the same breathing room, while nested lists stay compact. Wrapped list text aligns
+beneath its content, including numbered items and checkboxes. Code and tables retain the available
+transcript width. These are display changes: the stored response retains its original Markdown, while mouse
+selection copies the painted rows, including their spacing.
 Very large unfinished blocks temporarily display as plain text and are formatted when the reply
 completes. User prompts and tool output retain their literal text.
 
