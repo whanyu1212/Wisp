@@ -6,6 +6,8 @@ test("navigation, highlighted code, and controls retain readable contrast", asyn
   page,
 }) => {
   for (const route of [
+    "",
+    "guide/index.html",
     "reference/sdk.html",
     "crafting-agents/01-core-loop.html",
   ]) {
@@ -43,7 +45,7 @@ test("navigation, highlighted code, and controls retain readable contrast", asyn
         const failures = new Set<string>();
         document
           .querySelectorAll<HTMLElement>(
-            ".site-header a, .eyebrow, .breadcrumbs a, article p, .sidebar a, .toc a, .astro-code span, button, select",
+            ".site-header a, .eyebrow, .breadcrumbs a, article p, .lede, .install-note, .tui-capture figcaption, .primary, .section-index p, .sidebar a, .toc a, .astro-code span, button, select",
           )
           .forEach((element) => {
             if (

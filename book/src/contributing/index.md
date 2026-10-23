@@ -11,7 +11,10 @@ protected paths, cancellation, retries, or process cleanup should include advers
 coverage.
 
 See [Development setup](./development) to prepare a checkout and [Testing](./testing) for local and
-CI test partitions.
+CI test partitions. If you are changing distribution or installation behavior, read
+[How Wisp is built](./building) before adjusting packaging. Start with the smallest reproducible
+case, add a regression for the intended behavior, and include the checks you actually ran in the
+pull request.
 
 Report security vulnerabilities privately, not in public issues; the repository's
 [security policy](https://github.com/whanyu1212/Wisp/blob/main/SECURITY.md) explains how and what is

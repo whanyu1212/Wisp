@@ -3,12 +3,14 @@
 Exact surfaces — flags, fields, schemas. Narrative explanation lives in the
 [Guide](../guide/); design rationale lives in [Architecture](../architecture/).
 
-- [CLI](./cli) — commands, flags, exit codes.
-- [Python SDK](./sdk) — supported namespaces, controllers, commands, events, and lifecycle options.
-- [Project file discovery](./project-files) — bounded snapshots, cancellation, and policy invalidation.
-- [Compatibility & versioning](./compatibility) — package, API, event, and session guarantees.
-- [Configuration](./configuration) — settings files and precedence.
-- [Environment variables](./environment) — every `WISP_*` variable.
+Looking up an invocation? Start with the [CLI reference](./cli) for commands, flags, and exit codes.
+Embedding Wisp? The [Python SDK reference](./sdk) covers supported namespaces, controller methods,
+options, and typed results; the [SDK guide](../guide/sdk) walks through complete tasks.
+
+For a setting that is not taking effect, check [Configuration](./configuration) for precedence before
+changing an environment variable. Read [Compatibility & versioning](./compatibility) before upgrading
+an integration or opening saved sessions with a different release. Use this section's navigation
+for the complete set of contracts.
 
 > [!WARNING]
 > **Keep in sync with code**

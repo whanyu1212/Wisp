@@ -1,6 +1,8 @@
 ---
-import { getCollection, render, type CollectionEntry } from "astro:content";
-import { navigation } from "../content/navigation";
+import { render, type CollectionEntry } from "astro:content";
+import Home from "../components/Home.astro";
+import SectionIndex from "../components/SectionIndex.astro";
+import TuiCapture from "../components/TuiCapture.astro";
 import Document from "./Document.astro";
 import { href, base } from "../content/paths";
 import type { Heading } from "../content/render";
@@ -13,19 +15,6 @@ interface Props {
 const { entry, compatibility } = Astro.props;
 const { Content, headings } = await render(entry);
 const target = href(entry.data.route);
-// Reuse the header's ordered section destinations, not a second route list.
-const startingPoints =
-  entry.data.layout === "home"
-    ? navigation((await getCollection("pages")).map((page) => page.data)).slice(
-        0,
-        3,
-      )
-    : [];
-const introductions: Record<string, string> = {
-  using: "Start with your repository",
-  reference: "Find the exact contract",
-  learn: "Build a coding agent",
-};
 ---
 
 <Document
@@ -61,52 +50,25 @@ const introductions: Record<string, string> = {
       </script>
     </>
   ) : entry.data.layout === "home" ? (
-    <>
-      <div class="home-intro">
-        <div>
-          <div class="eyebrow">A coding agent you can steer</div>
-          <p class="display-title">
-            A little wisp.
-            <br />A clearer way
-            <br />
-            through code.
-          </p>
-          <p class="lede">
-            Redirect Wisp while it works, approve changes before they happen,
-            and inspect the transcript afterward.
-          </p>
-          <a class="primary" href={href("guide/quickstart.html")}>
-            Start using Wisp →
-          </a>
-        </div>
-        <img
-          class="hero-image"
-          src={href("assets/wisp-banner-v2.png")}
-          alt="Wisp, a coding agent that stays in sync with you"
-          width="2400"
-          height="600"
-        />
-      </div>
-      <div class="starting-points">
-        {startingPoints.map(
-          (group, index) =>
-            group.pages[0] && (
-              <a href={href(group.pages[0].route)}>
-                <span class="eyebrow">
-                  {String(index + 1).padStart(2, "0")} / {group.title}
-                </span>
-                <strong>{introductions[group.key] ?? group.title} →</strong>
-              </a>
-            ),
-        )}
-      </div>
-      <article class="home-content">
-        <Content />
-      </article>
-    </>
+    <Home />
   ) : (
     <article>
       <Content />
+      {[
+        "guide/index.md",
+        "reference/index.md",
+        "contributing/index.md",
+      ].includes(entry.data.source) && <SectionIndex page={entry.data} />}
+      {entry.data.source === "guide/quickstart.md" && (
+        <TuiCapture capture="approval" />
+      )}
+      {entry.data.source === tuiSource && <TuiCapture capture="working" />}
+      {entry.data.source === "guide/tui/sessions.md" && (
+        <TuiCapture capture="diffs" />
+      )}
+      {entry.data.source === "guide/tui/commands.md" && (
+        <TuiCapture capture="mcp" />
+      )}
       {entry.data.source === tuiSource && <script>
         function navigateTuiSection() {
           let id: string;

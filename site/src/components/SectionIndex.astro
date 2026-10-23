@@ -1,0 +1,27 @@
+---
+import { getCollection } from "astro:content";
+import { navigation } from "../content/navigation";
+import { href } from "../content/paths";
+import type { PageMetadata } from "../content/metadata";
+interface Props {
+  page: PageMetadata;
+}
+const { page } = Astro.props;
+const group = navigation(
+  (await getCollection("pages")).map((entry) => entry.data),
+).find((group) => group.key === page.section);
+const children =
+  group?.pages.filter((entry) => entry.source !== page.source) ?? [];
+---
+
+<nav class="section-index" aria-label={`${group?.title} pages`}>
+  <h2>Explore {group?.title}</h2>
+  <ul>
+    {children.map((entry) => (
+      <li style={`--nav-depth: ${entry.depth}`}>
+        <a href={href(entry.route)}>{entry.navTitle ?? entry.title} →</a>
+        <p>{entry.description}</p>
+      </li>
+    ))}
+  </ul>
+</nav>

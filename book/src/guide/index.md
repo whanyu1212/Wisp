@@ -16,3 +16,8 @@ the ones in 0.2.
 Start with [Installation](./installation) and the [Quickstart](./quickstart). Then read
 [Staying in sync](./staying-in-sync) for the exact steering, follow-up, cancellation, and approval
 behavior available through each interface. Embedders can continue with the [Python SDK](./sdk).
+
+For daily terminal work, the [TUI guide](./tui) covers composing prompts, reviewing changes, and
+finding commands. Read [Tools and safety](./tools-and-safety) before enabling unattended execution,
+and [Sessions](./sessions) when you want to resume, branch, or inspect saved work. The section
+navigation lists the rest of the guide in reading order.

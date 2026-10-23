@@ -163,6 +163,20 @@ fn fixture(scenario: &str) -> LiveUi {
             session_only_yolo: false,
         });
     }
+    if scenario == "mcp" {
+        use wisp_protocol::events::{McpServerSnapshot, McpServerStatus, McpStatusSnapshot};
+        ui.state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
+            servers: vec![McpServerSnapshot {
+                name: "demo-docs".into(),
+                status: McpServerStatus::Connected,
+                tool_names: vec!["search_docs".into(), "read_page".into()],
+                error: None,
+                launch: None,
+                sign_in: None,
+            }],
+        }));
+        ui.discovery_view = Some(DiscoveryView::mcp());
+    }
     if scenario == "permissions" {
         ui.state.permissions.snapshot = Some(Arc::new(wisp_protocol::events::PermissionState {
             mode: wisp_protocol::commands::PermissionMode::Ask,
@@ -1094,6 +1108,15 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
 }
 
 #[test]
+fn documentation_mcp_capture_shows_synthetic_server_and_tools() {
+    let text = screen_text(&draw(&mut fixture("mcp"), 100, 30));
+    assert!(text.contains("demo-docs  connected · 2 tools"));
+    assert!(text.contains("search_docs"));
+    assert!(text.contains("read_page"));
+    assert!(text.contains("a add · e on/off · d remove"));
+}
+
+#[test]
 #[ignore = "writes review artifacts only when explicitly requested"]
 fn capture_conversation_screens() {
     let output =
@@ -1117,6 +1140,7 @@ fn capture_conversation_screens() {
                 "tool-dim",
                 "approval",
                 "permissions",
+                "mcp",
                 "new-turn",
                 "scrollback",
                 "activity-rail",

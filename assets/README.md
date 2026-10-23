@@ -10,6 +10,9 @@ tracked image files have identical bytes, so link to the existing file instead o
 | `book/theme/favicon.png` | 256 × 256 | The book's browser-tab icon (mdBook picks it up automatically) |
 | `book/src/apple-touch-icon.png` | 180 × 180 | The book's iOS home-screen icon, linked from `book/theme/head.hbs` |
 
+Documentation UI captures live in [`docs/`](docs/README.md), with their synthetic-data provenance
+and regeneration commands. Each master is stored once; Astro generates responsive derivatives.
+
 ## Rules
 
 - **Never rename or delete `wisp-banner-v2.png`.** Every published README, `0.1.0rc1` onward, loads
