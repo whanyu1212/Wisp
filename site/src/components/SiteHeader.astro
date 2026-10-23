@@ -1,5 +1,6 @@
 ---
 import { href } from "../content/paths";
+import Search from "./Search.astro";
 import type { NavigationGroup } from "../content/navigation";
 import type { PageMetadata } from "../content/metadata";
 
@@ -31,6 +32,7 @@ const { groups, page } = Astro.props;
         ),
     )}
   </nav>
+  <Search />
   <label class="theme-control" for="theme-select">
     <span>Theme</span>
     <select id="theme-select" disabled>

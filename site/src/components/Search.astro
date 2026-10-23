@@ -1,0 +1,132 @@
+---
+import { href } from "../content/paths";
+---
+
+<button
+  type="button"
+  id="search-open"
+  aria-haspopup="dialog"
+  aria-label="Search documentation"
+  hidden
+>
+  Search
+</button>
+<dialog
+  id="search-dialog"
+  class="search-dialog"
+  aria-labelledby="search-title"
+  data-pagefind-ignore="all"
+  data-search-bundle={href("pagefind/pagefind.js")}
+>
+  <div class="search-heading">
+    <h2 id="search-title">Search documentation</h2>
+    <button type="button" id="search-close">
+      Close
+    </button>
+  </div>
+  <form role="search" id="search-form">
+    <label for="search-query">Search guides, reference, and lessons</label>
+    <div class="search-field">
+      <input
+        id="search-query"
+        type="search"
+        autocomplete="off"
+        autofocus
+        aria-describedby="search-status"
+      />
+      <button type="submit">Search</button>
+    </div>
+  </form>
+  <p id="search-status" role="status" aria-live="polite" aria-atomic="true">
+    Type to search the documentation.
+  </p>
+  <ol id="search-results" aria-label="Search results"></ol>
+  <button type="button" id="search-more" hidden>
+    Load more results
+  </button>
+</dialog>
+<script>
+  import "./search";
+</script>
+
+<style>
+  .search-dialog {
+    width: min(720px, calc(100% - 32px));
+    max-height: calc(100dvh - 32px);
+    margin: 16px auto;
+    padding: 24px;
+    color: var(--ink);
+    background: var(--paper);
+    border: 1px solid var(--muted);
+    border-radius: 8px;
+    overflow-wrap: anywhere;
+  }
+  .search-dialog::backdrop {
+    background: rgb(0 0 0 / 55%);
+  }
+  .search-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .search-heading h2 {
+    margin: 0;
+    font-size: 28px;
+  }
+  .search-field {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  input {
+    min-width: 0;
+    width: 100%;
+    min-height: 44px;
+    padding: 8px;
+    border: 1px solid var(--muted);
+    border-radius: 4px;
+    background: var(--paper);
+    color: var(--ink);
+    font: inherit;
+    /* Avoid mobile browsers zooming the search field. */
+    font-size: 16px;
+  }
+  #search-status {
+    color: var(--muted);
+  }
+  #search-results {
+    padding-left: 24px;
+  }
+  #search-results :global(li) {
+    padding: 16px 0;
+    border-top: 1px solid var(--rule);
+  }
+  #search-results :global(a) {
+    display: inline-block;
+    padding-block: 8px;
+    min-height: 44px;
+    font-weight: 600;
+  }
+  #search-results :global(p) {
+    margin: 4px 0;
+  }
+  #search-results :global(.search-section) {
+    color: var(--muted);
+    font-size: 13px;
+  }
+  #search-results :global(mark) {
+    color: var(--ink);
+    background: var(--soft);
+    font-weight: 600;
+  }
+  @media (max-width: 760px) {
+    .search-dialog {
+      padding: 16px;
+    }
+    .search-heading h2 {
+      font-size: 24px;
+    }
+  }
+</style>
