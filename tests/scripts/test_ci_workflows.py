@@ -69,6 +69,17 @@ def test_docs_has_one_verified_serialized_deployment_path() -> None:
     assert "npm run build" in commands
     assert "npm run test:browser" in commands
     assert "pytest tests/docs tests/repository/test_images.py" in commands
+    contracts = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify documentation contracts and SDK examples"
+    )
+    # HOME isolation must not lose the container checkout's narrowly scoped Git trust.
+    assert contracts["env"] == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "${{ github.workspace }}",
+    }
     for checkpoint in range(1, 6):
         assert f"python -m examples.crafting_agents.checkpoint_0{checkpoint}" in commands
     smoke = jobs["smoke"]["steps"][-1]

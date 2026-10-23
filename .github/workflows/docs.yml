@@ -113,6 +113,12 @@ jobs:
 
       - name: Verify documentation contracts and SDK examples
         working-directory: .
+        # pytest isolates HOME, hiding checkout's global safe.directory setting.
+        # Preserve trust for this checkout only across the container UID boundary.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
         run: uv run --locked pytest tests/docs tests/repository/test_images.py
 
       - name: Test content pipeline
