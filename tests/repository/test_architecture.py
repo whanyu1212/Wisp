@@ -24,6 +24,7 @@ _PURE_AGENT_MODULES = (
     "harness/__init__.py",
     "harness/config.py",
     "harness/boundaries.py",
+    "harness/queues.py",
     "harness/runner.py",
     "loop/__init__.py",
     "loop/config.py",

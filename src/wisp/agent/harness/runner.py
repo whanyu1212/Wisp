@@ -28,7 +28,6 @@ from wisp.messages import (
     completion_event_has_history,
     message_from_completion_event,
 )
-from wisp.providers.base import prepare_provider_history
 
 from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
 from .config import AgentHarnessConfig, _build_loop_config
@@ -408,13 +407,7 @@ class AgentHarness:
                 request_boundary_hook=boundary,
                 context_overflow_hook=boundary if context_overflow_hook is not None else None,
             )
-            provider_messages = prepare_provider_history(
-                self.messages,
-                provider=self._config.provider,
-                effort=self._config.effort,
-                active_from=boundary.active_from,
-            )
-            loop_events = run_agent_loop(config, messages=provider_messages)
+            loop_events = run_agent_loop(config, messages=boundary.provider_history())
             while True:
                 step = await self._next_loop_step(loop_events, token=token, run=run)
                 if step is _LoopStepAction.CANCEL_AND_STOP:

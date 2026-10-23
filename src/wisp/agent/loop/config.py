@@ -14,6 +14,9 @@ from wisp.providers.base import Provider, ToolSpec
 
 type UsageCostEstimator = Callable[[str, str | None, str | None, TokenUsage], UsageCost]
 
+DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
+DEFAULT_CONTEXT_PRESSURE_THRESHOLD = 0.8
+
 
 class CancellationToken(Protocol):
     """Cooperative cancellation state observed by the pure loop."""
@@ -69,8 +72,8 @@ class AgentLoopConfig:
     # own default behavior."
     effort: str | None = None
     context_window: int | None = None
-    context_reserve_tokens: int = 16_384
-    context_pressure_threshold: float = 0.8
+    context_reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS
+    context_pressure_threshold: float = DEFAULT_CONTEXT_PRESSURE_THRESHOLD
     turn_offset: int = 0
     tool_iteration_offset: int = 0
     cost_estimator: UsageCostEstimator | None = None
@@ -116,4 +119,10 @@ class AgentLoopConfig:
         return token is not None and token.is_cancelled()
 
 
-__all__ = ["AgentLoopConfig", "CancellationToken", "UsageCostEstimator"]
+__all__ = [
+    "DEFAULT_CONTEXT_PRESSURE_THRESHOLD",
+    "DEFAULT_CONTEXT_RESERVE_TOKENS",
+    "AgentLoopConfig",
+    "CancellationToken",
+    "UsageCostEstimator",
+]

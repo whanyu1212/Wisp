@@ -9,9 +9,10 @@ import wisp.providers.events as provider_events
 from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
-    Provider,
     ToolCallResult,
     is_context_overflow_message,
+    provider_supports_continuation_messages,
+    provider_supports_prompt_cache_key,
     provider_supports_web_search,
 )
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseFailed
@@ -20,42 +21,6 @@ from .stream_cleanup import closing_stream
 
 if TYPE_CHECKING:
     from .config import AgentLoopConfig
-
-
-def provider_supports_prompt_cache_key(provider: Provider) -> bool:
-    """Check whether an adapter explicitly accepts a prompt cache key.
-
-    Args:
-        provider (Provider): Adapter whose optional capability is inspected.
-
-    Returns:
-        bool: True only when supports_prompt_cache_key is literally True.
-    """
-    return getattr(provider, "supports_prompt_cache_key", False) is True
-
-
-def provider_supports_continuation_messages(provider: Provider) -> bool:
-    """Check whether an adapter explicitly accepts continuation messages.
-
-    Args:
-        provider (Provider): Adapter to inspect without requiring a new protocol member.
-
-    Returns:
-        bool: True only when supports_continuation_messages is literally True.
-    """
-    return getattr(provider, "supports_continuation_messages", False) is True
-
-
-def provider_supports_context_rebase(provider: Provider) -> bool:
-    """Check whether an adapter explicitly supports context rebasing.
-
-    Args:
-        provider (Provider): Adapter whose optional capability is inspected.
-
-    Returns:
-        bool: True only when supports_context_rebase is literally True.
-    """
-    return getattr(provider, "supports_context_rebase", False) is True
 
 
 def open_provider_stream(

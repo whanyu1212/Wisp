@@ -18,12 +18,9 @@ from wisp.events import ContextBudget, ToolResultReady
 from wisp.messages import Message
 from wisp.providers.base import (
     ToolCallResult,
-    structured_tool_replacement_support,
-)
-
-from .provider_request import (
     provider_supports_context_rebase,
     provider_supports_continuation_messages,
+    structured_tool_replacement_support,
 )
 
 if TYPE_CHECKING:
@@ -677,7 +674,9 @@ async def at_context_overflow(
         config,
         state,
         messages=messages,
-        had_tool_calls=any(is_tool_shaped(item) for item in state.continuation_messages),
+        # Results still pending were carried by the rejected request, so a rebased
+        # retry must send them again; a clean turn's boundary already consumed them.
+        had_tool_calls=bool(state.pending_tool_results),
         decision=decision,
         allow_extra_messages=False,
     )

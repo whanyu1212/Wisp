@@ -119,6 +119,18 @@ class ContextRebaseProvider(Protocol):
     supports_context_rebase: Literal[True]
 
 
+def provider_supports_context_rebase(provider: Provider) -> bool:
+    """Check whether an adapter explicitly supports context rebasing.
+
+    Args:
+        provider (Provider): Adapter whose optional capability is inspected.
+
+    Returns:
+        bool: True only when supports_context_rebase is literally True.
+    """
+    return getattr(provider, "supports_context_rebase", False) is True
+
+
 class PromptCacheKeyProvider(Protocol):
     """Opt-in provider capability for request-level prompt-cache routing."""
 
@@ -137,6 +149,18 @@ class PromptCacheKeyProvider(Protocol):
     ) -> AsyncIterator[ProviderEvent]:
         """Yield one response lifecycle with an optional stable cache-routing key."""
         ...
+
+
+def provider_supports_prompt_cache_key(provider: Provider) -> bool:
+    """Check whether an adapter explicitly accepts a prompt cache key.
+
+    Args:
+        provider (Provider): Adapter whose optional capability is inspected.
+
+    Returns:
+        bool: True only when supports_prompt_cache_key is literally True.
+    """
+    return getattr(provider, "supports_prompt_cache_key", False) is True
 
 
 class WebSearchProvider(Protocol):
@@ -188,6 +212,18 @@ class ContinuationMessageProvider(Protocol):
     ) -> AsyncIterator[ProviderEvent]:
         """Yield one response lifecycle with new user messages appended once."""
         ...
+
+
+def provider_supports_continuation_messages(provider: Provider) -> bool:
+    """Check whether an adapter explicitly accepts continuation messages.
+
+    Args:
+        provider (Provider): Adapter to inspect without requiring a new protocol member.
+
+    Returns:
+        bool: True only when supports_continuation_messages is literally True.
+    """
+    return getattr(provider, "supports_continuation_messages", False) is True
 
 
 class StructuredToolReplacementProvider(Protocol):
