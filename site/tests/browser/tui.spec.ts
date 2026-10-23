@@ -1,5 +1,8 @@
 import { expect, test } from "@playwright/test";
 
+const destinationId = (id: string) =>
+  id === "rust-keybinding-preferences" ? "keybinding-preferences" : id;
+
 const moved = [
   ["rust-keybinding-preferences", "keybindings"],
   ["keybindings", "keybindings"],
@@ -39,9 +42,11 @@ test("moved fragments redirect exactly on load and hashchange, retaining queries
   for (const [id, part] of moved) {
     await page.goto(`guide/tui.html?from=legacy#${id}`);
     await expect(page).toHaveURL(
-      new RegExp(`/guide/tui/${part}\\.html\\?from=legacy#${id}$`),
+      new RegExp(
+        `/guide/tui/${part}\\.html\\?from=legacy#${destinationId(id!)}$`,
+      ),
     );
-    await expect(page.locator(`article #${id}`)).toBeVisible();
+    await expect(page.locator(`article #${destinationId(id!)}`)).toBeVisible();
   }
   await page.goto("guide/tui.html");
   await page.evaluate(() => {
@@ -68,7 +73,10 @@ test("old TUI fragments have visible destinations without JavaScript", async ({
     for (const [id, part] of moved) {
       await expect(
         page.locator(`[id="${id}"] a[data-tui-destination]`),
-      ).toHaveAttribute("href", `/Wisp/guide/tui/${part}.html#${id}`);
+      ).toHaveAttribute(
+        "href",
+        `/Wisp/guide/tui/${part}.html#${destinationId(id!)}`,
+      );
     }
     await page.locator("#keybindings a").click();
     await expect(page.locator("article #keybindings")).toBeVisible();

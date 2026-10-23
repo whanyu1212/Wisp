@@ -156,11 +156,19 @@ export function splitTui(html: string) {
     if (id && /^h[1-6]$/.test(node.tagName)) {
       const text = element.text().replace(/^Rust /, "");
       element.text(id === "tui" ? "TUI basics" : text);
+      // The migration plan drops the historical prefix at the destination,
+      // while both the original URL and early child-page links keep working.
+      const destinationId =
+        id === "rust-keybinding-preferences" ? "keybinding-preferences" : id;
+      if (destinationId !== id) {
+        parts[part].push(`<span id="${id}"></span>`);
+        element.attr("id", destinationId);
+      }
       if (part !== "basics")
         moved.push({
           id,
           text,
-          target: `${href(`guide/tui/${part}.html`)}#${id}`,
+          target: `${href(`guide/tui/${part}.html`)}#${destinationId}`,
         });
     }
     parts[part].push($.html(node));
