@@ -1271,7 +1271,10 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
 /// What the run is doing when no call names it: compacting, cancelling, thinking, or
 /// otherwise working.
 pub(crate) fn activity_phase(state: &UiState) -> String {
-    if state.interaction_status == crate::reducer::InteractionStatus::Compacting {
+    // Automatic compaction runs inside a prompt, so only the compaction event marks it.
+    if state.interaction_status == crate::reducer::InteractionStatus::Compacting
+        || state.context.compaction.is_some()
+    {
         return "Compacting context".into();
     }
     if state.cancel_requested {
@@ -3642,7 +3645,9 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
     use serde_json::json;
-    use wisp_protocol::events::{ContextAccountingMethod, ContextBudget, ContextEstimate};
+    use wisp_protocol::events::{
+        CompactionReason, ContextAccountingMethod, ContextBudget, ContextEstimate,
+    };
 
     #[derive(Default)]
     struct TestIds(u64);
@@ -4267,6 +4272,22 @@ mod tests {
         let prompt = state.transcript.append_prompt("check ci".into());
         state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
         state
+    }
+
+    #[test]
+    fn status_line_shows_auto_compaction() {
+        let mut state = running_state();
+        for reason in [CompactionReason::Threshold, CompactionReason::Overflow] {
+            state.context.compaction = Some(reason);
+            let (compacting, _) = status_row(&state, 100, Some(5));
+            assert!(
+                compacting.starts_with("◐ Compacting context · turn 6"),
+                "{compacting}"
+            );
+        }
+        state.context.compaction = None;
+        let (working, _) = status_row(&state, 100, Some(5));
+        assert!(working.starts_with("◐ Working · turn 6"), "{working}");
     }
 
     #[test]
