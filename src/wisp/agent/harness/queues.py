@@ -10,7 +10,7 @@ from wisp.events import QueueKind, QueueMode, QueueUpdated
 from wisp.messages import Message
 
 
-def queue_full_error(max_messages: int) -> str:
+def queue_full_message(max_messages: int) -> str:
     """Return the error for a message that would exceed the queued-message limit.
 
     Args:
@@ -106,7 +106,7 @@ class _QueueStore:
         if message.role != "user":
             raise ValueError("AgentHarness queues require a user message")
         if self.count >= max_messages:
-            raise RuntimeError(queue_full_error(max_messages))
+            raise RuntimeError(queue_full_message(max_messages))
         if _message_size(message) > max_bytes - self.byte_size:
             raise RuntimeError(
                 f"Agent queue byte limit exceeded (maximum {max_bytes} pending bytes)"

@@ -8,7 +8,7 @@ import pytest
 from tests.agent.harness.support import (
     RecordingToolExecutor,
 )
-from wisp.agent.harness import AgentHarnessConfig, SimpleCancellationToken
+from wisp.agent.harness import AgentHarnessConfig, RunCancellationToken
 from wisp.agent.harness.config import _build_loop_config
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.request_boundary import RequestBoundaryDecision, RequestBoundarySnapshot
@@ -108,7 +108,7 @@ def test_loop_config_forwards_every_field() -> None:
     )
     loop_config = _build_loop_config(
         harness_config,
-        cancellation_token=SimpleCancellationToken(),
+        cancellation_token=RunCancellationToken(),
         turn_offset=0,
         tool_iteration_offset=0,
         request_boundary_hook=_StopBoundary(),

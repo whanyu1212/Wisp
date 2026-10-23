@@ -277,13 +277,13 @@ class _ClosingProvider:
 def test_provider_closes_before_outer_stream_finishes(
     interface: str, ending: Literal["close", "cancel", "complete", "failure"]
 ) -> None:
-    from wisp.agent.harness import SimpleCancellationToken
+    from wisp.agent.harness import RunCancellationToken
     from wisp.providers.base import ProviderProtocolError
 
     provider = _ClosingProvider(failure=ending == "failure")
     executor = _Executor()
     harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=executor))
-    token = SimpleCancellationToken()
+    token = RunCancellationToken()
 
     async def run() -> None:
         stream = (
@@ -393,10 +393,10 @@ def test_provider_protocol_failure_survives_close_failure() -> None:
 def test_cancelled_turn_completes_once_when_provider_close_fails(
     close_message: str,
 ) -> None:
-    from wisp.agent.harness import SimpleCancellationToken
+    from wisp.agent.harness import RunCancellationToken
 
     provider = _ClosingProvider(close_failure=True, close_message=close_message)
-    token = SimpleCancellationToken()
+    token = RunCancellationToken()
 
     async def run() -> None:
         events = []
@@ -417,10 +417,10 @@ def test_cancelled_turn_completes_once_when_provider_close_fails(
 
 
 def test_cancellation_terminals_publish_before_provider_cleanup() -> None:
-    from wisp.agent.harness import SimpleCancellationToken
+    from wisp.agent.harness import RunCancellationToken
 
     provider = _ClosingProvider()
-    token = SimpleCancellationToken()
+    token = RunCancellationToken()
 
     async def run() -> None:
         events: list[object] = []

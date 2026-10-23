@@ -11,7 +11,6 @@ from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     ToolExecutionEvent,
     ToolPreparationEvent,
-    ToolResultProcessingError,
 )
 from wisp.events import (
     ManagedProcessState,
@@ -89,6 +88,15 @@ _RESULT_DATA_KEYS = {
     "find": ("count",),
     "ls": ("entries", "entry_count", "path"),
 }
+
+
+class ToolResultProcessingError(RuntimeError):
+    """Raised when Wisp cannot normalize an otherwise returned tool result."""
+
+    def __init__(self, *, call_id: str, tool_name: str) -> None:
+        self.call_id = call_id
+        self.tool_name = tool_name
+        super().__init__("Internal error while processing a tool result")
 
 
 @dataclass(frozen=True)
