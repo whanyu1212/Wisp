@@ -1,5 +1,6 @@
 ---
-import { render, type CollectionEntry } from "astro:content";
+import { getCollection, render, type CollectionEntry } from "astro:content";
+import { navigation } from "../content/navigation";
 import Document from "./Document.astro";
 import { href, base } from "../content/paths";
 import type { Heading } from "../content/render";
@@ -11,6 +12,19 @@ interface Props {
 const { entry, compatibility } = Astro.props;
 const { Content, headings } = await render(entry);
 const target = href(entry.data.route);
+// Reuse the header's ordered section destinations, not a second route list.
+const startingPoints =
+  entry.data.layout === "home"
+    ? navigation((await getCollection("pages")).map((page) => page.data)).slice(
+        0,
+        3,
+      )
+    : [];
+const introductions: Record<string, string> = {
+  using: "Start with your repository",
+  reference: "Find the exact contract",
+  learn: "Build a coding agent",
+};
 ---
 
 <Document
@@ -68,16 +82,17 @@ const target = href(entry.data.route);
         />
       </div>
       <div class="starting-points">
-        {[
-          ["01 / Use", "Start with your repository", "guide/quickstart.html"],
-          ["02 / Reference", "Find the exact contract", "reference/index.html"],
-          ["03 / Learn", "Build a coding agent", "crafting-agents/index.html"],
-        ].map(([label, title, route]) => (
-          <a href={href(route!)}>
-            <span class="eyebrow">{label}</span>
-            <strong>{title} →</strong>
-          </a>
-        ))}
+        {startingPoints.map(
+          (group, index) =>
+            group.pages[0] && (
+              <a href={href(group.pages[0].route)}>
+                <span class="eyebrow">
+                  {String(index + 1).padStart(2, "0")} / {group.title}
+                </span>
+                <strong>{introductions[group.key] ?? group.title} →</strong>
+              </a>
+            ),
+        )}
       </div>
       <article class="home-content">
         <Content />

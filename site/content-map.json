@@ -386,6 +386,7 @@
   {
     "source": "guide/index.md",
     "title": "Introduction",
+    "navTitle": "Using Wisp",
     "description": "Wisp is a coding agent that **stays in sync with you**. Its fullscreen TUI, RPC, and SDK surfaces can steer an active run or queue follow-up work, and every interface uses the\u2026",
     "route": "guide/index.html",
     "section": "using",
@@ -529,7 +530,7 @@
   {
     "source": "index.md",
     "title": "Wisp",
-    "description": "Wisp is a coding agent that stays in sync with you. You can redirect it while it works, approve changes before they happen, and inspect the transcript afterward.",
+    "description": "Install and use Wisp, a coding agent you can steer. Find technical reference, learn to build coding agents, explore Wisp's internals, and contribute.",
     "route": "index.html",
     "section": "using",
     "order": 0,
