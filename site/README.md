@@ -162,9 +162,19 @@ Inside Wisp at `architecture/sdk-capability-audit.html`; its old reference URL i
 non-indexed compatibility page with fragment redirects and no-JavaScript links. Source files and
 edit links remain under `book/src/` until cutover, and the immutable audit evidence is unchanged.
 Interfaces and Staying in sync remain separate: interface selection versus live-control semantics.
-HY-277 owns real homepage imagery. The foundation preserves
-the complete homepage article below the new editorial opening; final content editing
-will remove repetition in HY-277.
+HY-277 supplies the Astro homepage in `src/components/Home.astro`: a direct install/start path,
+production-rendered TUI captures, the shared Use / Reference / Learn destinations, and secondary
+architecture/contributor links. It replaces the repeated mdBook home article in Astro while retaining
+its public heading IDs. `book/src/index.md` still supplies the mdBook landing page until cutover.
+`SectionIndex.astro` derives guide, reference, and contributing listings from the same navigation
+metadata as the sidebar. Markdown introductions remain authoritative; there is no second page list.
+
+`TuiCapture.astro` uses Astro's image pipeline for responsive WebP output and links to full-size PNG
+masters stored once in `assets/docs/`. Captures also appear in Quickstart and relevant TUI pages.
+All four are static production-buffer captures with explicitly labeled synthetic data, not live
+service screenshots. See `assets/docs/README.md` at the repository root for provenance and
+regeneration. The capture script uses the existing Playwright dependency, only during development.
+No capture, browser, or Rust build is required to build the site from the checked-in masters.
 
 HY-316 moves content to `site/src/content/`, transfers metadata into frontmatter,
 updates Python test paths, switches deployment to Astro and adds the combined print

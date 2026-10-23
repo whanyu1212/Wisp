@@ -446,8 +446,63 @@ svg {
   color: var(--muted);
   max-width: 48ch;
 }
-.hero-image {
-  object-fit: contain;
+.install-note,
+.tui-capture figcaption {
+  font-size: 13px;
+  color: var(--muted);
+}
+.tui-capture {
+  margin: 28px 0;
+  min-width: 0;
+}
+.tui-capture img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+.tui-capture figcaption {
+  margin-top: 12px;
+}
+.capture-provenance {
+  display: block;
+  margin-top: 6px;
+}
+.home-intro > div {
+  min-width: 0;
+}
+.home-intro h2 {
+  font-size: 20px;
+  margin-top: 26px;
+}
+.workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 32px;
+}
+.home-workflows {
+  margin-top: 48px;
+}
+.secondary-starts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+.section-index ul {
+  list-style: none;
+  padding: 0;
+}
+.section-index li {
+  padding: 18px 0 18px calc(var(--nav-depth, 0) * 18px);
+  border-top: 1px solid var(--rule);
+}
+.section-index a {
+  font-weight: 600;
+}
+.section-index p {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--muted);
 }
 .primary {
   display: inline-block;
@@ -562,8 +617,8 @@ svg {
     display: block;
     padding: 36px 0;
   }
-  .hero-image {
-    margin-top: 35px;
+  .workflow-grid {
+    grid-template-columns: 1fr;
   }
   .display-title {
     font-size: 48px;

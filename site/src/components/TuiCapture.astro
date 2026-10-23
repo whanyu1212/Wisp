@@ -1,0 +1,31 @@
+---
+import { Image } from "astro:assets";
+import { tuiCaptures, type TuiCapture } from "../content/tui-captures";
+interface Props {
+  capture: TuiCapture;
+  eager?: boolean;
+}
+const { capture, eager = false } = Astro.props;
+const { image, alt, caption } = tuiCaptures[capture];
+---
+
+<figure class="tui-capture">
+  <a href={image.src} aria-label={`Open full-size capture: ${alt}`}>
+    <Image
+      src={image}
+      alt={alt}
+      widths={[480, 800, 1200]}
+      sizes="(max-width: 760px) 100vw, 760px"
+      format="webp"
+      loading={eager ? "eager" : "lazy"}
+      decoding="async"
+    />
+  </a>
+  <figcaption>
+    {caption}{" "}
+    <span class="capture-provenance">
+      Production TUI renderer · synthetic demo data · static capture. Open the
+      image for full size.
+    </span>
+  </figcaption>
+</figure>
