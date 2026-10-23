@@ -68,13 +68,19 @@ def test_every_local_audit_link_has_a_markdown_target() -> None:
         assert resolved.is_file(), target
 
 
-def test_audit_is_linked_from_sdk_reference_navigation() -> None:
+def test_audit_is_linked_as_design_evidence_not_api_reference() -> None:
     guide = (BOOK_SRC_DIR / "guide" / "sdk.md").read_text(encoding="utf-8")
     reference_index = (BOOK_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
+    architecture_index = (BOOK_SRC_DIR / "architecture" / "index.md").read_text(encoding="utf-8")
     summary = (BOOK_SRC_DIR / "SUMMARY.md").read_text(encoding="utf-8")
     changelog = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
     assert "[SDK capability audit](../reference/sdk-capability-audit)" in guide
-    assert "[SDK capability audit](./sdk-capability-audit)" in reference_index
-    assert "[SDK capability audit](reference/sdk-capability-audit.md)" in summary
+    assert "sdk-capability-audit" not in reference_index
+    assert "[SDK capability audit](../reference/sdk-capability-audit)" in architecture_index
+    reference_section = summary.split("# Reference\n", 1)[1].split("# Inside Wisp\n", 1)[0]
+    inside_section = summary.split("# Inside Wisp\n", 1)[1].split("# Contributing\n", 1)[0]
+    assert "sdk-capability-audit" not in reference_section
+    assert "[SDK capability audit](reference/sdk-capability-audit.md)" in inside_section
+    assert "Historical design evidence" in _AUDIT
     assert f"capability audit pinned to Pi SDK {_PI_RELEASE}" in changelog

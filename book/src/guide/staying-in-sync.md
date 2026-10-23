@@ -4,6 +4,10 @@ Wisp keeps control and evidence in the same loop as the work. A live client can 
 run at a safe boundary, every frontend uses the same approval and cancellation policy, and the
 append-only session shows what actually happened.
 
+Use [Interfaces](./interfaces) to choose how to launch and consume Wisp. This page explains what
+happens after work starts: when queued input takes effect, what cancellation preserves, and how
+approvals and saved events keep the client informed.
+
 The shared runtime guarantees consistent semantics, but frontend controls differ:
 
 | Interface | Live controls |
@@ -40,7 +44,9 @@ Rust TUI intentionally offers only newest-item restoration rather than the compl
 
 The in-process `InProcessWisp` controller exposes these as `steer()`, `follow_up()`,
 `get_queue_state()`, `set_queue_mode()`, `pop_queue()`, and `clear_queue()`. Raw JSONL clients use
-commands with the same names over newline-delimited JSON.
+commands with the same names over newline-delimited JSON. For an embedding walkthrough, see
+[SDK live control](./sdk#live-control); for signatures and snapshot-token rules, see
+[Live queues and cancellation](../reference/sdk#live-queues-and-cancellation).
 
 ## Cancelling cleanly
 

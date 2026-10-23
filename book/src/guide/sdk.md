@@ -1,13 +1,22 @@
 # Python SDK
 
-Use the Python SDK when an asyncio application should own Wisp in its process and consume the same
-typed command/event contract as the CLI and JSONL RPC interfaces. The SDK is presentation-free: the
-embedding application renders events, decides trust and approvals, and owns shutdown.
+Embed Wisp in an asyncio application: start a controller, consume typed events, respond to safety
+requests, and close the runtime explicitly. This guide walks through those tasks using offline
+examples. Your application supplies the presentation and owns trust, approvals, and shutdown.
 
-Wisp currently ships the runtime and client in the single `wisp-ai` distribution. A possible
-lightweight client package is still being evaluated in
-[#409](https://github.com/whanyu1212/Wisp/issues/409); do not install or depend on a separate SDK
-package today.
+For exact signatures, defaults, result events, and validation rules, use the
+[Python SDK reference](../reference/sdk). To choose between terminal, one-shot, RPC, and SDK use,
+start with [Interfaces](./interfaces).
+
+| Task | Walkthrough |
+|---|---|
+| Run a first prompt without credentials | [Minimal offline prompt](#minimal-offline-prompt) |
+| Use application configuration or saved settings | [Choose a startup path](#choose-a-startup-path) |
+| Route results from concurrent commands | [Own one event consumer](#own-one-event-consumer) |
+| Answer trust and tool requests safely | [Handle trust and approvals](#handle-trust-and-approvals-re-entrantly) |
+| Steer work or cancel a prompt | [Live control](#live-control) |
+| Resume, clone, or fork saved work | [Persist and resume sessions](#persist-and-resume-sessions) |
+| Release resources or isolate the runtime | [Cleanup](#clean-up-explicitly) and [subprocess RPC](#in-process-or-subprocess-rpc) |
 
 ## Install
 
@@ -19,17 +28,9 @@ changes, so pin the minor line:
 uv add "wisp-ai~=0.2.0"
 ```
 
-The supported embedding imports start here:
-
-```python
-from wisp.config import WispConfig
-from wisp.events import KnownWispEvent, RpcCommandFinished
-from wisp.rpc import RpcController
-from wisp.sdk import InProcessOptions, InProcessWisp
-```
-
-See the [SDK API reference](../reference/sdk) for supported namespaces, signatures, and command
-groups.
+The runtime and client ship together in `wisp-ai`; no separate SDK package is needed. The example
+below includes the imports it uses. See [Supported namespaces](../reference/sdk#supported-namespaces)
+when looking up other public imports.
 
 ## Minimal offline prompt
 
@@ -85,7 +86,21 @@ if __name__ == "__main__":
 
 The maintained version is
 [`examples/sdk/minimal.py`](https://github.com/whanyu1212/Wisp/blob/main/examples/sdk/minimal.py),
-and automated tests execute that same function.
+and automated tests execute its `prompt_once()` workflow. To run the maintained examples from a
+source checkout:
+
+```bash
+uv run python -m examples.sdk.minimal
+uv run python -m examples.sdk.safety_requests
+uv run python -m examples.sdk.control_requests
+uv run python -m examples.sdk.persisted_sessions
+uv run python -m examples.sdk.subprocess_rpc
+```
+
+These use deterministic fake providers or a recording transport, not live model credentials.
+`control_requests` demonstrates request construction; it does not run an agent. The shorter snippets
+below illustrate individual steps and assume a running `controller` and an event consumer unless
+they show startup explicitly.
 
 ## Choose a startup path
 
@@ -288,14 +303,9 @@ Static source-checkout extension composition is demonstrated in
 current SDK does not accept an arbitrary caller-owned runtime or provider instance; that API belongs
 to [#402](https://github.com/whanyu1212/Wisp/issues/402).
 
-Other planned APIs are intentionally not presented as available:
-
-- typed system-prompt, context, skill, and template overrides —
-  [#403](https://github.com/whanyu1212/Wisp/issues/403)
-- model, credential, and settings management —
-  [#405](https://github.com/whanyu1212/Wisp/issues/405)
-- health, restart, recovery, and long-running observability primitives —
-  [#406](https://github.com/whanyu1212/Wisp/issues/406)
+Check [Current limitations](../reference/sdk#current-limitations) before designing around a planned
+API. That reference lists unshipped capabilities and their owners; the examples here use only the
+supported surface.
 
 Use public namespaces only. Private names such as `_InProcessTransport` are implementation details
 and may change without notice.
@@ -303,8 +313,8 @@ and may change without notice.
 ## Next steps
 
 - [SDK API reference](../reference/sdk) — exact public controllers, options, commands, and events.
-- [SDK capability audit](../reference/sdk-capability-audit) — pinned Pi comparison, intentional
-  differences, and roadmap ownership.
+- [SDK capability audit](../reference/sdk-capability-audit) — historical design evidence under Inside
+  Wisp, pinned to specific Pi and Wisp revisions; not the current API reference.
 - [Canonical examples](https://github.com/whanyu1212/Wisp/tree/main/examples/sdk) — deterministic,
   executable workflows covered by tests.
 - [Interfaces](./interfaces) — compare SDK behavior with TUI, print, JSON, and RPC modes.

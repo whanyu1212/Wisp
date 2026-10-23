@@ -442,7 +442,7 @@
   {
     "source": "guide/sdk.md",
     "title": "Python SDK",
-    "description": "Use the Python SDK when an asyncio application should own Wisp in its process and consume the same typed command/event contract as the CLI and JSONL RPC interfaces. The SDK is\u2026",
+    "description": "Embed Wisp in an asyncio application with runnable examples for startup, events, safety requests, live control, sessions, and cleanup.",
     "route": "guide/sdk.html",
     "section": "using",
     "order": 16,
@@ -607,7 +607,7 @@
   {
     "source": "reference/sdk-capability-audit.md",
     "title": "SDK capability audit",
-    "description": "This audit compares Wisp's supported Python embedding surface with a fixed Pi SDK reference. It is a capability and developer-experience comparison, not a promise of source,\u2026",
+    "description": "Historical SDK design evidence: a capability comparison pinned to specific Pi and Wisp revisions, not the current API reference.",
     "route": "architecture/sdk-capability-audit.html",
     "section": "inside",
     "order": 33,
@@ -618,7 +618,7 @@
   {
     "source": "reference/sdk.md",
     "title": "Python SDK reference",
-    "description": "The Python SDK is part of the wisp-ai distribution and carries a py.typed marker. It requires Python 3.12+. The package-boundary evaluation in #409 has not produced a separate\u2026",
+    "description": "Look up supported Python namespaces, controller signatures, option defaults, result events, and lifecycle contracts.",
     "route": "reference/sdk.html",
     "section": "reference",
     "order": 24,

@@ -34,6 +34,13 @@ provider adapters to preserve their own request, replay, continuation, and usage
 See [Agent runtime](./agent-runtime) for the loop and harness lifecycles, ownership boundaries,
 request-boundary handshake, and source navigation.
 
+## SDK design evidence
+
+The [SDK capability audit](../reference/sdk-capability-audit) records a comparison against pinned
+Pi and Wisp revisions. It preserves historical evidence and intentional differences, not a live
+API inventory. Use the [SDK guide](../guide/sdk) to build an integration and the
+[SDK reference](../reference/sdk) to look up current contracts.
+
 ## Terminal frontend boundary
 
 `wisp`, `wisp tui`, and `wisp --mode tui` launch the Rust frontend. Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle its

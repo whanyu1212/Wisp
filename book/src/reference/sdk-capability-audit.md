@@ -4,6 +4,13 @@ This audit compares Wisp's supported Python embedding surface with a fixed Pi SD
 capability and developer-experience comparison, not a promise of source, binary, wire, or behavioral
 compatibility with Pi.
 
+> [!NOTE]
+> **Historical design evidence**
+>
+> This Inside Wisp page describes the revisions pinned below, not today's complete API. For current
+> behavior, use the [Python SDK reference](./sdk); for runnable tasks, use the
+> [Python SDK guide](../guide/sdk). The matrix and its evidence remain tied to the original audit.
+
 ## Pinned reference
 
 The Pi side is pinned to:

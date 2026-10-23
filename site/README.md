@@ -156,7 +156,13 @@ Using Wisp → Reference → Learn → Inside Wisp → Contributing. Homepage ca
 first three groups from that same model; the primary call to action still goes
 straight to Quickstart. Built-site tests check desktop/mobile section parity and
 every listed page's sidebar and previous/next destinations.
-HY-274/HY-276/HY-277 own TUI splits, SDK prose and real homepage imagery. The foundation preserves
+HY-274 projects the TUI split through the adapter described above. HY-276 keeps the SDK guide
+focused on runnable tasks and the reference on API contracts. The pinned SDK audit is listed under
+Inside Wisp at `architecture/sdk-capability-audit.html`; its old reference URL is a hidden,
+non-indexed compatibility page with fragment redirects and no-JavaScript links. Source files and
+edit links remain under `book/src/` until cutover, and the immutable audit evidence is unchanged.
+Interfaces and Staying in sync remain separate: interface selection versus live-control semantics.
+HY-277 owns real homepage imagery. The foundation preserves
 the complete homepage article below the new editorial opening; final content editing
 will remove repetition in HY-277.
 
