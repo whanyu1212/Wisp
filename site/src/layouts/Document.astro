@@ -2,7 +2,7 @@
 import { getCollection } from "astro:content";
 import { href } from "../content/paths";
 import { ancestors, navigation } from "../content/navigation";
-import { sections, type PageMetadata } from "../content/metadata";
+import { changelog, sections, type PageMetadata } from "../content/metadata";
 import type { Heading } from "../content/render";
 import Diagrams from "../components/Diagrams.astro";
 import SiteHeader from "../components/SiteHeader.astro";
@@ -14,8 +14,9 @@ interface Props {
   page: PageMetadata;
   headings?: Heading[];
   compatibility?: boolean;
+  editSource?: string;
 }
-const { page, headings = [], compatibility = false } = Astro.props;
+const { page, headings = [], compatibility = false, editSource } = Astro.props;
 const pages = (await getCollection("pages")).map((entry) => entry.data);
 const groups = navigation(pages);
 const current = groups.find((group) => group.key === page.section);
@@ -188,8 +189,9 @@ const firstCase = course
     </div>
     <footer class="site-footer">
       <span>One shared runtime. TUI · CLI · RPC · Python SDK.</span>
+      <a href={href(changelog.route)}>Changelog</a>
       <a
-        href={`https://github.com/whanyu1212/Wisp/edit/main/book/src/${page.source}`}
+        href={`https://github.com/whanyu1212/Wisp/edit/main/${editSource ?? (page.source === changelog.source ? "CHANGELOG.md" : `book/src/${page.source}`)}`}
       >
         Edit this page
       </a>

@@ -45,6 +45,20 @@ export const pageSchema = z
   .strict();
 export type PageMetadata = z.infer<typeof pageSchema>;
 
+// A collection identity, not a second Markdown file: the loader reads the root changelog.
+export const changelog: PageMetadata = {
+  source: "changelog.md",
+  title: "Changelog",
+  description:
+    "Wisp release notes, compatibility changes, and upgrade guidance.",
+  route: "changelog.html",
+  section: "using",
+  order: 0,
+  layout: "docs",
+  listed: false,
+  searchable: true,
+};
+
 export function markdownSources(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true })
     .flatMap((entry) => {
@@ -118,7 +132,7 @@ export function loadMetadata(): PageMetadata[] {
     .map((p) => relative(bookRoot, p).replaceAll("\\", "/"))
     .filter((p) => p !== "SUMMARY.md");
   return validateMetadata(
-    JSON.parse(readFileSync(metadataPath, "utf8")),
-    sources,
+    [...JSON.parse(readFileSync(metadataPath, "utf8")), changelog],
+    [...sources, changelog.source],
   );
 }

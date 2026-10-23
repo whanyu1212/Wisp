@@ -2,7 +2,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Loader } from "astro/loaders";
-import { loadMetadata } from "./metadata.ts";
+import { changelog, loadMetadata } from "./metadata.ts";
 import { baselinePath, bookRoot, metadataPath, repoRoot } from "./paths.ts";
 import { expandIncludes } from "./includes.ts";
 import { finishHtml, type LegacyPage } from "./render.ts";
@@ -23,7 +23,10 @@ export function bookLoader(archive = false): Loader {
         )) {
           if (page.checkpoint && !existsSync(join(repoRoot, page.checkpoint)))
             throw new Error(`Missing checkpoint: ${page.checkpoint}`);
-          const sourcePath = join(bookRoot, page.source);
+          const sourcePath =
+            page.source === changelog.source
+              ? join(repoRoot, "CHANGELOG.md")
+              : join(bookRoot, page.source);
           const body = expandIncludes(
             readFileSync(sourcePath, "utf8"),
             sourcePath,
@@ -55,6 +58,7 @@ export function bookLoader(archive = false): Loader {
       if (context.watcher) {
         context.watcher.add([
           bookRoot,
+          join(repoRoot, "CHANGELOG.md"),
           metadataPath,
           baselinePath,
           join(repoRoot, "examples/crafting_agents"),
@@ -63,6 +67,7 @@ export function bookLoader(archive = false): Loader {
         const changed = (path: string) => {
           if (
             path.startsWith(bookRoot) ||
+            path === join(repoRoot, "CHANGELOG.md") ||
             path === metadataPath ||
             path === baselinePath ||
             path.startsWith(join(repoRoot, "examples/crafting_agents"))

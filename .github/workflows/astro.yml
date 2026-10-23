@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "site/**"
+      - "CHANGELOG.md"
       - "book/src/**"
       - "book/migration/astro/**"
       - "examples/crafting_agents/**"
@@ -16,6 +17,7 @@ on:
       - main
     paths:
       - "site/**"
+      - "CHANGELOG.md"
       - "book/src/**"
       - "book/migration/astro/**"
       - "examples/crafting_agents/**"
