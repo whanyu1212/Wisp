@@ -1,3 +1,5 @@
+"""Unit tests for assert_message_pairing on hand-built event sequences."""
+
 from __future__ import annotations
 
 from typing import Literal

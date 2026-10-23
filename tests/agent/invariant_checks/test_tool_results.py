@@ -1,8 +1,10 @@
+"""Unit tests for assert_tool_result_pairing and assert_settled_tool_calls."""
+
 from __future__ import annotations
 
 import pytest
 
-from tests.agent.invariant_checks_support import (
+from tests.agent.invariant_checks.support import (
     completed_turn,
     tool_ended,
     tool_ready,

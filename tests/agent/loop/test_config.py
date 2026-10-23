@@ -1,3 +1,5 @@
+"""AgentLoopConfig validation and positional field order."""
+
 from __future__ import annotations
 
 from typing import cast

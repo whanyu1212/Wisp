@@ -1,3 +1,5 @@
+"""Applying boundary and overflow decisions to ContinuationState, and the state itself."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence

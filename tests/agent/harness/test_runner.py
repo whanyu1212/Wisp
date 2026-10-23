@@ -1,3 +1,5 @@
+"""AgentHarness transcript ownership, snapshots, offsets, and run lifecycle across invocations."""
+
 from __future__ import annotations
 
 import json

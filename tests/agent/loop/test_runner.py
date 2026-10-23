@@ -1,3 +1,5 @@
+"""run_agent_loop sequencing: context, costs, overflow recovery, failures, and cancellation."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence

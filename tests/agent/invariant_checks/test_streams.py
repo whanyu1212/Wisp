@@ -14,7 +14,7 @@ import wisp.agent.harness.runner as harness_runner
 import wisp.agent.loop as loop_package
 import wisp.agent.loop.runner as loop_runner
 import wisp.coding.compaction as compaction_module
-from tests.agent.invariant_checks_support import completed_turn
+from tests.agent.invariant_checks.support import completed_turn
 from tests.support.loop_stream_checks import checked_run_agent_loop, is_exempt
 from wisp.events import TurnStarted
 

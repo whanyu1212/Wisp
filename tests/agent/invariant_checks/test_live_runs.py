@@ -1,3 +1,5 @@
+"""Real loop and harness runs that must satisfy every runtime invariant check."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence

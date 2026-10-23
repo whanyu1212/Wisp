@@ -97,7 +97,7 @@ The detailed compatibility list is in
 Use the focused suite for the phase being changed:
 
 ```bash
-uv run pytest tests/agent/loop tests/agent/test_runtime_invariants.py
+uv run pytest tests/agent/loop tests/agent/invariant_checks/test_live_runs.py
 ```
 
 Changes at provider, session, event, or persistence boundaries require the corresponding integration

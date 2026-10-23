@@ -1,3 +1,5 @@
+"""Harness cancel and early close during provider streams, tool batches, and hooks."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence

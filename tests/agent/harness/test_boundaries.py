@@ -1,3 +1,5 @@
+"""Harness boundary coordinator: arming, replacements, rebases, and snapshot isolation."""
+
 from __future__ import annotations
 
 import anyio

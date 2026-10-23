@@ -1,3 +1,5 @@
+"""Tool results through run_agent_loop: validation, projection, and provider payloads."""
+
 from __future__ import annotations
 
 import shlex

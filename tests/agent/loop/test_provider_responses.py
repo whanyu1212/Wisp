@@ -1,3 +1,5 @@
+"""Provider response validation through run_agent_loop: ids, finish reasons, truncation."""
+
 from __future__ import annotations
 
 from typing import cast

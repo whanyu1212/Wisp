@@ -1,3 +1,5 @@
+"""TurnLifecycle start, completion, terminal events, and event observation."""
+
 from __future__ import annotations
 
 from typing import Any, Literal

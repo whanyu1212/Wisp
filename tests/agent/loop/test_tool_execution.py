@@ -1,3 +1,5 @@
+"""Unit tests for ToolBatch and ToolExecutionLifecycle, without the loop."""
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
