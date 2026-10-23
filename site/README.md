@@ -1,7 +1,8 @@
 # Wisp documentation in Astro
 
-This implements the HY-313 foundation and HY-314 shared editorial layouts. It builds
-a static site under `/Wisp/` while the production workflow continues to deploy mdBook.
+This implements the HY-313 foundation, HY-314 shared editorial layouts, and HY-315
+static search. It builds a static site under `/Wisp/` while the production workflow
+continues to deploy mdBook.
 Markdown stays authoritative in `../book/src/`; tutorial code stays in
 `../examples/crafting_agents/`. No content copies or new frontend framework are needed.
 
@@ -28,11 +29,14 @@ npm run test:browser
 Browser tests use the built `dist/` output (run `build` first), served by an isolated
 Astro preview on port 4322. They check desktop, tablet, and mobile layouts, keyboard
 and no-JavaScript navigation, local code/table scrolling, clipboard success/failure,
-Mermaid redraws, and theme persistence/system changes. Chromium is a development-only
+Mermaid redraws, and theme persistence/system changes. Search checks exercise the
+real built index, result destinations, pagination, focus, both themes, lazy loading,
+stale requests, and failed runtime/index/fragment downloads. Chromium is a development-only
 test dependency; on Linux use `npm exec playwright install -- --with-deps chromium`.
 Failure traces are saved in ignored `test-results/`.
 
-`build` renders the complete corpus and then checks the actual files in `dist/`:
+`build` renders the complete corpus, indexes it with the pinned Pagefind CLI, and
+then checks the actual files in `dist/`:
 all canonical/legacy routes, the 358 captured heading IDs, directory index aliases,
 local link fragments, and base-prefixed assets. It fails on invalid output rather
 than relying on a server's extension fallback. The frozen baseline lives in
@@ -91,6 +95,20 @@ mdbook build book
 - `src/components/CodeBlocks.astro` progressively adds copy buttons when the Clipboard
   API is available, with live success/failure feedback. Code/table scroll areas are
   keyboard-focusable in static output. Static articles are not hydrated.
+- `src/components/Search.astro` and its adjacent `search.ts` provide a native modal
+  search dialog with labeled controls, live loading/empty/failure feedback, and paged
+  results. Search resources load only after a nonempty query; closing the dialog
+  restores focus, and stale requests cannot replace newer results. The entry point
+  stays hidden without JavaScript; reading and native navigation remain available.
+  The generated `/Wisp/pagefind/` bundle and explicit base URL also work from nested
+  pages. Search uses the existing `searchable` metadata to index article bodies and
+  title/section metadata, not navigation, compatibility pages, or maintainer records.
+  `search-client.ts` lazily starts `search-worker.ts`, keeping indexing queries off
+  the main thread. The worker observes its own downloads because Pagefind can
+  swallow failed index chunks; failures must not appear as an empty result set.
+  Requests time out after 15 seconds rather than leaving a permanent loading state.
+  Use `build` and `preview` to try search locally: the Astro development server does
+  not serve the generated index.
 - `src/components/Diagrams.astro` imports Mermaid only on pages with diagrams.
   All seven existing diagrams retain readable source without JavaScript; successful
   rendering collapses that fallback into a disclosure. Failures leave it open. Wide
@@ -112,8 +130,8 @@ remains `run_agent_loop`.
 
 ## Follow-up scope
 
-HY-315 owns Pagefind. HY-314 provides the shared responsive layouts, navigation,
-light/dark/system themes, focus handling, and built-site browser coverage.
+HY-314 provides the shared responsive layouts, navigation, light/dark/system themes,
+focus handling, and built-site browser coverage; HY-315 adds Pagefind static search.
 HY-269/HY-270/HY-274/HY-276/HY-277 own final navigation/content restructuring, the
 changelog, TUI splits, SDK prose and real homepage imagery. The foundation preserves
 the complete homepage article below the new editorial opening; final content editing
@@ -122,4 +140,5 @@ will remove repetition in HY-277.
 HY-316 moves content to `site/src/content/`, transfers metadata into frontmatter,
 updates Python test paths, switches deployment to Astro and adds the combined print
 view, then retires mdBook. The existing `.github/workflows/docs.yml` is unchanged.
-No search UI is displayed until search actually works.
+The generated search bundle ships with the Astro build; production remains on mdBook
+until the cutover.

@@ -2,7 +2,7 @@
 import { getCollection } from "astro:content";
 import { href } from "../content/paths";
 import { ancestors, navigation } from "../content/navigation";
-import type { PageMetadata } from "../content/metadata";
+import { sections, type PageMetadata } from "../content/metadata";
 import type { Heading } from "../content/render";
 import Diagrams from "../components/Diagrams.astro";
 import SiteHeader from "../components/SiteHeader.astro";
@@ -46,6 +46,15 @@ const firstCase = course
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={page.description} />
+    {page.searchable && !compatibility && (
+      <>
+        <meta data-pagefind-meta="title[content]" content={page.title} />
+        <meta
+          data-pagefind-meta="section[content]"
+          content={sections[page.section]}
+        />
+      </>
+    )}
     <title>{page.title === 'Wisp' ? 'Wisp — a coding agent you can steer' : `${page.title} · Wisp`}</title>
     <link rel="canonical" href={new URL(href(page.route), Astro.site)} />
     {(!page.searchable || compatibility) && (
@@ -117,7 +126,7 @@ const firstCase = course
                 </li>
               </ol>
             </nav>
-            <div class="eyebrow">
+            <div class="eyebrow" data-pagefind-ignore>
               {page.layout === "archive"
                 ? "Maintainer archive · historical record"
                 : current?.title}
@@ -134,7 +143,11 @@ const firstCase = course
         )}
         <slot />
         {page.checkpoint && (
-          <aside class="checkpoint" aria-label="Runnable checkpoint">
+          <aside
+            class="checkpoint"
+            aria-label="Runnable checkpoint"
+            data-pagefind-ignore
+          >
             <span class="eyebrow">Keep building</span>
             <p>
               <a

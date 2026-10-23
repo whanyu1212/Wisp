@@ -8,7 +8,7 @@ const { headings, mobile = false } = Astro.props;
 ---
 
 {mobile ? (
-  <details class="mobile-toc" data-navigation>
+  <details class="mobile-toc" data-navigation data-pagefind-ignore>
     <summary>On this page</summary>
     <nav aria-label="Page outline">
       {headings.map((heading) => (
