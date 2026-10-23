@@ -42,8 +42,8 @@ all canonical/legacy routes, the 358 captured heading IDs, directory index alias
 local link fragments, and base-prefixed assets. It fails on invalid output rather
 than relying on a server's extension fallback. The frozen baseline lives in
 `../book/migration/astro/routes.json` and should change only after an intentional
-compatibility decision. The old TUI anchors continue pointing to the intact TUI
-page until HY-274 splits it.
+compatibility decision. Old TUI anchors retain visible fallback links and redirect
+only moved fragments to their focused pages, on initial load and hash changes.
 
 `.github/workflows/astro.yml` runs these checks on pull requests and main-branch
 changes to the site, root changelog, Markdown sources, migration baseline, tutorial examples, and
@@ -74,6 +74,13 @@ mdbook build book
   rendering and compatibility projection. It watches Markdown, metadata and example
   changes during development. Invalid edits are reported and do not partially replace
   the current collection. Restart development after changing the loader itself.
+- `src/content/tui.ts` projects the authoritative `book/src/guide/tui.md` into
+  TUI basics plus Keys, Commands, and Sessions children. It partitions existing
+  content (including paragraphs in the long introduction), not copied Markdown.
+  Exact boundaries fail loudly on source drift; conservation tests check that prose,
+  code, and tables survive once. MCP instructions remain in Commands until HY-273.
+  Child edit links still target the original source. HY-316 must replace this temporary
+  adapter with physical Markdown pages while retaining the routes and fragment fallbacks.
 - `src/content/includes.ts` supports the existing anchored mdBook includes, complete
   files, and explicit inclusive line ranges. Missing/ambiguous anchors, invalid ranges,
   malformed directives and paths escaping the repository fail the build.

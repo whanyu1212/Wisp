@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { z } from "zod";
 import { bookRoot, metadataPath } from "./paths.ts";
+import { tuiChildren } from "./tui.ts";
 
 export const sections = {
   using: "Using Wisp",
@@ -132,7 +133,11 @@ export function loadMetadata(): PageMetadata[] {
     .map((p) => relative(bookRoot, p).replaceAll("\\", "/"))
     .filter((p) => p !== "SUMMARY.md");
   return validateMetadata(
-    [...JSON.parse(readFileSync(metadataPath, "utf8")), changelog],
-    [...sources, changelog.source],
+    [
+      ...JSON.parse(readFileSync(metadataPath, "utf8")),
+      changelog,
+      ...tuiChildren,
+    ],
+    [...sources, changelog.source, ...tuiChildren.map((page) => page.source)],
   );
 }

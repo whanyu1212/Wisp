@@ -4,6 +4,7 @@ import { navigation } from "../content/navigation";
 import Document from "./Document.astro";
 import { href, base } from "../content/paths";
 import type { Heading } from "../content/render";
+import { tuiSource, tuiChildren } from "../content/tui";
 
 interface Props {
   entry: CollectionEntry<"pages"> | CollectionEntry<"maintainerRecords">;
@@ -29,6 +30,11 @@ const introductions: Record<string, string> = {
 
 <Document
   page={entry.data}
+  editSource={
+    tuiChildren.some((page) => page.source === entry.data.source)
+      ? `book/src/${tuiSource}`
+      : undefined
+  }
   headings={compatibility ? [] : (headings as Heading[])}
   compatibility={compatibility}
 >
@@ -101,6 +107,26 @@ const introductions: Record<string, string> = {
   ) : (
     <article>
       <Content />
+      {entry.data.source === tuiSource && <script>
+        function navigateTuiSection() {
+          let id: string;
+          try {
+            id = decodeURIComponent(location.hash.slice(1));
+          } catch {
+            return;
+          }
+          const link = document
+            .getElementById(id)
+            ?.querySelector<HTMLAnchorElement>("a[data-tui-destination]");
+          if (link) {
+            const target = new URL(link.href);
+            target.search = location.search;
+            location.replace(target.href);
+          }
+        }
+        navigateTuiSection();
+        window.addEventListener("hashchange", navigateTuiSection);
+      </script>}
       {entry.data.source === "contributing/index.md" && (
         <section aria-labelledby="release-records">
           <h2 id="release-records">Release records</h2>

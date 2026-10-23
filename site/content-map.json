@@ -496,8 +496,8 @@
   },
   {
     "source": "guide/tui.md",
-    "title": "TUI",
-    "description": "The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions, and sessions.",
+    "title": "TUI basics",
+    "description": "Start Wisp in your terminal, compose prompts, steer work, and customize its appearance.",
     "route": "guide/tui.html",
     "section": "using",
     "order": 22,
