@@ -32,13 +32,14 @@ the boundary decision.
 | --- | --- |
 | [`runner.py`](./runner.py) | Top-level turn sequencing, context events, limits, and failure or cancellation transitions |
 | [`model_response.py`](./model_response.py) | Provider event translation, response outcomes, deltas, and retries |
-| [`provider_request.py`](./provider_request.py) | Optional provider capabilities, request invocation, overflow normalization, and owned stream cleanup |
+| [`provider_request.py`](./provider_request.py) | Capability-gated request options, request invocation, overflow normalization, and owned stream cleanup |
 | [`provider_lifecycle.py`](./provider_lifecycle.py) | Provider response start, retry, tool-call, and terminal validation |
 | [`response_projection.py`](./response_projection.py) | Usage, cost, context observation, and completed-message projection |
 | [`tool_execution.py`](./tool_execution.py) | ToolBatch facade, sequential and truncated execution, and cancellation settlement |
 | [`tool_lifecycle.py`](./tool_lifecycle.py) | Shared tool event contracts, executor lifecycle validation, and the per-batch settlement record |
 | [`prepared_tools.py`](./prepared_tools.py) | Two-phase preparation and bounded scheduling |
-| [`continuation.py`](./continuation.py) | Provider cursors, pending tool results, injected user messages, context replacement, or rebasing |
+| [`continuation.py`](./continuation.py) | Provider cursors, pending tool results, injected user messages, and the live continuation transcript |
+| [`boundary_transitions.py`](./boundary_transitions.py) | Applying boundary and overflow decisions: continuing, folding, context replacement, or rebasing |
 | [`stream_cleanup.py`](./stream_cleanup.py) | Owned iterator close, cleanup exception precedence, and shielded aclose |
 | [`config.py`](./config.py) | Public loop dependencies, hooks, limits, offsets, and cancellation contracts |
 | [`__init__.py`](./__init__.py) | Supported public imports |

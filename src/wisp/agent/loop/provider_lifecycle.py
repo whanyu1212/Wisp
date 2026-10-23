@@ -14,19 +14,6 @@ from wisp.providers.events import (
 )
 
 
-def require_provider_response_started(started: bool) -> None:
-    """Require a start event before accepting response data.
-
-    Args:
-        started (bool): Whether a response start has been observed.
-
-    Raises:
-        ProviderProtocolError: No response start has been observed.
-    """
-    if not started:
-        raise ProviderProtocolError("Provider emitted response data before response_started")
-
-
 def resolve_provider_response_id(
     *,
     started_response_id: str | None,
@@ -133,6 +120,15 @@ class ProviderResponseLifecycle:
         if self.terminal is not None:
             raise ProviderProtocolError("Provider emitted an event after its terminal response")
 
+    def _require_started(self) -> None:
+        """Require a start event before accepting response data.
+
+        Raises:
+            ProviderProtocolError: No response start has been observed.
+        """
+        if not self.started:
+            raise ProviderProtocolError("Provider emitted response data before response_started")
+
     def start(self, event: ProviderResponseStarted) -> None:
         """Record the response's initial model and identifier.
 
@@ -169,7 +165,7 @@ class ProviderResponseLifecycle:
             ProviderProtocolError: The response has not started or has terminated.
         """
         self.require_open()
-        require_provider_response_started(self.started)
+        self._require_started()
         self.text.append(delta)
 
     def accept_thinking(self) -> None:
@@ -179,7 +175,7 @@ class ProviderResponseLifecycle:
             ProviderProtocolError: The response has not started or has terminated.
         """
         self.require_open()
-        require_provider_response_started(self.started)
+        self._require_started()
 
     def add_web_search(self) -> None:
         """Validate a provider-run web search reported inside an active response.
@@ -188,7 +184,7 @@ class ProviderResponseLifecycle:
             ProviderProtocolError: The response has not started or has terminated.
         """
         self.require_open()
-        require_provider_response_started(self.started)
+        self._require_started()
         self.web_searches += 1
 
     def add_tool_call(self, tool_call: ToolCall) -> None:
@@ -207,7 +203,7 @@ class ProviderResponseLifecycle:
                 or it already contains a call with this ID.
         """
         self.require_open()
-        require_provider_response_started(self.started)
+        self._require_started()
         if any(recorded.call_id == tool_call.call_id for recorded in self.tool_calls):
             raise ProviderProtocolError(
                 f"Provider emitted tool call id {tool_call.call_id!r} more than once"
@@ -227,7 +223,7 @@ class ProviderResponseLifecycle:
         """
         self.require_open()
         if isinstance(event, ProviderResponseCompleted):
-            require_provider_response_started(self.started)
+            self._require_started()
         self.terminal = event
 
     def finish(self) -> CompletedProviderResponse | FailedProviderResponse:

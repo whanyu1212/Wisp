@@ -107,8 +107,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - `harness/boundaries.py` prepares boundary decisions and transcript replacements; `harness/runner.py`
   applies replacements when the next turn starts. In the loop, `model_response.py` translates
   provider events, `provider_request.py` opens capability-aware requests, `provider_lifecycle.py`
-  validates them, and `response_projection.py` builds completed messages. `tool_execution.py`,
-  `tool_lifecycle.py`, `prepared_tools.py`, and `continuation.py` cover the remaining phases.
+  validates them, and `response_projection.py` builds completed messages. `continuation.py` holds
+  the live continuation state and `boundary_transitions.py` applies boundary and overflow decisions
+  to it. `tool_execution.py`, `tool_lifecycle.py`, and `prepared_tools.py` cover tool batches.
 - `src/wisp/events/` is the typed event vocabulary shared by every interface. Import from
   `wisp.events` (the package root re-exports everything); the lifecycle submodules `run.py`,
   `usage.py`, `tools.py`, `sessions.py`, `rpc.py`, and `errors.py` only group the models, and

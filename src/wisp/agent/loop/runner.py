@@ -35,19 +35,16 @@ from wisp.providers.base import (
 )
 from wisp.providers.events import ProviderFailureKind
 
+from .boundary_transitions import decide_next_request, recover_from_overflow
 from .config import AgentLoopConfig
-from .continuation import (
-    ContinuationState,
-    at_context_overflow,
-    at_request_boundary,
-)
+from .continuation import ContinuationState
 from .model_response import (
     CancelledModelResponse,
-    CompletedModelResponse,
     FailedModelResponse,
     ModelResponseStream,
     OverflowModelResponse,
 )
+from .provider_lifecycle import CompletedProviderResponse
 from .response_projection import project_completed_response
 from .stream_cleanup import closing_stream
 from .tool_execution import CancelledToolBatch, ToolBatch
@@ -74,8 +71,8 @@ type AgentLoopEvent = (
 
 
 @dataclass(frozen=True, slots=True)
-class _FailedResponseAction:
-    """Classify a failed or overflowed model response without publishing events."""
+class _ResponseFailure:
+    """Display and recovery fields for a failed or overflowed model response."""
 
     message: str
     kind: ProviderFailureKind
@@ -89,7 +86,7 @@ class _FailedResponseAction:
 def _classify_failed_response(
     config: AgentLoopConfig,
     outcome: OverflowModelResponse | FailedModelResponse,
-) -> _FailedResponseAction:
+) -> _ResponseFailure:
     """Map a typed model-response failure onto loop recovery fields.
 
     Args:
@@ -97,13 +94,13 @@ def _classify_failed_response(
         outcome (OverflowModelResponse | FailedModelResponse): Terminal model-response result.
 
     Returns:
-        _FailedResponseAction: Display fields and whether the original overflow must be
+        _ResponseFailure: Display fields and whether the original overflow must be
             re-raised after the opened message is closed. Recovery itself stays in the
             runner so ContextOverflow is published before the hook runs.
     """
 
     if isinstance(outcome, OverflowModelResponse):
-        return _FailedResponseAction(
+        return _ResponseFailure(
             message=str(outcome.error),
             kind="context_overflow",
             content=outcome.content,
@@ -119,7 +116,7 @@ def _classify_failed_response(
         or is_context_overflow_message(failure.message)
         else failure.failure_kind
     )
-    return _FailedResponseAction(
+    return _ResponseFailure(
         message=failure.message,
         kind=kind,
         content=outcome.failed.content,
@@ -351,31 +348,31 @@ async def run_agent_loop(
                 return
 
             if isinstance(outcome, OverflowModelResponse | FailedModelResponse):
-                action = _classify_failed_response(config, outcome)
+                failure = _classify_failed_response(config, outcome)
                 # Close an opened message before recovery can start another turn.
-                if action.started:
+                if failure.started:
                     yield MessageCompleted(
                         turn=turn,
-                        content=action.content,
+                        content=failure.content,
                         finish_reason="error",
-                        response_id=action.response_id,
+                        response_id=failure.response_id,
                     )
                 # Raised overflow without a hook retains its exception contract;
                 # the outer handler owns its terminal events and re-raises.
-                if action.raise_overflow is not None:
-                    raise action.raise_overflow
-                failure_message = action.message
-                if action.kind == "context_overflow":
-                    yield _context_overflow_event(config, turn=turn, message=action.message)
-                    recovery = await at_context_overflow(
+                if failure.raise_overflow is not None:
+                    raise failure.raise_overflow
+                failure_message = failure.message
+                if failure.kind == "context_overflow":
+                    yield _context_overflow_event(config, turn=turn, message=failure.message)
+                    recovery = await recover_from_overflow(
                         config,
                         state.continuation,
                         turn=turn,
                         tool_iterations=state.tool_iterations,
                         messages=messages,
                         context_budget=context_budget,
-                        had_streamed_delta=action.had_streamed_delta,
-                        message=action.message,
+                        had_streamed_delta=failure.had_streamed_delta,
+                        message=failure.message,
                     )
                     messages = recovery.messages
                     if recovery.retry:
@@ -385,13 +382,13 @@ async def run_agent_loop(
                         failure_message = recovery.failure_message
                 for event in lifecycle.terminal_events(
                     failure_message,
-                    outcome="cancelled" if action.kind == "aborted" else "failed",
+                    outcome="cancelled" if failure.kind == "aborted" else "failed",
                 ):
                     yield event
                 return
-            if not isinstance(outcome, CompletedModelResponse):
+            if not isinstance(outcome, CompletedProviderResponse):
                 raise RuntimeError("Provider turn ended without a completed response")
-            completed = outcome.completed
+            completed = outcome
             response = completed.response
             tool_calls = response.tool_calls
             projection = project_completed_response(
@@ -439,7 +436,7 @@ async def run_agent_loop(
             yield lifecycle.complete("completed", response.finish_reason)
             stop = not had_tool_calls
             if not config.cancellation_requested():
-                messages, stop = await at_request_boundary(
+                messages, stop = await decide_next_request(
                     config,
                     state.continuation,
                     turn=turn,

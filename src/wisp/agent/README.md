@@ -128,7 +128,8 @@ assistant/tool tail produced so far.
   fresh request. A tail containing tool calls is never flattened. Right after a tool batch, the next
   request can still carry the pending tool results; adding extra messages there, or continuing at
   any later boundary, is rejected.
-  `_apply_continuation` in [`loop/continuation.py`](./loop/continuation.py) tabulates every case.
+  `_apply_continuation` in [`loop/boundary_transitions.py`](./loop/boundary_transitions.py)
+  tabulates every case.
 
 ## Request boundaries and live input
 

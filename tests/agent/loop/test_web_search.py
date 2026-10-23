@@ -9,14 +9,19 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.loop.model_response import CompletedModelResponse, ModelResponseStream
+from wisp.agent.loop.model_response import ModelResponseStream, OverflowModelResponse
 from wisp.agent.loop.provider_lifecycle import CompletedProviderResponse
 from wisp.agent.loop.provider_request import open_provider_stream
 from wisp.agent.loop.response_projection import project_usage_and_cost
 from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import WebSearchPerformed, WebSearchSource
 from wisp.messages import Message
-from wisp.providers.base import ProviderProtocolError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ContextOverflowError,
+    ProviderProtocolError,
+    ToolCallResult,
+    ToolSpec,
+)
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -80,6 +85,24 @@ class _SearchingProvider:
         for event in self.events:
             yield event
         yield ProviderResponseCompleted(content="ok")
+
+
+class _OverflowingSearchProvider(_SearchingProvider):
+    """Runs a search, then rejects the request as too large."""
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+        tools: Sequence[ToolSpec] = (),
+        tool_results: Sequence[ToolCallResult] = (),
+        previous_response_id: str | None = None,
+        web_search: bool = False,
+    ) -> AsyncIterator[ProviderEvent]:
+        for event in self.events:
+            yield event
+        raise ContextOverflowError("context window exceeded")
 
 
 def _open(provider: object, *, web_search: bool) -> list[ProviderEvent]:
@@ -170,7 +193,7 @@ def test_a_search_before_the_response_starts_is_a_protocol_error() -> None:
 def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
     stream = ModelResponseStream(
         config=AgentLoopConfig(
-            provider=_SearchingProvider(  # type: ignore[arg-type]
+            provider=_OverflowingSearchProvider(  # type: ignore[arg-type]
                 [ProviderResponseStarted(model="searching"), ProviderWebSearch(query="q")]
             ),
             tool_executor=_NeverExecutor(),
@@ -187,9 +210,8 @@ def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
 
     anyio.run(run)
 
-    assert isinstance(stream.outcome, CompletedModelResponse)
+    assert isinstance(stream.outcome, OverflowModelResponse)
     assert stream.outcome.had_streamed_delta is True
-    assert stream.outcome.completed.web_searches == 1
 
 
 def test_a_response_cost_records_its_searches() -> None:

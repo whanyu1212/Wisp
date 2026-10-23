@@ -35,7 +35,7 @@ class QueuedMessages:
         return len(self.steering) + len(self.follow_up)
 
 
-class _MessageQueues:
+class _QueueStore:
     """Hold both FIFO user-message queues, their shared limits, and one revision token.
 
     Every change replaces the revision token, so a holder of an older

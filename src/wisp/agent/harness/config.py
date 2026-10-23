@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import get_args
 
-from wisp.agent.loop import AgentLoopConfig, CancellationToken, UsageCostEstimator
 from wisp.agent.loop.config import (
     DEFAULT_CONTEXT_PRESSURE_THRESHOLD,
     DEFAULT_CONTEXT_RESERVE_TOKENS,
+    AgentLoopConfig,
+    CancellationToken,
+    UsageCostEstimator,
 )
 from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
 from wisp.agent.tool_contracts import ToolExecutor
