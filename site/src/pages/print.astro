@@ -1,0 +1,61 @@
+---
+import { getCollection } from "astro:content";
+import { readFileSync } from "node:fs";
+import Document from "../layouts/Document.astro";
+import { baselinePath, cutoverPath, href } from "../content/paths";
+import { navigation } from "../content/navigation";
+import { combinePrint } from "../content/print";
+import type { PageMetadata } from "../content/metadata";
+const entries = [
+  ...(await getCollection("pages")),
+  ...(await getCollection("maintainerRecords")),
+];
+const order = navigation(entries.map((entry) => entry.data)).flatMap((group) =>
+  group.pages.map((page) => page.source),
+);
+const home = entries.find((entry) => entry.data.layout === "home")!;
+const ordered = [
+  home,
+  ...order.map((source) =>
+    entries.find((entry) => entry.data.source === source)!,
+  ),
+  ...entries.filter(
+    (entry) => entry !== home && !order.includes(entry.data.source),
+  ),
+];
+const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+const legacy = baseline.utility_routes.find(
+  (route: { legacy_url: string }) => route.legacy_url === "/Wisp/print.html",
+).heading_destinations;
+const cutover = JSON.parse(readFileSync(cutoverPath, "utf8"));
+const html = combinePrint(
+  // The loader supplies the same expanded and rendered HTML used by standalone pages.
+  ordered.map((entry) => ({ page: entry.data, html: entry.rendered!.html })),
+  // mdBook reused numbered IDs as chapters moved; the final published destination wins.
+  { ...legacy, ...cutover.print.heading_destinations },
+);
+const page: PageMetadata = {
+  source: "print.md",
+  route: "print.html",
+  title: "Print documentation",
+  description: "Combined Wisp documentation for printing and offline reading.",
+  section: "using",
+  order: 0,
+  layout: "docs",
+  listed: false,
+  searchable: false,
+};
+---
+
+<Document page={page} editSource="site/src/pages/print.astro">
+  <header class="print-intro">
+    <h1>Print documentation</h1>
+    <p>
+      Use your browser's Print command to print or save a PDF. Historical
+      release records are included at the end; they are not current installation
+      instructions.
+    </p>
+    <a href={href("index.html")}>Return to Wisp →</a>
+  </header>
+  <article class="print-document" set:html={html} />
+</Document>

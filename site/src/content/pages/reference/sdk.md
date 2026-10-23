@@ -1,0 +1,477 @@
+---
+title: Python SDK reference
+description: Look up supported Python namespaces, controller signatures, option defaults, result events, and lifecycle contracts.
+route: reference/sdk.html
+section: reference
+order: 24
+layout: docs
+listed: true
+searchable: true
+---
+
+# Python SDK reference
+
+Look up supported Python namespaces, controller signatures, option defaults, result events, and
+lifecycle contracts. Wisp's public Python surface carries a `py.typed` marker.
+
+For installation and task-oriented, runnable examples, start with the
+[Python SDK guide](../guide/sdk.md). This page describes the current API, not the historical
+[SDK capability audit](../architecture/sdk-capability-audit.md).
+
+| Look up | Contract |
+|---|---|
+| Startup and tool/session options | [`InProcessWisp`](#inprocesswisp) and [`InProcessOptions`](#inprocessoptions) |
+| Command submission and result correlation | [`RpcController`](#rpccontroller) and [event groups](#event-groups) |
+| Steering, cancellation, and guarded queue edits | [Live queues and cancellation](#live-queues-and-cancellation) |
+| Trust and tool decisions | [Trust and approval](#trust-and-approval) |
+| Session selection and bounded transcript reads | [Persisted sessions](#persisted-sessions) |
+| Process isolation and cleanup | [`JsonlSubprocessRpcTransport`](#jsonlsubprocessrpctransport) |
+| Event decoding and runtime configuration | [`wisp.events`](#wispevents) and [`wisp.config`](#wispconfig) |
+
+## Supported namespaces
+
+| Namespace | Supported surface |
+|---|---|
+| `wisp.sdk` | In-process controller and startup options |
+| `wisp.rpc` | High-level controller, transport protocol, subprocess transport, and typed command models |
+| `wisp.events` | Typed event models and JSON/dict parsers |
+| `wisp.config` | Immutable runtime configuration |
+| `wisp.sessions` | JSONL session store, entries, replay models, and typed session errors |
+| `wisp.runtime` | Static extension/runtime contracts and registries |
+| `wisp.providers` | Provider event/tool types, built-in providers, and deterministic fake providers |
+| `wisp.tools` | Tool, context, result, safety, approval, and policy contracts |
+
+Import supported names from these namespaces, not private implementation modules. Package-level
+`__all__` lists are verified from the built wheel. `wisp.events` re-exports every event model from
+its package root; import from `wisp.events`, not its lifecycle submodules. The stable entry points
+used by SDK consumers are described below.
+
+See [Project file discovery](project-files.md) for snapshot bounds, cancellation,
+and handling `ProjectFilesInvalidated` notifications.
+
+## `wisp.sdk`
+
+### `InProcessWisp`
+
+```python
+class InProcessWisp(RpcController):
+    @classmethod
+    async def start(
+        cls,
+        config: WispConfig,
+        *,
+        options: InProcessOptions | None = None,
+    ) -> InProcessWisp: ...
+
+    @classmethod
+    async def from_environment(
+        cls,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        session_dir: Path | None = None,
+        auth_path: Path | None = None,
+        options: InProcessOptions | None = None,
+    ) -> InProcessWisp: ...
+
+    async def aclose(self) -> None: ...
+```
+
+`InProcessWisp` inherits every command, event, and `close()` method from `RpcController`. It is an
+async context manager; `__aexit__` calls `aclose()`.
+
+The active AnyIO backend must be asyncio. Startup on another backend raises `RuntimeError` before
+runtime resources are retained.
+
+`events()` returns the controller's only `AsyncIterator[KnownWispEvent]`. A second call raises
+`RuntimeError`.
+
+### `InProcessOptions`
+
+`InProcessOptions` is an immutable dataclass.
+
+| Field | Type | Default | Meaning |
+|---|---|---:|---|
+| `all_tools` | `bool` | `False` | Expose the complete registered tool set to the model. |
+| `allow_read_tools` | `bool` | `False` | Expose tools classified as read-only. |
+| `allowed_tools` | `tuple[str, ...]` | `()` | Expose selected tool names. |
+| `resume` | `str \| None` | `None` | Resume by session path, filename, ID, or unique prefix. |
+| `continue_latest` | `bool` | `False` | Resume the newest session in the configured store. |
+| `approve_unsafe_tools` | `bool` | `False` | Pre-approve mutating and command tools. |
+| `max_tool_iterations` | `int \| None` | `None` | Optional non-negative model/tool round limit. |
+| `startup_trusted` | `bool` | `False` | Caller-supplied initial project trust decision. |
+| `project_context_root` | `Path \| None` | `None` | Root for trust, project settings, skills, and instructions. |
+| `cwd` | `Path \| None` | `None` | Working directory for built-in file and process tools. |
+
+`resume` and `continue_latest` cannot both be set. A negative `max_tool_iterations` is rejected.
+When `cwd` is omitted and `project_context_root` is supplied, the project root also becomes the tool
+working directory.
+
+Tool visibility does not imply tool approval. Unsafe tools still request approval unless
+`approve_unsafe_tools=True`.
+
+## `wisp.rpc`
+
+### `RpcTransport`
+
+A custom transport implements this public protocol:
+
+```python
+class RpcTransport(Protocol):
+    async def send(self, command: RpcCommand) -> None: ...
+    def events(self) -> AsyncIterator[KnownWispEvent]: ...
+    async def close(self) -> None: ...
+```
+
+Transport implementations preserve typed command submission and one ordered event stream. Runtime
+policy remains in the shared command host, not in the transport.
+
+### `RpcController`
+
+```python
+RpcController(
+    transport: RpcTransport,
+    *,
+    command_id_factory: Callable[[str], str] | None = None,
+)
+```
+
+Every command method returns `str`, the selected command ID, after the transport accepts the typed
+request. Completion and results arrive through `events()`.
+
+#### Prompt, lifecycle, configuration, and snapshots
+
+| Method | Signature after `self` | Result event or effect |
+|---|---|---|
+| `prompt` | `(prompt: str, *, command_id: str \| None = None)` | Agent/message/tool events; terminal `RpcCommandFinished` |
+| `init` | `(*, command_id: str \| None = None)` | Initialize project guidance |
+| `compact` | `(instructions: str \| None = None, *, command_id: str \| None = None)` | Compaction events |
+| `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
+| `get_model_catalog` | `(*, command_id: str \| None = None)` | `RpcModelCatalogReported` |
+| `get_connection_catalog` | `(*, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
+| `store_api_key` | `(provider: str, api_key: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |
+| `disconnect_provider` | `(provider: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |
+| `begin_device_code` | `(provider: str, *, command_id: str \| None = None)` | `RpcDeviceCodeReported`, zero or more `RpcDeviceCodeProgressReported`, terminal `RpcCommandFinished`, and refreshed `RpcConnectionCatalogReported` when available |
+| `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
+| `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
+| `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
+| `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
+| `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
+| `get_git_diff` | `(*, command_id: str \| None = None)` | `RpcGitDiffReported` |
+| `get_project_files` | `(*, command_id: str \| None = None)` | `RpcProjectFilesReported` |
+| `get_skills` | `(*, command_id: str \| None = None)` | `RpcSkillsReported` |
+| `get_mcp_status` | `(*, command_id: str \| None = None)` | `RpcMcpStatusReported` |
+| `add_mcp_server` | `(name: str, *, command=None, args=(), url=None, env=None, env_from=(), headers=None, headers_from=None, replace=False, command_id=None)` | Saves the server, restarts MCP servers, then `RpcMcpStatusReported` and terminal `RpcCommandFinished` |
+| `remove_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
+| `set_mcp_server_enabled` | `(name: str, enabled: bool, *, expected=None, command_id=None)` | Same as `add_mcp_server`; `expected` is required when enabling |
+| `reconnect_mcp` | `(*, command_id: str \| None = None)` | Reloads servers from the settings file and restarts them; same events |
+| `login_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Signs in to an HTTP server with OAuth: `RpcMcpLoginStarted` with the sign-in page's URL, then, once the browser returns, the same events as `add_mcp_server`; cancel the command to stop waiting |
+| `logout_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Forgets a server's sign-in; same events as `add_mcp_server` |
+| `preview_mcp_snippet` | `(snippet: str, *, command_id: str \| None = None)` | `RpcMcpSnippetPreviewed`; nothing is saved |
+| `shutdown` | `(*, command_id: str \| None = None)` | Request host shutdown |
+
+The MCP server commands edit `mcp_servers` in `~/.wisp/settings.json` and then restart every
+configured server from that file, so servers passed only through `WispConfig.mcp_servers` are
+replaced by the file's servers. They wait for an active prompt to finish rather than changing its
+tools, cannot be cancelled once started, and finish within MCP's startup timeout. A refused
+settings change leaves both the file and the running servers as they were. Each restart revokes
+per-tool "allow for this session" grants for MCP tools; the permission mode and an "allow
+everything this session" answer are kept. Per-server startup problems appear as `unavailable`
+entries in the status, and a disabled server is reported as `disabled`.
+
+Each status entry carries `launch`: the server's command and arguments or URL, the names of the
+environment variables it sets, and the variables it forwards (`env_from`). An HTTP server's launch
+also names its stored headers (`header_names`) and each header built from a variable
+(`headers_from`, with the header, variable, and scheme). Environment and header values are never
+included. Adding or enabling a server is the user's decision: show them the launch settings
+and get their confirmation first. To enable, pass the confirmed `launch` as `expected`; the server is
+enabled only if its saved settings still match, so a confirmation cannot enable a command that was
+edited in the meantime. `env` and `headers` values given to `add_mcp_server` are written to the
+settings file and are never echoed in events or errors. A `headers_from` value names one variable,
+optionally after a scheme word: `{"Authorization": "Bearer ${LINEAR_API_KEY}"}`.
+
+An HTTP server's status also carries `sign_in`: `"required"` when the server refused Wisp or a saved
+sign-in could not be refreshed, `"signed_in"` when it started with a saved sign-in, and
+`"available"` when the user could sign in. It is null for servers that run a command or send their
+own `Authorization` header. `login_mcp_server` opens the sign-in page on the host's machine and
+reports its URL in `RpcMcpLoginStarted`, for a frontend to show when no browser opens; tokens never
+appear in events.
+
+`preview_mcp_snippet` parses a pasted `{"mcpServers": {...}}` snippet with the same rules as
+`wisp mcp import` and replies with each server's name and `launch`, naming environment variables
+only. The snippet may hold real secrets, so it is never echoed back; ask the user for each value
+again, or forward the variable with `env_from`.
+
+For credential mutations, the terminal `RpcCommandFinished` is authoritative for the mutation
+itself. A successful mutation normally emits a correlated refreshed connection catalog first. If
+that secondary refresh fails, the backend emits a sanitized `ErrorEvent` diagnostic but still
+finishes the mutation with `ok=true`; clients must not retry a completed credential write or delete
+solely because its status refresh was unavailable.
+
+`configure()` accepts `provider: str | None`, `model: str | None`, `effort: str | None`,
+`auto_compaction_enabled: bool | None`, and `mode: Literal["build", "plan"] | None`. Pass the
+string `"build"` for normal operation or `"plan"` for read-only planning. `effort=None` leaves the
+current setting untouched; use `clear_effort=True` to restore the provider default.
+
+#### Live queues and cancellation
+
+| Method | Signature after `self` |
+|---|---|
+| `steer` | `(content: str, *, command_id: str \| None = None)` |
+| `follow_up` | `(content: str, *, command_id: str \| None = None)` |
+| `get_queue_state` | `(*, command_id: str \| None = None)` |
+| `set_queue_mode` | `(kind: QueueKind, mode: QueueMode, *, command_id: str \| None = None, expected_token: str \| None = None)` |
+| `pop_queue` | `(kind: QueueKind, *, command_id: str \| None = None, expected_token: str \| None = None)` |
+| `clear_queue` | `(kind: QueueKind \| None = None, *, command_id: str \| None = None, expected_token: str \| None = None)` |
+| `cancel` | `(target_id: str, *, command_id: str \| None = None)` |
+
+Connection catalogs and progress events contain sanitized status only. API keys and OAuth tokens are
+write-only inputs and never appear in results, events, or session JSONL. `RpcDeviceCodeReported`
+intentionally exposes the short-lived user code and verification URL needed to complete login;
+clients must display them without logging or persistence.
+
+`QueueKind` is `"steering" | "follow_up"`. `QueueMode` is `"one_at_a_time" | "all"`.
+`cancel()` targets a running prompt or compaction command ID.
+
+`QueueUpdated.token` is an opaque revision of an active queue owner; retained/legacy snapshots have
+no token. Pass it as `expected_token` to guard a displayed mode/pop/clear operation. Any intervening
+mutation or a replacement run invalidates it, including removal and replacement with identical text.
+Stale guards fail through the ordinary command lifecycle without mutation. Omitting the guard retains
+legacy command semantics. Inspection works while idle; mutations still require an active run.
+
+Solicited `QueueUpdated` events carry `command_id`; spontaneous run events omit it. Successful removals
+publish `QueueItemsRemoved`, then `QueueUpdated`, then `RpcCommandFinished`. JSONL response-size
+preflight rejects oversized removal payloads before mutation. Transport loss after execution is not a
+transaction rollback: do not blindly retry a pop or clear after an unknown outcome.
+
+#### Trust and approval
+
+| Method | Signature after `self` |
+|---|---|
+| `trust` | `(request_id: str, *, trusted: bool, reason: str \| None = None, transient: bool = False, command_id: str \| None = None)` |
+| `approve` | `(call_id: str, *, approved: bool = True, reason: str \| None = None, scope: ApprovalScope \| None = None, command_id: str \| None = None)` |
+
+`ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project"`.
+`all_project` saves YOLO for the current project; the other scopes remain temporary. In the home
+folder or a folder above it YOLO is never saved: `ToolApprovalRequested.session_only_yolo` and
+`PermissionState.session_only_yolo` are true, and `all_project` or `set_permissions("yolo")` applies
+YOLO for the session only.
+When `ToolApprovalRequested.grants_allowed` is false (MCP server proposals), every call needs its
+own confirmation: any approval counts as `"once"` and grants nothing. Show the user the proposal's
+arguments before approving; see [Asking Wisp to set up a server](../guide/tools-and-safety.md#asking-wisp-to-set-up-a-server).
+`PermissionMode` is `"ask" | "yolo"`. `set_permissions` saves the default and clears temporary
+grants; it fails without changing permissions if an operation is running or saving fails.
+Saved defaults apply to future launches in the same canonical project directory. Match `request_id` from
+`TrustRequested` and `call_id` from `ToolApprovalRequested`. These methods are re-entrant control
+commands and may be submitted while a prompt is paused.
+
+#### Persisted sessions
+
+| Method | Signature after `self` | Primary result event |
+|---|---|---|
+| `get_sessions` | `(*, limit: int = 50, query: str = "", cursor: str \| None = None, command_id: str \| None = None)` | `RpcSessionsReported` |
+| `new_session` | `(*, command_id: str \| None = None)` | Deselect; next prompt creates a session |
+| `select_session` | `(session_id: str, *, command_id: str \| None = None)` | `RpcSessionSelected` |
+| `set_session_name` | `(name: str, *, session_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionNameChanged` |
+| `clone_session` | `(*, command_id: str \| None = None)` | `RpcSessionCloned` |
+| `fork_session` | `(entry_id: str, *, command_id: str \| None = None)` | `RpcSessionForked` |
+| `get_session_tree` | `(*, limit: int = 200, after_entry_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionTreeReported` |
+| `navigate_session_tree` | `(entry_id: str, *, command_id: str \| None = None)` | `RpcSessionTreeNavigated` |
+| `unrevert_session_tree` | `(*, command_id: str \| None = None)` | `RpcSessionTreeUnreverted` |
+
+`get_sessions()` accepts `limit` from 0 through 200 (zero returns no rows or cursors).
+`query` is bounded to 1024 UTF-8 bytes and uses trimmed, Unicode-casefolded literal substring
+matching against current session names and full IDs. An empty query lists all sessions;
+unnamed sessions remain searchable by ID. Duplicate names remain separate identities.
+
+`RpcSessionsReported` includes the normalized `query`, `next_cursor`, and `previous_cursor`.
+Pass a non-null cursor back with the same query to navigate. Cursors are opaque, bounded to
+4096 bytes, and tied to the catalog's current file metadata; edits, renames, additions, or deletions
+can invalidate them. On a stale-cursor failure, retry without a cursor. Do not decode a cursor,
+reuse it with another query/store, or infer a total count from the page size. Reports can be smaller
+than requested to fit transport limits; their cursors still follow the actual returned boundary.
+An individually oversized summary fails instead of being silently skipped.
+
+Results are ordered newest-first by modification time, then filename descending as a deterministic
+tie-breaker. Search reads session metadata, not full transcript models, but scan cost still grows
+with the catalog and JSONL files; bounded result pages are not a durable index or constant-time search.
+Selected-session metadata is independent of the query. Existing calls without query/cursor retain
+their behavior. The shared `get_sessions` command and `rpc.sessions` event use optional
+`query`/cursor fields.
+
+Session tree pages accept 1 through 500 nodes.
+
+Transcript pages use:
+
+```python
+async def get_messages(
+    *,
+    session_id: str | None = None,
+    limit: int = 200,
+    before_entry_id: str | None = None,
+    after_entry_id: str | None = None,
+    entry_ids: tuple[str, ...] = (),
+    complete_structure: bool = False,
+    full_content: bool = False,
+    allow_during_prompt: bool = False,
+    command_id: str | None = None,
+) -> str: ...
+```
+
+`limit` is 1 through 500. Forward and backward cursors are mutually exclusive. Exact `entry_ids`
+cannot be combined with cursors; at most 16 IDs are accepted. `full_content=True` requires exactly
+one explicit entry ID. The result is `RpcMessagesReported`, including bounded message snapshots,
+`truncated`, and continuation cursors.
+
+#### Event and cleanup methods
+
+```python
+def events(self) -> AsyncIterator[KnownWispEvent]: ...
+async def close(self) -> None: ...
+```
+
+The controller delegates stream ownership and cleanup to its transport. `InProcessWisp.aclose()` is
+an alias for its client cleanup path.
+
+### `JsonlSubprocessRpcTransport`
+
+```python
+await JsonlSubprocessRpcTransport.start(
+    command: Sequence[str] | None = None,
+    *,
+    cwd: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    stderr: int | None = subprocess.DEVNULL,
+) -> JsonlSubprocessRpcTransport
+```
+
+The default command is the current Python interpreter running `-m wisp --mode rpc`. Commands are
+newline-delimited JSON on stdin; stdout is parsed into typed events. Keep the default
+`stderr=subprocess.DEVNULL`: the current transport does not expose a public stderr stream, so
+selecting `subprocess.PIPE` can block a noisy child and is not a supported SDK integration pattern.
+
+`close()` closes stdin, waits for bounded graceful exit, then terminates and kills if needed. It is
+idempotent and re-raises a retained close failure.
+
+### Typed command models
+
+`wisp.rpc` exports `RpcCommand` and one Pydantic model for each command:
+
+- work/configuration: `PromptCommand`, `InitCommand`, `CompactCommand`, `ConfigureCommand`,
+  `ShutdownCommand`
+- snapshots: `GetSessionStatsCommand`, `GetStateCommand`, `GetCommandsCommand`, `GetSkillsCommand`,
+  `GetMcpStatusCommand`, `GetProjectFilesCommand`, `GetGitDiffCommand`
+- queue/control: `SteerCommand`, `FollowUpCommand`, `GetQueueStateCommand`, `SetQueueModeCommand`,
+  `PopQueueCommand`, `ClearQueueCommand`, `CancelCommand`
+- safety: `ApprovalCommand`, `TrustCommand`
+- MCP servers: `AddMcpServerCommand`, `RemoveMcpServerCommand`, `SetMcpServerEnabledCommand`,
+  `ReconnectMcpCommand`, `PreviewMcpSnippetCommand`
+- sessions: `GetMessagesCommand`, `GetSessionsCommand`, `NewSessionCommand`,
+  `SelectSessionCommand`, `SetSessionNameCommand`, `CloneSessionCommand`, `ForkSessionCommand`,
+  `GetSessionTreeCommand`, `NavigateSessionTreeCommand`, `UnrevertSessionTreeCommand`
+
+Each model is frozen, discriminated by `type`, accepts an optional `id`, and provides
+`to_json_line()`. Prefer `RpcController` unless an integration is implementing a lower-level
+transport.
+
+## `wisp.events`
+
+### Core types and parsers
+
+| Name | Contract |
+|---|---|
+| `WispEvent` | Frozen Pydantic base model with `type` and `timestamp`. Unknown fields are rejected. |
+| `KnownWispEvent` | Discriminated union of every event model understood by this version. |
+| `wisp_event_from_json(line)` | Validate one JSON event string and return `KnownWispEvent`. |
+| `wisp_event_from_dict(data)` | Validate one event dictionary and return `KnownWispEvent`. |
+
+Use the parser functions at protocol boundaries rather than selecting a model from an untrusted
+`type` value manually. Unsupported future schemas raise `ValueError`. See
+[Compatibility & versioning](compatibility.md) for readable history, consumer actions, and the
+deprecation policy.
+
+### Event groups
+
+| Group | Important models |
+|---|---|
+| Command lifecycle | `RpcCommandStarted`, `RpcCommandFinished` |
+| Assistant output | `MessageStarted`, `MessageDelta`, `WebSearchPerformed`, `MessageCompleted` |
+| Run lifecycle | `AgentStarted`, `TurnStarted`, `TurnCompleted`, `AgentCompleted`, `ErrorEvent` |
+| Safety | `TrustRequested`, `TrustResolved`, `ToolApprovalRequested`, `ToolApprovalResolved` |
+| Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionEnded`, `ToolResultReady` |
+| Compaction/context | `ContextEstimated`, `ContextPressure`, `ContextOverflow`, `CompactionStarted`, `CompactionCompleted` |
+| Queues | `QueueUpdated`, `QueueItemsRemoved`, `QueueMessageInjected` |
+| Snapshots | `SessionStatsReported`, `RpcStateReported`, `RpcCommandsReported`, `RpcSkillsReported`, `RpcMcpStatusReported`, `RpcProjectFilesReported` |
+| Sessions | `SessionSaved`, `RpcMessagesReported`, `RpcSessionsReported`, `RpcSessionSelected`, `RpcSessionCloned`, `RpcSessionForked`, `RpcSessionNameChanged`, `RpcSessionTreeReported`, `RpcSessionTreeNavigated`, `RpcSessionTreeUnreverted` |
+
+`RpcCommandFinished` is the terminal command correlation event:
+
+```python
+class RpcCommandFinished(WispEvent):
+    command_id: str
+    command_type: str
+    ok: bool
+    error: str | None = None
+```
+
+A failed command has `ok=False` and an optional sanitized error. Domain result events normally
+precede the matching successful terminal event and carry the same `command_id`. Streamed run events
+are ordered but do not all have command IDs.
+
+## `wisp.config`
+
+`WispConfig` is a frozen Pydantic model. Its primary fields are:
+
+| Field | Type | Default behavior |
+|---|---|---|
+| `provider` | `str` | `openai-codex` |
+| `model` | `str \| None` | Provider default |
+| `effort` | `str \| None` | Provider/user default |
+| `session_dir` | `Path` | `~/.wisp/sessions` |
+| `auth_path` | `Path` | `~/.wisp/auth.json` |
+| `protected_paths` | `tuple[str, ...]` | Built-in protected globs plus sensitive settings/auth paths |
+| `retry_policy` | `RetryPolicy` | Bounded default retry policy |
+| `context_reserve_tokens` | `int` | `16384` |
+| `auto_compaction_enabled` | `bool` | `True` |
+| `web_search` | `bool` | `False` |
+| `mcp_servers` | `tuple[McpServerConfig, ...]` | `()` |
+| `openai_compatible` | `OpenAICompatibleSettings \| None` | `None` |
+
+`WispConfig.from_env(...)` applies explicit arguments over environment, trusted project settings,
+user settings, and defaults. For SDK startup, prefer `InProcessWisp.from_environment()` when the
+project trust transition must remain re-entrant; it resolves trust before building initial project
+configuration.
+
+See [Configuration](configuration.md) for every persisted field and precedence rule.
+
+## Related public contracts
+
+- `wisp.sessions.JsonlSessionStore` and `JsonlSession` provide direct typed access to append-only
+  session storage. RPC/SDK command methods are preferred when the active runtime must change session.
+- `wisp.runtime.ExtensionAPI` and `WispRuntime` describe static extension composition. The current
+  `InProcessWisp` startup methods do not accept a caller-built runtime; see
+  [#402](https://github.com/whanyu1212/Wisp/issues/402).
+- `wisp.providers.FakeProvider` and `ScriptedProvider` are deterministic provider implementations;
+  the package also exports provider event and tool-call types. The structural provider protocol is
+  not currently a supported package export, and arbitrary provider injection into `InProcessWisp`
+  is not yet public; both belong to [#402](https://github.com/whanyu1212/Wisp/issues/402).
+- `wisp.tools.Tool`, `ToolContext`, and `ToolResult` are the core custom-tool contracts. Tool
+  registration is demonstrated in the
+  [static extension example](https://github.com/whanyu1212/Wisp/tree/main/examples/extensions).
+
+## Current limitations
+
+These APIs are tracked but are not part of the current reference:
+
+- awaitable command results and independent event subscriptions —
+  [#400](https://github.com/whanyu1212/Wisp/issues/400)
+- direct settled lifecycle/state primitives — [#401](https://github.com/whanyu1212/Wisp/issues/401)
+- caller-owned runtime/provider injection — [#402](https://github.com/whanyu1212/Wisp/issues/402)
+- typed prompt/context/skill/template overrides —
+  [#403](https://github.com/whanyu1212/Wisp/issues/403)
+- in-memory sessions and atomic active-session replacement —
+  [#404](https://github.com/whanyu1212/Wisp/issues/404)
+- model, authentication, and settings management —
+  [#405](https://github.com/whanyu1212/Wisp/issues/405)
+- long-running health, restart, recovery, and observability —
+  [#406](https://github.com/whanyu1212/Wisp/issues/406)

@@ -13,14 +13,18 @@ from scripts.ci_jobs import FULL, GROUP_JOBS, changed_paths, select_groups, veri
 
 class CheckSelectionTests(unittest.TestCase):
     def test_docs_and_site_skip_runtime_but_keep_contracts(self) -> None:
-        for path in ("book/src/guide/tui.md", "site/src/styles/site.css", "assets/banner.png"):
+        for path in (
+            "site/src/content/pages/guide/tui.md",
+            "site/src/styles/site.css",
+            "assets/banner.png",
+        ):
             with self.subTest(path=path):
                 self.assertEqual(select_groups([path]), {"contracts"})
         self.assertEqual(select_groups(["README.md"]), {"contracts", "package"})
 
     def test_tui_source_keeps_rust_handoff_and_repository_contracts(self) -> None:
         self.assertEqual(
-            select_groups(["rust/wisp-tui/src/ui.rs", "book/src/guide/tui.md"]),
+            select_groups(["rust/wisp-tui/src/ui.rs", "site/src/content/pages/guide/tui.md"]),
             {"rust", "handoff", "contracts"},
         )
 

@@ -18,10 +18,7 @@ dist/
 # Rust
 /target/
 
-# Docs: mdBook output (the source in book/ IS tracked)
-/book/build/
-
-# Private local notes and design docs (never published; the book lives elsewhere)
+# Private local notes and design docs (never published; the site lives elsewhere)
 /docs/
 
 # Personal working notes such as WISP_ROADMAP.local.md

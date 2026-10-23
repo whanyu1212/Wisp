@@ -1,3 +1,6 @@
 dist/
 .astro/
 node_modules/
+# Keep the migrated repository Markdown convention and historical evidence unchanged.
+# These sources were outside the frontend formatting gate before relocation.
+src/content/pages/**/*.md

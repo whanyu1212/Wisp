@@ -1,7 +1,7 @@
 import { load } from "cheerio";
-import { posix } from "node:path";
+import { posix, relative, resolve } from "node:path";
 import { changelog, type PageMetadata } from "./metadata.ts";
-import { base, href } from "./paths.ts";
+import { base, href, contentRoot, repoRoot } from "./paths.ts";
 
 export interface LegacyHeading {
   id: string;
@@ -36,7 +36,10 @@ export function resolveLink(
   // The changelog is authored at the repository root. Older releases retain
   // links using the former site/ source directory; both resolve to current pages.
   if (source === changelog.source)
-    url = url.replace(/^(?:\.\/)?(?:book\/src\/|site\/)/, "");
+    url = url.replace(
+      /^(?:\.\/)?(?:site\/src\/content\/pages\/|book\/src\/|site\/)/,
+      "",
+    );
   const publicPrefix = "https://whanyu1212.github.io/Wisp/";
   if (url.startsWith(publicPrefix)) url = base + url.slice(publicPrefix.length);
   if (/^(?:[a-z][\w+.-]*:|\/\/)/i.test(url)) return url;
@@ -53,12 +56,21 @@ export function resolveLink(
     posix.join(normalized, "index.md"),
   ]);
   const target = pages.find(
-    (page) => candidates.has(page.source) || page.route === normalized,
+    (page) =>
+      candidates.has(page.source) ||
+      (page.legacySource && candidates.has(page.legacySource)) ||
+      page.route === normalized,
   );
   if (target) return href(target.route) + url.slice(pathname.length);
   // Source links to repository files become explicit repository links, never broken site URLs.
-  if (normalized.startsWith("../../"))
-    return `https://github.com/whanyu1212/Wisp/blob/main/${normalized.slice(6)}${suffix}`;
+  if (normalized.startsWith("../")) {
+    const file = relative(
+      repoRoot,
+      resolve(contentRoot, normalized),
+    ).replaceAll("\\", "/");
+    if (!file.startsWith("../"))
+      return `https://github.com/whanyu1212/Wisp/blob/main/${file}${suffix}`;
+  }
   throw new Error(`Unresolved link in ${source}: ${url}`);
 }
 

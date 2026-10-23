@@ -198,7 +198,7 @@ new compatibility shims.
 
 ## Further reading
 
-- [Agent runtime architecture](../../../book/src/architecture/agent-runtime.md) describes the same
+- [Agent runtime architecture](../../../site/src/content/pages/architecture/agent-runtime.md) describes the same
   boundaries in the project documentation.
 - [Harness README](./harness/README.md) covers transcript ownership, queues, cancellation, boundary
   synchronization, invariants, and focused tests.

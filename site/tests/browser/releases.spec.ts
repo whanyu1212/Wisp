@@ -81,7 +81,8 @@ test("old release URLs retain fragment redirects and an explicit no-JavaScript d
   const record = records[0]!;
   await page.goto(href(record.route));
   const id = await page.locator("article h1").getAttribute("id");
-  const old = `/Wisp/${record.source.replace(/\.md$/, ".html")}#${id}`;
+  expect(record.legacySource).toMatch(/^contributing\//);
+  const old = `/Wisp/${record.legacySource!.replace(/\.md$/, ".html")}#${id}`;
   await page.goto(old);
   await expect(page).toHaveURL(
     `http://127.0.0.1:4322${href(record.route)}#${id}`,

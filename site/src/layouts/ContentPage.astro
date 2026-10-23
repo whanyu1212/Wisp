@@ -6,7 +6,7 @@ import TuiCapture from "../components/TuiCapture.astro";
 import Document from "./Document.astro";
 import { href, base } from "../content/paths";
 import type { Heading } from "../content/render";
-import { tuiSource, tuiChildren } from "../content/tui";
+const tuiSource = "guide/tui.md";
 
 interface Props {
   entry: CollectionEntry<"pages"> | CollectionEntry<"maintainerRecords">;
@@ -19,11 +19,6 @@ const target = href(entry.data.route);
 
 <Document
   page={entry.data}
-  editSource={
-    tuiChildren.some((page) => page.source === entry.data.source)
-      ? `book/src/${tuiSource}`
-      : undefined
-  }
   headings={compatibility ? [] : (headings as Heading[])}
   compatibility={compatibility}
 >

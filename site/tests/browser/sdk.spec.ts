@@ -79,7 +79,7 @@ test("every legacy SDK audit fragment redirects to its preserved Inside Wisp hea
     page.getByRole("link", { name: "Edit this page", exact: true }),
   ).toHaveAttribute(
     "href",
-    "https://github.com/whanyu1212/Wisp/edit/main/book/src/reference/sdk-capability-audit.md",
+    "https://github.com/whanyu1212/Wisp/edit/main/site/src/content/pages/architecture/sdk-capability-audit.md",
   );
 });
 

@@ -39,7 +39,7 @@ npm run test:browser -- tests/browser/entry-pages.spec.ts
 The capture test emits a larger review matrix outside the repository. The rasterizer selects only
 the four documented frames. Inspect the selected buffer text and resulting images before publishing;
 never substitute a personal session dump. Keep each master here once. Astro generates 480/800/1200px
-WebP variants during the build; do not commit those derived files or copies in `book/src/` or
+WebP variants during the build; do not commit those derived files or copies in Markdown source directories or
 `site/public/`. Full-size image links, descriptive alt text, and captions keep the content usable
 without JavaScript or animation. No recordings or autoplay are used.
 

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from tests.support.paths import BOOK_SRC_DIR
+from tests.support.paths import DOCS_SRC_DIR
 
-_ARCHITECTURE = (BOOK_SRC_DIR / "architecture" / "rust-tui-boundary.md").read_text(encoding="utf-8")
-_ARCHITECTURE_INDEX = (BOOK_SRC_DIR / "architecture" / "index.md").read_text(encoding="utf-8")
-_TUI_GUIDE = (BOOK_SRC_DIR / "guide" / "tui.md").read_text(encoding="utf-8")
-_CLI = (BOOK_SRC_DIR / "reference" / "cli.md").read_text(encoding="utf-8")
-_ENVIRONMENT = (BOOK_SRC_DIR / "reference" / "environment.md").read_text(encoding="utf-8")
+_ARCHITECTURE = (DOCS_SRC_DIR / "architecture" / "rust-tui-boundary.md").read_text(encoding="utf-8")
+_ARCHITECTURE_INDEX = (DOCS_SRC_DIR / "architecture" / "index.md").read_text(encoding="utf-8")
+_TUI_GUIDE = (DOCS_SRC_DIR / "guide" / "tui.md").read_text(encoding="utf-8")
+_CLI = (DOCS_SRC_DIR / "reference" / "cli.md").read_text(encoding="utf-8")
+_ENVIRONMENT = (DOCS_SRC_DIR / "reference" / "environment.md").read_text(encoding="utf-8")
 
 
 def test_architecture_records_rust_only_terminal_boundary() -> None:
@@ -43,7 +43,9 @@ def test_docs_explain_pure_install_failure_and_source_override() -> None:
 
 
 def test_rc2_decision_keeps_publication_and_stable_promotion_separate() -> None:
-    release = (BOOK_SRC_DIR / "contributing" / "rc2-release.md").read_text(encoding="utf-8")
+    release = (DOCS_SRC_DIR / "maintainers" / "releases" / "rc2-release.md").read_text(
+        encoding="utf-8"
+    )
     architecture = " ".join(_ARCHITECTURE.split())
     assert "The RC2 trial did not itself publish a stable release" in architecture
     assert "does not create a" in release

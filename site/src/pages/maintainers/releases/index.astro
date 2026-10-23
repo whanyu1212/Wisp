@@ -5,7 +5,7 @@ import { href } from "../../../content/paths";
 import type { PageMetadata } from "../../../content/metadata";
 
 // Keep every record discoverable without putting historical checklists in the
-// product navigation or search. Source files stay in book/ until HY-316.
+// product navigation or search.
 const records = (await getCollection("maintainerRecords"))
   .map((entry) => entry.data)
   .sort((a, b) => a.order - b.order);

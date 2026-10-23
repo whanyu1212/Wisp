@@ -278,3 +278,28 @@ test("actual Astro Markdown output supports Mermaid and dual-theme highlighting"
   assert.match(finished.html, /Diagram source/);
   assert.match(finished.html, /--shiki-dark/);
 });
+
+test("frontmatter owns metadata and rejects missing, unknown, or spoofed source fields", async () => {
+  const { readPage } = await import("../src/content/metadata.ts");
+  const directory = mkdtempSync(join(tmpdir(), "wisp-frontmatter-"));
+  try {
+    const { source: _source, ...metadata } = page;
+    const write = (data: unknown) =>
+      writeFileSync(
+        join(directory, "page.md"),
+        `---\n${JSON.stringify(data)}\n---\n# Body\n`,
+      );
+    write(metadata);
+    const parsed = readPage("page.md", directory);
+    assert.equal(parsed.metadata.source, "page.md");
+    assert.equal(parsed.body.trim(), "# Body");
+    write({ ...metadata, source: "other.md" });
+    assert.throws(() => readPage("page.md", directory));
+    write({ ...metadata, title: undefined });
+    assert.throws(() => readPage("page.md", directory));
+    write({ ...metadata, legacySource: "../escape.md" });
+    assert.throws(() => readPage("page.md", directory));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

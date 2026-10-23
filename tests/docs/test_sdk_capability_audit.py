@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 
-from tests.support.paths import BOOK_SRC_DIR, REPO_ROOT
+import yaml
+
+from tests.support.paths import DOCS_SRC_DIR, REPO_ROOT
 
 _REPOSITORY_ROOT = REPO_ROOT
-_AUDIT_PATH = BOOK_SRC_DIR / "reference" / "sdk-capability-audit.md"
+_AUDIT_PATH = DOCS_SRC_DIR / "architecture" / "sdk-capability-audit.md"
 _AUDIT = _AUDIT_PATH.read_text(encoding="utf-8")
 _PI_RELEASE = "v0.84.2"
 _PI_COMMIT = "914cf1472e715297caa30db4b9535d534a9eb718"
@@ -69,18 +71,17 @@ def test_every_local_audit_link_has_a_markdown_target() -> None:
 
 
 def test_audit_is_linked_as_design_evidence_not_api_reference() -> None:
-    guide = (BOOK_SRC_DIR / "guide" / "sdk.md").read_text(encoding="utf-8")
-    reference_index = (BOOK_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
-    architecture_index = (BOOK_SRC_DIR / "architecture" / "index.md").read_text(encoding="utf-8")
-    summary = (BOOK_SRC_DIR / "SUMMARY.md").read_text(encoding="utf-8")
+    guide = (DOCS_SRC_DIR / "guide" / "sdk.md").read_text(encoding="utf-8")
+    reference_index = (DOCS_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
+    architecture_index = (DOCS_SRC_DIR / "architecture" / "index.md").read_text(encoding="utf-8")
+    metadata = yaml.safe_load(_AUDIT.split("---", 2)[1])
     changelog = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert "[SDK capability audit](../reference/sdk-capability-audit)" in guide
+    assert "[SDK capability audit](../architecture/sdk-capability-audit.md)" in guide
     assert "sdk-capability-audit" not in reference_index
-    assert "[SDK capability audit](../reference/sdk-capability-audit)" in architecture_index
-    reference_section = summary.split("# Reference\n", 1)[1].split("# Inside Wisp\n", 1)[0]
-    inside_section = summary.split("# Inside Wisp\n", 1)[1].split("# Contributing\n", 1)[0]
-    assert "sdk-capability-audit" not in reference_section
-    assert "[SDK capability audit](reference/sdk-capability-audit.md)" in inside_section
+    assert "[SDK capability audit](sdk-capability-audit.md)" in architecture_index
+    assert metadata["section"] == "inside"
+    assert metadata["listed"] is True
+    assert metadata["route"] == "architecture/sdk-capability-audit.html"
     assert "Historical design evidence" in _AUDIT
     assert f"capability audit pinned to Pi SDK {_PI_RELEASE}" in changelog

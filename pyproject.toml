@@ -66,7 +66,7 @@ module-name = "wisp"
 
 # Native wheels are built explicitly with Hatchling by rust-tui-wheels.yml.
 # Ordinary PEP 517 builds retain uv_build for the pure fallback wheel and sdist.
-# See book/src/contributing/building.md.
+# See site/src/content/pages/contributing/building.md.
 [tool.hatch.build.targets.wheel]
 packages = ["src/wisp"]
 

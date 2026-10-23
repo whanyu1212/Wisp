@@ -1,0 +1,100 @@
+---
+title: Sessions
+description: 'Wisp persists each run as a JSONL session and can continue an existing one:'
+route: guide/sessions.html
+section: using
+order: 19
+layout: docs
+listed: true
+searchable: true
+---
+
+# Sessions
+
+Wisp persists each run as a JSONL session and can continue an existing one:
+
+```bash
+wisp -p "continue the work" --continue
+wisp -p "continue the work" --resume path/to/session.jsonl
+wisp -p "continue the work" --resume <session-id-prefix>
+```
+
+- `--continue` resumes the newest session in the active session directory.
+- `--resume` accepts a JSONL path, filename, full session id, or unique id prefix.
+- Sessions live under `~/.wisp/sessions`; override with `--session-dir` or `WISP_SESSION_DIR`.
+
+## Finding older sessions
+
+In the Rust TUI, `/resume` searches and pages through persisted session summaries without retaining
+the entire catalog. Search matches current names or session IDs, not prompt or assistant text.
+Sessions are newest-first by file modification time, with filename descending breaking ties.
+Unnamed and duplicate-name sessions remain distinct; the picker displays an ID prefix, while
+selection uses the full ID. Refresh after renaming, deleting, or otherwise changing the catalog
+if a page cursor becomes stale. See [TUI controls](tui.md) and the
+[SDK catalog contract](../reference/sdk.md#persisted-sessions) for navigation and error handling.
+
+## What a session file contains
+
+Session files contain provider-facing `message` entries plus selected structured `event` entries
+(tool calls, approvals, tool start/end, [web searches](providers.md#web-search), errors) for audit. They do **not** persist `message.delta`
+events. Continuation replays only the selected path's messages and compactions, so audit events never
+become model-visible history.
+
+That split is what makes the transcript useful for both purposes at once: the model sees a clean
+conversation, while you keep the full record of what actually ran.
+
+## Durability
+
+Wisp treats a JSONL record as committed only when it is newline-terminated. A successful append also
+synchronizes the session file before returning. Appends are serialized across cooperating Wisp
+processes and rolled back to the previous committed size if writing or synchronization fails.
+
+On the next read, Wisp discards any unterminated final bytes left by an interrupted writer — even if
+those bytes happen to form valid JSON — while preserving all newline-terminated records. A malformed
+newline-terminated record remains a session error rather than being silently removed.
+
+Session files first created by an append, and recovery deletions, also synchronize the parent
+directory on supported POSIX systems. Operations that remove a session suffix stage and validate a
+complete replacement before atomically publishing it, so a failed rewrite does not truncate the last
+committed history.
+
+This is the mechanism behind the cancellation guarantee in
+[Staying in sync](staying-in-sync.md): an interrupted run leaves a valid, resumable file rather than a
+half-written one.
+
+## Branching
+
+Records form a parent-linked tree, and an append-only active-leaf record selects the root-to-leaf
+path used by continuation — abandoned or cancelled work stays in the audit log without entering model
+context. Session files use session-entry schema v6, while embedded event payloads and compaction
+records keep their own independent versions. Files in any older schema are rejected, and loading
+never rewrites a file. See [Compatibility & versioning](../reference/compatibility.md) for details.
+
+The typed session API can derive a new session without rewriting its source:
+
+- A **clone** copies the complete active path.
+- A **fork** copies the path before a selected user message and returns that prompt for editing.
+
+Copied entries retain stable IDs, parent links, timestamps, and accounting metadata under a new
+session ID. RPC clients use `clone_session` / `fork_session`. The Rust TUI exposes
+`/clone` and a keyboard-only `/tree` picker: `Enter` navigates to a node, `f` forks a selected user
+message, and `/unrevert` reverses the latest eligible navigation. Fork and user-message navigation
+restore the editable prompt only after the authoritative target history loads. The picker requests
+200 append-ordered nodes at a time, retains two pages (400 nodes), evicts whole oldest pages, and
+restarts at the first page whenever `/tree` is reopened.
+
+The Rust TUI also supports `/name <display name>` and `/name --clear`. The direct CLI does
+not currently expose these direct session commands; they remain available through the typed RPC and
+SDK surfaces.
+
+> [!WARNING]
+> **Unreleased Python API change**
+>
+> The deprecated `wisp.agent.messages.SessionEntry(...)` factory has been removed. Import
+> `MessageSessionEntry`, `EventSessionEntry`, or `CompactionSessionEntry` from `wisp.sessions` and
+> construct the appropriate model directly. For event entries, wrap the raw event dictionary in
+> `PersistedEventEnvelope(payload=...)`, also exported by `wisp.sessions`.
+>
+> Existing session files need no migration. See the
+> [early-removal exception](../reference/compatibility.md#deprecation-and-removal) for the compatibility
+> policy that applies to this cleanup.
