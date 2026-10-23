@@ -137,8 +137,9 @@ class ToolBatch:
         is_cancelled (CancellationCheck): Cooperative stop callback.
         on_result (Callable[[ToolResultReady], None]): Callback recording each published
             result, in publication order, after its public yield.
-        outcome (ToolBatchOutcome | None, optional): Terminal result, initially None.
-            Normally left unset and populated by exhausting events.
+
+    Attributes:
+        outcome (ToolBatchOutcome | None): Terminal result, set once events are exhausted.
     """
 
     tool_executor: ToolExecutor
@@ -146,7 +147,7 @@ class ToolBatch:
     truncated: bool
     is_cancelled: CancellationCheck
     on_result: Callable[[ToolResultReady], None]
-    outcome: ToolBatchOutcome | None = None
+    outcome: ToolBatchOutcome | None = field(default=None, init=False)
     _cancelled: bool = field(default=False, init=False)
 
     async def events(self) -> AsyncIterator[ToolBatchEvent]:

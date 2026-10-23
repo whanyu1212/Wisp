@@ -28,7 +28,7 @@ from wisp.events import (
     wisp_event_from_json,
 )
 from wisp.messages import CompactionRecord, Message, NativeOutput
-from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.providers.base import ToolSpec
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
     CompactionSessionEntry,
@@ -182,7 +182,7 @@ def _usage(
     )
 
 
-def test_estimate_counts_system_messages_tools_and_results() -> None:
+def test_estimate_counts_system_messages_and_tools() -> None:
     messages = (
         Message(role="system", content="system"),
         Message(role="user", content="hello"),
@@ -197,9 +197,11 @@ def test_estimate_counts_system_messages_tools_and_results() -> None:
 
     initial = estimate_context(messages, tools)
     continued = estimate_context(
-        messages,
+        (
+            *messages,
+            Message(role="tool", content="a large tool result" * 20, tool_call_id="call-1"),
+        ),
         tools,
-        (ToolCallResult(call_id="call-1", output="a large tool result" * 20),),
     )
 
     assert initial.method == "utf8_bytes_div_4_v2"
@@ -332,21 +334,21 @@ def test_estimate_uses_utf8_size_for_every_payload() -> None:
     messages = (
         Message(role="system", content="系统 🌐"),
         Message(role="user", content="質問 e\u0301"),
+        Message(role="tool", content="結果 ✅", tool_call_id="呼出"),
     )
-    result = ToolCallResult(call_id="呼出", output="結果 ✅", is_error=False)
     tool = ToolSpec(
         name="検索",
         description="探す 🔎",
         input_schema={"type": "object", "properties": {"値": {"type": "string"}}},
     )
 
-    estimate = estimate_context(messages, (tool,), (result,))
+    estimate = estimate_context(messages, (tool,))
 
     assert estimate.system_tokens == _serialized_tokens([{"role": "system", "content": "系统 🌐"}])
     assert estimate.message_tokens == _serialized_tokens(
         [
             {"role": "user", "content": "質問 e\u0301"},
-            {"call_id": "呼出", "output": "結果 ✅", "is_error": False},
+            {"role": "tool", "content": "結果 ✅", "tool_call_id": "呼出"},
         ]
     )
     assert estimate.tool_schema_tokens == _serialized_tokens(

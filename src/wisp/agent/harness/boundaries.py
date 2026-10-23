@@ -98,6 +98,15 @@ class _HarnessBoundaryCoordinator:
         injected_messages: Sequence[Message],
         stop_by_default: bool,
     ) -> None:
+        """Record the completed turn's queue effects for the next boundary call.
+
+        Args:
+            turn (int): Completed turn the boundary follows.
+            had_tool_calls (bool): Whether that turn ran a tool batch.
+            injected_messages (Sequence[Message]): Queued user messages already added
+                to the transcript at this boundary.
+            stop_by_default (bool): Whether the run stops when no policy decides.
+        """
         self.armed_boundary = _ArmedRequestBoundary(
             turn=turn,
             had_tool_calls=had_tool_calls,
@@ -108,6 +117,23 @@ class _HarnessBoundaryCoordinator:
     async def before_next_request(
         self, *, snapshot: RequestBoundarySnapshot
     ) -> RequestBoundaryDecision:
+        """Decide the next request after the armed turn, consuming the armed state.
+
+        A session preparer's decision wins. Otherwise injected messages are appended to
+        the live continuation when the provider allows it, or sent as a fresh replacement
+        built from the whole transcript; with nothing injected, the armed default decides
+        whether the run stops.
+
+        Args:
+            snapshot (RequestBoundarySnapshot): Loop state after the completed turn.
+
+        Returns:
+            RequestBoundaryDecision: Decision for the loop. A preparer's replacement is
+                also kept for the runner to apply when the next turn starts.
+
+        Raises:
+            RuntimeError: The boundary was not armed or does not match the armed turn.
+        """
         boundary = self.armed_boundary
         if boundary is None:
             raise RuntimeError("AgentHarness received an unarmed request boundary")
@@ -150,6 +176,19 @@ class _HarnessBoundaryCoordinator:
     async def recover_context_overflow(
         self, *, snapshot: ContextOverflowSnapshot
     ) -> RequestBoundaryDecision | ContextOverflowFailure | None:
+        """Forward a rejected request to the session's overflow hook.
+
+        Args:
+            snapshot (ContextOverflowSnapshot): State of the rejected request.
+
+        Returns:
+            RequestBoundaryDecision | ContextOverflowFailure | None: The hook's answer.
+                A retry decision's replacement is kept for the runner to apply when the
+                next turn starts.
+
+        Raises:
+            RuntimeError: No overflow hook was configured.
+        """
         if self.context_overflow_hook is None:
             raise RuntimeError("AgentHarness received context overflow without a recovery hook")
         decision = await self.context_overflow_hook.recover_context_overflow(

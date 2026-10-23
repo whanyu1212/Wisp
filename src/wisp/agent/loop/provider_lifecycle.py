@@ -172,18 +172,14 @@ class ProviderResponseLifecycle:
         require_provider_response_started(self.started)
         self.text.append(delta)
 
-    def add_thinking(self, delta: str) -> None:
-        """Validate a thinking fragment without adding it to answer text.
-
-        Args:
-            delta (str): Thinking content forwarded separately by the stream adapter.
+    def accept_thinking(self) -> None:
+        """Validate that a thinking fragment may arrive; its text is not retained.
 
         Raises:
             ProviderProtocolError: The response has not started or has terminated.
         """
         self.require_open()
         require_provider_response_started(self.started)
-        del delta
 
     def add_web_search(self) -> None:
         """Validate a provider-run web search reported inside an active response.

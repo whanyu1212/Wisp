@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import wisp.providers.events as provider_events
@@ -104,11 +104,13 @@ class ModelResponseStream:
         tool_results (Sequence[ToolCallResult]): Results pending delivery to the model.
         extra_messages (Sequence[Message]): User messages queued for this continuation.
         previous_response_id (str | None): Native provider cursor, if available.
-        outcome (ModelResponseOutcome | None, optional): Terminal result, initially None.
-            Normally left unset and populated by consuming events to completion.
-        unfinished (UnfinishedModelResponse | None, optional): The opened message's
-            partial text when an unexpected error escapes after the response started,
-            so the runner can close it. Normally left unset.
+
+    Attributes:
+        outcome (ModelResponseOutcome | None): Terminal result, set once events are
+            consumed to completion.
+        unfinished (UnfinishedModelResponse | None): The opened message's partial text
+            when an unexpected error escapes after the response started, so the runner
+            can close it.
     """
 
     config: AgentLoopConfig
@@ -116,8 +118,8 @@ class ModelResponseStream:
     tool_results: Sequence[ToolCallResult]
     extra_messages: Sequence[Message]
     previous_response_id: str | None
-    outcome: ModelResponseOutcome | None = None
-    unfinished: UnfinishedModelResponse | None = None
+    outcome: ModelResponseOutcome | None = field(default=None, init=False)
+    unfinished: UnfinishedModelResponse | None = field(default=None, init=False)
 
     async def events(self, *, turn: int) -> AsyncIterator[ModelResponseEvent]:
         """Translate provider progress and record a terminal outcome when exhausted.
@@ -191,7 +193,7 @@ class ModelResponseStream:
                                 content_index=provider_event.content_index,
                             )
                         elif isinstance(provider_event, ProviderThinkingDelta):
-                            lifecycle.add_thinking(provider_event.delta)
+                            lifecycle.accept_thinking()
                             attempt_had_streamed_delta = True
                             yield MessageDelta(
                                 turn=turn,
