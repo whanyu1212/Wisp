@@ -6,14 +6,14 @@ import anyio
 import pytest
 
 from wisp.agent.loop import AgentLoopConfig
-from wisp.agent.loop.continuation import (
-    ContinuationState,
+from wisp.agent.loop.boundary_transitions import (
     apply_request_boundary_decision,
-    at_context_overflow,
-    at_request_boundary,
+    decide_next_request,
     has_valid_replacement_tool_order,
     is_tool_shaped,
+    recover_from_overflow,
 )
+from wisp.agent.loop.continuation import ContinuationState
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -464,7 +464,7 @@ def test_stops_by_default_without_boundary_hook() -> None:
     original = (_user(),)
 
     async def run() -> None:
-        messages, stop = await at_request_boundary(
+        messages, stop = await decide_next_request(
             _config(),
             ContinuationState(),
             turn=1,
@@ -503,7 +503,7 @@ def test_boundary_snapshot_is_isolated() -> None:
     )
 
     async def run() -> None:
-        await at_request_boundary(
+        await decide_next_request(
             config,
             state,
             turn=2,
@@ -539,7 +539,7 @@ def test_overflow_recovery_requires_replacement_or_rebase() -> None:
         with pytest.raises(
             RequestBoundaryUnsupportedError, match="fresh replacement or context rebase"
         ):
-            await at_context_overflow(
+            await recover_from_overflow(
                 config,
                 ContinuationState(previous_response_id="resp-1"),
                 turn=1,

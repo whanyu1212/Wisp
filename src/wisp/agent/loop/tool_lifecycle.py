@@ -142,7 +142,7 @@ class RequestedCancellation:
         return True
 
 
-def tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
+def _tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
     """Build the public request event for a model-requested call.
 
     Args:
@@ -364,7 +364,7 @@ class ToolBatchSettlement:
             ToolCallRequested: Event whose arguments are detached from the provider's call.
         """
         self._requested.add(tool_call.call_id)
-        return tool_call_requested(tool_call)
+        return _tool_call_requested(tool_call)
 
     def begin_lifecycle(self, tool_call: ToolCall) -> ToolExecutionLifecycle:
         """Start validating one occurrence of a call, visible to settlement.
@@ -459,6 +459,6 @@ __all__ = [
     "ToolBatchEvent",
     "ToolBatchSettlement",
     "ToolExecutionLifecycle",
-    "tool_call_requested",
     "tool_execution_started",
+    "with_execution_duration",
 ]

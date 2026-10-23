@@ -31,7 +31,7 @@ from wisp.messages import (
 
 from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
 from .config import AgentHarnessConfig, _build_loop_config
-from .queues import QueuedMessages, _MessageQueues
+from .queues import QueuedMessages, _QueueStore
 
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
@@ -100,7 +100,7 @@ class AgentHarness:
         self._current_token: SimpleCancellationToken | None = None
         self._current_scope: anyio.CancelScope | None = None
         self._running = False
-        self._queues = _MessageQueues()
+        self._queues = _QueueStore()
 
     @property
     def config(self) -> AgentHarnessConfig:

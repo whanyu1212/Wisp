@@ -44,14 +44,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True, slots=True)
-class CompletedModelResponse:
-    """Represent a successful stream with its validated response and delta-presence flag."""
-
-    completed: CompletedProviderResponse
-    had_streamed_delta: bool
-
-
-@dataclass(frozen=True, slots=True)
 class FailedModelResponse:
     """Represent a typed provider failure, including whether its message lifecycle opened."""
 
@@ -87,7 +79,7 @@ class CancelledModelResponse:
 
 
 type ModelResponseOutcome = (
-    CompletedModelResponse | FailedModelResponse | OverflowModelResponse | CancelledModelResponse
+    CompletedProviderResponse | FailedModelResponse | OverflowModelResponse | CancelledModelResponse
 )
 type ModelResponseEvent = (
     MessageStarted | ProviderRetrying | MessageDelta | WebSearchPerformed | CancelledModelResponse
@@ -267,10 +259,7 @@ class ModelResponseStream:
                 had_streamed_delta=attempt_had_streamed_delta,
             )
             return
-        self.outcome = CompletedModelResponse(
-            completed=finished,
-            had_streamed_delta=attempt_had_streamed_delta,
-        )
+        self.outcome = finished
 
     def _record_unfinished(self, lifecycle: ProviderResponseLifecycle) -> None:
         """Keep an opened message's partial text for the runner to close."""
