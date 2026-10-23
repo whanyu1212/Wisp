@@ -101,6 +101,9 @@ the added tool presentation fields, while its typed event reader rejects new eve
 Keep a pre-upgrade session backup. See [Upgrading to 0.3](../guide/upgrading-to-0.3.md) for the
 supported rollback procedure. Settings, credentials, and trust formats are unchanged.
 
+0.3.1 changes no command, event, handshake, session, or trust format, so 0.3.0 and 0.3.1 read
+each other's sessions. The backend and every frontend must still be the same release.
+
 ## Deprecation and removal
 
 Except for an explicit exception documented below, a public API may be removed only when all of

@@ -35,12 +35,12 @@ wisp
 ```
 
 > [!TIP]
-> **Wisp 0.2.4 is available**
+> **Wisp 0.3 is available**
 >
-> 0.2 makes the Rust terminal UI the interactive interface, adds MCP server management and the
-> providers' own web search, and never saves trust or YOLO for your home folder. Read the
+> 0.3 brings a redesigned terminal conversation and sidebar, working-tree diff review, context
+> breakdowns, richer tool activity, and more concise default replies. Read the
 > [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and, if you are coming
-> from 0.1, the [upgrade guide](guide/upgrading.md).
+> from 0.2, the [upgrade guide](guide/upgrading-to-0.3.md).
 
 ## Start reading
 

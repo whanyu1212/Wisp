@@ -10,7 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.3.0 — Unreleased
+## 0.3.1 — Unreleased
+
+0.3.1 is a patch release on 0.3.0 with one terminal UI fix and the documentation site cutover.
+It changes no command, event, handshake model, or session format, so 0.3.0 and 0.3.1 read each
+other's sessions; the backend and frontend must still come from the same release.
+
+### Terminal UI
+
+- The run status line shows "Compacting context" while an automatic compaction runs, whether the
+  context reached the compaction threshold or overflowed. Previously it kept showing "Working" or
+  "Thinking" until compaction finished; manual `/compact` already showed it. (#810)
+
+### Documentation
+
+- The documentation site now builds with Astro instead of mdBook, with Pagefind search, user-first
+  navigation, refreshed homepage and section entry pages, a published changelog, and an archive of
+  maintainer release records. The TUI guide is split into focused pages, and SDK task guides are
+  separate from the API reference. The `/Wisp/` base path, print page, and older page URLs still
+  work. (#803, #804, #805, #806, #807, #808, #809)
+
+## 0.3.0 — 2026-10-22
 
 0.3.0 is a feature release centered on reading, reviewing, and following work in the terminal.
 Native platforms remain macOS arm64 and Linux glibc 2.28+ x86_64, with a pure wheel for other
@@ -59,7 +79,8 @@ presentation fields, and its typed event reader rejects new event fields. Back u
 upgrading; use a pre-upgrade backup or new sessions if returning to 0.2.4. Keep sessions written by
 0.3.0 for reopening with 0.3.0; do not remove fields from JSONL files to force a downgrade.
 Settings, credentials, and trust formats are unchanged. See the
-[0.3 upgrade guide](book/src/guide/upgrading-to-0.3.md) for commands and compatibility details.
+[0.3 upgrade guide](site/src/content/pages/guide/upgrading-to-0.3.md) for commands and
+compatibility details.
 
 ### Development and documentation
 

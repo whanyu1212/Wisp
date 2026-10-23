@@ -15,7 +15,8 @@ Wisp 0.3 brings a redesigned terminal conversation and sidebar, working-tree dif
 context breakdowns, richer tool activity, and more concise default replies. It keeps Python
 3.12+, native wheels for macOS arm64 and Linux glibc 2.28+ x86_64, and the pure-wheel fallback.
 
-0.3.0 is being prepared; the installation commands below apply after it is published.
+0.3.0 was published on October 22, 2026. The commands below install 0.3.1, the latest 0.3 patch
+release; until 0.3.1 is published, pin `"wisp-ai==0.3.0"` instead. Both read the same sessions.
 For a move from 0.1, also read the [0.2 upgrade guide](upgrading.md).
 
 ## Upgrade
@@ -24,9 +25,9 @@ Exit Wisp and back up `~/.wisp/sessions`, or your configured session directory, 
 Keep that backup separate from the directory the upgraded application will write to.
 
 ```bash
-uv tool install --force --python 3.12 "wisp-ai==0.3.0"
-wisp --version       # wisp 0.3.0
-wisp-tui --version   # wisp-tui 0.3.0, on a native-wheel platform
+uv tool install --force --python 3.12 "wisp-ai==0.3.1"
+wisp --version       # wisp 0.3.1
+wisp-tui --version   # wisp-tui 0.3.1, on a native-wheel platform
 ```
 
 Settings, credentials, and trust decisions need no migration. Source-checkout users must rebuild
