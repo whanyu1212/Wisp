@@ -12,8 +12,9 @@ from tests.agent.harness.support import (
     build_harness,
     message_with_nested_arguments,
 )
-from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages, QueueKind
+from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.events import (
+    QueueKind,
     QueueMessageInjected,
     QueueMode,
     QueueUpdated,

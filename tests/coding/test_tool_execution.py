@@ -16,9 +16,10 @@ import anyio
 import pytest
 
 import wisp.coding.tool_execution as tool_execution
-from wisp.agent.tool_contracts import PreparedToolExecution, ToolResultProcessingError
+from wisp.agent.tool_contracts import PreparedToolExecution
 from wisp.coding.tool_execution import (
     ConfiguredToolExecutor,
+    ToolResultProcessingError,
     _promote_before_text,
     _promote_created,
     _promote_exit_code,

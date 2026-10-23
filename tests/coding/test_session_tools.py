@@ -14,9 +14,9 @@ from tests.coding.session_support import (
     EchoTool,
     ToolLoopProvider,
 )
-from wisp.agent.tool_contracts import ToolResultProcessingError
 from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.coding.session import CodingSession, _tool_result_status
+from wisp.coding.tool_execution import ToolResultProcessingError
 from wisp.events import (
     AgentCompleted,
     ErrorEvent,

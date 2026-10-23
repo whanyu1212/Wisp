@@ -21,7 +21,7 @@ from wisp.agent.harness import (
     AgentHarnessConfig,
     HarnessBoundaryContext,
     QueuedMessages,
-    queue_full_error,
+    queue_full_message,
 )
 from wisp.agent.request_boundary import (
     ContextOverflowFailure,
@@ -408,7 +408,7 @@ class CodingSession:
             str | None: The queue-full error, or None when one more message fits.
         """
         if queued_messages >= DEFAULT_MAX_PENDING_QUEUE_MESSAGES:
-            return queue_full_error(DEFAULT_MAX_PENDING_QUEUE_MESSAGES)
+            return queue_full_message(DEFAULT_MAX_PENDING_QUEUE_MESSAGES)
         return None
 
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:

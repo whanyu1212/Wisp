@@ -36,8 +36,8 @@ from .queues import QueuedMessages, _QueueStore
 type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
 
 
-class SimpleCancellationToken:
-    """Small cooperative cancellation token owned by one harness run."""
+class RunCancellationToken:
+    """Cooperative cancellation token owned by one harness run."""
 
     def __init__(self) -> None:
         self._cancelled = False
@@ -97,7 +97,7 @@ class AgentHarness:
     ) -> None:
         self._config = config
         self._messages = [message.model_copy(deep=True) for message in messages]
-        self._current_token: SimpleCancellationToken | None = None
+        self._current_token: RunCancellationToken | None = None
         self._current_scope: anyio.CancelScope | None = None
         self._running = False
         self._queues = _QueueStore()
@@ -391,7 +391,7 @@ class AgentHarness:
             boundary_preparer=boundary_preparer,
             context_overflow_hook=context_overflow_hook,
         )
-        token = SimpleCancellationToken()
+        token = RunCancellationToken()
         run = _HarnessRunState()
         loop_events: AsyncGenerator[AgentLoopEvent, None] | None = None
         self._running = True
@@ -490,7 +490,7 @@ class AgentHarness:
         self,
         loop_events: AsyncGenerator[AgentLoopEvent, None],
         *,
-        token: SimpleCancellationToken,
+        token: RunCancellationToken,
         run: _HarnessRunState,
     ) -> AgentLoopEvent | _LoopStepAction:
         """Advance the loop once under the cancellation rules for this point in the run.
@@ -512,7 +512,7 @@ class AgentHarness:
 
         Args:
             loop_events (AsyncGenerator[AgentLoopEvent, None]): Owned primary loop stream.
-            token (SimpleCancellationToken): Cancellation state for this invocation.
+            token (RunCancellationToken): Cancellation state for this invocation.
             run (_HarnessRunState): Observed turn state and mutable cancellation phase.
 
         Returns:
@@ -556,11 +556,11 @@ class AgentHarness:
         return event
 
     @staticmethod
-    def _advance_mode(token: SimpleCancellationToken, run: _HarnessRunState) -> _AdvanceMode | None:
+    def _advance_mode(token: RunCancellationToken, run: _HarnessRunState) -> _AdvanceMode | None:
         """Choose how the next loop advance runs.
 
         Args:
-            token (SimpleCancellationToken): Cancellation state for this invocation.
+            token (RunCancellationToken): Cancellation state for this invocation.
             run (_HarnessRunState): Observed turn state and cancellation phase.
 
         Returns:
