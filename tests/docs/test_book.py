@@ -2,7 +2,7 @@ import re
 
 import yaml
 
-from tests.support.paths import DOCS_SRC_DIR
+from tests.support.paths import DOCS_SRC_DIR, REPO_ROOT
 
 # ``{{#include path}}``, ``{{#include path:anchor}}`` or a line range such as ``path:2:10``.
 _INCLUDE = re.compile(r"\{\{#include\s+([^}:\s]+)(?::([^}\s]*))?\s*\}\}")
@@ -28,6 +28,18 @@ def test_frontmatter_covers_every_published_source_and_unique_output() -> None:
         }:
             assert route not in routes, (source, routes.get(route), route)
             routes[route] = source
+
+
+def test_current_contributor_guides_reference_existing_workflows() -> None:
+    workflows = {
+        reference
+        for page in (DOCS_SRC_DIR / "contributing").glob("*.md")
+        for reference in re.findall(
+            r"\.github/workflows/[\w.-]+\.ya?ml", page.read_text(encoding="utf-8")
+        )
+    }
+    assert ".github/workflows/docs.yml" in workflows
+    assert not [path for path in sorted(workflows) if not (REPO_ROOT / path).is_file()]
 
 
 def test_every_include_resolves_to_an_existing_file_and_anchor() -> None:

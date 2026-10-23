@@ -135,7 +135,7 @@ CI changes, dependencies, schemas, and shared fixtures run all checks.
 
 | Change | Checks in the CI workflow |
 | -- | -- |
-| Book, site, or assets only | Documentation and repository contract tests |
+| Documentation site or assets only | Documentation and repository contract tests |
 | README | Contract tests and package build/installed SDK verification |
 | Rust TUI source only | Linux/macOS Rust workspace, Linux TUI handoff, contract tests |
 | Python runtime | Quality, both Python suites, macOS platform smoke, package, TUI handoff |
@@ -161,8 +161,9 @@ python3 -m unittest discover -s tests/scripts -p test_ci_jobs.py
 ```
 
 Astro uses a pinned Playwright container with browsers and OS dependencies already installed, so
-browser checks do not depend on fresh Ubuntu package downloads. Update the image and its version
-check in `.github/workflows/astro.yml` with `@playwright/test` in `site/package-lock.json`.
+browser checks do not depend on fresh Ubuntu package downloads. Update both container images and
+the build job's version check in `.github/workflows/docs.yml` with `@playwright/test` in
+`site/package-lock.json`.
 
 The reusable `Rust TUI wheel candidates` workflow builds `wisp-ai` platform wheels for manylinux
 x86_64 and macOS arm64. It compares Python package files with the current `uv_build` wheel, verifies
@@ -171,7 +172,7 @@ exercises an installed fake-provider Rust TUI prompt, the managed-output extensi
 replacement with an actionable missing-binary error, corruption, offline reinstall, and uninstall;
 it uploads checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
-It runs on runtime pushes to `main`, skipping changes confined to book/site content, assets, agent
+It runs on runtime pushes to `main`, skipping changes confined to site content, assets, agent
 instructions, and the changelog. Pull requests build candidates for native crates, shared build and
 protocol inputs, packaging files, wheel scripts/tests, and Python modules that load a native binary
 (the TUI launcher and the search and shell tools). TUI-only PRs use workspace and handoff checks;
