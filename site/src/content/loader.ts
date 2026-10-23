@@ -6,6 +6,7 @@ import { changelog, loadMetadata } from "./metadata.ts";
 import { baselinePath, bookRoot, metadataPath, repoRoot } from "./paths.ts";
 import { expandIncludes } from "./includes.ts";
 import { finishHtml, type LegacyPage } from "./render.ts";
+import { prepareTui, splitTui, tuiChildren, tuiSource } from "./tui.ts";
 
 export function bookLoader(archive = false): Loader {
   return {
@@ -23,21 +24,36 @@ export function bookLoader(archive = false): Loader {
         )) {
           if (page.checkpoint && !existsSync(join(repoRoot, page.checkpoint)))
             throw new Error(`Missing checkpoint: ${page.checkpoint}`);
+          const isTui =
+            page.source === tuiSource ||
+            tuiChildren.some((child) => child.source === page.source);
+          const source = isTui ? tuiSource : page.source;
           const sourcePath =
             page.source === changelog.source
               ? join(repoRoot, "CHANGELOG.md")
-              : join(bookRoot, page.source);
+              : join(bookRoot, source);
           const body = expandIncludes(
             readFileSync(sourcePath, "utf8"),
             sourcePath,
           );
-          const rendered = await context.renderMarkdown(body, {
-            fileURL: pathToFileURL(sourcePath),
-          });
-          const legacy = baseline.pages.find(
-            (p) => p.source === `book/src/${page.source}`,
+          const rendered = await context.renderMarkdown(
+            isTui ? prepareTui(body) : body,
+            {
+              fileURL: pathToFileURL(sourcePath),
+            },
           );
-          const finished = finishHtml(rendered.html, page, pages, legacy);
+          const legacy = baseline.pages.find(
+            (p) => p.source === `book/src/${source}`,
+          );
+          const original = finishHtml(
+            rendered.html,
+            { ...page, source },
+            pages,
+            legacy,
+          );
+          const finished = isTui
+            ? splitTui(original.html)(page.source)
+            : original;
           const data = await context.parseData({ id: page.source, data: page });
           entries.push({
             id: page.source,
