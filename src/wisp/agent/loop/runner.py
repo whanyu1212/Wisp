@@ -291,12 +291,9 @@ async def run_agent_loop(
         turn=config.turn_offset,
         tool_iterations=config.tool_iteration_offset,
     )
-    # Bind `turn` before the loop so the outer `except` below can always
-    # reference it, even if an exception (e.g. a raising CancellationToken)
-    # fires before the first `state.begin_turn()` call. `lifecycle` -- not
-    # `turn > 0` -- knows whether this invocation has a turn in flight, since a
-    # nonzero `turn_offset` makes `turn > 0` true before any `TurnStarted`.
-    turn = config.turn_offset
+    # `lifecycle` -- not `state.turn > 0` -- knows whether this invocation has a
+    # turn in flight, since a nonzero `turn_offset` makes the count positive
+    # before any `TurnStarted`.
     lifecycle = TurnLifecycle()
     consumer_closed = False
     response_cancelled = False
@@ -373,7 +370,7 @@ async def run_agent_loop(
                     recovery = await at_context_overflow(
                         config,
                         state.continuation,
-                        turn=state.turn,
+                        turn=turn,
                         tool_iterations=state.tool_iterations,
                         messages=messages,
                         context_budget=context_budget,
@@ -398,11 +395,7 @@ async def run_agent_loop(
             response = completed.response
             tool_calls = response.tool_calls
             projection = project_completed_response(
-                config,
-                completed,
-                turn=turn,
-                request_messages=request_messages,
-                selected_model=config.selected_model,
+                config, completed, turn=turn, request_messages=request_messages
             )
             yield projection.event
             state.continuation.record_response(
@@ -449,7 +442,7 @@ async def run_agent_loop(
                 messages, stop = await at_request_boundary(
                     config,
                     state.continuation,
-                    turn=state.turn,
+                    turn=turn,
                     tool_iterations=state.tool_iterations,
                     messages=messages,
                     had_tool_calls=had_tool_calls,
@@ -466,7 +459,7 @@ async def run_agent_loop(
         unfinished = response_stream.unfinished if response_stream is not None else None
         if unfinished is not None:
             yield MessageCompleted(
-                turn=turn,
+                turn=state.turn,
                 content=unfinished.content,
                 finish_reason="error",
                 response_id=unfinished.started_response_id,
@@ -475,7 +468,7 @@ async def run_agent_loop(
         # overflow raised at the request boundary, after the turn completed, sent no
         # request; it publishes only the error below.
         if isinstance(exc, ContextOverflowError) and lifecycle.open_turn is not None:
-            yield _context_overflow_event(config, turn=turn, message=str(exc))
+            yield _context_overflow_event(config, turn=state.turn, message=str(exc))
         for event in lifecycle.terminal_events(str(exc), outcome="failed"):
             yield event
         raise

@@ -331,7 +331,7 @@ def test_lifecycle_records_text_but_not_thinking() -> None:
     lifecycle = ProviderResponseLifecycle()
     lifecycle.start(ProviderResponseStarted(model="test"))
     lifecycle.add_text("hello")
-    lifecycle.add_thinking("secret")
+    lifecycle.accept_thinking()
     lifecycle.complete(ProviderResponseCompleted(content=""))
     completed = lifecycle.finish()
     assert completed.content == "hello"

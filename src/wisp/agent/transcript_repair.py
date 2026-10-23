@@ -23,6 +23,8 @@ class TranscriptRepairPlan:
 
 @dataclass(frozen=True, slots=True)
 class MissingToolResult:
+    """Placeholder for a call that has no matching result in the transcript."""
+
     tool_call: ToolCallSnapshot
 
 
@@ -38,6 +40,15 @@ def order_tool_result_items[TranscriptItem](
     ``MissingToolResult`` markers (it filters them out, whereas
     ``plan_interrupted_tool_repairs`` below synthesizes an error result for
     each one). Keep both call sites in mind when changing this function.
+
+    Args:
+        items (Sequence[TranscriptItem]): Transcript rows in their recorded order.
+        message_of (Callable[[TranscriptItem], Message]): Extracts each row's message.
+
+    Returns:
+        tuple[TranscriptItem | MissingToolResult, ...]: Rows with each assistant call
+            group followed by its results in call order, a marker for each missing
+            result, and unmatched tool rows left where they were.
     """
 
     source = tuple(items)
@@ -85,6 +96,13 @@ def plan_interrupted_tool_repairs(messages: Sequence[Message]) -> TranscriptRepa
     Persisted sessions remain append-only, so an older repair may physically appear
     after later messages. The returned logical transcript moves each matched result
     next to its assistant call without rewriting the durable audit log.
+
+    Args:
+        messages (Sequence[Message]): Transcript to repair.
+
+    Returns:
+        TranscriptRepairPlan: The reordered transcript, plus the synthesized interrupted
+            results the caller must persist.
     """
 
     repaired: list[Message] = []

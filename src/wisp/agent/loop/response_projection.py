@@ -143,7 +143,6 @@ def project_completed_response(
     *,
     turn: int,
     request_messages: Sequence[Message],
-    selected_model: str | None,
 ) -> CompletedResponseProjection:
     """Prepare public completion metadata and isolated continuation tool snapshots.
 
@@ -152,7 +151,6 @@ def project_completed_response(
         completed (CompletedProviderResponse): Validated successful response.
         turn (int): Turn number attached to the public completion event.
         request_messages (Sequence[Message]): Exact portable context used for observation.
-        selected_model (str | None): Requested model or provider default for the observation.
 
     Returns:
         CompletedResponseProjection: Public event and deep-copied continuation tool
@@ -162,8 +160,7 @@ def project_completed_response(
         Preserve tool arguments across a consumer-controlled yield boundary::
 
             projection = project_completed_response(
-                config, completed, turn=turn,
-                request_messages=request_messages, selected_model=selected_model,
+                config, completed, turn=turn, request_messages=request_messages
             )
             yield projection.event
             continuation = projection.to_continuation_message()
@@ -193,7 +190,7 @@ def project_completed_response(
             request_messages,
             config.tools,
             provider=config.provider.name,
-            model=selected_model,
+            model=config.selected_model,
             input_tokens=(
                 response.usage.context_input_tokens
                 if response.usage is not None and response.usage.context_input_tokens is not None

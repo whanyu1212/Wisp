@@ -149,6 +149,16 @@ class _PreparedToolBatch:
             async for event in execution_events:
                 yield event
 
+    def _cancellation_requested(self) -> bool:
+        """Check the run's token until a request to stop this batch is remembered.
+
+        Returns:
+            bool: True once the batch is cancelled; the token is not checked again.
+        """
+        if not self.cancelled and self.is_cancelled():
+            self.cancelled = True
+        return self.cancelled
+
     async def _prepare_calls(self) -> AsyncIterator[ToolBatchEvent]:
         """Prepare every requested call before any deferred side effect starts.
 
@@ -158,13 +168,11 @@ class _PreparedToolBatch:
 
         for tool_call in self.tool_calls:
             yield self.settlement.request(tool_call)
-            if self.is_cancelled():
-                self.cancelled = True
+            if self._cancellation_requested():
                 return
 
             yield tool_execution_started(tool_call)
-            if self.is_cancelled():
-                self.cancelled = True
+            if self._cancellation_requested():
                 return
 
             lifecycle = self.settlement.begin_lifecycle(tool_call)
@@ -180,8 +188,7 @@ class _PreparedToolBatch:
                                 )
                             lifecycle.accept_prepared(raw_event)
                             prepared = raw_event
-                            if self.is_cancelled():
-                                self.cancelled = True
+                            if self._cancellation_requested():
                                 break
                             continue
                         if prepared is not None:
@@ -196,8 +203,7 @@ class _PreparedToolBatch:
                                 f"during preparation for {tool_call.call_id}"
                             )
                         yield event.model_copy(deep=True)
-                        if self.is_cancelled():
-                            self.cancelled = True
+                        if self._cancellation_requested():
                             break
                 if cancellation.absorbed:
                     self.cancelled = True
@@ -225,14 +231,15 @@ class _PreparedToolBatch:
         batch_is_parallel = all(call.execution.parallel_safe for call in self._prepared_calls)
         chunk_size = _MAX_PARALLEL_TOOL_EXECUTIONS if batch_is_parallel else 1
         for chunk_start in range(0, len(self._prepared_calls), chunk_size):
-            if self.is_cancelled():
-                self.cancelled = True
+            if self._cancellation_requested():
                 return
             chunk = self._prepared_calls[chunk_start : chunk_start + chunk_size]
             outcomes, chunk_cancelled = await _run_prepared_chunk(
                 chunk, is_cancelled=self.is_cancelled
             )
-            self.cancelled = self.cancelled or chunk_cancelled or self.is_cancelled()
+            if chunk_cancelled:
+                self.cancelled = True
+            self._cancellation_requested()
             fatal_error: Exception | None = None
             for call, outcome in zip(chunk, outcomes, strict=True):
                 if outcome.error is not None:
@@ -255,7 +262,7 @@ class _PreparedToolBatch:
                     continue
                 yield terminal
                 yield result
-                self.cancelled = self.cancelled or self.is_cancelled()
+                self._cancellation_requested()
             if self.cancelled:
                 # Cancellation takes precedence over a sibling's stored runner error.
                 return

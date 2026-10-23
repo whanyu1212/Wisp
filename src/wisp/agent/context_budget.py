@@ -14,15 +14,22 @@ from wisp.events import (
     ContextObservation,
 )
 from wisp.messages import Message
-from wisp.providers.base import ToolCallResult, ToolSpec
+from wisp.providers.base import ToolSpec
 
 
 def estimate_context(
     messages: Sequence[Message],
     tools: Sequence[ToolSpec] = (),
-    tool_results: Sequence[ToolCallResult] = (),
 ) -> ContextEstimate:
-    """Estimate normalized request context with a stable UTF-8-bytes-per-token heuristic."""
+    """Estimate normalized request context with a stable UTF-8-bytes-per-token heuristic.
+
+    Args:
+        messages (Sequence[Message]): Request history; system messages are counted apart.
+        tools (Sequence[ToolSpec]): Tool schemas advertised with the request.
+
+    Returns:
+        ContextEstimate: System, message, and tool-schema tokens and their total.
+    """
 
     system_payloads = [
         _message_payload(message) for message in messages if message.role == "system"
@@ -30,14 +37,6 @@ def estimate_context(
     message_payloads = [
         _message_payload(message) for message in messages if message.role != "system"
     ]
-    message_payloads.extend(
-        {
-            "call_id": result.call_id,
-            "output": result.output,
-            "is_error": result.is_error,
-        }
-        for result in tool_results
-    )
     tool_payloads = [_tool_payload(tool) for tool in tools]
     system_tokens = _payload_tokens(system_payloads)
     message_tokens = _payload_tokens(message_payloads)
@@ -60,7 +59,20 @@ def observe_context(
     input_tokens: int,
     prompt_cache_key: str | None = None,
 ) -> ContextObservation:
-    """Capture provider-reported input usage for one exact request context."""
+    """Capture provider-reported input usage for one exact request context.
+
+    Args:
+        messages (Sequence[Message]): Exact history the request sent.
+        tools (Sequence[ToolSpec]): Tool schemas the request advertised.
+        provider (str): Provider that reported the usage.
+        model (str | None): Model the usage applies to.
+        input_tokens (int): Provider-reported input tokens for the request.
+        prompt_cache_key (str | None): Cache key the request carried, if any.
+
+    Returns:
+        ContextObservation: Usage keyed by a fingerprint of the messages and tools, so a
+            later request can reuse it only while that prefix is unchanged.
+    """
 
     return ContextObservation(
         provider=provider,
@@ -77,7 +89,17 @@ def trailing_context_estimate(
     tools: Sequence[ToolSpec],
     observation: ContextObservation,
 ) -> ContextEstimate | None:
-    """Estimate context appended after a still-valid observed request prefix."""
+    """Estimate context appended after a still-valid observed request prefix.
+
+    Args:
+        messages (Sequence[Message]): Current request history.
+        tools (Sequence[ToolSpec]): Current tool schemas.
+        observation (ContextObservation): Usage observed for an earlier request.
+
+    Returns:
+        ContextEstimate | None: Estimate for messages after the observed prefix, or None
+            when the history is shorter than that prefix or its fingerprint changed.
+    """
 
     if observation.message_count > len(messages):
         return None
@@ -97,7 +119,24 @@ def estimate_context_budget(
     provider: str | None = None,
     model: str | None = None,
 ) -> ContextBudget:
-    """Build a budget, anchoring a valid prefix to provider-reported input usage."""
+    """Build a budget, anchoring a valid prefix to provider-reported input usage.
+
+    Args:
+        messages (Sequence[Message]): Request history to budget.
+        tools (Sequence[ToolSpec]): Tool schemas advertised with the request.
+        context_window (int | None): Model context capacity, when known.
+        reserve_tokens (int): Tokens held back from the window.
+        observation (ContextObservation | None): Latest provider-observed usage, if any.
+        provider (str | None): Provider for the next request.
+        model (str | None): Model for the next request.
+
+    Returns:
+        ContextBudget: Observed usage plus a trailing estimate when the observation
+            matches this provider, model, and history prefix; otherwise a full estimate.
+
+    Raises:
+        ValueError: reserve_tokens is negative.
+    """
 
     estimate = estimate_context(messages, tools)
     trailing = (
@@ -126,7 +165,25 @@ def build_context_budget(
     observed_is_current: bool = False,
     trailing_estimated_tokens: int | None = None,
 ) -> ContextBudget:
-    """Combine an estimate with optional model-window and provider observations."""
+    """Combine an estimate with optional model-window and provider observations.
+
+    Args:
+        estimate (ContextEstimate): Heuristic estimate for the whole request.
+        context_window (int | None): Model context capacity; None omits window fields.
+        reserve_tokens (int): Tokens held back from the window.
+        observed_tokens (int | None): Provider-reported input tokens, if any.
+        observed_is_current (bool): Whether the observation still covers this request's
+            prefix.
+        trailing_estimated_tokens (int | None): Estimate for messages after that prefix.
+
+    Returns:
+        ContextBudget: Effective tokens from the current observation plus its trailing
+            estimate, or from the full estimate, with remaining-window fields when the
+            window is known.
+
+    Raises:
+        ValueError: reserve_tokens is negative.
+    """
 
     if reserve_tokens < 0:
         raise ValueError("reserve_tokens must be non-negative")
@@ -170,7 +227,15 @@ def context_fingerprint(
     messages: Sequence[Message],
     tools: Sequence[ToolSpec] = (),
 ) -> str:
-    """Return a stable identity for the provider-visible context and tool schemas."""
+    """Return a stable identity for the provider-visible context and tool schemas.
+
+    Args:
+        messages (Sequence[Message]): Messages whose provider-visible fields are hashed.
+        tools (Sequence[ToolSpec]): Tool schemas included in the identity.
+
+    Returns:
+        str: SHA-256 hex digest of the canonical JSON payload.
+    """
 
     payload = {
         "messages": [_message_payload(message) for message in messages],
