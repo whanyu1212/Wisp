@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import get_args
 
 from wisp.agent.loop import AgentLoopConfig, CancellationToken, UsageCostEstimator
+from wisp.agent.loop.config import (
+    DEFAULT_CONTEXT_PRESSURE_THRESHOLD,
+    DEFAULT_CONTEXT_RESERVE_TOKENS,
+)
 from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
 from wisp.agent.tool_contracts import ToolExecutor
-from wisp.agent.validation import validate_agent_runtime_limits
+from wisp.agent.validation import validate_agent_runtime_limits, validate_non_negative_integer
 from wisp.events import QueueMode
 from wisp.providers.base import Provider, ToolSpec
 
@@ -26,8 +31,8 @@ class AgentHarnessConfig:
     max_tool_iterations: int | None = None
     effort: str | None = None
     context_window: int | None = None
-    context_reserve_tokens: int = 16_384
-    context_pressure_threshold: float = 0.8
+    context_reserve_tokens: int = DEFAULT_CONTEXT_RESERVE_TOKENS
+    context_pressure_threshold: float = DEFAULT_CONTEXT_PRESSURE_THRESHOLD
     cost_estimator: UsageCostEstimator | None = None
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
@@ -46,14 +51,14 @@ class AgentHarnessConfig:
         )
         _require_queue_mode(self.steering_mode)
         _require_queue_mode(self.follow_up_mode)
-        if type(self.max_pending_queue_messages) is not int or self.max_pending_queue_messages < 0:
-            raise ValueError("max_pending_queue_messages must be a non-negative integer")
-        if type(self.max_pending_queue_bytes) is not int or self.max_pending_queue_bytes < 0:
-            raise ValueError("max_pending_queue_bytes must be a non-negative integer")
+        validate_non_negative_integer(
+            self.max_pending_queue_messages, field="max_pending_queue_messages"
+        )
+        validate_non_negative_integer(self.max_pending_queue_bytes, field="max_pending_queue_bytes")
 
 
 def _require_queue_mode(mode: object) -> None:
-    if not isinstance(mode, str) or mode not in {"one_at_a_time", "all"}:
+    if not isinstance(mode, str) or mode not in get_args(QueueMode):
         raise ValueError(f"Unsupported queue mode: {mode!r}")
 
 

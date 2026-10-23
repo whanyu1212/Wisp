@@ -9,7 +9,7 @@ from typing import Literal, cast
 import anyio
 import pytest
 
-import wisp.agent.harness.runner as harness_module
+import wisp.agent.harness.boundaries as boundaries_module
 from tests.support.agent_runtime import (
     assert_tool_result_pairing,
     assert_turn_invariants,
@@ -223,7 +223,7 @@ def test_history_preparation_failure_releases_run(monkeypatch: pytest.MonkeyPatc
 
     async def run() -> None:
         with monkeypatch.context() as patch:
-            patch.setattr(harness_module, "prepare_provider_history", fail)
+            patch.setattr(boundaries_module, "prepare_provider_history", fail)
             with pytest.raises(RuntimeError, match="history preparation failed"):
                 await anext(harness.prompt("accepted"))
         assert not harness.is_running

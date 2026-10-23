@@ -76,6 +76,20 @@ class _HarnessBoundaryCoordinator:
     armed_boundary: _ArmedRequestBoundary | None = None
     pending_transcript_replacement: tuple[Message, ...] | None = None
 
+    def provider_history(self) -> tuple[Message, ...]:
+        """Normalize the current transcript for a fresh provider request.
+
+        Returns:
+            tuple[Message, ...]: Provider-ready history. Rows before `active_from` are
+                durable; only the live tail after it may keep native replay data.
+        """
+        return prepare_provider_history(
+            self.get_messages(),
+            provider=self.provider,
+            effort=self.effort,
+            active_from=self.active_from,
+        )
+
     def arm(
         self,
         *,
@@ -130,14 +144,7 @@ class _HarnessBoundaryCoordinator:
             # Cursor-less structured history cannot be flattened into
             # extras. Replace from the complete normalized transcript,
             # retaining assistant/tool pairs atomically.
-            return RequestBoundaryDecision(
-                messages=prepare_provider_history(
-                    self.get_messages(),
-                    provider=self.provider,
-                    effort=self.effort,
-                    active_from=self.active_from,
-                )
-            )
+            return RequestBoundaryDecision(messages=self.provider_history())
         return RequestBoundaryDecision(stop=boundary.stop_by_default)
 
     async def recover_context_overflow(

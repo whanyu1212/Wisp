@@ -8,6 +8,7 @@ from typing import cast
 import anyio
 import pytest
 
+import wisp.agent.harness.boundaries as boundaries_module
 import wisp.agent.harness.runner as harness_module
 from tests.coding.session_support import (
     CapturingProvider,
@@ -109,7 +110,7 @@ def test_harness_failure_releases_state_and_retains_follow_up(
         observed: list[WispEvent] = []
         with monkeypatch.context() as patch:
             if phase == "startup":
-                patch.setattr(harness_module, "prepare_provider_history", fail_preparation)
+                patch.setattr(boundaries_module, "prepare_provider_history", fail_preparation)
             else:
                 patch.setattr(harness_module, "run_agent_loop", fail_cleanup)
             with pytest.raises(RuntimeError, match=f"{phase} failed"):
