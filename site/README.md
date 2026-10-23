@@ -132,8 +132,13 @@ remains `run_agent_loop`.
 
 HY-314 provides the shared responsive layouts, navigation, light/dark/system themes,
 focus handling, and built-site browser coverage; HY-315 adds Pagefind static search.
-HY-269/HY-270/HY-274/HY-276/HY-277 own final navigation/content restructuring, the
-changelog, TUI splits, SDK prose and real homepage imagery. The foundation preserves
+HY-269 aligns homepage section destinations with the shared user-first navigation:
+Using Wisp → Reference → Learn → Inside Wisp → Contributing. Homepage cards use the
+first three groups from that same model; the primary call to action still goes
+straight to Quickstart. Built-site tests check desktop/mobile section parity and
+every listed page's sidebar and previous/next destinations.
+HY-270/HY-274/HY-276/HY-277 own the changelog, TUI splits, SDK prose and real homepage
+imagery. The foundation preserves
 the complete homepage article below the new editorial opening; final content editing
 will remove repetition in HY-277.
 
