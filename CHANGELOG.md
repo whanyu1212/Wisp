@@ -30,6 +30,9 @@ other's sessions; the backend and frontend must still come from the same release
   separate from the API reference. The `/Wisp/` base path, print page, and older page URLs still
   work. (#803, #804, #805, #806, #807, #808, #809)
 
+<!-- Keeps links to the pre-release "0.3.0 — Unreleased" heading working. -->
+<a id="030--unreleased"></a>
+
 ## 0.3.0 — 2026-10-22
 
 0.3.0 is a feature release centered on reading, reviewing, and following work in the terminal.

@@ -39,6 +39,15 @@ test("homepage release notes open the root changelog with working upgrade links"
   await expect(page).toHaveURL(/\/Wisp\/guide\/upgrading-to-0\.3.html$/);
 });
 
+test("dated changelog heading keeps its old anchor", async ({ page }) => {
+  await page.goto("changelog.html#030--unreleased");
+  const anchor = page.locator('article [id="030--unreleased"]');
+  await expect(anchor).toHaveCount(1);
+  await expect(anchor.locator("xpath=following::h2[1]")).toHaveText(
+    "0.3.0 — 2026-10-22",
+  );
+});
+
 test("contributing exposes every historical release through a non-indexed archive", async ({
   page,
 }) => {
