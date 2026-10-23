@@ -3,7 +3,8 @@
 This implements the HY-313 foundation, HY-314 shared editorial layouts, and HY-315
 static search. It builds a static site under `/Wisp/` while the production workflow
 continues to deploy mdBook.
-Markdown stays authoritative in `../book/src/`; tutorial code stays in
+Markdown stays authoritative in `../book/src/`, with release notes loaded directly
+from the root `../CHANGELOG.md`; tutorial code stays in
 `../examples/crafting_agents/`. No content copies or new frontend framework are needed.
 
 ## Develop and verify
@@ -45,7 +46,7 @@ compatibility decision. The old TUI anchors continue pointing to the intact TUI
 page until HY-274 splits it.
 
 `.github/workflows/astro.yml` runs these checks on pull requests and main-branch
-changes to the site, Markdown sources, migration baseline, tutorial examples, and
+changes to the site, root changelog, Markdown sources, migration baseline, tutorial examples, and
 shared assets, including built-site Chromium checks. It does not deploy; the separate
 docs workflow still publishes mdBook.
 
@@ -118,6 +119,17 @@ mdbook build book
 - `src/content/check-output.ts` validates output, including the compatibility pages
   for the release records and the SDK audit. Those records still read their original
   source files; they are hidden from normal navigation and marked `noindex`.
+- HY-270 loads the root `CHANGELOG.md` into the `pages` collection with adapter-supplied
+  metadata (`changelog.md` is an identity, not a copied source file). The loader watches
+  root changelog edits, and the renderer resolves both current `book/src/` links and
+  historical `site/` links to current routes. The footer and homepage release-notes
+  link lead to `/Wisp/changelog.html`; its edit link targets the root source.
+- `/Wisp/maintainers/releases/` lists every release record from `maintainerRecords`.
+  Contributing links to this archive, which is excluded from navigation and search.
+  Canonical archive pages and old contributing URLs preserve historical headings;
+  redirects retain fragments and provide links without JavaScript. Per HY-312's
+  migration plan, physical source relocation waits for HY-316 so mdBook remains
+  deployable from the same files. No records or ticket history are deleted.
 - `tests/content.test.ts` exercises invalid metadata, include failures, actual Astro
   rendering, source-link resolution and compatibility-validation failures.
 
@@ -137,8 +149,7 @@ Using Wisp → Reference → Learn → Inside Wisp → Contributing. Homepage ca
 first three groups from that same model; the primary call to action still goes
 straight to Quickstart. Built-site tests check desktop/mobile section parity and
 every listed page's sidebar and previous/next destinations.
-HY-270/HY-274/HY-276/HY-277 own the changelog, TUI splits, SDK prose and real homepage
-imagery. The foundation preserves
+HY-274/HY-276/HY-277 own TUI splits, SDK prose and real homepage imagery. The foundation preserves
 the complete homepage article below the new editorial opening; final content editing
 will remove repetition in HY-277.
 

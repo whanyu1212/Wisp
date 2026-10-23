@@ -101,6 +101,19 @@ const introductions: Record<string, string> = {
   ) : (
     <article>
       <Content />
+      {entry.data.source === "contributing/index.md" && (
+        <section aria-labelledby="release-records">
+          <h2 id="release-records">Release records</h2>
+          <p>
+            Read the <a href={href("changelog.html")}>Changelog</a> for
+            user-facing changes. Maintainers can browse the{" "}
+            <a href={href("maintainers/releases/index.html")}>
+              release record archive
+            </a>
+            for historical decisions, verification evidence, and checklists.
+          </p>
+        </section>
+      )}
     </article>
   )}
 </Document>

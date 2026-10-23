@@ -1,0 +1,46 @@
+---
+import { getCollection } from "astro:content";
+import Document from "../../../layouts/Document.astro";
+import { href } from "../../../content/paths";
+import type { PageMetadata } from "../../../content/metadata";
+
+// Keep every record discoverable without putting historical checklists in the
+// product navigation or search. Source files stay in book/ until HY-316.
+const records = (await getCollection("maintainerRecords"))
+  .map((entry) => entry.data)
+  .sort((a, b) => a.order - b.order);
+const page: PageMetadata = {
+  source: "maintainers/releases/index.md",
+  route: "maintainers/releases/index.html",
+  title: "Release record archive",
+  description:
+    "Historical Wisp release decisions, verification evidence, and maintainer checklists.",
+  section: "maintainers",
+  order: 0,
+  layout: "archive",
+  listed: false,
+  searchable: false,
+};
+---
+
+<Document
+  page={page}
+  editSource="site/src/pages/maintainers/releases/index.astro"
+>
+  <article>
+    <h1>Release record archive</h1>
+    <p>
+      These are historical maintainer records, not current installation
+      instructions. They preserve release decisions, checks, and ticket history.
+      For user-facing changes, read the{" "}
+      <a href={href("changelog.html")}>Changelog</a>.
+    </p>
+    <ul>
+      {records.map((record) => (
+        <li>
+          <a href={href(record.route)}>{record.title}</a>
+        </li>
+      ))}
+    </ul>
+  </article>
+</Document>

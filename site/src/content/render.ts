@@ -1,6 +1,6 @@
 import { load } from "cheerio";
 import { posix } from "node:path";
-import type { PageMetadata } from "./metadata.ts";
+import { changelog, type PageMetadata } from "./metadata.ts";
 import { base, href } from "./paths.ts";
 
 export interface LegacyHeading {
@@ -29,6 +29,14 @@ export function resolveLink(
   pages: PageMetadata[],
 ): string {
   if (!url || url.startsWith("#")) return url;
+  const changelogUrl =
+    "https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md";
+  if (url === changelogUrl || url.startsWith(`${changelogUrl}#`))
+    return href(changelog.route) + url.slice(changelogUrl.length);
+  // The changelog is authored at the repository root. Older releases retain
+  // links using the former site/ source directory; both resolve to current pages.
+  if (source === changelog.source)
+    url = url.replace(/^(?:\.\/)?(?:book\/src\/|site\/)/, "");
   const publicPrefix = "https://whanyu1212.github.io/Wisp/";
   if (url.startsWith(publicPrefix)) url = base + url.slice(publicPrefix.length);
   if (/^(?:[a-z][\w+.-]*:|\/\/)/i.test(url)) return url;
