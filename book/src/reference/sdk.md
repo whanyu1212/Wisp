@@ -1,11 +1,21 @@
 # Python SDK reference
 
-The Python SDK is part of the `wisp-ai` distribution and carries a `py.typed` marker. It requires
-Python 3.12+. The package-boundary evaluation in
-[#409](https://github.com/whanyu1212/Wisp/issues/409) has not produced a separate client or SDK
-distribution.
+Look up supported Python namespaces, controller signatures, option defaults, result events, and
+lifecycle contracts. Wisp's public Python surface carries a `py.typed` marker.
 
-For lifecycle guidance and complete examples, start with the [Python SDK guide](../guide/sdk).
+For installation and task-oriented, runnable examples, start with the
+[Python SDK guide](../guide/sdk). This page describes the current API, not the historical
+[SDK capability audit](./sdk-capability-audit).
+
+| Look up | Contract |
+|---|---|
+| Startup and tool/session options | [`InProcessWisp`](#inprocesswisp) and [`InProcessOptions`](#inprocessoptions) |
+| Command submission and result correlation | [`RpcController`](#rpccontroller) and [event groups](#event-groups) |
+| Steering, cancellation, and guarded queue edits | [Live queues and cancellation](#live-queues-and-cancellation) |
+| Trust and tool decisions | [Trust and approval](#trust-and-approval) |
+| Session selection and bounded transcript reads | [Persisted sessions](#persisted-sessions) |
+| Process isolation and cleanup | [`JsonlSubprocessRpcTransport`](#jsonlsubprocessrpctransport) |
+| Event decoding and runtime configuration | [`wisp.events`](#wispevents) and [`wisp.config`](#wispconfig) |
 
 ## Supported namespaces
 

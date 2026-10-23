@@ -35,7 +35,6 @@
 - [Overview](reference/index.md)
 - [CLI](reference/cli.md)
 - [Python SDK](reference/sdk.md)
-- [SDK capability audit](reference/sdk-capability-audit.md)
 - [Project file discovery](reference/project-files.md)
 - [Compatibility and versioning](reference/compatibility.md)
 - [Configuration](reference/configuration.md)
@@ -46,6 +45,7 @@
 - [Architecture overview](architecture/index.md)
 - [Agent runtime](architecture/agent-runtime.md)
 - [Rust terminal frontend boundary](architecture/rust-tui-boundary.md)
+- [SDK capability audit](reference/sdk-capability-audit.md)
 
 # Contributing
 
