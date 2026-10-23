@@ -7,7 +7,7 @@ import subprocess
 from collections import defaultdict
 from pathlib import PurePosixPath
 
-from tests.support.paths import BOOK_SRC_DIR, REPO_ROOT
+from tests.support.paths import DOCS_SRC_DIR, REPO_ROOT
 
 _IMAGE_SUFFIXES = frozenset(
     {".avif", ".bmp", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
@@ -49,4 +49,4 @@ def test_readme_and_book_load_the_published_banner_path() -> None:
     assert (REPO_ROOT / _PUBLISHED_BANNER).is_file()
     assert _PUBLISHED_BANNER in _tracked_images()
     assert _BANNER_URL in (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert _BANNER_URL in (BOOK_SRC_DIR / "index.md").read_text(encoding="utf-8")
+    assert _BANNER_URL in (DOCS_SRC_DIR / "index.md").read_text(encoding="utf-8")

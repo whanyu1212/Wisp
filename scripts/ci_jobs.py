@@ -49,7 +49,7 @@ def select_groups(paths: list[str]) -> set[str]:
         elif path == "README.md":
             # The README is also distribution metadata.
             selected.update({"contracts", "package"})
-        elif path.startswith(("book/", "site/", "assets/")) or path in {
+        elif path.startswith(("site/", "assets/")) or path in {
             "AGENTS.md",
             "CHANGELOG.md",
             "CONTRIBUTING.md",

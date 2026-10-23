@@ -14,7 +14,10 @@ export async function getStaticPaths() {
     )
     .flatMap((entry) => {
       const canonical = entry.data.route.replace(/\.html$/, "");
-      const old = entry.data.source.replace(/\.md$/, "");
+      const old = (entry.data.legacySource ?? entry.data.source).replace(
+        /\.md$/,
+        "",
+      );
       const path = (slug: string, compatibility: boolean) => ({
         params: { slug },
         props: { entry, compatibility },

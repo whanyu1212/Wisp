@@ -31,12 +31,57 @@ def test_required_status_accounts_for_every_workflow_job() -> None:
 
 
 def test_playwright_container_matches_locked_browser_version() -> None:
-    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/astro.yml").read_text())
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/docs.yml").read_text())
     lock = json.loads((REPO_ROOT / "site/package-lock.json").read_text())
     version = lock["packages"]["node_modules/@playwright/test"]["version"]
-    job = workflow["jobs"]["check"]
+    job = workflow["jobs"]["build"]
+    assert workflow["jobs"]["smoke"]["container"]["image"] == (
+        f"mcr.microsoft.com/playwright:v{version}-noble"
+    )
     assert job["container"]["image"] == f"mcr.microsoft.com/playwright:v{version}-noble"
     check = next(
         step for step in job["steps"] if step.get("name") == "Verify Playwright image version"
     )
     assert f'!== "{version}"' in check["run"]
+
+
+def test_docs_has_one_verified_serialized_deployment_path() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/docs.yml").read_text())
+    assert not (REPO_ROOT / ".github/workflows/astro.yml").exists()
+    assert not (REPO_ROOT / "book/book.toml").exists()
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "deploy", "smoke"}
+    assert jobs["deploy"]["needs"] == "build"
+    assert jobs["deploy"]["if"] == "github.event_name != 'pull_request'"
+    assert jobs["smoke"]["needs"] == "deploy"
+    assert (
+        workflow["concurrency"]["cancel-in-progress"]
+        == "${{ github.event_name == 'pull_request' }}"
+    )
+    assert "|| 'pages'" in workflow["concurrency"]["group"]
+    steps = jobs["build"]["steps"]
+    artifact = next(
+        step for step in steps if step.get("uses") == "actions/upload-pages-artifact@v3"
+    )
+    assert artifact["with"]["path"] == "site/dist"
+    assert artifact["if"] == "github.event_name != 'pull_request'"
+    commands = "\n".join(step.get("run", "") for step in steps)
+    assert "npm run build" in commands
+    assert "npm run test:browser" in commands
+    assert "pytest tests/docs tests/repository/test_images.py" in commands
+    contracts = next(
+        step
+        for step in steps
+        if step.get("name") == "Verify documentation contracts and SDK examples"
+    )
+    # HOME isolation must not lose the container checkout's narrowly scoped Git trust.
+    assert contracts["env"] == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "safe.directory",
+        "GIT_CONFIG_VALUE_0": "${{ github.workspace }}",
+    }
+    for checkpoint in range(1, 6):
+        assert f"python -m examples.crafting_agents.checkpoint_0{checkpoint}" in commands
+    smoke = jobs["smoke"]["steps"][-1]
+    assert smoke["env"]["WISP_DOCS_REVISION"] == "${{ github.sha }}"
+    assert smoke["run"] == "npm run test:deployed"

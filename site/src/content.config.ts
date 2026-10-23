@@ -1,11 +1,11 @@
 import { defineCollection } from "astro:content";
-import { bookLoader } from "./content/loader.ts";
+import { docsLoader } from "./content/loader.ts";
 import { pageSchema } from "./content/metadata.ts";
 
 export const collections = {
   maintainerRecords: defineCollection({
-    loader: bookLoader(true),
+    loader: docsLoader(true),
     schema: pageSchema,
   }),
-  pages: defineCollection({ loader: bookLoader(), schema: pageSchema }),
+  pages: defineCollection({ loader: docsLoader(), schema: pageSchema }),
 };

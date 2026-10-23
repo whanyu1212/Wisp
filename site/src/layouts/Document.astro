@@ -45,6 +45,10 @@ const firstCase = course
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta
+      name="wisp-docs-revision"
+      content={process.env.GITHUB_SHA ?? "local"}
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content={page.description} />
     {page.searchable && !compatibility && (
@@ -190,8 +194,9 @@ const firstCase = course
     <footer class="site-footer">
       <span>One shared runtime. TUI · CLI · RPC · Python SDK.</span>
       <a href={href(changelog.route)}>Changelog</a>
+      <a href={href("print.html")}>Print documentation</a>
       <a
-        href={`https://github.com/whanyu1212/Wisp/edit/main/${editSource ?? (page.source === changelog.source ? "CHANGELOG.md" : `book/src/${page.source}`)}`}
+        href={`https://github.com/whanyu1212/Wisp/edit/main/${editSource ?? (page.source === changelog.source ? "CHANGELOG.md" : `site/src/content/pages/${page.source}`)}`}
       >
         Edit this page
       </a>

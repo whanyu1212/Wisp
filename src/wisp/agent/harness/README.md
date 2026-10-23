@@ -9,7 +9,7 @@ calls, plus steering, follow-up, and cancellation state. It does **not** own dur
 compaction or safety policy, provider-native behavior, or frontend rendering.
 
 For the system-level design and lifecycle diagrams, see the
-[agent runtime architecture](../../../../book/src/architecture/agent-runtime.md). The lower-level
+[agent runtime architecture](../../../../site/src/content/pages/architecture/agent-runtime.md). The lower-level
 execution cycle is documented in the sibling [loop README](../loop/README.md).
 
 ## Run lifecycle

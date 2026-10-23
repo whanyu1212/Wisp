@@ -1,9 +1,9 @@
 # Contributing to Wisp
 
-Thanks for helping. The full contributor guide is in the book:
+Thanks for helping. The full contributor guide is on the documentation site:
 [Contributing](https://whanyu1212.github.io/Wisp/contributing/index.html) covers development setup,
 testing and [how Wisp is built](https://whanyu1212.github.io/Wisp/contributing/building.html). Its
-source lives in [`book/src/contributing/`](book/src/contributing/). This page is the short version.
+source lives in [`site/src/content/pages/contributing/`](site/src/content/pages/contributing/). This page is the short version.
 
 ## Set up a checkout
 
@@ -38,11 +38,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
 ```
 
-Documentation-only changes don't need the application test suite. For changes to the book, run
-`mdbook build book` and `uv run pytest tests/docs`, which keeps the book's examples and references in
-sync with the code. See
-[Development setup](https://whanyu1212.github.io/Wisp/contributing/development.html#working-on-these-docs)
-for installing the pinned mdBook tools.
+Documentation-only changes don't need the application test suite. Run `uv run pytest tests/docs`
+and, from `site/`, `npm ci`, `npm test`, `npm run check`, `npm run format:check`, `npm run build`,
+and `npm run test:browser` (install Chromium with `npm exec playwright install chromium`).
+See [`site/README.md`](site/README.md) for the pinned Node toolchain, source layout, and deployment
+checks. GitHub Pages publishes the Astro build under the existing `/Wisp/` base path.
 
 ## Pull requests
 

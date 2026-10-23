@@ -665,25 +665,66 @@ svg {
     transition: none !important;
   }
 }
+.print-chapter {
+  margin-block: 64px;
+  border-top: 1px solid var(--rule);
+  padding-top: 24px;
+}
 @media print {
+  :root,
+  :root[data-theme],
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #fff;
+    --paper: #fff;
+    --ink: #111;
+    --muted: #333;
+    --rule: #999;
+    --accent: #333;
+    --soft: #fff;
+    --code: #fff;
+  }
+  /* Remain readable without background graphics, even when the screen theme is dark. */
+  :root .astro-code,
+  :root .astro-code span,
+  :root[data-theme] .astro-code,
+  :root[data-theme] .astro-code span,
+  :root:not([data-theme]) .astro-code,
+  :root:not([data-theme]) .astro-code span {
+    color: var(--ink) !important;
+    background-color: var(--code) !important;
+  }
+  .diagram {
+    print-color-adjust: exact;
+  }
+  details {
+    display: block;
+  }
   .site-header,
+  .site-footer,
   .sidebar,
   .toc,
   .mobile-navigation,
   .mobile-toc,
   .previous-next,
-  .site-footer,
   .code-tools,
   .skip {
     display: none;
   }
   .page {
     display: block;
+    max-width: none;
+    padding: 0;
+  }
+  .print-chapter {
+    break-before: page;
+  }
+  pre,
+  .table-scroll {
+    overflow: visible;
   }
   pre {
     white-space: pre-wrap;
-  }
-  details {
-    display: block;
+    overflow-wrap: anywhere;
   }
 }

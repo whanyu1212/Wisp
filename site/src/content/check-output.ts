@@ -17,6 +17,7 @@ export function checkOutput(
   directory: string,
   pages: PageMetadata[],
   baseline: LegacyPage[],
+  printAnchors: string[] = [],
 ): string[] {
   const errors: string[] = [];
   const documents = new Map<string, ReturnType<typeof load>>();
@@ -70,7 +71,7 @@ export function checkOutput(
       errors.push(`Missing canonical output: ${page.route}`);
   for (const old of baseline) {
     const current = pages.find(
-      (page) => `book/src/${page.source}` === old.source,
+      (page) => `book/src/${page.legacySource ?? page.source}` === old.source,
     );
     if (!current) {
       errors.push(`Unaccounted legacy source: ${old.source}`);
@@ -107,6 +108,16 @@ export function checkOutput(
         if (!ids.has(heading.id))
           errors.push(`${route}: lost legacy #${heading.id}`);
     }
+  }
+  if (printAnchors.length) {
+    const print = documents.get("print.html");
+    const ids = new Set(
+      print?.("[id]")
+        .toArray()
+        .map((node) => print(node).attr("id")) ?? [],
+    );
+    for (const id of printAnchors)
+      if (!ids.has(id)) errors.push(`print.html: lost legacy #${id}`);
   }
   return errors;
 }

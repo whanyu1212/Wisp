@@ -1,6 +1,6 @@
 # Crafting Coding Agents checkpoints
 
-Runnable sources for the first five chapters of the [mdBook](../../book/src/crafting-agents/index.md).
+Runnable sources for the first five chapters of the [Wisp documentation](../../site/src/content/pages/crafting-agents/index.md).
 Use Python 3.12+ from the checkout root; no package installation, API key, network,
 or third-party dependency is needed:
 
@@ -69,10 +69,10 @@ privileges: the temporary directory is not an OS sandbox.
 
 The adapter intentionally supports text and function calls without reasoning-item
 replay. GPT-4.1 mini is the documented non-reasoning example; this is not a generic
-adapter for every model exposed by Responses. See the [provider chapter](../../book/src/crafting-agents/04-providers.md)
+adapter for every model exposed by Responses. See the [provider chapter](../../site/src/content/pages/crafting-agents/04-providers.md)
 for terminal validation, retry limits, and the live-verification boundary.
 
-The book includes code through mdBook `ANCHOR` regions. Edit these files rather
+The site includes code through `ANCHOR` regions. Edit these files rather
 than creating duplicate snippets. From a development environment:
 
 ```bash
@@ -80,7 +80,9 @@ uv run pytest tests/docs/crafting/test_agents.py tests/docs/crafting/test_contex
 uv run ruff format --check .
 uv run ruff check .
 uv run mypy
-mdbook build
+cd site
+npm ci
+npm run build
 ```
 
 The focused tests run in normal Python CI; the examples are included in configured

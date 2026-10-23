@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 declare const __WISP_REPO_ROOT__: string;
@@ -7,15 +8,9 @@ export const repoRoot =
   typeof __WISP_REPO_ROOT__ !== "undefined"
     ? __WISP_REPO_ROOT__
     : fileURLToPath(new URL("../../../", import.meta.url));
-export const bookRoot = fileURLToPath(
-  new URL("../../../book/src/", import.meta.url),
-);
-export const metadataPath = fileURLToPath(
-  new URL("../../content-map.json", import.meta.url),
-);
-export const baselinePath = fileURLToPath(
-  new URL("../../../book/migration/astro/routes.json", import.meta.url),
-);
+export const contentRoot = join(repoRoot, "site/src/content/pages");
+export const baselinePath = join(repoRoot, "site/migration/routes.json");
+export const cutoverPath = join(repoRoot, "site/migration/cutover-routes.json");
 export const base = "/Wisp/";
 
 export function href(route: string): string {

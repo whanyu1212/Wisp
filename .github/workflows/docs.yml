@@ -5,61 +5,94 @@ on:
     branches:
       - main
     paths:
-      - "book/**"
+      - "site/**"
+      - "CHANGELOG.md"
       - "examples/crafting_agents/**"
+      - "examples/sdk/**"
+      - "tests/docs/**"
+      - "tests/repository/test_images.py"
+      - "tests/support/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "assets/**"
       - ".github/workflows/docs.yml"
   pull_request:
     branches:
       - main
     paths:
-      - "book/**"
+      - "site/**"
+      - "CHANGELOG.md"
       - "examples/crafting_agents/**"
+      - "examples/sdk/**"
+      - "tests/docs/**"
+      - "tests/repository/test_images.py"
+      - "tests/support/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "assets/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Keep production build + deploy runs ordered as one unit so an older build
-# cannot publish after a newer commit. Pull-request builds use independent groups.
+# Order production build/deploy/smoke runs so an older build cannot publish last.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'pages' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  MDBOOK_VERSION: "0.5.4"
-  MDBOOK_MERMAID_VERSION: "0.17.1"
-  LYCHEE_VERSION: "0.24.2"
-
 jobs:
   build:
-    name: Build book
+    name: Check Astro site
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    # Keep this version aligned with @playwright/test in site/package-lock.json.
+    # The image includes browsers and OS dependencies, avoiding apt mirror stalls.
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    defaults:
+      run:
+        working-directory: site
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Install documentation tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$HOME/.cargo/bin"
-          curl -fsSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" |
-            tar -xz -C "$HOME/.cargo/bin"
-          curl -fsSL "https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" |
-            tar -xz -C "$HOME/.cargo/bin"
-          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/lychee-x86_64-unknown-linux-gnu.tar.gz" |
-            tar -xz -C "$HOME/.cargo/bin" --strip-components=1 \
-              lychee-x86_64-unknown-linux-gnu/lychee
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: site/.nvmrc
+          cache: npm
+          cache-dependency-path: site/package-lock.json
 
-      - name: Set up checkpoint Python
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Verify Playwright image version
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const lock = JSON.parse(readFileSync("package-lock.json", "utf8"));
+            if (lock.packages["node_modules/@playwright/test"].version !== "1.64.1") {
+              throw new Error("Update the Playwright image in .github/workflows/docs.yml");
+            }
+          '
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Run book checkpoints offline
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Run curriculum checkpoints offline
+        working-directory: .
         run: |
           python -m examples.crafting_agents.checkpoint_01
           python -m examples.crafting_agents.checkpoint_02
@@ -78,26 +111,41 @@ jobs:
           python -m examples.crafting_agents.checkpoint_05 --scenario approval-denied
           python -m examples.crafting_agents.checkpoint_05 --scenario stale-input
 
-      # mdBook exits 0 even when a preprocessor fails (a missing {{#include}} file is
-      # logged as ERROR and the raw directive is published), so fail on logged errors.
-      - name: Build book
-        shell: bash
-        run: |
-          set -euo pipefail
-          mdbook build book 2>&1 | tee "$RUNNER_TEMP/mdbook.log"
-          if grep -qE '^\s*ERROR' "$RUNNER_TEMP/mdbook.log"; then
-            echo "::error::mdbook build logged errors; see the output above."
-            exit 1
-          fi
+      - name: Verify documentation contracts and SDK examples
+        working-directory: .
+        # pytest isolates HOME, hiding checkout's global safe.directory setting.
+        # Preserve trust for this checkout only across the container UID boundary.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+        run: uv run --locked pytest tests/docs tests/repository/test_images.py
 
-      - name: Check rendered links
-        run: lychee --offline --no-progress --fallback-extensions html --exclude-path 'book/build/404.html' book/build
+      - name: Test content pipeline
+        run: npm test
 
-      - name: Upload artifact
+      - name: Check Astro types
+        run: npm run check
+
+      - name: Build and validate routes, anchors, links, and assets
+        run: npm run build
+
+      - name: Check built-site layouts and keyboard behavior
+        run: npm run test:browser
+
+      - name: Upload browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: astro-browser-traces
+          path: site/test-results/
+          if-no-files-found: ignore
+
+      - name: Upload Pages artifact
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
-          path: book/build
+          path: site/dist
 
   deploy:
     name: Deploy to GitHub Pages
@@ -115,6 +163,9 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
 
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+
     steps:
       - name: Configure Pages
         uses: actions/configure-pages@v5
@@ -122,3 +173,28 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+  smoke:
+    name: Verify deployed Astro site
+    needs: deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      options: --init --ipc=host
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: site/.nvmrc
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+      - name: Check deployed revision, legacy links, search, themes, and diagrams
+        env:
+          WISP_DOCS_URL: ${{ needs.deploy.outputs.page_url }}
+          WISP_DOCS_REVISION: ${{ github.sha }}
+        run: npm run test:deployed

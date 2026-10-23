@@ -6,7 +6,9 @@ import re
 import tomllib
 from typing import get_args
 
-from tests.support.paths import BOOK_SRC_DIR, REPO_ROOT
+import yaml
+
+from tests.support.paths import DOCS_SRC_DIR, REPO_ROOT
 from wisp import __version__
 from wisp.events import WispEvent
 from wisp.messages import CompactionRecord
@@ -17,7 +19,7 @@ from wisp.sessions import (
 
 _REPOSITORY_ROOT = REPO_ROOT
 _CHANGELOG = (_REPOSITORY_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-_POLICY = (BOOK_SRC_DIR / "reference" / "compatibility.md").read_text(encoding="utf-8")
+_POLICY = (DOCS_SRC_DIR / "reference" / "compatibility.md").read_text(encoding="utf-8")
 
 
 def test_runtime_and_project_package_versions_match() -> None:
@@ -111,13 +113,14 @@ def test_policy_documents_current_persistence_versions() -> None:
 
 
 def test_compatibility_reference_is_linked_from_sdk_and_navigation() -> None:
-    sdk = (BOOK_SRC_DIR / "reference" / "sdk.md").read_text(encoding="utf-8")
-    reference_index = (BOOK_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
-    sessions = (BOOK_SRC_DIR / "guide" / "sessions.md").read_text(encoding="utf-8")
-    summary = (BOOK_SRC_DIR / "SUMMARY.md").read_text(encoding="utf-8")
+    sdk = (DOCS_SRC_DIR / "reference" / "sdk.md").read_text(encoding="utf-8")
+    reference_index = (DOCS_SRC_DIR / "reference" / "index.md").read_text(encoding="utf-8")
+    sessions = (DOCS_SRC_DIR / "guide" / "sessions.md").read_text(encoding="utf-8")
+    metadata = yaml.safe_load(_POLICY.split("---", 2)[1])
 
-    assert "[Compatibility & versioning](./compatibility)" in sdk
+    assert "[Compatibility & versioning](compatibility.md)" in sdk
     assert "being documented separately as part of" not in sdk
-    assert "[Compatibility & versioning](./compatibility)" in reference_index
-    assert "[Compatibility & versioning](../reference/compatibility)" in sessions
-    assert "[Compatibility and versioning](reference/compatibility.md)" in summary
+    assert "[Compatibility & versioning](compatibility.md)" in reference_index
+    assert "[Compatibility & versioning](../reference/compatibility.md)" in sessions
+    assert metadata["listed"] is True
+    assert metadata["section"] == "reference"

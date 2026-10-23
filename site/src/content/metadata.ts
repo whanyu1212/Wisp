@@ -1,8 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative } from "node:path";
 import { z } from "zod";
-import { bookRoot, metadataPath } from "./paths.ts";
-import { tuiChildren } from "./tui.ts";
+import { parseFrontmatter } from "@astrojs/markdown-remark";
+import { contentRoot } from "./paths.ts";
 
 export const sections = {
   using: "Using Wisp",
@@ -19,6 +19,11 @@ export const pageSchema = z
       .string()
       .regex(/^[a-zA-Z0-9_-][a-zA-Z0-9_./-]*\.md$/)
       .refine((s) => !s.split("/").includes("..")),
+    legacySource: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-][a-zA-Z0-9_./-]*\.md$/)
+      .refine((s) => !s.split("/").includes(".."))
+      .optional(),
     title: z.string().trim().min(1),
     description: z.string().trim().min(1),
     route: z
@@ -97,7 +102,7 @@ export function validateMetadata(
   for (const page of pages) {
     for (const output of new Set([
       page.route,
-      page.source.replace(/\.md$/, ".html"),
+      (page.legacySource ?? page.source).replace(/\.md$/, ".html"),
     ])) {
       if (output === "404.html" || output === "print.html")
         throw new Error(`Reserved route: ${output}`);
@@ -128,16 +133,19 @@ export function validateMetadata(
   return pages;
 }
 
+/** Read strict per-page frontmatter; the physical path owns the source identity. */
+export function readPage(source: string, root = contentRoot) {
+  const parsed = parseFrontmatter(readFileSync(join(root, source), "utf8"));
+  const metadata = pageSchema.omit({ source: true }).parse(parsed.frontmatter);
+  return { metadata: { ...metadata, source }, body: parsed.content };
+}
+
 export function loadMetadata(): PageMetadata[] {
-  const sources = markdownSources(bookRoot)
-    .map((p) => relative(bookRoot, p).replaceAll("\\", "/"))
-    .filter((p) => p !== "SUMMARY.md");
+  const sources = markdownSources(contentRoot).map((p) =>
+    relative(contentRoot, p).replaceAll("\\", "/"),
+  );
   return validateMetadata(
-    [
-      ...JSON.parse(readFileSync(metadataPath, "utf8")),
-      changelog,
-      ...tuiChildren,
-    ],
-    [...sources, changelog.source, ...tuiChildren.map((page) => page.source)],
+    [...sources.map((source) => readPage(source).metadata), changelog],
+    [...sources, changelog.source],
   );
 }

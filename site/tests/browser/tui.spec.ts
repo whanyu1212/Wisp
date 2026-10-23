@@ -31,7 +31,7 @@ test("TUI basics links to focused, searchable children with correct source editi
       page.getByRole("link", { name: "Edit this page", exact: true }),
     ).toHaveAttribute(
       "href",
-      "https://github.com/whanyu1212/Wisp/edit/main/book/src/guide/tui.md",
+      `https://github.com/whanyu1212/Wisp/edit/main/site/src/content/pages/guide/tui/${part}.md`,
     );
   }
 });

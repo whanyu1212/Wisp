@@ -5,8 +5,8 @@ import { repoRoot } from "../../content/paths";
 
 const assets = {
   "wisp-banner-v2.png": "assets/wisp-banner-v2.png",
-  "favicon.png": "book/theme/favicon.png",
-  "apple-touch-icon.png": "book/src/apple-touch-icon.png",
+  "favicon.png": "assets/favicon.png",
+  "apple-touch-icon.png": "assets/apple-touch-icon.png",
 };
 export function getStaticPaths() {
   return Object.entries(assets).map(([asset, source]) => ({
