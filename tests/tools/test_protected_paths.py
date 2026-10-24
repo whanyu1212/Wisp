@@ -257,40 +257,6 @@ def test_default_bare_pattern_does_not_match_directory_component() -> None:
 # --- Regression tests for the second Codex review pass (fixes to the fixes) ---
 
 
-def test_grep_record_parser_fails_closed_on_separator_in_filename() -> None:
-    # Re-review finding 1: rg's \x1f field separator can appear inside a filename,
-    # making the record ambiguous. Such a record must fail closed (be dropped),
-    # never mis-parsed to a wrong, non-protected path that leaks the secret.
-    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search.tools import _rg_grep_line_is_protected
-
-    context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
-    leaky = f"dir{SEP}123{SEP}/id_rsa{SEP}1{SEP}SECRET=leak"
-
-    assert _rg_grep_line_is_protected(leaky, context) is True
-
-
-def test_grep_record_parser_fails_closed_on_truncated_fragment() -> None:
-    # Re-review finding 4: a record truncated by output buffering (missing the
-    # text field) can't be parsed to a path and must fail closed.
-    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search.tools import _rg_grep_line_is_protected
-
-    context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
-    fragment = f"id_rsa{SEP}1"  # truncated: no text field
-
-    assert _rg_grep_line_is_protected(fragment, context) is True
-
-
-def test_grep_record_parser_keeps_non_file_lines() -> None:
-    from wisp.tools.search.tools import _rg_grep_line_is_protected
-
-    context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
-
-    assert _rg_grep_line_is_protected("--", context) is False
-    assert _rg_grep_line_is_protected("prose with no separators", context) is False
-
-
 def test_rg_find_protected_files_do_not_exhaust_result_budget(tmp_path: Path) -> None:
     # Re-review finding 2: protected candidates must be filtered at the subprocess
     # boundary so they don't consume the max_results line budget, which would hide
@@ -312,48 +278,6 @@ def test_default_list_covers_common_env_secret_variants(tmp_path: Path, variant:
     # variants, not only the fully spelled-out forms.
     context = ToolContext(cwd=tmp_path)  # DEFAULT_PROTECTED_PATHS
     assert is_protected_path(tmp_path / variant, context) is True
-
-
-def test_dropping_protected_groups_leaves_no_orphan_separator() -> None:
-    # Third-review finding: dropping a protected context group must not leave a
-    # dangling "--" separator (which would render as output with count == 0).
-    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search.tools import _result_from_grep_lines
-
-    context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
-
-    # A protected match fenced by rg group separators collapses to a clean miss.
-    only_protected = _result_from_grep_lines(
-        ["--", f"id_rsa{SEP}1{SEP}SECRET", "--"], max_results=10, context=context
-    )
-    assert only_protected.text == "No matches"
-    assert only_protected.data["count"] == 0
-
-    # A legitimate group followed by a dropped protected group keeps the real hit
-    # without a trailing orphan separator.
-    mixed = _result_from_grep_lines(
-        [f"app.py{SEP}1{SEP}hit", "--", f"id_rsa{SEP}2{SEP}SECRET"],
-        max_results=10,
-        context=context,
-    )
-    assert mixed.text == "app.py:1:hit"
-    assert mixed.data["count"] == 1
-
-
-def test_separator_between_two_kept_groups_is_preserved() -> None:
-    # The orphan-separator cleanup must not strip separators between real groups.
-    from wisp.tools.search.tools import RG_MATCH_SEPARATOR as SEP
-    from wisp.tools.search.tools import _result_from_grep_lines
-
-    context = ToolContext(cwd=Path("/repo"), protected_paths=("id_rsa",))
-    result = _result_from_grep_lines(
-        [f"app.py{SEP}1{SEP}hit1", "--", f"app.py{SEP}5{SEP}hit2"],
-        max_results=10,
-        context=context,
-    )
-
-    assert result.text == "app.py:1:hit1\n--\napp.py:5:hit2"
-    assert result.data["count"] == 2
 
 
 def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> None:

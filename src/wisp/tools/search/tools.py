@@ -55,8 +55,6 @@ IGNORED_DIRS = {
     "target",
     "vendor",
 }
-RG_MATCH_SEPARATOR = "\x1f"
-RG_CONTEXT_SEPARATOR = "\x1e"
 _REGEX_TIMEOUT_SECONDS = 0.05
 # The regex timeout is wall-clock, so a CPU-starved thread can exceed it on a benign line.
 # Each search may spend this much wall time re-trying timed-out lines before failing.
@@ -298,7 +296,7 @@ class LsTool:
         )
 
 
-def _bounded_rg_context_lines(requested_context_lines: int, context: ToolContext) -> int:
+def _bounded_context_lines(requested_context_lines: int, context: ToolContext) -> int:
     if requested_context_lines <= 0:
         return 0
     return min(requested_context_lines, max(0, (context.max_output_lines - 1) // 2))
@@ -353,7 +351,7 @@ def _python_grep(
         if native_module is not None
         else _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     )
-    effective_context_lines = _bounded_rg_context_lines(context_lines, context)
+    effective_context_lines = _bounded_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
     output: list[str] = []
     output_bytes = 0
@@ -537,21 +535,21 @@ def _python_grep(
                 output_bytes += file_buffer.byte_count
 
             if file_had_extra_match or file_buffer.exhausted:
-                return _result_from_grep_lines(
+                return _grep_result(
                     output,
+                    match_count=match_count,
                     max_results=max_results,
                     context=context,
-                    force_truncated=True,
+                    truncated=True,
                     match_limit_reached=file_had_extra_match,
                 )
 
-    if not output:
-        return ToolResult(text="No matches", data={"count": 0, "matches": []})
-    return _result_from_grep_lines(
+    return _grep_result(
         output,
+        match_count=match_count,
         max_results=max_results,
         context=context,
-        force_truncated=context_truncated,
+        truncated=context_truncated and bool(output),
     )
 
 
@@ -1473,243 +1471,47 @@ type GlobMatcher = Callable[[str], bool]
 type PathMatcher = Callable[[Path], bool]
 
 
-def _normalize_rg_line(line: str) -> str:
-    line = _replace_rg_field_separator(line, RG_MATCH_SEPARATOR, ":")
-    line = _replace_rg_field_separator(line, RG_CONTEXT_SEPARATOR, "-")
-    if line.startswith("./"):
-        return line[2:]
-    return line
-
-
-def _replace_rg_field_separator(line: str, field_separator: str, output_separator: str) -> str:
-    parts = line.split(field_separator, 2)
-    if len(parts) == 3 and parts[1].isdigit():
-        return f"{parts[0]}{output_separator}{parts[1]}{output_separator}{parts[2]}"
-    return line
-
-
-def _grep_line_kind(line: str, context: ToolContext | None = None) -> str | None:
-    if _has_rg_field_separator(line, RG_MATCH_SEPARATOR):
-        return "match"
-    if _has_rg_field_separator(line, RG_CONTEXT_SEPARATOR):
-        return "context"
-
-    if context is not None:
-        kind = _grep_line_kind_from_existing_path(line, context)
-        if kind is not None:
-            return kind
-
-    match_index = _find_line_number_separator(line, ":")
-    context_index = _find_line_number_separator(line, "-")
-    if match_index == -1 and context_index == -1:
-        return None
-    if context_index != -1 and (match_index == -1 or context_index < match_index):
-        return "context"
-    return "match"
-
-
-def _has_rg_field_separator(line: str, field_separator: str) -> bool:
-    parts = line.split(field_separator, 2)
-    return len(parts) == 3 and parts[1].isdigit()
-
-
-def _find_line_number_separator(line: str, separator: str) -> int:
-    return next(_iter_line_number_separators(line, separator), -1)
-
-
-def _iter_line_number_separators(line: str, separator: str) -> Iterator[int]:
-    search_start = 0
-    while True:
-        first = line.find(separator, search_start)
-        if first == -1:
-            return
-        digit_start = first + len(separator)
-        if digit_start < len(line) and line[digit_start].isdigit():
-            digit_end = digit_start + 1
-            while digit_end < len(line) and line[digit_end].isdigit():
-                digit_end += 1
-            if line.startswith(separator, digit_end):
-                yield first
-        search_start = first + len(separator)
-
-
-def _grep_line_kind_from_existing_path(line: str, context: ToolContext) -> str | None:
-    candidates: list[tuple[int, str]] = []
-    for separator, kind in ((":", "match"), ("-", "context")):
-        for separator_index in _iter_line_number_separators(line, separator):
-            if _grep_record_path_exists(line[:separator_index], context):
-                candidates.append((separator_index, kind))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda candidate: candidate[0])[1]
-
-
-def _grep_record_path_exists(path_text: str, context: ToolContext) -> bool:
-    if not path_text:
-        return False
-    path = Path(path_text)
-    if not path.is_absolute():
-        path = context.cwd / path
-    try:
-        return path.resolve(strict=False).is_file()
-    except OSError:
-        return False
-
-
-def _rg_grep_line_is_protected(line: str, context: ToolContext) -> bool:
-    """Return whether a grep output line belongs to a protected file.
-
-    The ``rg --glob '!...'`` exclusions are only a best-effort speedup: they use
-    gitignore glob semantics (case-sensitive, last-match-wins) that differ from
-    :func:`is_protected_path`, and a caller-supplied ``--glob`` can re-include an
-    excluded file. So ``is_protected_path`` is the single source of truth: every
-    emitted record is post-filtered by extracting its file path and dropping the
-    line if that path is protected.
-
-    Extraction **fails closed**. rg's field separators are not escape-safe — a
-    filename may itself contain the separator byte, and buffering may truncate a
-    record mid-field — so a record whose path cannot be extracted *unambiguously*
-    is treated as protected and dropped. This trades a rare false drop (a genuine
-    non-secret line with a pathological name) for a guarantee that no secret line
-    leaks through an ambiguous parse. Lines that are plainly not file records
-    (no path field at all) are kept.
-    """
-
-    if not context.protected_paths:
-        return False
-
-    extraction = _grep_line_path_text(line)
-    if extraction is None:
-        return False  # not a file record (e.g. a separator line); nothing to protect
-    path_text, unambiguous = extraction
-    if not unambiguous:
-        return True  # fail closed: ambiguous/truncated record — assume protected
-    path = Path(path_text)
-    if not path.is_absolute():
-        path = context.cwd / path
-    return is_protected_path(path, context)
-
-
-def _grep_line_path_text(line: str) -> tuple[str, bool] | None:
-    """Extract the file-path field from a grep output line.
-
-    Returns ``None`` when the line carries no path field (not a file record).
-    Otherwise returns ``(path_text, unambiguous)`` where ``unambiguous`` is False
-    if the record cannot be split cleanly — e.g. the field-separated form does not
-    have exactly a ``path SEP linenumber SEP text`` shape (a filename containing
-    the separator byte, or a record truncated by output buffering). Callers must
-    treat an ambiguous result as protected (fail closed).
-
-    Accepted trade-off: a legitimate match whose *text* happens to contain the raw
-    separator byte (``\\x1f`` / ``\\x1e``, control chars that essentially never
-    occur in source or config) is reported as ambiguous and dropped. Losing such a
-    rare match is preferable to leaking a secret through a mis-parsed path.
-    """
-
-    for separator in (RG_MATCH_SEPARATOR, RG_CONTEXT_SEPARATOR):
-        if separator not in line:
-            continue
-        parts = line.split(separator)
-        # A well-formed field-separated record is exactly:
-        #   path SEP linenumber SEP text
-        # More separators than that means the filename (or text) contains the
-        # separator byte -> the path boundary is ambiguous. Fewer means the record
-        # was truncated before the text field arrived.
-        if len(parts) == 3 and parts[1].isdigit():
-            return parts[0], True
-        return "", False
-    for separator in (":", "-"):
-        index = _find_line_number_separator(line, separator)
-        if index != -1:
-            return line[:index], True
-    return None
-
-
-def _result_from_grep_lines(
-    lines: Sequence[str],
+def _grep_result(
+    records: Sequence[str],
     *,
+    match_count: int,
     max_results: int,
     context: ToolContext,
-    force_truncated: bool = False,
+    truncated: bool,
     match_limit_reached: bool = False,
 ) -> ToolResult:
-    kept: list[str] = []
-    pending_context_after_limit: list[str] = []
-    match_count = 0
-    truncated_by_count = force_truncated
-    for line in lines:
-        if line == "--" and match_count >= max_results:
-            kept.extend(pending_context_after_limit)
-            pending_context_after_limit.clear()
-            truncated_by_count = True
-            match_limit_reached = True
-            break
-        # Drop any line from a protected file that rg's --glob exclusions failed to
-        # filter (case mismatch, or a caller --glob re-including it). is_protected_path
-        # is the authoritative gate for both search engines.
-        if _rg_grep_line_is_protected(line, context):
-            pending_context_after_limit.clear()
-            continue
-        # A bare "--" group separator is only meaningful between two kept groups.
-        # Emit it only when real content precedes it; otherwise dropping protected
-        # groups would leave orphaned separators (and a "--" with count == 0).
-        if line == "--":
-            if kept and kept[-1] != "--":
-                kept.append("--")
-            continue
-        line_kind = _grep_line_kind(line, context)
-        if line_kind == "match":
-            if match_count >= max_results:
-                pending_context_after_limit.clear()
-                truncated_by_count = True
-                match_limit_reached = True
-                break
-            kept.extend(pending_context_after_limit)
-            pending_context_after_limit.clear()
-            match_count += 1
-            kept.append(_normalize_rg_line(line))
-            continue
-        if match_count >= max_results and line_kind == "context":
-            pending_context_after_limit.append(_normalize_rg_line(line))
-            continue
-        if match_count >= max_results:
-            pending_context_after_limit.clear()
-            truncated_by_count = True
-            break
-        kept.extend(pending_context_after_limit)
-        pending_context_after_limit.clear()
-        kept.append(_normalize_rg_line(line))
-    kept.extend(pending_context_after_limit)
-    # Drop a trailing orphan separator left when the final group was dropped.
-    while kept and kept[-1] == "--":
-        kept.pop()
+    """Build grep's result from the records its scan kept.
 
-    if not kept:
-        if match_count == 0:
-            return ToolResult(text="No matches", data={"count": 0, "matches": []})
-        truncated = truncate_text(
-            "[truncated]",
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
-        )
-        return ToolResult(
-            text=truncated.text,
-            data={"count": match_count, "matches": []},
-            truncated=True,
-        )
+    The scan skips protected files and stops at ``max_results``, so the records are
+    reported as they are and ``match_count`` is the number of matches among them.
 
-    text = "\n".join(kept)
-    if truncated_by_count:
-        text = f"{text}\n{_limit_marker(max_results, match_limit_reached)}"
-    truncated = truncate_text(
+    Args:
+        records (Sequence[str]): Match and context records, with ``--`` between files.
+        match_count (int): Matching records among ``records``.
+        max_results (int): The call's match limit, named in the truncation hint.
+        context (ToolContext): Supplies the output budget.
+        truncated (bool): Whether the scan stopped early or reduced context lines.
+        match_limit_reached (bool): Whether ``max_results`` is what stopped it.
+
+    Returns:
+        ToolResult: The bounded text, with ``count`` and ``matches`` data.
+    """
+
+    if not records and not truncated:
+        return ToolResult(text="No matches", data={"count": 0, "matches": []})
+    text = "\n".join(records)
+    if truncated:
+        marker = _limit_marker(max_results, match_limit_reached)
+        text = f"{text}\n{marker}" if text else marker
+    bounded = truncate_text(
         text,
         max_bytes=context.max_output_bytes,
         max_lines=context.max_output_lines,
     )
     return ToolResult(
-        text=truncated.text,
-        data={"count": match_count, "matches": kept},
-        truncated=truncated.truncated or truncated_by_count,
+        text=bounded.text,
+        data={"count": match_count, "matches": list(records)},
+        truncated=truncated or bounded.truncated,
     )
 
 
