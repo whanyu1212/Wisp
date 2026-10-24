@@ -90,67 +90,63 @@ async def run_benchmark_async(config: BenchmarkConfig | None = None) -> Benchmar
     root = secure_tool_path(str(selected.root), context)
     find = FindTool()
     grep = GrepTool(_scanner_backend=selected.grep_backend)
-    try:
-        discovered = await find.run(
-            {"path": str(root.path), "pattern": "*.py", "max_results": _DISCOVERY_LIMIT},
-            context,
+    discovered = await find.run(
+        {"path": str(root.path), "pattern": "*.py", "max_results": _DISCOVERY_LIMIT},
+        context,
+    )
+    python_files_observed = _result_count(discovered)
+    scenarios = (
+        (
+            "find_sorted_python_prefix",
+            find,
+            {"path": str(root.path), "pattern": "*.py", "max_results": selected.max_results},
+        ),
+        (
+            "grep_literal_miss",
+            grep,
+            {"path": str(root.path), "pattern": _LITERAL_MISS, "literal": True, "glob": "*.py"},
+        ),
+        (
+            "grep_literal_capped",
+            grep,
+            {
+                "path": str(root.path),
+                "pattern": selected.common_token,
+                "literal": True,
+                "glob": "*.py",
+                "max_results": selected.max_results,
+            },
+        ),
+    )
+    samples: list[BenchmarkSample] = []
+    for name, tool, arguments in scenarios:
+        warmup = await tool.run(arguments, context)
+        if name == "grep_literal_miss" and _result_count(warmup) != 0:
+            raise RuntimeError("literal-miss workload unexpectedly found a match")
+        result, measurement = await measure_async(
+            partial(tool.run, arguments, context), iterations=selected.iterations
         )
-        python_files_observed = _result_count(discovered)
-        scenarios = (
-            (
-                "find_sorted_python_prefix",
-                find,
-                {"path": str(root.path), "pattern": "*.py", "max_results": selected.max_results},
-            ),
-            (
-                "grep_literal_miss",
-                grep,
-                {"path": str(root.path), "pattern": _LITERAL_MISS, "literal": True, "glob": "*.py"},
-            ),
-            (
-                "grep_literal_capped",
-                grep,
-                {
-                    "path": str(root.path),
-                    "pattern": selected.common_token,
-                    "literal": True,
-                    "glob": "*.py",
-                    "max_results": selected.max_results,
-                },
-            ),
-        )
-        samples: list[BenchmarkSample] = []
-        for name, tool, arguments in scenarios:
-            warmup = await tool.run(arguments, context)
-            if name == "grep_literal_miss" and _result_count(warmup) != 0:
-                raise RuntimeError("literal-miss workload unexpectedly found a match")
-            result, measurement = await measure_async(
-                partial(tool.run, arguments, context), iterations=selected.iterations
+        if (_result_count(result), result.truncated) != (
+            _result_count(warmup),
+            warmup.truncated,
+        ):
+            raise RuntimeError(f"search results changed during {name}")
+        samples.append(
+            BenchmarkSample(
+                scenario=name,
+                result_count=_result_count(result),
+                truncated=result.truncated,
+                output_bytes=len(result.text.encode("utf-8")),
+                measurement=measurement,
             )
-            if (_result_count(result), result.truncated) != (
-                _result_count(warmup),
-                warmup.truncated,
-            ):
-                raise RuntimeError(f"search results changed during {name}")
-            samples.append(
-                BenchmarkSample(
-                    scenario=name,
-                    result_count=_result_count(result),
-                    truncated=result.truncated,
-                    output_bytes=len(result.text.encode("utf-8")),
-                    measurement=measurement,
-                )
-            )
-        return BenchmarkReport(
-            config=selected,
-            environment=environment(),
-            python_files_observed=python_files_observed,
-            python_files_capped=python_files_observed > _DISCOVERY_LIMIT,
-            samples=tuple(samples),
         )
-    finally:
-        await find.aclose()
-        await grep.aclose()
+    return BenchmarkReport(
+        config=selected,
+        environment=environment(),
+        python_files_observed=python_files_observed,
+        python_files_capped=python_files_observed > _DISCOVERY_LIMIT,
+        samples=tuple(samples),
+    )
 
 
 def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:

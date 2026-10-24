@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import anyio
 import pytest
 
 from tests.tools.support import run_tool
@@ -155,21 +154,3 @@ def test_builtin_tools_have_safety_metadata() -> None:
     assert WriteTool().safety == "mutating"
     assert EditTool().safety == "mutating"
     assert BashTool().safety == "command"
-
-
-def test_search_tools_expose_process_cleanup() -> None:
-    class DummySupervisor:
-        def __init__(self) -> None:
-            self.close_count = 0
-
-        async def aclose(self) -> None:
-            self.close_count += 1
-
-    async def run() -> tuple[int, int]:
-        grep_supervisor = DummySupervisor()
-        find_supervisor = DummySupervisor()
-        await GrepTool(grep_supervisor).aclose()  # type: ignore[arg-type]
-        await FindTool(find_supervisor).aclose()  # type: ignore[arg-type]
-        return grep_supervisor.close_count, find_supervisor.close_count
-
-    assert anyio.run(run) == (1, 1)

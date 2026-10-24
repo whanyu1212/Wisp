@@ -12,7 +12,8 @@ from tests.tools.support import run_tool
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS
 from wisp.tools.builtin import FindTool, GrepTool, ReadTool
 from wisp.tools.context import ToolContext
-from wisp.tools.files.paths import is_protected_path, resolve_tool_path
+from wisp.tools.files.paths import is_protected_path
+from wisp.tools.files.secure_fs import secure_tool_path
 from wisp.tools.result import ToolError
 
 PROTECTED = (".env", "*.key", "credentials.json", ".wisp/auth.json", ".wisp/settings.json")
@@ -94,19 +95,19 @@ def test_matching_is_case_insensitive(tmp_path: Path) -> None:
     assert is_protected_path(tmp_path / ".ENV", context) is True
 
 
-# --- resolve_tool_path enforcement ---
+# --- secure_tool_path enforcement ---
 
 
-def test_resolve_tool_path_rejects_protected(tmp_path: Path) -> None:
+def test_secure_tool_path_rejects_protected(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     with pytest.raises(ToolError, match="protected path"):
-        resolve_tool_path(".env", _context(tmp_path))
+        secure_tool_path(".env", _context(tmp_path))
 
 
-def test_resolve_tool_path_allows_ordinary_file(tmp_path: Path) -> None:
+def test_secure_tool_path_allows_ordinary_file(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
-    resolved = resolve_tool_path("main.py", _context(tmp_path))
-    assert resolved == (tmp_path / "main.py").resolve()
+    resolved = secure_tool_path("main.py", _context(tmp_path))
+    assert resolved.path == tmp_path / "main.py"
 
 
 # --- end-to-end tool behavior ---
@@ -149,7 +150,7 @@ def test_find_skips_protected_files(tmp_path: Path) -> None:
 
 def test_find_pointed_directly_at_protected_file_is_denied(tmp_path: Path) -> None:
     # Pointing find/grep AT a protected file (not just walking past it) must be
-    # denied too. The path argument resolves through resolve_tool_path first, so
+    # denied too. The path argument resolves through secure_tool_path first, so
     # the guard fires before the "candidates = [path]" direct-file branch runs.
     (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     with pytest.raises(ToolError, match="protected path"):

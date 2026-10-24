@@ -13,7 +13,7 @@ from wisp.rpc.host import RpcToolApprovalPolicy
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.builtin import BashTool, WriteTool
 from wisp.tools.context import ToolContext
-from wisp.tools.files.paths import resolve_tool_path
+from wisp.tools.files.secure_fs import secure_tool_path
 from wisp.tools.result import ToolError
 from wisp.trust.permissions import load_permission_mode, permissions_directory, save_permission_mode
 
@@ -134,11 +134,11 @@ def test_preference_files_are_protected_even_with_empty_configured_paths(tmp_pat
     config = WispConfig(protected_paths=())
     context = ToolContext.from_config(config, cwd=Path.home())
     with pytest.raises(ToolError, match="protected"):
-        resolve_tool_path(str(preference), context)
+        secure_tool_path(str(preference), context)
     alias = Path.home() / "permission-alias.json"
     alias.symlink_to(preference)
     with pytest.raises(ToolError, match="protected"):
-        resolve_tool_path(str(alias), context)
+        secure_tool_path(str(alias), context)
 
 
 def test_temporary_grants_expire_but_yolo_and_ask_are_saved(tmp_path: Path) -> None:

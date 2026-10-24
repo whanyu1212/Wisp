@@ -35,7 +35,6 @@ from wisp.tools.files.secure_fs import (
     secure_tool_path,
 )
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
-from wisp.tools.shell.supervisor import ProcessSupervisor
 from wisp.tools.truncation import truncate_text
 
 # The TUI file picker imports this curated pruning set to keep indexing bounded.
@@ -180,21 +179,10 @@ class GrepTool:
         "required": ["pattern"],
     }
 
-    def __init__(
-        self,
-        process_supervisor: ProcessSupervisor | None = None,
-        *,
-        _scanner_backend: _GrepScannerBackend = "auto",
-    ) -> None:
+    def __init__(self, *, _scanner_backend: _GrepScannerBackend = "auto") -> None:
         if _scanner_backend not in {"auto", "python", "native"}:
             raise ValueError(f"unknown grep scanner backend: {_scanner_backend}")
-        self._process_supervisor = process_supervisor or ProcessSupervisor()
         self._scanner_backend = _scanner_backend
-
-    async def aclose(self) -> None:
-        """Retry and release any retained search-process cleanup."""
-
-        await self._process_supervisor.aclose()
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         pattern = _required_string(arguments, "pattern", allow_whitespace=True)
@@ -263,14 +251,6 @@ class FindTool:
             "max_results": {"type": "integer", "minimum": 1, "default": 100},
         },
     }
-
-    def __init__(self, process_supervisor: ProcessSupervisor | None = None) -> None:
-        self._process_supervisor = process_supervisor or ProcessSupervisor()
-
-    async def aclose(self) -> None:
-        """Retry and release any retained search-process cleanup."""
-
-        await self._process_supervisor.aclose()
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = secure_tool_path(_optional_string(arguments, "path"), context)
@@ -1508,14 +1488,6 @@ def _replace_rg_field_separator(line: str, field_separator: str, output_separato
     return line
 
 
-def _is_grep_match_line(line: str) -> bool:
-    return _grep_line_kind(line) == "match"
-
-
-def _is_grep_context_line(line: str) -> bool:
-    return _grep_line_kind(line) == "context"
-
-
 def _grep_line_kind(line: str, context: ToolContext | None = None) -> str | None:
     if _has_rg_field_separator(line, RG_MATCH_SEPARATOR):
         return "match"
@@ -1660,7 +1632,6 @@ def _result_from_grep_lines(
     context: ToolContext,
     force_truncated: bool = False,
     match_limit_reached: bool = False,
-    known_match_count: int | None = None,
 ) -> ToolResult:
     kept: list[str] = []
     pending_context_after_limit: list[str] = []
@@ -1712,12 +1683,9 @@ def _result_from_grep_lines(
     # Drop a trailing orphan separator left when the final group was dropped.
     while kept and kept[-1] == "--":
         kept.pop()
-    effective_match_count = max(match_count, known_match_count or 0)
-    if effective_match_count > match_count:
-        truncated_by_count = True
 
     if not kept:
-        if effective_match_count == 0:
+        if match_count == 0:
             return ToolResult(text="No matches", data={"count": 0, "matches": []})
         truncated = truncate_text(
             "[truncated]",
@@ -1726,7 +1694,7 @@ def _result_from_grep_lines(
         )
         return ToolResult(
             text=truncated.text,
-            data={"count": effective_match_count, "matches": []},
+            data={"count": match_count, "matches": []},
             truncated=True,
         )
 
@@ -1740,7 +1708,7 @@ def _result_from_grep_lines(
     )
     return ToolResult(
         text=truncated.text,
-        data={"count": effective_match_count, "matches": kept},
+        data={"count": match_count, "matches": kept},
         truncated=truncated.truncated or truncated_by_count,
     )
 

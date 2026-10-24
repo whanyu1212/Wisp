@@ -683,8 +683,6 @@ def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it()
         assert isinstance(grep, GrepTool)
         assert isinstance(find, FindTool)
         assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
-        assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
-        assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
 
         await runtime.aclose()
         await runtime.aclose()
@@ -744,8 +742,6 @@ def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -
         assert isinstance(grep, GrepTool)
         assert isinstance(find, FindTool)
         assert bash._process_supervisor is runtime.process_supervisor  # noqa: SLF001
-        assert grep._process_supervisor is runtime.process_supervisor  # noqa: SLF001
-        assert find._process_supervisor is runtime.process_supervisor  # noqa: SLF001
         for parallel_name in ("ls", "read", "skill"):
             assert runtime.tools.execution_metadata_for(parallel_name).parallel_safe
         for sequential_name in ("bash", "edit", "write", "find", "grep"):

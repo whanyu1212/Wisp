@@ -16,7 +16,6 @@ from wisp.tools.builtin import GrepTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.search import tools as search_tools_module
-from wisp.tools.shell import supervisor as process_manager_module
 
 _LIMIT_HINT = (
     "[truncated] Stopped at max_results=1. Narrow the search, or raise max_results to see more."
@@ -328,85 +327,6 @@ def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Pa
     assert result.text == "data.txt:1:match"
 
 
-@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
-def test_grep_tool_ripgrep_bounds_stdout_before_buffering(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    calls: list[tuple[list[str], int, int | None, int | None, int | None, int | None]] = []
-
-    async def fake_run(
-        command: list[str],
-        *,
-        cwd: Path,
-        process_supervisor: object,
-        max_stdout_lines: int,
-        stdout_line_filter: object = None,
-        stdout_count_filter: object = None,
-        max_buffered_stdout_bytes: int | None = None,
-        max_buffered_stdout_lines: int | None = None,
-        max_buffered_stderr_bytes: int | None = None,
-        max_buffered_stderr_lines: int | None = None,
-    ) -> search_tools_module.ProcessResult:
-        assert cwd == tmp_path
-        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
-        assert callable(stdout_count_filter)
-        calls.append(
-            (
-                command,
-                max_stdout_lines,
-                max_buffered_stdout_bytes,
-                max_buffered_stdout_lines,
-                max_buffered_stderr_bytes,
-                max_buffered_stderr_lines,
-            )
-        )
-        return search_tools_module.ProcessResult(
-            exit_code=-9,
-            stdout="one.txt:1:e\ntwo.txt:1:e\nthree.txt:1:e\n",
-            stderr="",
-            stdout_truncated=True,
-        )
-
-    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
-    # This test asserts the exact rg argv for stdout bounding; opt out of the
-    # protected-path default so its --glob exclusions don't clutter the assertion.
-    context = ToolContext(cwd=tmp_path, protected_paths=())
-
-    result = run_tool(GrepTool(), {"pattern": "e", "path": ".", "max_results": 2}, context)
-
-    assert calls == [
-        (
-            [
-                "rg",
-                "--no-config",
-                "--no-follow",
-                "--line-number",
-                "--no-heading",
-                "--color=never",
-                "--with-filename",
-                "--field-match-separator",
-                "\x1f",
-                "--field-context-separator",
-                "\x1e",
-                "--max-columns",
-                "50000",
-                "--",
-                "e",
-                ".",
-            ],
-            3,
-            50000,
-            2000,
-            50000,
-            2000,
-        )
-    ]
-    assert result.text == "one.txt:1:e\ntwo.txt:1:e\n[truncated]"
-    assert result.truncated is True
-
-
 def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) -> None:
     if shutil.which("rg") is None:
         pytest.skip("ripgrep is not installed")
@@ -518,59 +438,6 @@ def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     assert "data.txt-1-before" in result.text
     assert "data.txt:2:match" in result.text
     assert "data.txt-3-after" in result.text
-
-
-@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
-def test_grep_tool_ripgrep_drops_context_for_omitted_merged_match(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    async def fake_run(
-        command: list[str],
-        *,
-        cwd: Path,
-        process_supervisor: object,
-        max_stdout_lines: int,
-        stdout_line_filter: object = None,
-        stdout_count_filter: object = None,
-        max_buffered_stdout_bytes: int | None = None,
-        max_buffered_stdout_lines: int | None = None,
-        max_buffered_stderr_bytes: int | None = None,
-        max_buffered_stderr_lines: int | None = None,
-    ) -> search_tools_module.ProcessResult:
-        assert cwd == tmp_path
-        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
-        assert max_stdout_lines == 2
-        assert callable(stdout_count_filter)
-        assert max_buffered_stdout_bytes == 50000
-        assert max_buffered_stdout_lines == 2000
-        assert max_buffered_stderr_bytes == 50000
-        assert max_buffered_stderr_lines == 2000
-        return search_tools_module.ProcessResult(
-            exit_code=-9,
-            stdout=(
-                "data.txt\x1f1\x1fneedle one\n"
-                "data.txt\x1e2\x1ebridge\n"
-                "data.txt\x1f3\x1fneedle two\n"
-            ),
-            stderr="",
-            stdout_truncated=True,
-        )
-
-    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
-    context = ToolContext(cwd=tmp_path)
-
-    result = run_tool(
-        GrepTool(),
-        {"pattern": "needle", "path": ".", "context": 1, "literal": True, "max_results": 1},
-        context,
-    )
-
-    assert result.text == "data.txt:1:needle one\n[truncated]"
-    assert result.data["matches"] == ["data.txt:1:needle one"]
-    assert result.data["count"] == 1
-    assert result.truncated is True
 
 
 def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:

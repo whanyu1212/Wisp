@@ -383,9 +383,6 @@ class ProcessSupervisor:
             asyncio.Task[Any],
         ] = {}
         self._one_shot_locks: dict[asyncio.subprocess.Process, asyncio.Lock] = {}
-        self._pending_one_shot_starts = 0
-        self._pending_one_shot_starts_idle = asyncio.Event()
-        self._pending_one_shot_starts_idle.set()
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
@@ -626,61 +623,8 @@ class ProcessSupervisor:
         self._one_shot.pop(process, None)
         self._one_shot_locks.pop(process, None)
 
-    async def _reserve_one_shot_start(self) -> None:
-        async with self._lock:
-            self._ensure_open()
-            self._evict_terminals_for_capacity()
-            if self._owned_process_count() >= self._max_processes:
-                raise ToolError(
-                    f"Cannot start command: managed process limit ({self._max_processes}) reached"
-                )
-            self._pending_one_shot_starts += 1
-            self._pending_one_shot_starts_idle.clear()
-
-    async def _cancel_one_shot_start(self) -> None:
-        async with self._lock:
-            self._finish_one_shot_start_locked()
-
-    def _finish_one_shot_start_locked(self) -> None:
-        if self._pending_one_shot_starts == 0:
-            return
-        self._pending_one_shot_starts -= 1
-        if self._pending_one_shot_starts == 0:
-            self._pending_one_shot_starts_idle.set()
-
     def _owned_process_count(self) -> int:
-        return len(self._managed) + len(self._one_shot) + self._pending_one_shot_starts
-
-    async def _track_one_shot(
-        self,
-        process: asyncio.subprocess.Process,
-        task: asyncio.Task[Any],
-        *,
-        reserved: bool = False,
-    ) -> None:
-        async with self._lock:
-            supervisor_closed = self._closed
-            if reserved:
-                self._finish_one_shot_start_locked()
-            if not supervisor_closed:
-                self._evict_terminals_for_capacity()
-            over_capacity = (
-                not supervisor_closed
-                and not reserved
-                and self._owned_process_count() >= self._max_processes
-            )
-            self._one_shot[process] = task
-            self._one_shot_locks[process] = asyncio.Lock()
-        if supervisor_closed or over_capacity:
-            cleanup_succeeded = await self._terminate_one_shot(process, wait=True)
-            if cleanup_succeeded:
-                async with self._lock:
-                    self._remove_one_shot(process)
-            if supervisor_closed:
-                raise RuntimeError("ProcessSupervisor is closed")
-            raise ToolError(
-                f"Cannot start command: managed process limit ({self._max_processes}) reached"
-            )
+        return len(self._managed) + len(self._one_shot)
 
     async def _terminate_one_shot(
         self,
@@ -718,7 +662,6 @@ class ProcessSupervisor:
             return result
 
     async def _close_owned_processes(self) -> None:
-        await self._wait_for_pending_one_shot_starts()
         async with self._lock:
             managed = tuple(self._managed.values())
             one_shot = tuple(self._one_shot.items())
@@ -791,14 +734,6 @@ class ProcessSupervisor:
                     item.state = "failed"
                     item.changed.set()
             raise ToolError(PROCESS_TREE_CLEANUP_ERROR)
-
-    async def _wait_for_pending_one_shot_starts(self) -> None:
-        while True:
-            async with self._lock:
-                if self._pending_one_shot_starts == 0:
-                    return
-                idle = self._pending_one_shot_starts_idle
-            await idle.wait()
 
     async def _close_managed_process(self, managed: _ManagedProcess) -> bool:
         async with managed.operation_lock:
