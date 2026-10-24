@@ -35,8 +35,10 @@ from wisp.tools.truncation import truncate_text
 # drop the snapshot and let the write fall back to its plain summary. Matched to the
 # renderer's per-hunk character ceiling so the two bounds agree.
 _WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
-# Room a read continuation notice needs within the output budget, besides the path it quotes.
+# Room a read continuation notice needs within the output budget, besides the path it
+# quotes. Budgets too small for that get a compact notice without the bash example.
 _READ_NOTICE_RESERVED_BYTES = 256
+_COMPACT_READ_NOTICE_BYTES = 64
 
 
 class CreateOnlyWriteReceipt:
@@ -81,10 +83,10 @@ class ReadTool:
         # The notice must fit inside the output budget: a later bounding pass would
         # otherwise cut it from the end, leaving the model no way to continue.
         quoted_path = shlex.quote(path.display)
-        notice_bytes = min(
-            _READ_NOTICE_RESERVED_BYTES + len(quoted_path.encode("utf-8")),
-            context.max_output_bytes // 2,
-        )
+        notice_bytes = _READ_NOTICE_RESERVED_BYTES + len(quoted_path.encode("utf-8"))
+        compact_notice = notice_bytes > context.max_output_bytes // 2
+        if compact_notice:
+            notice_bytes = _COMPACT_READ_NOTICE_BYTES
         try:
             slice_result = await anyio.to_thread.run_sync(
                 lambda: _secure_read_line_slice(
@@ -113,6 +115,7 @@ class ReadTool:
             offset=offset,
             quoted_path=quoted_path,
             part_bytes=context.max_output_bytes - notice_bytes,
+            compact=compact_notice,
         )
         text = slice_result.text
         if notice:
@@ -146,6 +149,7 @@ def _read_continuation_notice(
     offset: int,
     quoted_path: str,
     part_bytes: int,
+    compact: bool,
 ) -> str | None:
     """Tell the model where the next page starts when a read stops early.
 
@@ -154,6 +158,7 @@ def _read_continuation_notice(
         offset (int): 1-indexed line the slice started at.
         quoted_path (str): Shell-quoted path for the oversized-line example.
         part_bytes (int): How much of an oversized line one read can show.
+        compact (bool): Whether to use the short wording for a small output budget.
 
     Returns:
         str | None: The notice, or ``None`` when the slice reached the end of the
@@ -163,12 +168,16 @@ def _read_continuation_notice(
     next_offset = offset + slice_result.selected_count
     if slice_result.partial_line is not None:
         line = slice_result.partial_line
+        if compact:
+            return f"[truncated] Line {line} is too long; use offset={line + 1} to skip it."
         return (
             f"[truncated] Line {line} is longer than the output limit. Use offset={line + 1} "
             f"to skip it, or read it in parts with bash, for example: "
             f"sed -n '{line}p' {quoted_path} | cut -c1-{max(part_bytes, 1)}"
         )
     if slice_result.truncated:
+        if compact:
+            return f"[truncated] Use offset={next_offset} to continue."
         return f"[truncated] Output limit reached. Use offset={next_offset} to continue."
     if slice_result.line_count is None:
         return f"[More lines follow. Use offset={next_offset} to continue.]"

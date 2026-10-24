@@ -68,8 +68,9 @@ def _summarize_read(data: Mapping[str, object], truncated: bool) -> str | None:
             return f"read {_count(selected, 'line', 'lines')} of {line_count}{suffix}"
         returned = selected if isinstance(selected, int) else line_count
         return f"read {_count(returned, 'line', 'lines')}{suffix}"
+    # Without a total or truncation, the read stopped at its limit before the end.
     assert isinstance(selected, int)
-    return f"read {_count(selected, 'line', 'lines')}{suffix}"
+    return f"read {_count(selected, 'line', 'lines')} (+ more){suffix}"
 
 
 def _summarize_grep(data: Mapping[str, object], truncated: bool) -> str | None:

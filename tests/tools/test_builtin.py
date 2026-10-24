@@ -40,7 +40,7 @@ def test_summary_module_reads_the_real_tool_data_keys(tmp_path: Path) -> None:
     # the whole-file count — the P1 the review caught (summary replaces the dump).
     paged = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 1}, context)
     assert paged.text == "beta\n[More lines follow. Use offset=3 to continue.]"
-    assert summary_of("read", paged) == "read 1 line from notes.txt"
+    assert summary_of("read", paged) == "read 1 line (+ more) from notes.txt"
 
     grep = run_tool(GrepTool(), {"pattern": "alpha"}, context)
     assert summary_of("grep", grep) == "grep: 2 matches"

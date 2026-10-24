@@ -26,7 +26,7 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
 
     result = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 3}, context)
 
-    assert result.text == "two\n[truncated] Output limit reached. Use offset=3 to continue."
+    assert result.text == "two\n[truncated] Use offset=3 to continue."
     assert result.truncated is True
     assert "line_count" not in result.data
     assert result.data["selected_count"] == 1
@@ -103,6 +103,15 @@ def test_read_exact_fit_has_no_notice(tmp_path: Path) -> None:
 
     assert result.text == "one\ntwo\nthree\n"
     assert result.truncated is False
+
+
+def test_read_small_budget_keeps_notice(tmp_path: Path) -> None:
+    (tmp_path / "min.js").write_text("x" * 1000 + "\nafter\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=100)
+
+    result = run_tool(ReadTool(), {"path": "min.js"}, context)
+
+    assert result.text == "x" * 36 + "\n[truncated] Line 1 is too long; use offset=2 to skip it."
 
 
 def test_read_offset_past_eof(tmp_path: Path) -> None:
