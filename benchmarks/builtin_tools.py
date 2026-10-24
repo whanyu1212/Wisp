@@ -36,7 +36,11 @@ _MEBIBYTE = 1024 * _KIBIBYTE
 _PAGE_LINES = 100
 _MAX_RESULTS = 100
 _LARGE_FILE_LINE = b"large-file benchmark line " + b"x" * 99 + b"\n"
-_MIN_OUTPUT_BYTES = _PAGE_LINES * len(_LARGE_FILE_LINE)
+# A read page that stops before the end of the file ends with a one-line continuation
+# notice. Leave room for it so the budget never cuts the page itself.
+_READ_NOTICE_ROOM_BYTES = 512
+_MIN_OUTPUT_LINES = _PAGE_LINES + 1
+_MIN_OUTPUT_BYTES = _PAGE_LINES * len(_LARGE_FILE_LINE) + _READ_NOTICE_ROOM_BYTES
 # Built at runtime so a repository run never finds this module's own source as a match.
 _ABSENT_TOKEN = "wisp-bench" + "mark-absent-token"
 _ABSENT_REGEX = "wisp-bench" + r"mark-absent-\d+-token"
@@ -208,8 +212,8 @@ def _validate_config(config: BenchmarkConfig) -> None:
         raise ValueError("file_bytes must be at least 64")
     if config.max_output_bytes < _MIN_OUTPUT_BYTES:
         raise ValueError(f"max_output_bytes must be at least {_MIN_OUTPUT_BYTES}")
-    if config.max_output_lines < _PAGE_LINES:
-        raise ValueError(f"max_output_lines must be at least {_PAGE_LINES}")
+    if config.max_output_lines < _MIN_OUTPUT_LINES:
+        raise ValueError(f"max_output_lines must be at least {_MIN_OUTPUT_LINES}")
     if config.iterations < 1:
         raise ValueError("iterations must be positive")
     if config.batch_size < 0:

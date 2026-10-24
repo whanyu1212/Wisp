@@ -34,7 +34,6 @@ def test_one_shot_completion_kills_descendant_with_redirected_output(tmp_path: P
                 cwd=tmp_path,
                 timeout=2,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
             child_pid = await wait_for_pid_file(child_pid_path)
             with anyio.fail_after(3):
@@ -74,7 +73,6 @@ def test_one_shot_completion_surfaces_process_tree_cleanup_failure(
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             return len(supervisor._one_shot)  # noqa: SLF001
         finally:
@@ -110,7 +108,6 @@ def test_one_shot_timeout_retains_ownership_when_cleanup_fails(
                     cwd=tmp_path,
                     timeout=0.05,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             return len(supervisor._one_shot)  # noqa: SLF001
         finally:
@@ -149,7 +146,6 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
                     cwd=tmp_path,
                     timeout=30,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             return len(supervisor._one_shot)  # noqa: SLF001
         finally:
@@ -198,7 +194,6 @@ def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_conten
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             one_shot_finished.set()
 
@@ -221,7 +216,6 @@ def test_one_shot_releases_ownership_inside_cancelled_scope_while_lock_is_conten
                 cwd=tmp_path,
                 timeout=2,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
             return retained_count, result.stdout
         finally:
@@ -267,7 +261,6 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_while_lock_is_contend
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             )
             await lock_held.wait()
@@ -289,7 +282,6 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_while_lock_is_contend
                 cwd=tmp_path,
                 timeout=2,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
             return retained_count, result.stdout
         finally:
@@ -325,7 +317,6 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_during_cleanup(
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             )
             await terminate_started.wait()
@@ -343,7 +334,6 @@ def test_one_shot_releases_ownership_after_raw_task_cancel_during_cleanup(
                 cwd=tmp_path,
                 timeout=2,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
             return retained_count, result.stdout
         finally:
@@ -379,7 +369,6 @@ def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
                     cwd=tmp_path,
                     timeout=30,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             assert len(captured_processes) == 1
             return captured_processes[0].returncode, len(supervisor._one_shot)  # noqa: SLF001

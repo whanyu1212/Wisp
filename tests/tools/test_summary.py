@@ -88,7 +88,7 @@ def test_read_summary_falls_back_when_selected_count_absent() -> None:
 def test_read_summary_handles_unknown_total() -> None:
     assert (
         summarize_tool_result("read", {"path": "large.log", "selected_count": 2})
-        == "read 2 lines from large.log"
+        == "read 2 lines (+ more) from large.log"
     )
 
 

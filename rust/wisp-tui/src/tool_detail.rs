@@ -780,10 +780,14 @@ fn build_read_presentation(
         return DetailAvailability::None;
     };
     let mut retained_lines = logical_lines(result.output);
-    if result.truncated
+    // The backend appends a notice only when the read stopped before the end of the
+    // file: when truncated, or at the limit (summarized as "(+ more)"). A file line
+    // that merely looks like a notice is content.
+    let stopped_early = result.truncated || summary.contains(" (+ more)");
+    if stopped_early
         && retained_lines
             .last()
-            .is_some_and(|line| is_truncation_marker(line))
+            .is_some_and(|line| is_read_continuation_notice(line) || is_truncation_marker(line))
     {
         retained_lines.pop();
     }
@@ -1142,6 +1146,14 @@ fn bounded_result_records(
 
 fn is_truncation_marker(line: &str) -> bool {
     !line.is_empty() && "[truncated]".starts_with(line)
+}
+
+/// The backend's read tool ends a page that stops before the end of the file with
+/// one of these notices, which tell the model where to continue.
+fn is_read_continuation_notice(line: &str) -> bool {
+    ["[truncated] ", "[More lines follow. Use offset="]
+        .iter()
+        .any(|prefix| line.starts_with(prefix))
 }
 
 fn parse_grep_record(line: &str) -> Option<(&str, u64, &str)> {
@@ -1530,6 +1542,46 @@ mod tests {
             .find(|row| row.kind == DetailRowKind::Omission)
             .expect("frontend omission row");
         assert_eq!(omission.hidden_bytes, 9_999);
+    }
+
+    #[test]
+    fn read_continuation_notice_is_not_a_file_line() {
+        let read = project_tool_detail_source(
+            "read",
+            serde_json::json!({"path": "a.rs"}).as_object().unwrap(),
+        );
+        for (output, truncated, summary, rows) in [
+            (
+                "one\n[More lines follow. Use offset=2 to continue.]",
+                false,
+                "read 1 line (+ more) from a.rs",
+                1,
+            ),
+            (
+                "one\n[truncated] Use offset=2 to continue.",
+                true,
+                "read (truncated) from a.rs",
+                1,
+            ),
+            (
+                "one\n[More lines follow. Use offset=2 to continue.]\n",
+                false,
+                "read 2 lines from a.rs",
+                2,
+            ),
+        ] {
+            let DetailAvailability::LiveRetained(detail) = build_tool_detail(
+                &read,
+                DetailResult {
+                    truncated,
+                    ..result(output, Some(summary))
+                },
+            ) else {
+                panic!("read detail expected");
+            };
+            assert_eq!(detail.rows.len(), rows, "{summary}");
+            assert_eq!(detail.rows[0].text, "one");
+        }
     }
 
     #[test]

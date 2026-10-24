@@ -218,7 +218,6 @@ def test_one_shot_commands_share_managed_process_capacity(tmp_path: Path) -> Non
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             await supervisor.cancel(process_id)
         finally:
@@ -242,7 +241,6 @@ def test_one_shot_evicts_observed_terminal_handle_for_capacity(tmp_path: Path) -
                 cwd=tmp_path,
                 timeout=2,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
             return result.stdout
         finally:

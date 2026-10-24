@@ -318,6 +318,7 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
         {
             "cwd": str(tmp_path),
             "start_new_session": False,
+            "stdin": process_tools_module.asyncio.subprocess.DEVNULL,
             "stdout": process_tools_module.asyncio.subprocess.PIPE,
             "stderr": process_tools_module.asyncio.subprocess.PIPE,
             "creationflags": process_tools_module._WINDOWS_CREATE_SUSPENDED,  # noqa: SLF001

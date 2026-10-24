@@ -54,17 +54,24 @@ def truncate_text(text: str, *, max_bytes: int, max_lines: int) -> TruncatedText
     return TruncatedText(text=text, truncated=truncated)
 
 
-def truncate_text_tail(text: str, *, max_bytes: int, max_lines: int) -> TruncatedText:
+def truncate_text_tail(
+    text: str,
+    *,
+    max_bytes: int,
+    max_lines: int,
+    input_truncated: bool = False,
+) -> TruncatedText:
     """Limit text while preserving its diagnostic tail.
 
     Unlike :func:`truncate_text`, this helper discards from the beginning and
     places the truncation marker before the retained tail. It is intended for
     completed process output, where the final stderr or traceback lines carry
-    more diagnostic value than the beginning.
+    more diagnostic value than the beginning. Set ``input_truncated`` when
+    ``text`` is already a tail, so the marker appears even if it fits.
     """
 
     lines = text.splitlines(keepends=True)
-    truncated = len(lines) > max_lines
+    truncated = input_truncated or len(lines) > max_lines
     if truncated:
         text = "".join(lines[-max_lines:]) if max_lines > 0 else ""
 

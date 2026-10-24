@@ -21,7 +21,6 @@ from wisp.tools.shell.process import (
     _collect_limited_output,
     _create_shell_process,
     _kill_process_tree_and_wait,
-    _OutputBudget,
     _terminate_process_tree,
 )
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
@@ -398,7 +397,6 @@ class ProcessSupervisor:
         cwd: Path,
         timeout: float,
         max_output_bytes: int,
-        max_output_lines: int,
     ) -> ProcessResult:
         """Run one compatibility command while tracking it for shutdown."""
 
@@ -409,10 +407,9 @@ class ProcessSupervisor:
                 raise ToolError(
                     f"Cannot start command: managed process limit ({self._max_processes}) reached"
                 )
-            budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
             process = await self._spawn(command, cwd=cwd)
             self._one_shot_locks[process] = asyncio.Lock()
-            capture_task = asyncio.create_task(_collect_limited_output(process, budget))
+            capture_task = asyncio.create_task(_collect_limited_output(process, max_output_bytes))
             self._one_shot[process] = capture_task
 
         release_ownership = False

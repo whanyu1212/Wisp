@@ -38,6 +38,10 @@ _WINDOWS_WAIT_TIMEOUT = 0x00000102
 _LINUX_PR_SET_CHILD_SUBREAPER = 36
 _POSIX_JOBS_FD_MIN = 100
 _OUTPUT_LIMIT_EXIT_GRACE_SECONDS = 0.1
+# How long output may keep arriving after the shell exits. A background job that
+# inherited the pipes would otherwise hold a one-shot command open until it exits.
+_OUTPUT_DRAIN_GRACE_SECONDS = 0.2
+_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
 _POSIX_SUBREAPER_HELPER = (
     "import ctypes, os, sys\n"
@@ -172,6 +176,37 @@ class _LimitedStreamResult:
     dropped_bytes: int = 0
 
 
+class _StreamTail:
+    """The last ``max_bytes`` bytes of one output stream, plus how many were dropped.
+
+    Command output is kept from the end because failures, tracebacks, and summaries
+    are printed last.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self._max_bytes = max(0, max_bytes)
+        self._retained = bytearray()
+        self._dropped_bytes = 0
+
+    def append(self, chunk: bytes) -> None:
+        self._retained += chunk
+        excess = len(self._retained) - self._max_bytes
+        if excess <= 0:
+            return
+        # Start on a UTF-8 character boundary so the kept tail decodes cleanly.
+        while excess < len(self._retained) and self._retained[excess] & 0xC0 == 0x80:
+            excess += 1
+        del self._retained[:excess]
+        self._dropped_bytes += excess
+
+    def result(self) -> _LimitedStreamResult:
+        return _LimitedStreamResult(
+            output=bytes(self._retained),
+            truncated=self._dropped_bytes > 0,
+            dropped_bytes=self._dropped_bytes,
+        )
+
+
 class _OutputBudget:
     def __init__(self, *, max_bytes: int, max_lines: int) -> None:
         self._remaining_bytes = max(0, max_bytes)
@@ -213,14 +248,12 @@ async def _run_shell(
     cwd: Path,
     timeout: float,
     max_output_bytes: int,
-    max_output_lines: int,
 ) -> ProcessResult:
     process = await _create_shell_process(command, cwd=cwd)
 
-    budget = _OutputBudget(max_bytes=max_output_bytes, max_lines=max_output_lines)
     try:
         stdout_result, stderr_result = await asyncio.wait_for(
-            _collect_limited_output(process, budget),
+            _collect_limited_output(process, max_output_bytes),
             timeout=timeout,
         )
     except TimeoutError as exc:
@@ -288,12 +321,14 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
             )
             raise ToolError(f"Failed to start command: {exc}") from exc
         command = _wrap_posix_shell_command(command, posix_jobs_file)
+    # Commands never read Wisp's stdin: in RPC mode it carries the JSONL command stream.
     try:
         if os.name == "nt":
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(cwd),
                 start_new_session=False,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=getattr(
@@ -314,6 +349,7 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                     command,
                     cwd=str(cwd),
                     start_new_session=True,
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     **process_kwargs,
@@ -323,6 +359,7 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                     command,
                     cwd=str(cwd),
                     start_new_session=os.name == "posix",
+                    stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     **process_kwargs,
@@ -1369,22 +1406,50 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
 
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
-    budget: _OutputBudget,
+    max_stream_bytes: int,
 ) -> tuple[_LimitedStreamResult, _LimitedStreamResult]:
+    """Capture the tail of stdout and stderr until the shell exits.
+
+    Each stream keeps its own last ``max_stream_bytes`` bytes, so a noisy stdout
+    cannot crowd out stderr. Capture ends at end-of-file on both streams, or
+    ``_OUTPUT_DRAIN_GRACE_SECONDS`` after the shell exits if a background job still
+    holds a pipe; the caller's process-tree cleanup then terminates that job.
+    """
+
     assert process.stdout is not None
     assert process.stderr is not None
 
-    stdout_task = asyncio.create_task(_read_stream_limited(process.stdout, budget))
-    stderr_task = asyncio.create_task(_read_stream_limited(process.stderr, budget))
+    stdout_tail = _StreamTail(max_stream_bytes)
+    stderr_tail = _StreamTail(max_stream_bytes)
+    readers = (
+        asyncio.create_task(_read_stream_tail(process.stdout, stdout_tail)),
+        asyncio.create_task(_read_stream_tail(process.stderr, stderr_tail)),
+    )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.gather(stdout_task, stderr_task)
-        await process.wait()
-        return stdout_bytes, stderr_bytes
+        # asyncio's ``Process.wait()`` also waits for every pipe to close, so poll the
+        # exit status instead to notice a shell that exited while a pipe stays open.
+        pending: set[asyncio.Task[None]] = set(readers)
+        while pending and process.returncode is None:
+            done, pending = await asyncio.wait(pending, timeout=_EXIT_POLL_INTERVAL_SECONDS)
+            for reader in done:
+                reader.result()
+        if pending:
+            done, _still_open = await asyncio.wait(pending, timeout=_OUTPUT_DRAIN_GRACE_SECONDS)
+            for reader in done:
+                reader.result()
+        else:
+            await process.wait()
+        return stdout_tail.result(), stderr_tail.result()
     finally:
-        for task in (stdout_task, stderr_task):
-            if not task.done():
-                task.cancel()
-        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
+        for reader in readers:
+            if not reader.done():
+                reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+
+
+async def _read_stream_tail(stream: asyncio.StreamReader, tail: _StreamTail) -> None:
+    while chunk := await stream.read(8192):
+        tail.append(chunk)
 
 
 async def _read_stream_limited(
@@ -1456,6 +1521,7 @@ async def _run_exec_limited_stdout(
             *command,
             cwd=str(cwd),
             start_new_session=os.name == "posix",
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -1646,8 +1712,22 @@ def _format_process_output_bounded(
     *,
     max_bytes: int,
     max_lines: int,
+    capture_truncated: bool = False,
 ) -> TruncatedText:
-    """Format process output within its budget while preserving diagnostics."""
+    """Format process output within its budget while preserving diagnostics.
+
+    Args:
+        exit_code (int): Exit status reported in the fixed status prefix.
+        stdout (str): Captured standard output.
+        stderr (str): Captured standard error, placed after stdout.
+        max_bytes (int): UTF-8 byte budget for the output body.
+        max_lines (int): Line budget for the output body.
+        capture_truncated (bool): Whether capture already dropped output, so the
+            body is marked truncated even when what remains fits the budget.
+
+    Returns:
+        TruncatedText: The status prefix and the tail of the combined output.
+    """
 
     parts = _process_output_parts(stdout, stderr)
     status = f"Command exited with code {exit_code}"
@@ -1668,6 +1748,7 @@ def _format_process_output_bounded(
         # the diagnostic tail for every positive body budget.
         max_bytes=max_bytes,
         max_lines=max_lines,
+        input_truncated=capture_truncated,
     )
     return TruncatedText(
         text=f"{prefix}{bounded_body.text}",
