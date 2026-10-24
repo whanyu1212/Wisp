@@ -1,9 +1,9 @@
 ---
 title: CLI
-description: The wisp executable selects an interface from its arguments and terminal state. Run wisp --help or any command with --help for the installed version's generated help.
+description: Invocation modes, subcommands, flags, and exit codes for the wisp executable.
 route: reference/cli.html
 section: reference
-order: 23
+order: 1
 layout: docs
 listed: true
 searchable: true

@@ -1,9 +1,9 @@
 ---
 title: 2. Reading, editing, and testing code
-description: 'Our agent can observe the broken addition function, but it cannot fix it. This chapter gives the same loop three operations: read the source, replace a known piece of text, and…'
+description: Add validated tool dispatch, exact-match file edits, bounded test execution, and structured error feedback.
 route: crafting-agents/02-tools.html
 section: learn
-order: 3
+order: 2
 layout: course
 listed: true
 searchable: true

@@ -54,16 +54,7 @@ const target = href(entry.data.route);
         "reference/index.md",
         "contributing/index.md",
       ].includes(entry.data.source) && <SectionIndex page={entry.data} />}
-      {entry.data.source === "guide/quickstart.md" && (
-        <TuiCapture capture="approval" />
-      )}
-      {entry.data.source === tuiSource && <TuiCapture capture="working" />}
-      {entry.data.source === "guide/tui/sessions.md" && (
-        <TuiCapture capture="diffs" />
-      )}
-      {entry.data.source === "guide/tui/commands.md" && (
-        <TuiCapture capture="mcp" />
-      )}
+      {entry.data.capture && <TuiCapture capture={entry.data.capture} />}
       {entry.data.source === tuiSource && <script>
         function navigateTuiSection() {
           let id: string;

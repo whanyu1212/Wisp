@@ -1,9 +1,9 @@
 ---
 title: Wisp 0.2.0rc3 release decision and checklist
-description: 'Status: release preparation, September 17, 2026. This PR prepares the candidate; it does not create v0.2.0rc3, publish packages, or change the stable 0.1.0 installation pin. At…'
+description: Release decision, prepublication checklist, and verification record for Wisp 0.2.0rc3.
 route: maintainers/releases/rc3-release.html
 section: maintainers
-order: 51
+order: 18
 layout: archive
 listed: false
 searchable: false

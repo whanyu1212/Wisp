@@ -1,9 +1,9 @@
 ---
 title: Development setup
-description: 'Wisp targets Python 3.12 or newer and uses uv for its locked development environment. Clone the repository, then install the package and development dependencies:'
+description: Prepare a local Python and Rust checkout with uv, build the native TUI binary, and run verification checks.
 route: contributing/development.html
 section: contributing
-order: 34
+order: 1
 layout: docs
 listed: true
 searchable: true

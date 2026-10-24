@@ -1,6 +1,6 @@
 ---
 title: TUI keys and keybindings
-description: Keyboard shortcuts, editing keys, and user keybinding configuration.
+description: Keyboard shortcuts, composer editing keys, and custom keybinding configuration in ~/.wisp/settings.json.
 route: guide/tui/keybindings.html
 section: using
 order: 0

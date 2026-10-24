@@ -1,12 +1,14 @@
 ---
 title: 'Case study: Hardening the tool boundary'
-description: The chapter 2 checkpoint assumes a small trusted fixture and a single writer. Wisp operates inside developer repositories, runs long-lived commands, and accepts calls from…
+description: How Wisp handles file races, protected paths, process supervision, bounded search, and concurrency across built-in tools.
 route: crafting-agents/case-studies/tool-boundary.html
 section: learn
-order: 7
+order: 6
 layout: course
 listed: true
 searchable: true
+navTitle: Hardening the tool boundary
+navGroup: Case studies
 ---
 
 # Case study: Hardening the tool boundary

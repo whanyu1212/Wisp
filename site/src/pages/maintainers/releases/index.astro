@@ -35,12 +35,15 @@ const page: PageMetadata = {
       For user-facing changes, read the{" "}
       <a href={href("changelog.html")}>Changelog</a>.
     </p>
-    <ul>
-      {records.map((record) => (
-        <li>
-          <a href={href(record.route)}>{record.title}</a>
-        </li>
-      ))}
-    </ul>
+    <div class="section-index">
+      <ul>
+        {records.map((record) => (
+          <li>
+            <a href={href(record.route)}>{record.title} →</a>
+            <p>{record.description}</p>
+          </li>
+        ))}
+      </ul>
+    </div>
   </article>
 </Document>

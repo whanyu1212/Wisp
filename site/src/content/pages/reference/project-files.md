@@ -1,9 +1,9 @@
 ---
 title: Project file discovery
-description: The report contains command_id, a process-local policy generation, entries with relative POSIX path and kind (file or directory), and truncated. The standard event timestamp…
+description: Contract for the get_project_files RPC command and the bounded, protected-path-aware rpc.project_files snapshot.
 route: reference/project-files.html
 section: reference
-order: 26
+order: 4
 layout: docs
 listed: true
 searchable: true

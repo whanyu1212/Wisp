@@ -1,9 +1,9 @@
 ---
 title: Configuration
-description: Wisp reads configuration from CLI flags, environment variables, and JSON settings files.
+description: Settings precedence across CLI flags, environment variables, project .wisp/settings.json, and user ~/.wisp/settings.json.
 route: reference/configuration.html
 section: reference
-order: 28
+order: 2
 layout: docs
 listed: true
 searchable: true

@@ -1,9 +1,9 @@
 ---
 title: Wisp 0.2.0rc2 release decision and checklist
-description: 'Status: release preparation, September 16, 2026. This PR prepares the candidate; it does not create a tag, publish packages, or remove Textual. Stable remains 0.1.0; the latest…'
+description: Release decision, Rust-default trial checklist, and verification record for Wisp 0.2.0rc2.
 route: maintainers/releases/rc2-release.html
 section: maintainers
-order: 52
+order: 19
 layout: archive
 listed: false
 searchable: false

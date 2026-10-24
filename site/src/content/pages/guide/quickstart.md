@@ -1,12 +1,13 @@
 ---
 title: Quickstart
-description: 'Wisp runs from the project you want it to understand. It requires Python 3.12 or newer; the recommended persistent installation is:'
+description: Trust a repository, connect a model provider, run your first interactive or one-shot prompt, and resume saved work.
 route: guide/quickstart.html
 section: using
-order: 11
+order: 2
 layout: docs
 listed: true
 searchable: true
+capture: approval
 ---
 
 # Quickstart

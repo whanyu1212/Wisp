@@ -1,9 +1,9 @@
 ---
 title: Tools & safety
-description: Wisp includes built-in local tools for reading files, editing files, searching projects, and running shell commands. File tools are sandboxed to the tool context's working…
+description: Understand read, mutating, and command tool policies, project trust, protected paths, and MCP server approvals.
 route: guide/tools-and-safety.html
 section: using
-order: 18
+order: 7
 layout: docs
 listed: true
 searchable: true

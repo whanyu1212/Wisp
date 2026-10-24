@@ -1,9 +1,9 @@
 ---
 title: How Wisp is built
-description: 'Wisp ships as one Python distribution, wisp-ai. Each release publishes four files: a source distribution, a pure-Python wheel, and two native wheels that add the Rust TUI and a…'
+description: How Wisp packages its source distribution, pure-Python wheel, and platform-specific native wheels with the Rust TUI.
 route: contributing/building.html
 section: contributing
-order: 35
+order: 2
 layout: docs
 listed: true
 searchable: true

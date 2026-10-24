@@ -1,9 +1,9 @@
 ---
 title: Interfaces
-description: Every interface drives the same RPC command host, CodingSession, AgentHarness, and provider-neutral loop. Choose a surface based on who supplies input and how output needs to…
+description: Compare the interactive Rust TUI, one-shot print and JSON modes, long-lived JSONL RPC, and the Python SDK.
 route: guide/interfaces.html
 section: using
-order: 15
+order: 6
 layout: docs
 listed: true
 searchable: true

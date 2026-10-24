@@ -1,9 +1,9 @@
 ---
 title: 5. Controlling side effects
-description: Chapter 4 made provider completion a prerequisite for dispatch. But a complete, valid response is still only a proposal. A well-formed edit can target the wrong file; a test…
+description: Separate tool exposure, safety policy, interactive approvals, project trust, and filesystem/process boundaries.
 route: crafting-agents/05-side-effects.html
 section: learn
-order: 6
+order: 5
 layout: course
 listed: true
 searchable: true

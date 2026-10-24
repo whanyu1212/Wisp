@@ -1,9 +1,9 @@
 ---
 title: Environment variables
-description: Each is required only for the matching provider. See Providers & auth for storage and precedence details.
+description: Runtime, provider credential, path, and terminal environment variables recognized by Wisp.
 route: reference/environment.html
 section: reference
-order: 29
+order: 3
 layout: docs
 listed: true
 searchable: true

@@ -1,9 +1,9 @@
 ---
 title: 4. Talking to models reliably
-description: Our agent has tools and useful context, but every decision so far has been scripted. This chapter connects the same loop to a streaming provider. The new problem is deciding…
+description: Connect the agent loop to a streaming model provider with lifecycle validation, completion signals, and safe retries.
 route: crafting-agents/04-providers.html
 section: learn
-order: 5
+order: 4
 layout: course
 listed: true
 searchable: true

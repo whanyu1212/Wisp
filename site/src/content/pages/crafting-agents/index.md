@@ -1,12 +1,13 @@
 ---
 title: Crafting Coding Agents
-description: '*Learn the engineering decisions involved in building a coding agent, then examine Wisp as a concrete, evolving answer to those decisions.*'
+description: Learn the engineering decisions behind building a coding agent and examine Wisp as a concrete production case study.
 route: crafting-agents/index.html
 section: learn
-order: 1
+order: 0
 layout: course
 listed: true
 searchable: true
+navTitle: Course overview
 ---
 
 # Crafting Coding Agents

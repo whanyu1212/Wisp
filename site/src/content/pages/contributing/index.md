@@ -1,9 +1,9 @@
 ---
 title: Contributing
-description: Wisp welcomes focused bug fixes, documentation improvements, tests, and features that preserve its single typed runtime. Keep provider-specific behavior in provider adapters,…
+description: Guidelines for bug fixes, documentation, tests, and features that preserve Wisp's shared typed runtime.
 route: contributing/index.html
 section: contributing
-order: 33
+order: 0
 layout: docs
 listed: true
 searchable: true

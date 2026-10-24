@@ -1,9 +1,9 @@
 ---
 title: Compatibility & versioning
-description: 'Wisp versions the Python package and persisted session records separately. The live RPC protocol has no compatibility promise of its own: a backend and a frontend must come…'
+description: Versioning policy for the wisp-ai package, persisted JSONL session schemas, and same-release RPC handshakes.
 route: reference/compatibility.html
 section: reference
-order: 27
+order: 6
 layout: docs
 listed: true
 searchable: true

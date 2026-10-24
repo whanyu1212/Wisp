@@ -1,12 +1,13 @@
 ---
 title: Upgrading from Wisp 0.1 to 0.2
-description: 'Wisp 0.2 is a minor release with announced breaking changes. What you need to do depends on how you use Wisp:'
+description: Migrate from Wisp 0.1 to 0.2 across the terminal interface, Python SDK imports, and JSONL-RPC handshake.
 route: guide/upgrading.html
 section: using
 order: 13
 layout: docs
 listed: true
 searchable: true
+navTitle: Upgrading to 0.2
 ---
 
 # Upgrading from Wisp 0.1 to 0.2

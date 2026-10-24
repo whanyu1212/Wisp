@@ -1,9 +1,9 @@
 ---
 title: Python SDK reference
-description: Look up supported Python namespaces, controller signatures, option defaults, result events, and lifecycle contracts.
+description: Supported Python namespaces, controller signatures, option defaults, result events, and lifecycle contracts.
 route: reference/sdk.html
 section: reference
-order: 24
+order: 5
 layout: docs
 listed: true
 searchable: true

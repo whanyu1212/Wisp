@@ -3,7 +3,7 @@ title: SDK capability audit
 description: 'Historical SDK design evidence: a capability comparison pinned to specific Pi and Wisp revisions, not the current API reference.'
 route: architecture/sdk-capability-audit.html
 section: inside
-order: 33
+order: 3
 layout: docs
 listed: true
 searchable: true
