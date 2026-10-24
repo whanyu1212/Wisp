@@ -44,6 +44,10 @@ _POSIX_JOBS_FD_MIN = 100
 _OUTPUT_DRAIN_GRACE_SECONDS = 0.2
 _EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
+# Cleanup lists processes with pgrep, ps, lsof, or fuser. On a busy machine these take
+# well over a second, and a scan that times out leaves cleanup unable to prove the tree
+# is gone, so the limit only stops a scan that hangs.
+_PROCESS_SCAN_TIMEOUT_SECONDS = 5.0
 _POSIX_SUBREAPER_HELPER = (
     "import ctypes, os, sys\n"
     "try:\n"
@@ -577,7 +581,7 @@ async def _terminate_process_tree(
         if os.name == "nt":
             return await asyncio.to_thread(_kill_process_tree, process)
         if os.name == "posix":
-            return await asyncio.to_thread(_force_kill_posix_process_tree, process)
+            return await asyncio.to_thread(_kill_posix_process_tree, process)
         return _kill_process_tree(process)
     if os.name == "nt":
         return await asyncio.to_thread(_kill_process_tree, process)
@@ -598,26 +602,32 @@ async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> 
         # Only the process group receives SIGTERM, so the grace period is needed only when
         # it had members to signal; detached survivors go straight to SIGKILL either way.
         await asyncio.sleep(_POSIX_TERMINATION_GRACE_SECONDS)
-    return await asyncio.to_thread(_finish_posix_process_tree_termination, process)
+    return await asyncio.to_thread(_kill_posix_process_tree, process)
 
 
-def _force_kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
+def _kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
+    """SIGKILL the command's process group and every recorded job.
+
+    Descendants that left the group are recorded first. When that scan fails, the
+    processes already known are still killed, but tracking is kept and failure is
+    reported so the caller retries the cleanup.
+
+    Args:
+        process (asyncio.subprocess.Process): The command's shell leader.
+
+    Returns:
+        bool: Whether every process in the tree is known and was signalled.
+    """
+
     descendants_recorded = _record_posix_descendant_pids(process)
-    if not descendants_recorded:
-        return False
-    return _kill_process_tree(process)
-
-
-def _finish_posix_process_tree_termination(process: asyncio.subprocess.Process) -> bool:
-    descendants_recorded = _record_posix_descendant_pids(process)
-    if not descendants_recorded:
-        return False
     group_kill = _signal_posix_process_group(process, signal.SIGKILL)
     recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
-    if group_kill is not _PosixGroupSignal.FAILED and recorded_kill_succeeded:
-        _release_posix_tracking(process)
-        return True
-    return False
+    if not descendants_recorded or group_kill is _PosixGroupSignal.FAILED:
+        return False
+    if not recorded_kill_succeeded:
+        return False
+    _release_posix_tracking(process)
+    return True
 
 
 def _signal_posix_process_group(
@@ -659,7 +669,7 @@ def _posix_group_has_members_without_live_leader(pgid: int) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=1,
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -919,7 +929,7 @@ def _posix_jobs_file_holder_pids_from_lsof(jobs_file: Path) -> tuple[int, ...] |
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=1,
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -935,7 +945,7 @@ def _posix_jobs_file_holder_pids_from_fuser(jobs_file: Path) -> tuple[int, ...] 
             check=False,
             capture_output=True,
             text=True,
-            timeout=1,
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -965,7 +975,7 @@ def _posix_child_pids(parent_pid: int) -> tuple[int, ...] | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=0.2,
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return _posix_child_pids_from_ps(parent_pid)
@@ -982,7 +992,7 @@ def _posix_child_pids_from_ps(parent_pid: int) -> tuple[int, ...] | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=1,
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

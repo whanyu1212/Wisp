@@ -373,7 +373,8 @@ def test_managed_timeout_bounds_post_termination_stream_drain(tmp_path: Path) ->
                 asyncio.create_task(hold_pipe_open()),
             )
             managed.stdout_task, managed.stderr_task = retained_pipe_tasks
-            with anyio.fail_after(2):
+            # Finishing at all proves the bound; 10 s leaves room for a loaded machine.
+            with anyio.fail_after(10):
                 update = (await poll_until_terminal(supervisor, process_id))[-1]
             return update, retained_pipe_tasks
         finally:
@@ -413,7 +414,8 @@ def test_supervisor_close_bounds_post_termination_stream_drain(tmp_path: Path) -
             asyncio.create_task(hold_pipe_open()),
         )
         managed.stdout_task, managed.stderr_task = retained_pipe_tasks
-        with anyio.fail_after(2):
+        # Finishing at all proves the bound; 10 s leaves room for a loaded machine.
+        with anyio.fail_after(10):
             await supervisor.aclose()
         return retained_pipe_tasks
 

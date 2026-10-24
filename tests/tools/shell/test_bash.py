@@ -231,7 +231,12 @@ def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
                 context,
             )
 
-            assert cancelled.text == f"Process {process_id} cancelled"
+            # Cancelling sends SIGTERM. The shell running the command traps it so it
+            # can record background jobs, so it may outlive the killed child long
+            # enough to report the signal on stderr ("Terminated: 15"), depending
+            # on timing. Only the header, state, and silent stdout are fixed.
+            assert cancelled.text.splitlines()[0] == f"Process {process_id} cancelled"
+            assert cancelled.data["stdout"] == ""
             assert cancelled.data["process_id"] == process_id
             assert cancelled.data["process_state"] == "cancelled"
             assert "exit_code" not in cancelled.data
@@ -789,19 +794,20 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
 def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     marker = tmp_path / "background-child-survived.txt"
-    command = f"(sleep 1.5; echo alive > {shlex.quote(str(marker))}) & echo started"
+    command = f"(sleep 3; echo alive > {shlex.quote(str(marker))}) & echo started"
 
     started = time.monotonic()
-    result = run_tool(BashTool(), {"command": command, "timeout": 10}, context)
+    result = run_tool(BashTool(), {"command": command, "timeout": 30}, context)
     elapsed = time.monotonic() - started
-    time.sleep(2.0)
+    time.sleep(max(0.0, 3.5 - elapsed))
 
     assert result.text == (
         "Command exited with code 0: started\n"
         "[Background processes still holding the output were stopped when the command "
         "exited. Use operation=start to keep a process running.]"
     )
-    assert elapsed < 1.0
+    # Returning before the child's 3 s sleep ends proves the call did not wait for it.
+    assert elapsed < 2.5
 
     assert not marker.exists()
 

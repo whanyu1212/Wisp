@@ -116,9 +116,10 @@ def test_poll_wait_releases_operation_lock_for_cancel(tmp_path: Path) -> None:
             poll_task = asyncio.create_task(supervisor.poll(process_id, wait_seconds=30))
             await changed.wait_started.wait()
 
-            with anyio.fail_after(2):
+            # Finishing at all proves the bound; 10 s leaves room for a loaded machine.
+            with anyio.fail_after(10):
                 cancel_update = await supervisor.cancel(process_id)
-            with anyio.fail_after(2):
+            with anyio.fail_after(10):
                 poll_update = await poll_task
             return cancel_update, poll_update
         finally:
