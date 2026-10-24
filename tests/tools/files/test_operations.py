@@ -565,12 +565,67 @@ def test_edit_tool_rejects_non_unique_replacement(tmp_path: Path) -> None:
     path.write_text("same same\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
-    with pytest.raises(ToolError, match="found 2 matches") as raised:
+    with pytest.raises(ToolError, match=r"edits\[0\].oldText matches 2 places") as raised:
         run_tool(
             EditTool(),
             {"path": "dupes.txt", "edits": [{"oldText": "same", "newText": "once"}]},
             context,
         )
-    assert raised.value.failure_code == "stale_input"
+    assert raised.value.failure_code == "invalid_arguments"
     assert raised.value.retryable is True
-    assert "Reread" in str(raised.value.recovery_hint)
+    assert "surrounding lines" in str(raised.value.recovery_hint)
+
+
+def _edit(tmp_path: Path, content: bytes, *edits: tuple[str, str]) -> bytes:
+    path = tmp_path / "file.txt"
+    path.write_bytes(content)
+    run_tool(
+        EditTool(),
+        {"path": "file.txt", "edits": [{"oldText": old, "newText": new} for old, new in edits]},
+        ToolContext(cwd=tmp_path),
+    )
+    return path.read_bytes()
+
+
+def test_edit_crlf_multiline(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"a\r\nb\r\nc\r\n", ("a\nb", "x\ny"))
+
+    assert edited == b"x\r\ny\r\nc\r\n"
+
+
+def test_edit_crlf_inserted_lines(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"a\r\nb\r\n", ("b", "b\nb2"))
+
+    assert edited == b"a\r\nb\r\nb2\r\n"
+
+
+def test_edit_mixed_endings_untouched(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"a\nb\r\nc\n", ("a", "A\nA2"), ("b\nc", "B\nC"))
+
+    assert edited == b"A\nA2\nB\r\nC\n"
+
+
+def test_edit_keeps_bom(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, "\ufeffhello\n".encode(), ("hello", "hi"))
+
+    assert edited == "\ufeffhi\n".encode()
+
+
+def test_edit_missing_names_index(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match=r"edits\[1\].oldText was not found") as raised:
+        _edit(tmp_path, b"alpha beta\n", ("alpha", "A"), ("gamma", "G"))
+
+    assert raised.value.failure_code == "stale_input"
+    assert (tmp_path / "file.txt").read_bytes() == b"alpha beta\n"
+
+
+def test_edit_overlap_names_indexes(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match=r"edits\[0\] and edits\[2\] overlap"):
+        _edit(tmp_path, b"abcdef\n", ("abc", "1"), ("f", "2"), ("bc", "3"))
+
+
+def test_edit_rejects_no_op(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="leave the file unchanged") as raised:
+        _edit(tmp_path, b"same\n", ("same", "same"))
+
+    assert raised.value.failure_code == "invalid_arguments"

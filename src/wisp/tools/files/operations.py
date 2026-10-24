@@ -8,6 +8,7 @@ import shlex
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from uuid import uuid4
 
@@ -820,31 +821,86 @@ def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> 
 
 
 def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
-    replacements: list[tuple[int, int, str]] = []
-    for old_text, new_text in edits:
+    """Replace each edit's ``oldText``, matched once in the original text.
+
+    Edits are matched against the original rather than each other's results. An
+    edit written with LF line endings is matched and written with CRLF where the
+    file uses CRLF, so the model need not reproduce line endings it cannot see and
+    lines outside the edits keep their exact bytes.
+
+    Args:
+        original (str): The file's current text.
+        edits (list[tuple[str, str]]): ``(oldText, newText)`` pairs in call order.
+
+    Returns:
+        str: The edited text.
+
+    Raises:
+        ToolError: When an ``oldText`` is missing or ambiguous, two edits overlap,
+            or the edits would leave the text unchanged.
+    """
+
+    replacements: list[tuple[int, int, str, int]] = []
+    for index, (old_text, new_text) in enumerate(edits):
+        old_text, new_text = _match_line_endings(original, old_text, new_text)
         occurrences = _find_occurrences(original, old_text)
-        if len(occurrences) != 1:
+        if not occurrences:
             raise ToolError(
-                f"edit.oldText must match exactly once; found {len(occurrences)} matches",
+                f"edits[{index}].oldText was not found in the file",
                 failure_code="stale_input",
                 retryable=True,
                 recovery_hint="Reread the relevant file range and retry with current exact text.",
             )
+        if len(occurrences) > 1:
+            raise ToolError(
+                f"edits[{index}].oldText matches {len(occurrences)} places; it must match once",
+                failure_code="invalid_arguments",
+                retryable=True,
+                recovery_hint="Include enough surrounding lines in oldText to make it unique.",
+            )
         start = occurrences[0]
-        replacements.append((start, start + len(old_text), new_text))
+        replacements.append((start, start + len(old_text), new_text, index))
     replacements.sort(key=lambda replacement: replacement[0])
-    previous_end = -1
-    for start, end, _new_text in replacements:
-        if start < previous_end:
-            raise ToolArgumentError("edit replacements must not overlap")
-        previous_end = end
+    for previous, current in pairwise(replacements):
+        if current[0] < previous[1]:
+            first, second = sorted((previous[3], current[3]))
+            raise ToolArgumentError(f"edits[{first}] and edits[{second}] overlap")
     parts: list[str] = []
     cursor = 0
-    for start, end, new_text in replacements:
+    for start, end, new_text, _index in replacements:
         parts.extend((original[cursor:start], new_text))
         cursor = end
     parts.append(original[cursor:])
-    return "".join(parts)
+    edited = "".join(parts)
+    if edited == original:
+        raise ToolError(
+            "The edits leave the file unchanged",
+            failure_code="invalid_arguments",
+            retryable=True,
+            recovery_hint="Make newText differ from oldText, or skip the edit.",
+        )
+    return edited
+
+
+def _match_line_endings(original: str, old_text: str, new_text: str) -> tuple[str, str]:
+    """Convert an edit to CRLF where the file uses it.
+
+    A file with only CRLF endings gets every edit in CRLF. A file with mixed endings
+    is converted only when the LF form of ``oldText`` is missing and the CRLF form
+    is present.
+    """
+
+    if "\r\n" not in original:
+        return old_text, new_text
+    crlf_old_text = _to_crlf(old_text)
+    only_crlf = original.count("\n") == original.count("\r\n")
+    if only_crlf or (old_text not in original and crlf_old_text in original):
+        return crlf_old_text, _to_crlf(new_text)
+    return old_text, new_text
+
+
+def _to_crlf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\n", "\r\n")
 
 
 class EditTool:
