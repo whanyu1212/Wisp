@@ -652,6 +652,12 @@ def test_edit_whitespace_match_crlf(tmp_path: Path) -> None:
     assert edited == b"x\r\nc\r\n"
 
 
+def test_edit_whitespace_match_keeps_crlf_region(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"header\nalpha  \r\nbeta\r\n", ("alpha\nbeta\n", "ALPHA\nbeta\n"))
+
+    assert edited == b"header\nALPHA\r\nbeta\r\n"
+
+
 def test_edit_whitespace_match_ambiguous(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match=r"edits\[0\].oldText matches 2 places"):
         _edit(tmp_path, b"pass \npass  \n", ("pass", "return"))

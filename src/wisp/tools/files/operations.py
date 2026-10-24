@@ -898,10 +898,13 @@ def _locate_edit(original: str, old_text: str, new_text: str, index: int) -> tup
     if len(windows) > 1:
         raise _ambiguous_edit_error(index, len(windows))
     if windows:
-        first = windows[0]
-        last = file_lines[first + len(old_lines) - 1]
-        end = last.end_with_newline if ends_with_newline else last.end
-        return file_lines[first].start, end, new_text
+        matched = file_lines[windows[0] : windows[0] + len(old_lines)]
+        endings = {original[line.end : line.end_with_newline] for line in matched}
+        endings.discard("")
+        if endings == {"\r\n"}:
+            new_text = _to_crlf(new_text)
+        end = matched[-1].end_with_newline if ends_with_newline else matched[-1].end
+        return matched[0].start, end, new_text
 
     indented = _matching_line_windows(original, file_lines, old_lines, str.strip)
     if indented:
