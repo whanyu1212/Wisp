@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shlex
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from uuid import uuid4
 import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
-from wisp.tools.common import _optional_bool, _optional_int, _required_string, _truncate_text
+from wisp.tools.common import _optional_bool, _optional_int, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.files.secure_fs import (
     OpenParent,
@@ -26,6 +27,7 @@ from wisp.tools.files.secure_fs import (
     stat_leaf,
 )
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
+from wisp.tools.truncation import truncate_text
 
 # A write can overwrite an arbitrarily large file. The before-snapshot rides the RPC
 # wire to the TUI as an event field, so cap it at the tool layer: past this size a
@@ -33,6 +35,8 @@ from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 # drop the snapshot and let the write fall back to its plain summary. Matched to the
 # renderer's per-hunk character ceiling so the two bounds agree.
 _WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
+# Room a read continuation notice needs within the output budget, besides the path it quotes.
+_READ_NOTICE_RESERVED_BYTES = 256
 
 
 class CreateOnlyWriteReceipt:
@@ -74,18 +78,50 @@ class ReadTool:
             raise ToolArgumentError("read.offset must be greater than or equal to 1")
         if limit is not None and limit < 1:
             raise ToolArgumentError("read.limit must be greater than or equal to 1")
+        # The notice must fit inside the output budget: a later bounding pass would
+        # otherwise cut it from the end, leaving the model no way to continue.
+        quoted_path = shlex.quote(path.display)
+        notice_bytes = min(
+            _READ_NOTICE_RESERVED_BYTES + len(quoted_path.encode("utf-8")),
+            context.max_output_bytes // 2,
+        )
         try:
             slice_result = await anyio.to_thread.run_sync(
-                lambda: _secure_read_line_slice(path, offset, limit, context),
+                lambda: _secure_read_line_slice(
+                    path,
+                    offset,
+                    limit,
+                    max_bytes=context.max_output_bytes,
+                    max_lines=context.max_output_lines,
+                    notice_bytes=notice_bytes,
+                ),
                 abandon_on_cancel=True,
             )
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
+        line_count = slice_result.line_count
+        if line_count is not None and offset > max(line_count, 1):
+            raise ToolError(
+                f"read.offset {offset} is beyond the end of {path.display} ({line_count} lines)",
+                failure_code="invalid_arguments",
+                retryable=True,
+                recovery_hint=f"Use an offset from 1 to {max(line_count, 1)}.",
+            )
 
-        truncated = _truncate_text(
-            slice_result.text,
-            context=context,
-            force_truncated=slice_result.truncated,
+        notice = _read_continuation_notice(
+            slice_result,
+            offset=offset,
+            quoted_path=quoted_path,
+            part_bytes=context.max_output_bytes - notice_bytes,
+        )
+        text = slice_result.text
+        if notice:
+            separator = "" if not text or text.endswith("\n") else "\n"
+            text = f"{text}{separator}{notice}"
+        truncated = truncate_text(
+            text,
+            max_bytes=context.max_output_bytes,
+            max_lines=context.max_output_lines,
         )
         data: dict[str, object] = {
             "path": path.display,
@@ -100,8 +136,43 @@ class ReadTool:
         return ToolResult(
             text=truncated.text,
             data=data,
-            truncated=truncated.truncated,
+            truncated=slice_result.truncated or truncated.truncated,
         )
+
+
+def _read_continuation_notice(
+    slice_result: _ReadSlice,
+    *,
+    offset: int,
+    quoted_path: str,
+    part_bytes: int,
+) -> str | None:
+    """Tell the model where the next page starts when a read stops early.
+
+    Args:
+        slice_result (_ReadSlice): The bounded slice that was read.
+        offset (int): 1-indexed line the slice started at.
+        quoted_path (str): Shell-quoted path for the oversized-line example.
+        part_bytes (int): How much of an oversized line one read can show.
+
+    Returns:
+        str | None: The notice, or ``None`` when the slice reached the end of the
+        file or the end of the requested limit.
+    """
+
+    next_offset = offset + slice_result.selected_count
+    if slice_result.partial_line is not None:
+        line = slice_result.partial_line
+        return (
+            f"[truncated] Line {line} is longer than the output limit. Use offset={line + 1} "
+            f"to skip it, or read it in parts with bash, for example: "
+            f"sed -n '{line}p' {quoted_path} | cut -c1-{max(part_bytes, 1)}"
+        )
+    if slice_result.truncated:
+        return f"[truncated] Output limit reached. Use offset={next_offset} to continue."
+    if slice_result.line_count is None:
+        return f"[More lines follow. Use offset={next_offset} to continue.]"
+    return None
 
 
 class WriteTool:
@@ -806,15 +877,19 @@ def _secure_read_line_slice(
     path: SecureToolPath,
     offset: int,
     limit: int | None,
-    context: ToolContext,
+    *,
+    max_bytes: int,
+    max_lines: int,
+    notice_bytes: int,
 ) -> _ReadSlice:
     with open_file(path) as descriptor:
         return _read_line_slice(
             descriptor,
             offset=offset,
             limit=limit,
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
+            max_bytes=max_bytes,
+            max_lines=max_lines,
+            notice_bytes=notice_bytes,
         )
 
 
@@ -822,8 +897,12 @@ def _secure_read_line_slice(
 class _ReadSlice:
     text: str
     line_count: int | None
+    """Total lines in the file, known only when the scan reached the end."""
     selected_count: int
+    """Complete lines in ``text``."""
     truncated: bool
+    partial_line: int | None = None
+    """1-indexed line that ends ``text`` cut short because it exceeds the byte budget."""
 
 
 def _read_line_slice(
@@ -833,13 +912,29 @@ def _read_line_slice(
     limit: int | None,
     max_bytes: int,
     max_lines: int,
+    notice_bytes: int = 0,
 ) -> _ReadSlice:
+    """Read whole lines from ``offset`` within a byte and line budget.
+
+    A slice that stops before the end of the file gives back trailing lines until
+    a continuation notice of ``notice_bytes`` fits on one more line of the same
+    budget. A first line too long for the budget is returned cut short.
+    """
+
     selected_parts: list[str] = []
+    selected_bytes = 0
     scanned_count = 0
-    selected_count = 0
-    buffered_bytes = 0
-    buffered_lines = 0
-    truncated = False
+
+    def stop_before_eof(*, truncated: bool) -> _ReadSlice:
+        nonlocal selected_bytes
+        while len(selected_parts) > 1 and (
+            len(selected_parts) + 1 > max_lines or selected_bytes + notice_bytes > max_bytes
+        ):
+            selected_bytes -= len(selected_parts.pop().encode("utf-8"))
+            truncated = True
+        if selected_parts and selected_bytes + notice_bytes > max_bytes:
+            return _partial_line_slice(selected_parts[0], offset, max_bytes - notice_bytes)
+        return _ReadSlice("".join(selected_parts), None, len(selected_parts), truncated)
 
     file_source = (
         os.fdopen(os.dup(descriptor), "r", encoding="utf-8", newline="")
@@ -847,39 +942,35 @@ def _read_line_slice(
         else descriptor.open("r", encoding="utf-8", newline="")
     )
     with file_source as file:
-        while True:
-            try:
-                line = next(file)
-            except StopIteration:
-                return _ReadSlice("".join(selected_parts), scanned_count, selected_count, truncated)
-
+        for line in file:
             scanned_count += 1
             if scanned_count < offset:
                 continue
 
-            if limit is not None and selected_count >= limit:
+            if limit is not None and len(selected_parts) >= limit:
                 # One-line lookahead distinguishes a slice ending exactly at EOF from
                 # a bounded page with an unread tail. The consumed lookahead is not
                 # part of the selected slice and is never presented as a file total.
-                return _ReadSlice("".join(selected_parts), None, selected_count, truncated)
+                return stop_before_eof(truncated=False)
 
-            selected_count += 1
-            if max_bytes <= 0 or max_lines <= 0 or buffered_lines >= max_lines:
-                return _ReadSlice("".join(selected_parts), None, selected_count, True)
+            if max_bytes <= 0 or max_lines <= 0 or len(selected_parts) >= max_lines:
+                return stop_before_eof(truncated=True)
 
             encoded_line = line.encode("utf-8")
-            remaining_bytes = max_bytes - buffered_bytes
-            if remaining_bytes <= 0:
-                return _ReadSlice("".join(selected_parts), None, selected_count, True)
-            if len(encoded_line) > remaining_bytes:
-                selected_parts.append(
-                    encoded_line[:remaining_bytes].decode("utf-8", errors="ignore")
-                )
-                return _ReadSlice("".join(selected_parts), None, selected_count, True)
+            if selected_bytes + len(encoded_line) > max_bytes:
+                if selected_parts:
+                    # The line may fit a page of its own, so the next read starts there.
+                    return stop_before_eof(truncated=True)
+                return _partial_line_slice(line, scanned_count, max_bytes - notice_bytes)
 
             selected_parts.append(line)
-            buffered_bytes += len(encoded_line)
-            buffered_lines += 1
+            selected_bytes += len(encoded_line)
+    return _ReadSlice("".join(selected_parts), scanned_count, len(selected_parts), False)
+
+
+def _partial_line_slice(line: str, line_number: int, max_bytes: int) -> _ReadSlice:
+    text = line.encode("utf-8")[: max(0, max_bytes)].decode("utf-8", errors="ignore")
+    return _ReadSlice(text, None, 0, True, partial_line=line_number)
 
 
 def _parse_edits(arguments: Mapping[str, object]) -> list[tuple[str, str]]:

@@ -60,7 +60,7 @@ def test_builtin_tools_benchmark_rejects_too_small_file_payload() -> None:
     ("overrides", "message"),
     [
         ({"max_output_bytes": 1_024}, "max_output_bytes must be at least"),
-        ({"max_output_lines": 99}, "max_output_lines must be at least 100"),
+        ({"max_output_lines": 100}, "max_output_lines must be at least 101"),
     ],
 )
 def test_builtin_tools_benchmark_rejects_budgets_below_fixed_scenario_minimums(
@@ -74,9 +74,9 @@ def test_builtin_tools_benchmark_rejects_budgets_below_fixed_scenario_minimums(
 def test_builtin_tools_benchmark_accepts_expected_listing_truncation() -> None:
     report = run_benchmark(
         BenchmarkConfig(
-            file_counts=(101,),
+            file_counts=(102,),
             file_bytes=512,
-            max_output_lines=100,
+            max_output_lines=101,
             iterations=1,
         )
     )

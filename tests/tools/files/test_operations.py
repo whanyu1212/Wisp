@@ -26,10 +26,10 @@ def test_read_tool_supports_offset_limit_and_truncation(tmp_path: Path) -> None:
 
     result = run_tool(ReadTool(), {"path": "notes.txt", "offset": 2, "limit": 3}, context)
 
-    assert result.text == "two\nthree\n[truncated]"
+    assert result.text == "two\n[truncated] Output limit reached. Use offset=3 to continue."
     assert result.truncated is True
     assert "line_count" not in result.data
-    assert result.data["selected_count"] == 3
+    assert result.data["selected_count"] == 1
 
 
 def test_read_tool_stops_after_requested_slice(tmp_path: Path) -> None:
@@ -39,7 +39,7 @@ def test_read_tool_stops_after_requested_slice(tmp_path: Path) -> None:
 
     result = run_tool(ReadTool(), {"path": "large.log", "offset": 5000, "limit": 2}, context)
 
-    assert result.text == "line 4999\nline 5000\n"
+    assert result.text == "line 4999\nline 5000\n[More lines follow. Use offset=5002 to continue.]"
     assert "line_count" not in result.data
     assert result.data["selected_count"] == 2
 
@@ -93,6 +93,39 @@ def test_read_tool_keeps_exact_line_count_when_slice_reaches_eof(tmp_path: Path)
     assert result.text == "two\n"
     assert result.data["line_count"] == 2
     assert result.data["selected_count"] == 1
+
+
+def test_read_exact_fit_has_no_notice(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=3)
+
+    result = run_tool(ReadTool(), {"path": "notes.txt"}, context)
+
+    assert result.text == "one\ntwo\nthree\n"
+    assert result.truncated is False
+
+
+def test_read_offset_past_eof(tmp_path: Path) -> None:
+    (tmp_path / "notes.txt").write_text("one\ntwo\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match=r"beyond the end of notes.txt \(2 lines\)"):
+        run_tool(ReadTool(), {"path": "notes.txt", "offset": 3}, ToolContext(cwd=tmp_path))
+
+
+def test_read_oversized_line_hint(tmp_path: Path) -> None:
+    (tmp_path / "min.js").write_text("short\n" + "x" * 5000 + "\nafter\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_bytes=1000, max_output_lines=100)
+
+    first = run_tool(ReadTool(), {"path": "min.js"}, context)
+    second = run_tool(ReadTool(), {"path": "min.js", "offset": 2}, context)
+
+    assert first.text == "short\n[truncated] Output limit reached. Use offset=2 to continue."
+    assert second.text.endswith(
+        "\n[truncated] Line 2 is longer than the output limit. Use offset=3 to skip it, "
+        "or read it in parts with bash, for example: sed -n '2p' min.js | cut -c1-738"
+    )
+    assert second.data["selected_count"] == 0
+    assert len(second.text.encode("utf-8")) <= context.max_output_bytes
 
 
 def test_read_tool_runs_filesystem_scan_off_event_loop(

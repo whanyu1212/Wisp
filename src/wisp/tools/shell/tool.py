@@ -15,7 +15,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_bounded, _run_shell
 from wisp.tools.shell.supervisor import ProcessSupervisor, ProcessUpdate
-from wisp.tools.truncation import TruncatedText, truncate_text, truncate_text_tail
+from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()
 _DEFAULT_BASH_TIMEOUT_SECONDS = 30
@@ -131,7 +131,6 @@ class BashTool:
                 cwd=context.cwd,
                 timeout=float(timeout),
                 max_output_bytes=context.max_output_bytes,
-                max_output_lines=context.max_output_lines,
             )
         else:
             result = await self._process_supervisor.run_to_completion(
@@ -139,24 +138,28 @@ class BashTool:
                 cwd=context.cwd,
                 timeout=float(timeout),
                 max_output_bytes=context.max_output_bytes,
-                max_output_lines=context.max_output_lines,
             )
-        stdout = truncate_text(
+        stdout = truncate_text_tail(
             result.stdout,
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
+            input_truncated=result.stdout_truncated,
         )
-        stderr = truncate_text(
+        stderr = truncate_text_tail(
             result.stderr,
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
+            input_truncated=result.stderr_truncated,
         )
+        # Format from the captured streams rather than the per-stream bounded copies
+        # so the text carries one truncation marker, ahead of the combined tail.
         output = _format_process_output_bounded(
             result.exit_code,
-            stdout.text,
-            stderr.text,
+            result.stdout,
+            result.stderr,
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
+            capture_truncated=result.stdout_truncated or result.stderr_truncated,
         )
         stdout_truncated = result.stdout_truncated or stdout.truncated
         stderr_truncated = result.stderr_truncated or stderr.truncated

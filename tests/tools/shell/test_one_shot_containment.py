@@ -145,7 +145,6 @@ def test_clean_one_shot_exit_kills_escaped_process(
                 cwd=tmp_path,
                 timeout=10,
                 max_output_bytes=10_000,
-                max_output_lines=100,
             )
         finally:
             await supervisor.aclose()

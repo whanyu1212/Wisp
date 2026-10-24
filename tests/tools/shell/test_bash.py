@@ -563,7 +563,7 @@ def test_bash_tool_counts_retruncated_replacement_source_bytes(
 
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
-    assert result.data["stdout"] == "\ufffd\n[truncated]"
+    assert result.data["stdout"] == "[truncated] \ufffd"
     assert result.data["stdout_truncated"] is True
     assert result.data["stdout_dropped_bytes"] == 14
     assert result.truncated is True
@@ -637,9 +637,55 @@ def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
 
     assert result.data["exit_code"] == 0
     assert result.data["stdout_truncated"] is True
-    assert result.data["stdout_dropped_bytes"] == output_bytes - context.max_output_bytes
+    retained_bytes = str(result.data["stdout"]).count("x")
+    assert result.data["stdout_dropped_bytes"] == output_bytes - retained_bytes
     assert result.truncated is True
     assert marker.read_text(encoding="utf-8") == "ok"
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="replaces the POSIX stdin descriptor")
+def test_bash_ignores_parent_stdin(tmp_path: Path) -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"frame-from-parent-stdin\n")
+    os.close(write_fd)
+    saved_stdin = os.dup(0)
+    os.dup2(read_fd, 0)
+    os.close(read_fd)
+    try:
+        result = run_tool(BashTool(), {"command": "cat", "timeout": 5}, ToolContext(cwd=tmp_path))
+    finally:
+        os.dup2(saved_stdin, 0)
+        os.close(saved_stdin)
+
+    assert result.text == "Command exited with code 0"
+
+
+@pytest.mark.process
+def test_stderr_survives_noisy_stdout(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=200, max_output_lines=10)
+    python = shlex.quote(sys.executable)
+    code = "import sys; print('\\n'.join(map(str, range(5000)))); sys.exit('final failure')"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.text.startswith("Command exited with code 1: [truncated] ")
+    assert result.text.endswith("4998\n4999\nfinal failure")
+    assert result.data["stderr"] == "final failure\n"
+    assert result.truncated is True
+
+
+@pytest.mark.process
+def test_capture_truncation_is_marked(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
+    python = shlex.quote(sys.executable)
+    code = "import sys; sys.stdout.write('x' * 10000)"
+    command = f"{python} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
+
+    assert result.text == "Command exited with code 0: [truncated] " + "x" * 68
 
 
 @pytest.mark.process
@@ -739,14 +785,18 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
 
 @pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
-def test_bash_timeout_kills_background_child_after_shell_exits(tmp_path: Path) -> None:
+def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     marker = tmp_path / "background-child-survived.txt"
-    command = f"(sleep 1.5; echo alive > {shlex.quote(str(marker))}) &"
+    command = f"(sleep 1.5; echo alive > {shlex.quote(str(marker))}) & echo started"
 
-    with pytest.raises(ToolError, match="timed out"):
-        run_tool(BashTool(), {"command": command, "timeout": 1}, context)
-    time.sleep(1.0)
+    started = time.monotonic()
+    result = run_tool(BashTool(), {"command": command, "timeout": 10}, context)
+    elapsed = time.monotonic() - started
+    time.sleep(2.0)
+
+    assert result.text == "Command exited with code 0: started"
+    assert elapsed < 1.0
 
     assert not marker.exists()
 
@@ -825,7 +875,6 @@ def test_direct_bash_cancellation_surfaces_cleanup_failure(
                 cwd=tmp_path,
                 timeout=10,
                 max_output_bytes=100,
-                max_output_lines=100,
             )
         )
         await collect_started.wait()
@@ -932,7 +981,6 @@ def test_direct_bash_cleans_process_after_capture_failure(
             cwd=tmp_path,
             timeout=5,
             max_output_bytes=100,
-            max_output_lines=100,
         )
 
     with pytest.raises(ToolError, match="capture failed"):

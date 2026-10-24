@@ -77,7 +77,6 @@ def test_one_shot_timeout_reports_process_tree_cleanup_failure(
                     cwd=tmp_path,
                     timeout=0.05,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
             retained_before_close = len(supervisor._one_shot)  # noqa: SLF001
 
@@ -87,7 +86,6 @@ def test_one_shot_timeout_reports_process_tree_cleanup_failure(
                     cwd=tmp_path,
                     timeout=1,
                     max_output_bytes=1_000,
-                    max_output_lines=100,
                 )
 
             await supervisor.aclose()
@@ -448,7 +446,6 @@ def test_supervisor_close_bounds_one_shot_capture_drain(
                 cwd=tmp_path,
                 timeout=30,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
         )
         await capture_started.wait()
@@ -512,7 +509,6 @@ def test_one_shot_cleanup_serializes_with_supervisor_close(
                 cwd=tmp_path,
                 timeout=0.01,
                 max_output_bytes=1_000,
-                max_output_lines=100,
             )
         )
         await cleanup_started.wait()

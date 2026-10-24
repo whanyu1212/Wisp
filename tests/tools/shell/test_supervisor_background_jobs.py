@@ -291,7 +291,6 @@ def test_endless_output_times_out_and_kills_detached_background_job(tmp_path: Pa
                     cwd=tmp_path,
                     timeout=2,
                     max_output_bytes=20,
-                    max_output_lines=100,
                 )
             return await wait_for_pid_file(child_pid_path)
         finally:
