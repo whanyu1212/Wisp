@@ -47,6 +47,7 @@ on:
       - "src/wisp/tools/shell/**"
       - "tests/tools/shell/test_pending_text_conformance.py"
       - "tests/tools/search/test_native_grep_conformance.py"
+      - "tests/tools/search/test_grep.py"
       - "tests/tools/shell/*supervisor*.py"
       - "tests/scripts/test_verify_rust_tui_wheel.py"
       - "tests/scripts/test_smoke_installed_rust_tui.py"
@@ -115,7 +116,8 @@ jobs:
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pytest -q \
               "$GITHUB_WORKSPACE/tests/tools/shell/test_pending_text_conformance.py" \
-              "$GITHUB_WORKSPACE/tests/tools/search/test_native_grep_conformance.py")
+              "$GITHUB_WORKSPACE/tests/tools/search/test_native_grep_conformance.py" \
+              "$GITHUB_WORKSPACE/tests/tools/search/test_grep.py")
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_sdk_install.py")
@@ -180,6 +182,7 @@ jobs:
           "$python" -m pip install --quiet pytest==9.1.1 pytest-asyncio==1.4.0
           (cd "$RUNNER_TEMP" && "$python" -m pytest -q \
             "$GITHUB_WORKSPACE/tests/tools/search/test_native_grep_conformance.py" \
+            "$GITHUB_WORKSPACE/tests/tools/search/test_grep.py" \
             "$GITHUB_WORKSPACE/tests/tools/shell/test_pending_text_conformance.py" \
             "$GITHUB_WORKSPACE"/tests/tools/shell/test_supervisor*.py)
 
@@ -256,6 +259,7 @@ jobs:
           (cd /tmp && PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin \
             /tmp/wisp-wheel/bin/python -m pytest -q \
               "$GITHUB_WORKSPACE/tests/tools/search/test_native_grep_conformance.py" \
+              "$GITHUB_WORKSPACE/tests/tools/search/test_grep.py" \
               "$GITHUB_WORKSPACE/tests/tools/shell/test_pending_text_conformance.py" \
               "$GITHUB_WORKSPACE"/tests/tools/shell/test_supervisor*.py)
           PATH=/tmp/wisp-wheel/bin:/usr/bin:/bin /bin/bash -c '! command -v cargo'
