@@ -73,7 +73,7 @@ class ReadTool:
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = secure_tool_path(_required_string(arguments, "path"), context)
+        path = secure_tool_path(_required_string(arguments, "path"), context, follow_links=True)
         offset = _optional_int(arguments, "offset", default=1)
         limit = _optional_int(arguments, "limit")
 

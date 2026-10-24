@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 
@@ -44,7 +45,9 @@ def is_protected_path(path: Path, context: ToolContext) -> bool:
     if _candidate_is_protected(lexical, patterns, cwd):
         return True
 
-    resolved = path.resolve(strict=False)
+    # os.path.realpath, unlike Path.resolve on Python 3.12, leaves a symlink loop in
+    # place instead of raising; opening the path then fails cleanly.
+    resolved = Path(os.path.realpath(lexical))
     # Keep the target check for symlinks, but avoid matching the same path twice.
     return resolved != lexical and _candidate_is_protected(resolved, patterns, cwd)
 
