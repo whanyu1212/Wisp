@@ -37,7 +37,8 @@ class BashTool:
     name = "bash"
     safety: ToolSafety = "command"
     description = (
-        "Run a shell command and capture stdout, stderr, and an explicit completion exit code. "
+        "Run a command in bash (or /bin/sh where bash is not installed) and capture stdout, "
+        "stderr, and an explicit completion exit code. "
         "Use operation=start to launch a resumable command, operation=poll to read incremental "
         "output by process_id, and operation=cancel to terminate it."
     )

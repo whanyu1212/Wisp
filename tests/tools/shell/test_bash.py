@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shlex
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -1020,3 +1021,23 @@ def test_direct_bash_cleans_process_after_capture_failure(
         anyio.run(run)
     assert cleanup_calls == 1
     assert process.wait_count == 1
+
+
+@pytest.mark.process
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_bash_syntax_works(tmp_path: Path) -> None:
+    command = "[[ a == a ]] && echo match; items=(x y); echo ${items[1]}; set -o pipefail"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 5}, ToolContext(cwd=tmp_path))
+
+    assert result.text == "Command exited with code 0: match\ny"
+
+
+def test_command_shell_falls_back_to_sh(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(process_tools_module.os, "access", lambda _path, _mode: False)
+    monkeypatch.setattr(process_tools_module.shutil, "which", lambda _name: None)
+    process_tools_module._command_shell.cache_clear()  # noqa: SLF001
+    try:
+        assert process_tools_module._command_shell() == "/bin/sh"  # noqa: SLF001
+    finally:
+        process_tools_module._command_shell.cache_clear()  # noqa: SLF001

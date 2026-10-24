@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import errno
+import functools
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -366,6 +368,19 @@ async def _await_process_cleanup(cleanup: Awaitable[bool]) -> bool:
         raise
 
 
+@functools.cache
+def _command_shell() -> str:
+    """Return the shell that runs commands: bash when installed, else ``/bin/sh``.
+
+    The tool is named bash and models write bash, but ``/bin/sh`` is dash on Debian
+    and Ubuntu, where ``[[``, arrays, and ``pipefail`` fail.
+    """
+
+    if os.access("/bin/bash", os.X_OK):
+        return "/bin/bash"
+    return shutil.which("bash") or "/bin/sh"
+
+
 def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
     recorder_prelude = _posix_job_recorder_prelude(jobs_file)
     signal_traps = _posix_signal_traps()
@@ -393,7 +408,7 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
             record_loop,
             "__wisp_record_loop & __wisp_recorder_pid=$!; ",
             signal_traps,
-            f"/bin/sh -c {quoted_child_command}; ",
+            f"{shlex.quote(_command_shell())} -c {quoted_child_command}; ",
             "__wisp_status=$?; ",
             "kill $__wisp_recorder_pid 2>/dev/null || true; ",
             "wait $__wisp_recorder_pid 2>/dev/null || true; ",
