@@ -32,6 +32,8 @@ pub struct ScanConfig {
     pub max_output_bytes: usize,
     /// Maximum Unicode scalar values accepted in one source line.
     pub max_line_chars: usize,
+    /// Unicode scalar values of a line shown in a record before it is clipped.
+    pub max_display_chars: usize,
 }
 
 impl ScanConfig {
@@ -44,6 +46,11 @@ impl ScanConfig {
         if self.max_line_chars == 0 {
             return Err(ScanError::InvalidConfig(
                 "max_line_chars must be greater than zero".to_owned(),
+            ));
+        }
+        if self.max_display_chars == 0 {
+            return Err(ScanError::InvalidConfig(
+                "max_display_chars must be greater than zero".to_owned(),
             ));
         }
         Ok(())
@@ -373,10 +380,8 @@ impl<'a> Scanner<'a> {
                 if self.line_number > self.group_end {
                     for (number, text) in &self.preceding {
                         if *number > self.last_emitted_line {
-                            self.output.append(
-                                format_record(&self.config.display_path, *number, text, false),
-                                false,
-                            );
+                            self.output
+                                .append(format_record(self.config, *number, text, false), false);
                             self.last_emitted_line = *number;
                             if self.output.exhausted {
                                 break;
@@ -385,7 +390,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 self.output.append(
-                    format_record(&self.config.display_path, self.line_number, &line, true),
+                    format_record(self.config, self.line_number, &line, true),
                     true,
                 );
                 self.last_emitted_line = self.line_number;
@@ -395,7 +400,7 @@ impl<'a> Scanner<'a> {
             }
         } else if self.line_number <= self.group_end {
             self.output.append(
-                format_record(&self.config.display_path, self.line_number, &line, false),
+                format_record(self.config, self.line_number, &line, false),
                 false,
             );
             self.last_emitted_line = self.line_number;
@@ -480,9 +485,19 @@ impl BoundedOutput {
     }
 }
 
-fn format_record(display_path: &str, line_number: usize, line: &str, is_match: bool) -> String {
+fn format_record(config: &ScanConfig, line_number: usize, line: &str, is_match: bool) -> String {
+    let display_path = &config.display_path;
     let separator = if is_match { ':' } else { '-' };
-    format!("{display_path}{separator}{line_number}{separator}{line}")
+    match line.char_indices().nth(config.max_display_chars) {
+        None => format!("{display_path}{separator}{line_number}{separator}{line}"),
+        Some((cut, _)) => {
+            let omitted = line[cut..].chars().count();
+            let shown = &line[..cut];
+            format!(
+                "{display_path}{separator}{line_number}{separator}{shown}... [{omitted} more characters]"
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -502,6 +517,7 @@ mod tests {
             max_output_lines: 2_000,
             max_output_bytes: 50_000,
             max_line_chars: 1_000_000,
+            max_display_chars: 500,
         }
     }
 
@@ -639,6 +655,28 @@ mod tests {
             scan(b"text", &empty_pattern).unwrap_err(),
             ScanError::InvalidConfig(_)
         ));
+
+        empty_pattern.max_line_chars = 1_000_000;
+        empty_pattern.max_display_chars = 0;
+        assert!(matches!(
+            scan(b"text", &empty_pattern).unwrap_err(),
+            ScanError::InvalidConfig(_)
+        ));
+    }
+
+    #[test]
+    fn clips_long_lines_by_character() {
+        let mut config = config("needle");
+        config.max_display_chars = 8;
+        let result = scan("ββ needle ββββ\nshort needle\n".as_bytes(), &config).unwrap();
+
+        assert_eq!(
+            result.lines,
+            [
+                "src/data.txt:1:ββ needl... [6 more characters]",
+                "src/data.txt:2:short ne... [4 more characters]",
+            ]
+        );
     }
 
     struct ChunkedReader {

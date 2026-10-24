@@ -16,6 +16,10 @@ from wisp.tools.result import ToolResult
 from wisp.tools.search import tools as search_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 
+_LIMIT_HINT = (
+    "[truncated] Stopped at max_results=1. Narrow the search, or raise max_results to see more."
+)
+
 
 def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
     tmp_path: Path,
@@ -245,7 +249,7 @@ def test_find_tool_python_fallback_bounds_retained_matches(
         context,
     )
 
-    assert result.text == "a.py\n[truncated]"
+    assert result.text == "a.py\n" + _LIMIT_HINT
     assert result.data == {"count": 2, "files": ["a.py"]}
     assert result.truncated is True
     assert visited == ["skip.txt", "c.py", "secret.key", "b.py", "a.py"]
@@ -266,7 +270,7 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
         ToolContext(cwd=tmp_path),
     )
 
-    assert result.text == "a/first.py\n[truncated]"
+    assert result.text == "a/first.py\n" + _LIMIT_HINT
     assert result.data == {"count": 2, "files": ["a/first.py"]}
 
 
@@ -290,7 +294,7 @@ def test_find_tool_python_fallback_skips_file_symlinks(
         ToolContext(cwd=tmp_path),
     )
 
-    assert result.text == "sub/b.py\n[truncated]"
+    assert result.text == "sub/b.py\n" + _LIMIT_HINT
     assert result.data == {"count": 2, "files": ["sub/b.py"]}
 
 

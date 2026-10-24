@@ -1144,16 +1144,16 @@ fn bounded_result_records(
     }
 }
 
+/// A truncated result ends with `[truncated]`, possibly cut short by the output
+/// budget, or with `[truncated] ` followed by a hint on how to see more.
 fn is_truncation_marker(line: &str) -> bool {
-    !line.is_empty() && "[truncated]".starts_with(line)
+    (!line.is_empty() && "[truncated]".starts_with(line)) || line.starts_with("[truncated] ")
 }
 
-/// The backend's read tool ends a page that stops before the end of the file with
-/// one of these notices, which tell the model where to continue.
+/// The backend's read tool ends a page that stops at its limit before the end of
+/// the file with this notice, which tells the model where to continue.
 fn is_read_continuation_notice(line: &str) -> bool {
-    ["[truncated] ", "[More lines follow. Use offset="]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
+    line.starts_with("[More lines follow. Use offset=")
 }
 
 fn parse_grep_record(line: &str) -> Option<(&str, u64, &str)> {
@@ -1452,6 +1452,54 @@ mod tests {
         assert_eq!(
             build_tool_detail(&find, result("a\n", Some("find: 2 files"))),
             DetailAvailability::None
+        );
+    }
+
+    #[test]
+    fn search_limit_hint_is_not_a_record() {
+        let hint = "[truncated] Stopped at max_results=2. Narrow the search, or raise max_results to see more.";
+        let grep = project_tool_detail_source(
+            "grep",
+            serde_json::json!({"pattern": "x", "path": "."})
+                .as_object()
+                .unwrap(),
+        );
+        let DetailAvailability::LiveRetained(grep_detail) = build_tool_detail(
+            &grep,
+            DetailResult {
+                truncated: true,
+                ..result(
+                    &format!("a.rs:1:x\nb.rs:2:x\n{hint}"),
+                    Some("grep: 2 matches (+ more)"),
+                )
+            },
+        ) else {
+            panic!("grep detail expected");
+        };
+        assert!(
+            !grep_detail
+                .rows
+                .iter()
+                .any(|row| row.text.contains("Stopped"))
+        );
+
+        let DetailAvailability::LiveRetained(find_detail) = build_tool_detail(
+            &ToolDetailSource::Find,
+            DetailResult {
+                truncated: true,
+                ..result(
+                    &format!("a.rs\nb.rs\n{hint}"),
+                    Some("find: 3 files (+ more)"),
+                )
+            },
+        ) else {
+            panic!("find detail expected");
+        };
+        assert!(
+            !find_detail
+                .rows
+                .iter()
+                .any(|row| row.text.contains("Stopped"))
         );
     }
 
