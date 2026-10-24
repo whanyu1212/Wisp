@@ -22,6 +22,10 @@ _DEFAULT_BASH_TIMEOUT_SECONDS = 30
 _DEFAULT_MANAGED_LIFETIME_SECONDS = 300.0
 _DEFAULT_MANAGED_YIELD_SECONDS = 1.0
 _DEFAULT_MANAGED_WAIT_SECONDS = 0.0
+_BACKGROUND_STOPPED_NOTICE = (
+    "[Background processes still holding the output were stopped when the command exited. "
+    "Use operation=start to keep a process running.]"
+)
 
 BashOperation = Literal["run", "start", "poll", "cancel"]
 _BASH_OPERATIONS: Final = frozenset({"run", "start", "poll", "cancel"})
@@ -160,6 +164,7 @@ class BashTool:
             max_bytes=context.max_output_bytes,
             max_lines=context.max_output_lines,
             capture_truncated=result.stdout_truncated or result.stderr_truncated,
+            notice=_BACKGROUND_STOPPED_NOTICE if result.background_stopped else None,
         )
         stdout_truncated = result.stdout_truncated or stdout.truncated
         stderr_truncated = result.stderr_truncated or stderr.truncated

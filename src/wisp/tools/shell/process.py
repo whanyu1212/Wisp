@@ -145,6 +145,8 @@ class ProcessResult:
     stderr_retained_bytes: int | None = None
     stdout_source_byte_lengths: tuple[int, ...] | None = None
     stderr_source_byte_lengths: tuple[int, ...] | None = None
+    background_stopped: bool = False
+    """Whether processes still holding the output were stopped after the shell exited."""
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,14 @@ class _LimitedStreamResult:
     output: bytes
     truncated: bool = False
     dropped_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class _CapturedOutput:
+    stdout: _LimitedStreamResult
+    stderr: _LimitedStreamResult
+    pipes_held_after_exit: bool
+    """A background process kept a pipe open after the shell exited."""
 
 
 class _StreamTail:
@@ -252,7 +262,7 @@ async def _run_shell(
     process = await _create_shell_process(command, cwd=cwd)
 
     try:
-        stdout_result, stderr_result = await asyncio.wait_for(
+        captured = await asyncio.wait_for(
             _collect_limited_output(process, max_output_bytes),
             timeout=timeout,
         )
@@ -283,6 +293,7 @@ async def _run_shell(
     cleanup_succeeded = await _await_process_cleanup(_terminate_process_tree(process))
     if not cleanup_succeeded:
         raise ToolError("Failed to terminate process tree")
+    stdout_result, stderr_result = captured.stdout, captured.stderr
     stdout_text, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(
         stdout_result.output
     )
@@ -301,6 +312,7 @@ async def _run_shell(
         stderr_retained_bytes=len(stderr_result.output),
         stdout_source_byte_lengths=stdout_source_byte_lengths,
         stderr_source_byte_lengths=stderr_source_byte_lengths,
+        background_stopped=captured.pipes_held_after_exit,
     )
 
 
@@ -1407,7 +1419,7 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
     max_stream_bytes: int,
-) -> tuple[_LimitedStreamResult, _LimitedStreamResult]:
+) -> _CapturedOutput:
     """Capture the tail of stdout and stderr until the shell exits.
 
     Each stream keeps its own last ``max_stream_bytes`` bytes, so a noisy stdout
@@ -1433,13 +1445,18 @@ async def _collect_limited_output(
             done, pending = await asyncio.wait(pending, timeout=_EXIT_POLL_INTERVAL_SECONDS)
             for reader in done:
                 reader.result()
+        still_open: set[asyncio.Task[None]] = set()
         if pending:
-            done, _still_open = await asyncio.wait(pending, timeout=_OUTPUT_DRAIN_GRACE_SECONDS)
+            done, still_open = await asyncio.wait(pending, timeout=_OUTPUT_DRAIN_GRACE_SECONDS)
             for reader in done:
                 reader.result()
         else:
             await process.wait()
-        return stdout_tail.result(), stderr_tail.result()
+        return _CapturedOutput(
+            stdout=stdout_tail.result(),
+            stderr=stderr_tail.result(),
+            pipes_held_after_exit=bool(still_open),
+        )
     finally:
         for reader in readers:
             if not reader.done():
@@ -1713,6 +1730,7 @@ def _format_process_output_bounded(
     max_bytes: int,
     max_lines: int,
     capture_truncated: bool = False,
+    notice: str | None = None,
 ) -> TruncatedText:
     """Format process output within its budget while preserving diagnostics.
 
@@ -1724,6 +1742,8 @@ def _format_process_output_bounded(
         max_lines (int): Line budget for the output body.
         capture_truncated (bool): Whether capture already dropped output, so the
             body is marked truncated even when what remains fits the budget.
+        notice (str | None): A line for the model after the output. It takes its
+            room from the body budget and is left out when the budget is too small.
 
     Returns:
         TruncatedText: The status prefix and the tail of the combined output.
@@ -1731,11 +1751,17 @@ def _format_process_output_bounded(
 
     parts = _process_output_parts(stdout, stderr)
     status = f"Command exited with code {exit_code}"
+    notice_bytes = len(notice.encode("utf-8")) + 1 if notice is not None else 0
+    if notice is not None and notice_bytes < max_bytes and max_lines > 1:
+        max_bytes -= notice_bytes
+        max_lines -= 1
+    else:
+        notice = None
     if not parts:
         # Completion evidence is fixed-size metadata, not captured command output.
         # Keep it intact even when an embedding deliberately selects a tiny body
         # budget; otherwise the model cannot distinguish success from failure.
-        return TruncatedText(text=status, truncated=False)
+        return TruncatedText(text=f"{status}: {notice}" if notice else status, truncated=False)
 
     prefix = f"{status}: "
     if max_bytes <= 0 or max_lines <= 0:
@@ -1750,8 +1776,9 @@ def _format_process_output_bounded(
         max_lines=max_lines,
         input_truncated=capture_truncated,
     )
+    notice_line = f"\n{notice}" if notice else ""
     return TruncatedText(
-        text=f"{prefix}{bounded_body.text}",
+        text=f"{prefix}{bounded_body.text}{notice_line}",
         truncated=bounded_body.truncated,
     )
 
