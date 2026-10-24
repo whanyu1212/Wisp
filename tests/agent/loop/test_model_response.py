@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import pytest
 
+from tests.agent.loop.support import NeverToolExecutor
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import (
     CancelledModelResponse,
@@ -18,7 +19,6 @@ from wisp.agent.loop.provider_lifecycle import (
 )
 from wisp.agent.loop.provider_request import iter_provider_events, open_provider_stream
 from wisp.agent.loop.response_projection import project_usage_and_cost
-from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import UsageCost
 from wisp.messages import Message
 from wisp.providers.base import (
@@ -31,14 +31,7 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
     ProviderUsage,
-    ToolCall,
 )
-
-
-class _NeverExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        raise AssertionError(f"Unexpected tool call: {tool_call.name}")
-        yield  # pragma: no cover - makes this an async generator
 
 
 class _CancelledToken:
@@ -118,7 +111,7 @@ class _ClosingOverflowProvider:
 def _config(*, provider: object | None = None, **kwargs: object) -> AgentLoopConfig:
     return AgentLoopConfig(
         provider=provider or _LegacyProvider(),
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
         **kwargs,  # type: ignore[arg-type]
     )
 

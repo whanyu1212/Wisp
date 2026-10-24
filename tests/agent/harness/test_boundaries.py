@@ -11,6 +11,7 @@ from tests.agent.harness.support import (
     build_harness,
     message_with_nested_arguments,
 )
+from tests.agent.loop.support import tool_call_stream
 from wisp.agent.request_boundary import (
     ContextOverflowSnapshot,
     RequestBoundaryDecision,
@@ -33,7 +34,6 @@ from wisp.providers.events import (
     ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderTextDelta,
-    ProviderToolCallCompleted,
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
@@ -223,15 +223,7 @@ def test_rebases_active_boundary_after_transcript_replacement() -> None:
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="first"),
             ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call, content="checking"),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="done"),

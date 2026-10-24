@@ -11,7 +11,7 @@ import anyio
 import pytest
 
 import wisp.agent.loop.prepared_tools as prepared_tools_module
-from tests.agent.loop.support import RecordingToolExecutor
+from tests.agent.loop.support import ApprovingToolExecutor, install_fake_clock
 from tests.support.agent_runtime import (
     assert_continuation_invariants,
     assert_settled_tool_calls,
@@ -186,15 +186,22 @@ def test_overlaps_execution_and_publishes_in_source_order() -> None:
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_parallel_calls_time_themselves() -> None:
+def test_parallel_calls_time_themselves(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = install_fake_clock(monkeypatch)
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
     )
     provider = _scripted_tool_batch_provider(calls)
+    quick_call_returned = anyio.Event()
 
     async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
-        await anyio.sleep(0.3 if tool_call.call_id == "call-1" else 0)
+        if tool_call.call_id == "call-1":
+            # The quick call's duration is stamped before its task yields again.
+            await quick_call_returned.wait()
+            clock.advance(0.3)
+        else:
+            quick_call_returned.set()
         return ToolExecutionEnded(
             call_id=tool_call.call_id,
             name=tool_call.name,
@@ -220,11 +227,8 @@ def test_parallel_calls_time_themselves() -> None:
     durations = {
         event.call_id: event.duration_ms for event in events if isinstance(event, ToolResultReady)
     }
-    assert durations["call-1"] is not None
-    assert durations["call-1"] >= 250
     # The quick sibling reports its own time, not the wait for the slow one.
-    assert durations["call-2"] is not None
-    assert durations["call-2"] < 200
+    assert durations == {"call-1": 300, "call-2": 0}
 
 
 def test_parallel_batch_isolates_one_tool_failure() -> None:
@@ -349,7 +353,7 @@ def test_repeated_call_id_in_one_response_runs_no_tool(
         ran.append(call)
         return ToolExecutionEnded(call_id=call.call_id, name=call.name, output="", is_error=False)
 
-    sequential = RecordingToolExecutor()
+    sequential = ApprovingToolExecutor()
     executor = sequential if path == "sequential" else PreparedScriptExecutor(runner)
 
     async def run() -> list[object]:

@@ -7,6 +7,8 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import pytest
 
+from tests.agent.harness.support import BlockingPreparedExecutor, RecordingToolExecutor
+from tests.agent.loop.support import NeverToolExecutor, completed_stream, tool_call_stream
 from tests.support.agent_runtime import (
     assert_cancellation_settled,
     assert_continuation_invariants,
@@ -18,11 +20,6 @@ from tests.support.agent_runtime import (
 )
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
-from wisp.agent.tool_contracts import (
-    PreparedToolExecution,
-    ToolExecutionEvent,
-    ToolPreparationEvent,
-)
 from wisp.events import (
     MessageDelta,
     ToolExecutionEnded,
@@ -41,50 +38,6 @@ from wisp.providers.events import (
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
-
-
-class _NeverToolExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        raise AssertionError(f"Unexpected tool call: {tool_call.name}")
-        yield  # pragma: no cover - makes this an async generator
-
-
-class _RecordingToolExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        yield ToolExecutionEnded(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            output="tool output",
-            is_error=False,
-        )
-
-
-class _BlockingPreparedExecutor:
-    def __init__(self, all_started: anyio.Event) -> None:
-        self._all_started = all_started
-        self.started_call_ids: set[str] = set()
-
-    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
-        async def run() -> ToolExecutionEnded:
-            self.started_call_ids.add(tool_call.call_id)
-            if len(self.started_call_ids) == 2:
-                self._all_started.set()
-            await anyio.sleep_forever()
-            raise AssertionError("unreachable")
-
-        yield PreparedToolExecution(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            parallel_safe=True,
-            runner=run,
-        )
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        async for event in self.prepare(tool_call):
-            if isinstance(event, PreparedToolExecution):
-                yield await event.run()
-            else:
-                yield event
 
 
 class _BlockingProvider:
@@ -118,21 +71,13 @@ class _BlockingProvider:
 
 
 def test_live_clean_turn_satisfies_turn_terminals() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="hello"),
-                ProviderResponseCompleted(content="hello"),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([completed_stream("hello", response_id=None)])
 
     async def run() -> list[object]:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=_NeverToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
                 messages=(Message(role="user", content="hi"),),
             )
         ]
@@ -161,7 +106,7 @@ def test_live_startless_provider_failure_settles_the_started_turn() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=_NeverToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
                 messages=(Message(role="user", content="hi"),),
             )
         ]
@@ -177,16 +122,7 @@ def test_live_sequential_tool_round_pairs_ended_and_ready() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ],
+            tool_call_stream(call, response_id="response-1"),
             [
                 ProviderResponseStarted(model="test", response_id="response-2"),
                 ProviderResponseCompleted(
@@ -202,7 +138,7 @@ def test_live_sequential_tool_round_pairs_ended_and_ready() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=_RecordingToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
                 messages=(Message(role="user", content="hi"),),
             )
         ]
@@ -217,7 +153,7 @@ def test_live_harness_cancel_settles_the_started_turn() -> None:
     async def run() -> list[object]:
         provider = _BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
         harness = AgentHarness(
-            AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
+            AgentHarnessConfig(provider=provider, tool_executor=NeverToolExecutor())
         )
         events: list[object] = []
         with anyio.fail_after(1):
@@ -257,7 +193,7 @@ def test_live_prepared_batch_cancel_settles_each_requested_call() -> None:
         harness = AgentHarness(
             AgentHarnessConfig(
                 provider=provider,
-                tool_executor=_BlockingPreparedExecutor(all_started),
+                tool_executor=BlockingPreparedExecutor(all_started),
             )
         )
         events: list[object] = []
@@ -281,16 +217,7 @@ def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="resp-1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                    response_id="resp-1",
-                ),
-            ],
+            tool_call_stream(call, response_id="resp-1"),
             [
                 ProviderResponseStarted(model="test", response_id="resp-2"),
                 ProviderTextDelta(delta="all done"),
@@ -307,7 +234,7 @@ def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=_RecordingToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
                 messages=(Message(role="user", content="lookup something"),),
             )
         ]
@@ -321,9 +248,7 @@ def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
 
 def test_live_cancellation_settlement_satisfies_invariants() -> None:
     provider = _BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
-    harness = AgentHarness(
-        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
-    )
+    harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=NeverToolExecutor()))
 
     async def run() -> list[object]:
         events: list[object] = []
@@ -348,9 +273,7 @@ def test_live_cancel_after_completed_turn_settles_cleanly() -> None:
             ]
         ]
     )
-    harness = AgentHarness(
-        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
-    )
+    harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=NeverToolExecutor()))
     harness.steer("do not inject")
 
     async def run() -> list[object]:
@@ -370,26 +293,12 @@ def test_live_cancel_after_completed_turn_settles_cleanly() -> None:
 def test_live_queue_drain_satisfies_ordering_invariants() -> None:
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="first response"),
-                ProviderResponseCompleted(content="first response"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="steered response"),
-                ProviderResponseCompleted(content="steered response"),
-            ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="follow-up response"),
-                ProviderResponseCompleted(content="follow-up response"),
-            ],
+            completed_stream("first response", response_id=None),
+            completed_stream("steered response", response_id=None),
+            completed_stream("follow-up response", response_id=None),
         ]
     )
-    harness = AgentHarness(
-        AgentHarnessConfig(provider=provider, tool_executor=_NeverToolExecutor())
-    )
+    harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=NeverToolExecutor()))
 
     async def run() -> list[object]:
         events: list[object] = []
@@ -424,7 +333,7 @@ def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=_NeverToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
                 messages=(Message(role="user", content="hi"),),
             )
         ]
@@ -436,21 +345,9 @@ def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
 
 def test_live_cancel_after_tool_finishes_settles_cleanly() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(call, content="checking")])
     harness = AgentHarness(
-        AgentHarnessConfig(provider=provider, tool_executor=_RecordingToolExecutor())
+        AgentHarnessConfig(provider=provider, tool_executor=RecordingToolExecutor())
     )
 
     async def run() -> list[object]:
@@ -498,7 +395,7 @@ def test_live_truncated_tool_limit_keeps_continuation_valid() -> None:
             async for event in run_agent_loop(
                 AgentLoopConfig(
                     provider=provider,
-                    tool_executor=_NeverToolExecutor(),
+                    tool_executor=NeverToolExecutor(),
                     max_tool_iterations=1,
                 ),
                 messages=(Message(role="user", content="hi"),),

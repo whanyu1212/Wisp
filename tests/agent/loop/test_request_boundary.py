@@ -9,11 +9,12 @@ import anyio
 import pytest
 
 from tests.agent.loop.support import (
+    ApprovingToolExecutor,
     NeverToolExecutor,
     RaisingRequestBoundaryHook,
     RecordingRequestBoundaryHook,
-    RecordingToolExecutor,
     completed_stream,
+    tool_call_stream,
 )
 from tests.support.agent_runtime import (
     assert_turn_terminals,
@@ -83,21 +84,9 @@ def test_hook_can_stop_after_tool_round() -> None:
     """A hook may still stop the run at the tool-round boundary."""
 
     provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
+        [tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={}))]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(stop=True)])
     messages = (Message(role="user", content="hi"),)
 
@@ -152,7 +141,7 @@ def test_snapshot_edits_do_not_leak_to_next_boundary() -> None:
             completed_stream("no more tools"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
 
     class MutateThenRecordHook:
         def __init__(self) -> None:
@@ -212,21 +201,9 @@ def test_stop_wins_over_unused_message_edits() -> None:
     """
 
     provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
+        [tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={}))]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     unused_replacement = (Message(role="user", content="compacted summary"),)
     hook = RecordingRequestBoundaryHook(
         [RequestBoundaryDecision(stop=True, messages=unused_replacement)]
@@ -280,7 +257,7 @@ def test_hook_injects_steering_after_tool_round() -> None:
             completed_stream("adjusted answer"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     injected = Message(role="user", content="steered")
     hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(injected,))])
     messages = (Message(role="user", content="hi"),)
@@ -816,17 +793,7 @@ def test_hook_failure_does_not_complete_turn_twice(
     """
 
     tool_call = ToolCall(call_id="call-1", name="test", arguments={})
-    stream = (
-        [
-            ProviderResponseStarted(model="test"),
-            ProviderToolCallCompleted(tool_call=tool_call),
-            ProviderResponseCompleted(
-                content="", tool_calls=(tool_call,), finish_reason="tool_calls"
-            ),
-        ]
-        if had_tool_calls
-        else completed_stream("first")
-    )
+    stream = tool_call_stream(tool_call) if had_tool_calls else completed_stream("first")
     provider = ScriptedProvider([stream])
     hook = RaisingRequestBoundaryHook()
     messages = (Message(role="user", content="hi"),)
@@ -836,7 +803,7 @@ def test_hook_failure_does_not_complete_turn_twice(
         async for event in run_agent_loop(
             AgentLoopConfig(
                 provider=provider,
-                tool_executor=RecordingToolExecutor(),
+                tool_executor=ApprovingToolExecutor(),
                 request_boundary_hook=hook,
             ),
             messages=messages,
@@ -869,21 +836,11 @@ def test_hook_stops_clean_turn_after_earlier_tool_round() -> None:
 
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={})),
             completed_stream("no more tools"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     hook = RecordingRequestBoundaryHook(
         [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=True)]
     )
@@ -925,22 +882,12 @@ def test_hook_continues_plain_after_earlier_tool_round() -> None:
 
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={})),
             completed_stream("no more tools"),
             completed_stream("final"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     hook = RecordingRequestBoundaryHook(
         [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=False)]
     )
@@ -981,22 +928,12 @@ def test_hook_injects_after_earlier_tool_round() -> None:
 
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={})),
             completed_stream("no more tools"),
             completed_stream("final"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     injected = Message(role="user", content="steered")
     hook = RecordingRequestBoundaryHook(
         [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(extra_messages=(injected,))]
@@ -1036,21 +973,11 @@ def test_rejects_plain_continuation_for_incapable_provider() -> None:
 
     provider = _LegacyProviderWithoutContinuationMessages(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={})),
             completed_stream("no more tools"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     hook = RecordingRequestBoundaryHook(
         [RequestBoundaryDecision(stop=False), RequestBoundaryDecision(stop=False)]
     )
@@ -1081,21 +1008,9 @@ def test_rejects_injection_for_incapable_provider() -> None:
     """
 
     provider = _LegacyProviderWithoutContinuationMessages(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(
-                    tool_call=ToolCall(call_id="call-1", name="noop", arguments={})
-                ),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(ToolCall(call_id="call-1", name="noop", arguments={}),),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
+        [tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={}))]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     injected = Message(role="user", content="steered")
     hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(extra_messages=(injected,))])
     messages = (Message(role="user", content="hi"),)
@@ -1154,20 +1069,11 @@ def test_rebase_keeps_live_native_continuation() -> None:
     tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="tool-response"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(tool_call,),
-                    response_id="tool-response",
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call, response_id="tool-response"),
             completed_stream("done", response_id="final-response"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
 
     class RebaseHook:
         async def before_next_request(
@@ -1214,16 +1120,7 @@ def test_clean_rebase_drops_consumed_tool_results() -> None:
     tool_call = ToolCall(call_id="call-1", name="noop", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="tool-response"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(tool_call,),
-                    response_id="tool-response",
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call, response_id="tool-response"),
             completed_stream("clean", response_id="clean-response"),
             completed_stream("followed up", response_id="follow-up-response"),
         ]
@@ -1251,7 +1148,7 @@ def test_clean_rebase_drops_consumed_tool_results() -> None:
             async for event in run_agent_loop(
                 AgentLoopConfig(
                     provider=provider,
-                    tool_executor=RecordingToolExecutor(),
+                    tool_executor=ApprovingToolExecutor(),
                     request_boundary_hook=CleanRebaseHook(),
                 ),
                 messages=(Message(role="user", content="inspect"),),

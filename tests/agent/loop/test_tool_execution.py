@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 import anyio
 import pytest
 
+from tests.agent.loop.support import NeverToolExecutor
 from tests.support.agent_runtime import assert_settled_tool_calls
 from wisp.agent.loop.tool_execution import (
     CancelledToolBatch,
@@ -87,16 +88,6 @@ class _ScriptedExecutor:
             yield event  # type: ignore[misc]
 
 
-class _NeverExecutor:
-    def __init__(self) -> None:
-        self.calls: list[ToolCall] = []
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        self.calls.append(tool_call)
-        raise AssertionError(f"Unexpected tool execution: {tool_call.call_id}")
-        yield  # pragma: no cover - makes this an async generator
-
-
 class _PreparedExecutor:
     def __init__(
         self,
@@ -143,6 +134,7 @@ def test_lifecycle_accepts_valid_approval_sequence() -> None:
 @pytest.mark.parametrize(
     ("events", "error"),
     [
+        ((), "ended without a result"),
         ((object(),), "unsupported event type"),
         ((_resolution(_call()),), "resolved approval before requesting"),
         ((_approval(_call()), _approval(_call())), "requested approval more than once"),
@@ -151,6 +143,7 @@ def test_lifecycle_accepts_valid_approval_sequence() -> None:
             "resolved approval more than once",
         ),
         ((_approval(_call()),), "unresolved approval"),
+        ((_approval(_call()), _ended(_call())), "unresolved approval"),
         (
             (_approval(_call()), _resolution(_call(), approved=False), _ended(_call())),
             "reported success after approval was denied",
@@ -216,10 +209,9 @@ def test_sequential_batch_streams_events_and_returns_results() -> None:
 
 def test_truncated_batch_synthesizes_results_without_execution() -> None:
     call = _call()
-    executor = _NeverExecutor()
     recorded: list[ToolResultReady] = []
     batch = ToolBatch(
-        tool_executor=executor,
+        tool_executor=NeverToolExecutor(),
         tool_calls=(call,),
         truncated=True,
         is_cancelled=lambda: False,
@@ -236,7 +228,6 @@ def test_truncated_batch_synthesizes_results_without_execution() -> None:
         ToolExecutionEnded,
         ToolResultReady,
     ]
-    assert executor.calls == []
     assert isinstance(batch.outcome, CompletedToolBatch)
     assert batch.outcome.results[0].is_error is True
     assert recorded[0].failure_code == "invalid_arguments"
@@ -326,7 +317,7 @@ def test_cancellation_check_errors_propagate() -> None:
         raise RuntimeError("cancellation check failed")
 
     batch = ToolBatch(
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
         tool_calls=(_call(),),
         truncated=False,
         is_cancelled=raise_cancelled,
@@ -426,10 +417,9 @@ def test_sequential_cancellation_settles_every_requested_call(
 
 def test_truncated_batch_rejects_every_call_even_if_cancelled() -> None:
     calls = (_call("call-1"), _call("call-2"))
-    executor = _NeverExecutor()
     cancelled = False
     batch = ToolBatch(
-        tool_executor=executor,
+        tool_executor=NeverToolExecutor(),
         tool_calls=calls,
         truncated=True,
         is_cancelled=lambda: cancelled,
@@ -452,7 +442,6 @@ def test_truncated_batch_rejects_every_call_even_if_cancelled() -> None:
         ("call-1", "invalid_arguments"),
         ("call-2", "invalid_arguments"),
     ]
-    assert executor.calls == []
     assert isinstance(batch.outcome, CancelledToolBatch)
     assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
 

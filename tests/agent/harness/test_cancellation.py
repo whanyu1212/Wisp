@@ -8,9 +8,11 @@ import anyio
 import pytest
 
 from tests.agent.harness.support import (
+    BlockingPreparedExecutor,
     RecordingToolExecutor,
     build_harness,
 )
+from tests.agent.loop.support import tool_call_stream
 from tests.support.agent_runtime import (
     assert_cancellation_settled,
     assert_settled_tool_calls,
@@ -47,34 +49,6 @@ from wisp.providers.events import (
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
-
-
-class BlockingPreparedExecutor:
-    def __init__(self, all_started: anyio.Event) -> None:
-        self._all_started = all_started
-        self.started_call_ids: set[str] = set()
-
-    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
-        async def run() -> ToolExecutionEnded:
-            self.started_call_ids.add(tool_call.call_id)
-            if len(self.started_call_ids) == 2:
-                self._all_started.set()
-            await anyio.sleep_forever()
-            raise AssertionError("unreachable")
-
-        yield PreparedToolExecution(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            parallel_safe=True,
-            runner=run,
-        )
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        async for event in self.prepare(tool_call):
-            if isinstance(event, PreparedToolExecution):
-                yield await event.run()
-            else:
-                yield event
 
 
 class FailingAndBlockingPreparedExecutor:
@@ -243,19 +217,7 @@ def test_cancel_interrupts_blocked_provider_stream() -> None:
 
 def test_close_after_tool_finishes_keeps_tool_output() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(tool_call, content="checking")])
     harness = build_harness(
         provider,
         tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
@@ -412,18 +374,7 @@ def test_cancel_settles_blocked_sequential_batch() -> None:
 def test_cancel_publishes_result_returned_before_executor_cleanup() -> None:
     tool_call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                    response_id="response-1",
-                ),
-            ]
-        ]
+        [tool_call_stream(tool_call, content="checking", response_id="response-1")]
     )
 
     class SlowCleanupExecutor:
@@ -568,19 +519,7 @@ def test_cancel_after_prepared_result_finishes_batch_then_turn() -> None:
 
 def test_cancel_after_tool_finishes_keeps_tool_output() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(tool_call, content="checking")])
     harness = build_harness(
         provider,
         tools=(ToolSpec(name="lookup", description="Look up", input_schema={}),),
@@ -613,13 +552,7 @@ def test_cancel_after_tool_turn_emits_one_boundary_error(prepared: bool) -> None
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="", tool_calls=(call,), finish_reason="tool_calls"
-                ),
-            ],
+            tool_call_stream(call),
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="unused")],
         ]
     )

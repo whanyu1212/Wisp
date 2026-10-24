@@ -15,6 +15,7 @@ from tests.agent.harness.support import (
     build_harness,
     message_with_nested_arguments,
 )
+from tests.agent.loop.support import completed_stream, tool_call_stream
 from tests.support.agent_runtime import (
     assert_turn_terminals,
 )
@@ -204,13 +205,7 @@ def test_keeps_detached_completion_before_exposing_it(close_at_completion: bool)
     call = ToolCall(call_id="call", name="read", arguments={"paths": ["original.txt"]})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="", tool_calls=(call,), finish_reason="tool_calls"
-                ),
-            ],
+            tool_call_stream(call),
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
         ]
     )
@@ -271,15 +266,7 @@ def test_requeued_message_is_not_in_old_drain_snapshot() -> None:
 
 def test_prompt_owns_transcript_and_returns_immutable_snapshots() -> None:
     initial = Message(role="system", content="system prompt")
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="hello"),
-                ProviderResponseCompleted(content="hello"),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([completed_stream("hello", response_id=None)])
     harness = build_harness(provider, messages=(initial,))
     before = harness.messages
 
@@ -353,16 +340,8 @@ def test_keeps_assistant_and_tool_result_order_across_runs() -> None:
                     finish_reason="tool_calls",
                 ),
             ],
-            [
-                ProviderResponseStarted(model="test", response_id="response-2"),
-                ProviderTextDelta(delta="done"),
-                ProviderResponseCompleted(content="done", response_id="response-2"),
-            ],
-            [
-                ProviderResponseStarted(model="test", response_id="response-3"),
-                ProviderTextDelta(delta="follow-up"),
-                ProviderResponseCompleted(content="follow-up", response_id="response-3"),
-            ],
+            completed_stream("done", response_id="response-2"),
+            completed_stream("follow-up", response_id="response-3"),
         ]
     )
     executor = RecordingToolExecutor("found it")
@@ -431,16 +410,7 @@ def test_drops_empty_tool_call_assistant_from_follow_up_history() -> None:
     )
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    response_id="response-1",
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call, response_id="response-1"),
             [
                 ProviderResponseStarted(model="test", response_id="response-2"),
                 ProviderResponseCompleted(content="done", response_id="response-2"),
@@ -712,13 +682,7 @@ def test_offsets_keep_turn_numbers_and_tool_limit(
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="checking", tool_calls=(call,), finish_reason="tool_calls"
-                ),
-            ],
+            tool_call_stream(call, content="checking"),
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
         ]
     )

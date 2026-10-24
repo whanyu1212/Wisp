@@ -12,10 +12,11 @@ import pytest
 
 import wisp.agent.loop.runner as agent_loop_module
 from tests.agent.loop.support import (
+    ApprovingToolExecutor,
     NeverToolExecutor,
     RaisingRequestBoundaryHook,
-    RecordingToolExecutor,
     completed_stream,
+    tool_call_stream,
 )
 from tests.support.agent_runtime import (
     assert_turn_terminals,
@@ -432,15 +433,7 @@ def test_works_with_provider_without_effort_parameter() -> None:
 
 
 def test_forwards_effort_to_provider_that_supports_it() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderTextDelta(delta="hello"),
-                ProviderResponseCompleted(content="hello"),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([completed_stream("hello", response_id=None)])
     messages = (Message(role="user", content="hi"),)
 
     async def run() -> list[object]:
@@ -481,14 +474,10 @@ def test_forwards_executor_events_and_provider_results() -> None:
                     finish_reason="tool_calls",
                 ),
             ],
-            [
-                ProviderResponseStarted(model="test", response_id="response-2"),
-                ProviderTextDelta(delta="done"),
-                ProviderResponseCompleted(content="done", response_id="response-2"),
-            ],
+            completed_stream("done", response_id="response-2"),
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
 
     async def run() -> list[object]:
         return [
@@ -925,24 +914,14 @@ def test_boundary_overflow_after_a_completed_turn_publishes_only_the_error() -> 
             raise ContextOverflowError("next request would exceed the context window")
 
     call = ToolCall(call_id="call-1", name="bash", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="", tool_calls=(call,), finish_reason="tool_calls"
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(call)])
     events: list[agent_loop_module.AgentLoopEvent] = []
 
     async def run() -> None:
         async for event in run_agent_loop(
             AgentLoopConfig(
                 provider=provider,
-                tool_executor=RecordingToolExecutor(),
+                tool_executor=ApprovingToolExecutor(),
                 request_boundary_hook=OverflowingBoundary(),
             ),
             messages=(Message(role="user", content="hi"),),
@@ -1011,17 +990,7 @@ def test_cancel_after_completed_turn_keeps_boundary_behavior(
 
     token = Token()
     tool_call = ToolCall(call_id="call-1", name="test", arguments={})
-    stream = (
-        [
-            ProviderResponseStarted(model="test"),
-            ProviderToolCallCompleted(tool_call=tool_call),
-            ProviderResponseCompleted(
-                content="", tool_calls=(tool_call,), finish_reason="tool_calls"
-            ),
-        ]
-        if had_tool_calls
-        else completed_stream("done")
-    )
+    stream = tool_call_stream(tool_call) if had_tool_calls else completed_stream("done")
     provider = ScriptedProvider([stream])
 
     async def run() -> list[agent_loop_module.AgentLoopEvent]:
@@ -1029,7 +998,7 @@ def test_cancel_after_completed_turn_keeps_boundary_behavior(
         async for event in run_agent_loop(
             AgentLoopConfig(
                 provider=provider,
-                tool_executor=RecordingToolExecutor(),
+                tool_executor=ApprovingToolExecutor(),
                 cancellation_token=token,
                 request_boundary_hook=RaisingRequestBoundaryHook(),
             ),

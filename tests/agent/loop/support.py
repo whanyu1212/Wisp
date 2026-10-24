@@ -1,10 +1,13 @@
-"""Tool executors, request-boundary hooks, and streams shared by the agent loop tests."""
+"""Tool executors, request-boundary hooks, provider streams, and a fake clock for agent tests."""
 
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncIterator, Iterable
 
+import pytest
+
+from wisp.agent.loop import prepared_tools, tool_execution, tool_lifecycle
 from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
     RequestBoundarySnapshot,
@@ -22,8 +25,30 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
     ProviderTextDelta,
+    ProviderToolCallCompleted,
     ToolCall,
 )
+
+
+class FakeClock:
+    """Stand in for the `time` module so tests set elapsed tool time directly."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def install_fake_clock(monkeypatch: pytest.MonkeyPatch) -> FakeClock:
+    clock = FakeClock()
+    # Patching time.monotonic itself would also freeze the event loop's clock.
+    for module in (tool_execution, prepared_tools, tool_lifecycle):
+        monkeypatch.setattr(module, "time", clock)
+    return clock
 
 
 class NeverToolExecutor:
@@ -32,7 +57,7 @@ class NeverToolExecutor:
         yield  # pragma: no cover - makes this an async generator
 
 
-class RecordingToolExecutor:
+class ApprovingToolExecutor:
     def __init__(self) -> None:
         self.calls: list[ToolCall] = []
 
@@ -90,6 +115,21 @@ def completed_stream(
         ProviderResponseStarted(model="test", response_id=response_id),
         ProviderTextDelta(delta=content),
         ProviderResponseCompleted(content=content, response_id=response_id),
+    ]
+
+
+def tool_call_stream(
+    *calls: ToolCall, content: str = "", response_id: str | None = None
+) -> list[ProviderEvent]:
+    return [
+        ProviderResponseStarted(model="test", response_id=response_id),
+        *(ProviderToolCallCompleted(tool_call=call) for call in calls),
+        ProviderResponseCompleted(
+            content=content,
+            tool_calls=calls,
+            response_id=response_id,
+            finish_reason="tool_calls",
+        ),
     ]
 
 

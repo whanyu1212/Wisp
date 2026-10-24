@@ -10,6 +10,7 @@ import anyio
 import pytest
 
 import wisp.agent.harness.boundaries as boundaries_module
+from tests.agent.loop.support import tool_call_stream
 from tests.support.agent_runtime import (
     assert_tool_result_pairing,
     assert_turn_invariants,
@@ -39,7 +40,6 @@ from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
     ProviderTextDelta,
-    ProviderToolCallCompleted,
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
@@ -114,16 +114,7 @@ class _PreparedExecutor(_Executor):
 def _provider_with_call(call: ToolCall) -> ScriptedProvider:
     return ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="r1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                    response_id="r1",
-                ),
-            ],
+            tool_call_stream(call, content="checking", response_id="r1"),
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
         ]
     )

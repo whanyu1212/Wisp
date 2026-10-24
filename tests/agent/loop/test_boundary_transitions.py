@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator, Sequence
 import anyio
 import pytest
 
+from tests.agent.loop.support import NeverToolExecutor
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.boundary_transitions import (
     apply_request_boundary_decision,
@@ -23,7 +24,6 @@ from wisp.agent.request_boundary import (
     RequestBoundaryUnsupportedError,
     RequestContextRebase,
 )
-from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import (
     ContextBudget,
     ContextEstimate,
@@ -33,13 +33,7 @@ from wisp.events import (
 )
 from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
-from wisp.providers.events import ProviderEvent, ToolCall
-
-
-class _NeverExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        raise AssertionError(f"Unexpected tool call: {tool_call.name}")
-        yield  # pragma: no cover - makes this an async generator
+from wisp.providers.events import ProviderEvent
 
 
 class _CursorlessProvider:
@@ -75,7 +69,7 @@ class _OpaqueReplayProvider(_ContinuationProvider):
 def _config(*, provider: object | None = None) -> AgentLoopConfig:
     return AgentLoopConfig(
         provider=provider or _ContinuationProvider(),
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
     )
 
 
@@ -500,7 +494,7 @@ def test_boundary_snapshot_is_isolated() -> None:
     hook = Hook()
     config = AgentLoopConfig(
         provider=_ContinuationProvider(),
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
         request_boundary_hook=hook,
     )
 
@@ -533,7 +527,7 @@ def test_overflow_recovery_requires_replacement_or_rebase() -> None:
 
     config = AgentLoopConfig(
         provider=_ContinuationProvider(),
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
         context_overflow_hook=Hook(),
     )
 
