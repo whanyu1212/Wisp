@@ -624,6 +624,47 @@ def test_edit_overlap_names_indexes(tmp_path: Path) -> None:
         _edit(tmp_path, b"abcdef\n", ("abc", "1"), ("f", "2"), ("bc", "3"))
 
 
+def test_edit_ignores_trailing_whitespace(tmp_path: Path) -> None:
+    edited = _edit(
+        tmp_path,
+        b"keep  \ndef f():  \n    return 1\t\nend  \n",
+        ("def f():\n    return 1\n", "def g():\n    return 2\n"),
+    )
+
+    assert edited == b"keep  \ndef g():\n    return 2\nend  \n"
+
+
+def test_edit_whitespace_match_deletes_lines(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"a\nb  \nc\n", ("b\n", ""))
+
+    assert edited == b"a\nc\n"
+
+
+def test_edit_exact_match_wins(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"x = 1   \ny = 2\n", ("x = 1", "x = 3"))
+
+    assert edited == b"x = 3   \ny = 2\n"
+
+
+def test_edit_whitespace_match_crlf(tmp_path: Path) -> None:
+    edited = _edit(tmp_path, b"a \r\nb\r\nc\r\n", ("a\nb\n", "x\n"))
+
+    assert edited == b"x\r\nc\r\n"
+
+
+def test_edit_whitespace_match_ambiguous(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match=r"edits\[0\].oldText matches 2 places"):
+        _edit(tmp_path, b"pass \npass  \n", ("pass", "return"))
+
+
+def test_edit_reports_indentation_mismatch(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="matches line 2 only if indentation is ignored") as raised:
+        _edit(tmp_path, b"def f():\n\treturn 1\n", ("    return 1", "    return 2"))
+
+    assert raised.value.failure_code == "stale_input"
+    assert (tmp_path / "file.txt").read_bytes() == b"def f():\n\treturn 1\n"
+
+
 def test_edit_rejects_no_op(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="leave the file unchanged") as raised:
         _edit(tmp_path, b"same\n", ("same", "same"))
