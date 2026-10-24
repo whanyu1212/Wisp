@@ -589,6 +589,28 @@ def test_from_config_backstops_settings_protection_after_model_copy(
         run_tool(ReadTool(), {"path": ".wisp/settings.json"}, context)
 
 
+@pytest.mark.parametrize("copied", [False, True])
+def test_mcp_credentials_protected_with_empty_guard(
+    tmp_path: Path, monkeypatch: MonkeyPatch, copied: bool
+) -> None:
+    from wisp.config.runtime import WispConfig
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".wisp").mkdir()
+    (tmp_path / ".wisp" / "mcp-auth.json").write_text('{"token": "secret"}', encoding="utf-8")
+    config = (
+        WispConfig().model_copy(update={"protected_paths": ()})
+        if copied
+        else WispConfig(protected_paths=())
+    )
+
+    context = ToolContext.from_config(config, cwd=tmp_path)
+
+    with pytest.raises(ToolError, match="protected path"):
+        run_tool(ReadTool(), {"path": ".wisp/mcp-auth.json"}, context)
+
+
 def test_project_settings_cannot_disable_secret_guard(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

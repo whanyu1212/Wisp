@@ -38,8 +38,8 @@ points to. `read`, `write`, and `edit` refuse a protected path, and `grep`, `fin
 protected files out of their results.
 
 Change the list with the `protected_paths` setting in your user settings; a project's settings
-cannot change it. Wisp's credential, settings, and permission files stay protected even if you set
-the list to empty.
+cannot change it. Wisp's credential files, including MCP sign-ins, and its settings and permission
+files stay protected even if you set the list to empty.
 
 Protected paths are not a sandbox. They apply only to Wisp's file tools. A `bash` command runs as
 your user, so `cat .env`, or a script that reads it, is not blocked, and neither are MCP or extension

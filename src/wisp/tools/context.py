@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
+from wisp.mcp.credentials import mcp_auth_path
 from wisp.trust.permissions import permissions_directory
 
 if TYPE_CHECKING:
@@ -48,8 +49,8 @@ class ToolContext:
         globs come from the resolved config so file tools deny reads of secrets
         (``.env`` and friends) unless the policy is relaxed.
 
-        The active credential, user settings, and provider CA bundle files are guaranteed
-        to be in the returned context's ``protected_paths``. ``WispConfig`` already
+        The active credential, MCP credential, user settings, and provider CA bundle files
+        are guaranteed to be in the returned context's ``protected_paths``. ``WispConfig`` already
         enforces this on construction; re-asserting it here is a defensive backstop so
         the secrets stay protected even for a config produced by a path that skipped
         validation (e.g. ``model_copy``).
@@ -58,6 +59,7 @@ class ToolContext:
         protected_paths = config.protected_paths
         required = (
             config.auth_path.expanduser().resolve(strict=False).as_posix(),
+            mcp_auth_path().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
             permissions_directory().resolve(strict=False).as_posix(),
             f"{permissions_directory().resolve(strict=False).as_posix()}/**",
