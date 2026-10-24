@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import sys
 import threading
 import time
@@ -298,9 +297,7 @@ def test_grep_tool_no_match_without_glob_skips_display_path_work(
     assert result.data == {"count": 0, "matches": []}
 
 
-def test_grep_tool_ripgrep_treats_option_like_pattern_as_literal(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_treats_option_like_pattern_as_literal(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("--help\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -314,9 +311,7 @@ def test_grep_tool_ripgrep_treats_option_like_pattern_as_literal(tmp_path: Path)
     assert "Usage:" not in result.text
 
 
-def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_includes_filename_for_single_file_search(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("match\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -329,9 +324,7 @@ def test_grep_tool_ripgrep_includes_filename_for_single_file_search(tmp_path: Pa
     assert result.text == "data.txt:1:match"
 
 
-def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_bounds_long_lines_before_buffering(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path, max_output_bytes=80)
 
@@ -346,9 +339,7 @@ def test_grep_tool_ripgrep_bounds_long_lines_before_buffering(tmp_path: Path) ->
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
-def test_grep_tool_ripgrep_preserves_oversized_match_when_truncated(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_preserves_oversized_match_when_truncated(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path, max_output_bytes=35)
 
@@ -366,9 +357,7 @@ def test_grep_tool_ripgrep_preserves_oversized_match_when_truncated(tmp_path: Pa
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
-def test_grep_tool_ripgrep_counts_match_when_budget_cuts_record_prefix(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_counts_match_when_budget_cuts_record_prefix(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("needle" + ("x" * 10_000) + "\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path, max_output_bytes=5)
 
@@ -384,9 +373,7 @@ def test_grep_tool_ripgrep_counts_match_when_budget_cuts_record_prefix(tmp_path:
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes
 
 
-def test_grep_tool_ripgrep_bounds_context_output_before_buffering(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_bounds_context_output_before_buffering(tmp_path: Path) -> None:
     lines = [f"before {index}" for index in range(50)]
     lines.append("needle")
     lines.extend(f"after {index}" for index in range(50))
@@ -406,9 +393,7 @@ def test_grep_tool_ripgrep_bounds_context_output_before_buffering(tmp_path: Path
     assert result.truncated is True
 
 
-def test_grep_tool_ripgrep_does_not_count_context_text_as_match(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_does_not_count_context_text_as_match(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("context :123: text\nneedle\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -423,11 +408,9 @@ def test_grep_tool_ripgrep_does_not_count_context_text_as_match(tmp_path: Path) 
     assert result.data["count"] == 1
 
 
-def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
+def test_grep_counts_matches_separately_from_context_lines(
     tmp_path: Path,
 ) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
     (tmp_path / "data.txt").write_text("before\nmatch\nafter\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -442,9 +425,7 @@ def test_grep_tool_ripgrep_counts_matches_separately_from_context_lines(
     assert "data.txt-3-after" in result.text
 
 
-def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_grep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:
     (tmp_path / "data.txt").write_text("a b\nab\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
@@ -457,35 +438,7 @@ def test_grep_tool_ripgrep_preserves_whitespace_only_patterns(tmp_path: Path) ->
     assert result.text == "data.txt:1:a b"
 
 
-def test_grep_tool_ripgrep_ignores_config_that_follows_symlinks(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("secret\n", encoding="utf-8")
-    link = workspace / "link.txt"
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
-    config = tmp_path / "ripgreprc"
-    config.write_text("--follow\n", encoding="utf-8")
-    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
-    context = ToolContext(cwd=workspace)
-
-    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
-
-    assert result.text == "No matches"
-    assert result.data == {"count": 0, "matches": []}
-
-
 def test_grep_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside.txt"

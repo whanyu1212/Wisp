@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import threading
 from collections.abc import Iterable
 from pathlib import Path
@@ -108,9 +107,7 @@ def test_find_tool_python_fallback_skips_hidden_entries(
     assert result.data["files"] == ["visible.py"]
 
 
-def test_find_tool_ripgrep_handles_option_like_paths(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_find_handles_option_like_paths(tmp_path: Path) -> None:
     dash_dir = tmp_path / "-dash"
     dash_dir.mkdir()
     (dash_dir / "tool.py").write_text("", encoding="utf-8")
@@ -121,9 +118,7 @@ def test_find_tool_ripgrep_handles_option_like_paths(tmp_path: Path) -> None:
     assert result.text == "-dash/tool.py"
 
 
-def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+def test_find_returns_no_files_for_empty_directory(tmp_path: Path) -> None:
     empty_dir = tmp_path / "empty"
     empty_dir.mkdir()
     context = ToolContext(cwd=tmp_path)
@@ -134,35 +129,7 @@ def test_find_tool_ripgrep_returns_no_files_for_empty_directory(tmp_path: Path) 
     assert result.data == {"count": 0, "files": []}
 
 
-def test_find_tool_ripgrep_ignores_config_that_follows_symlinks(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.py"
-    outside.write_text("", encoding="utf-8")
-    link = workspace / "outside.py"
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
-    config = tmp_path / "ripgreprc"
-    config.write_text("--follow\n", encoding="utf-8")
-    monkeypatch.setenv("RIPGREP_CONFIG_PATH", str(config))
-    context = ToolContext(cwd=workspace)
-
-    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
-
-    assert result.text == "No files found"
-    assert result.data == {"count": 0, "files": []}
-
-
 def test_find_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside.py"

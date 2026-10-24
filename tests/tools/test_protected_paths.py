@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
@@ -167,8 +166,7 @@ def test_grep_pointed_directly_at_protected_file_is_denied(tmp_path: Path) -> No
 
 
 def test_grep_user_glob_cannot_reinclude_protected_file(tmp_path: Path) -> None:
-    # Finding 1: rg's --glob exclusions are last-match-wins, so a caller-supplied
-    # glob could re-include a secret. The output post-filter must still hide it.
+    # Finding 1: a caller-supplied glob must not re-include a protected file.
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-needle\n", encoding="utf-8")
 
     result = run_tool(
@@ -182,8 +180,7 @@ def test_grep_user_glob_cannot_reinclude_protected_file(tmp_path: Path) -> None:
 
 
 def test_grep_protects_case_variant_of_key_pattern(tmp_path: Path) -> None:
-    # Finding 2: rg globs are case-sensitive but is_protected_path is not; an
-    # uppercase API.KEY must not leak via the rg engine.
+    # Finding 2: protected-path matching ignores case, so API.KEY stays hidden.
     (tmp_path / "API.KEY").write_text("PRIVATE=sk-needle\n", encoding="utf-8")
 
     result = run_tool(
@@ -281,12 +278,8 @@ def test_default_list_covers_common_env_secret_variants(tmp_path: Path, variant:
 
 
 def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> None:
-    # PR #58 review P2: protected records must be dropped BEFORE buffering. A large
-    # set of protected matches preceding an ordinary match must not exhaust the
-    # stdout buffer and kill rg before the real match is read. Only the rg engine
-    # buffers a single stream, so this scenario is rg-specific.
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
+    # PR #58 review P2: protected files are skipped before buffering, so many of
+    # them ahead of an ordinary match cannot exhaust the output budget.
     big_secret = "NEEDLE_SECRET=" + ("x" * 400) + "\n"
     for i in range(30):
         directory = tmp_path / f"aaa{i:02d}"
@@ -310,14 +303,9 @@ def test_protected_matches_do_not_starve_a_later_real_match(tmp_path: Path) -> N
 
 
 def test_protected_group_separators_do_not_starve_context_grep(tmp_path: Path) -> None:
-    # PR #58 review (5907c8b): with context > 0, rg emits bare "--" group
-    # separators. Dropping protected records but keeping their separators could let
-    # a large run of protected groups exhaust the line buffer and lose a later
-    # match. Separators around dropped groups must be suppressed before buffering.
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
-    # Case-variant .KEY names: is_protected_path (case-insensitive) protects them,
-    # but rg's case-sensitive glob misses them, so rg emits records + "--".
+    # PR #58 review (5907c8b): with context > 0, groups are separated by "--". A
+    # large run of protected files must not leave separators that exhaust the line
+    # budget and hide a later match. Case-variant .KEY names are protected too.
     for i in range(50):
         (tmp_path / f"aaa{i:02d}.KEY").write_text("pre\nNEEDLE_SECRET=x\npost\n", encoding="utf-8")
     (tmp_path / "zzz.py").write_text("found_NEEDLE\n", encoding="utf-8")
@@ -340,8 +328,6 @@ def test_protected_group_separators_do_not_starve_context_grep(tmp_path: Path) -
 def test_context_grep_preserves_separators_between_kept_groups(tmp_path: Path) -> None:
     # The separator suppression must not eat legitimate separators between two kept
     # context groups.
-    if shutil.which("rg") is None:
-        pytest.skip("ripgrep is not installed")
     (tmp_path / "file1.py").write_text("a\nNEEDLE_one\nb\n", encoding="utf-8")
     (tmp_path / "file2.py").write_text("c\nNEEDLE_two\nd\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path, protected_paths=(".env",))
