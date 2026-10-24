@@ -415,7 +415,7 @@ class ProcessSupervisor:
         release_ownership = False
         try:
             try:
-                stdout_result, stderr_result = await asyncio.wait_for(
+                captured = await asyncio.wait_for(
                     capture_task,
                     timeout=timeout,
                 )
@@ -471,6 +471,7 @@ class ProcessSupervisor:
                 raise
             if not cleanup_succeeded:
                 raise ToolError("Failed to terminate process tree")
+            stdout_result, stderr_result = captured.stdout, captured.stderr
             stdout, stdout_source_byte_lengths = decode_utf8_with_source_byte_lengths(
                 stdout_result.output
             )
@@ -489,6 +490,7 @@ class ProcessSupervisor:
                 stderr_retained_bytes=len(stderr_result.output),
                 stdout_source_byte_lengths=stdout_source_byte_lengths,
                 stderr_source_byte_lengths=stderr_source_byte_lengths,
+                background_stopped=captured.pipes_held_after_exit,
             )
             release_ownership = True
             return result

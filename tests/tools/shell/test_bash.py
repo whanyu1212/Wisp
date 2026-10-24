@@ -795,10 +795,43 @@ def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
     elapsed = time.monotonic() - started
     time.sleep(2.0)
 
-    assert result.text == "Command exited with code 0: started"
+    assert result.text == (
+        "Command exited with code 0: started\n"
+        "[Background processes still holding the output were stopped when the command "
+        "exited. Use operation=start to keep a process running.]"
+    )
     assert elapsed < 1.0
 
     assert not marker.exists()
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX background job")
+def test_redirected_job_has_no_notice(tmp_path: Path) -> None:
+    command = "sleep 5 >/dev/null 2>&1 & echo started"
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 10}, ToolContext(cwd=tmp_path))
+
+    assert result.text == "Command exited with code 0: started"
+
+
+def test_notice_fits_output_budget() -> None:
+    notice = "[stopped]"
+
+    output = process_tools_module._format_process_output_bounded(  # noqa: SLF001
+        0, "a\nb\nc\n", "", max_bytes=25, max_lines=3, notice=notice
+    )
+
+    assert output.text == "Command exited with code 0: [truncated] b\nc\n[stopped]"
+    assert output.truncated is True
+
+
+def test_notice_dropped_when_budget_tiny() -> None:
+    output = process_tools_module._format_process_output_bounded(  # noqa: SLF001
+        0, "", "", max_bytes=5, max_lines=3, notice="[stopped]"
+    )
+
+    assert output.text == "Command exited with code 0"
 
 
 @pytest.mark.process
