@@ -124,7 +124,7 @@ def test_coordinator_replacement_leaves_transcript_untouched() -> None:
     assert coordinator.pending_transcript_replacement is None
 
 
-def test_fallback_replacement_needs_no_pending_transition() -> None:
+def test_fallback_leaves_no_pending_replacement() -> None:
     user = Message(role="user", content="initial")
     injected = Message(role="user", content="steered")
     harness = build_harness(ScriptedProvider([]), messages=(user, injected))
@@ -163,9 +163,7 @@ def test_fallback_replacement_needs_no_pending_transition() -> None:
 
 @pytest.mark.parametrize("raised", [False, True])
 @pytest.mark.parametrize("empty_replacement", [False, True])
-def test_overflow_replacement_applies_only_when_retry_starts(
-    raised: bool, empty_replacement: bool
-) -> None:
+def test_overflow_replacement_applies_at_retry(raised: bool, empty_replacement: bool) -> None:
     original = Message(role="user", content="long prompt")
     replacement = () if empty_replacement else (Message(role="user", content="summary"),)
     provider = ScriptedProvider(
@@ -215,7 +213,7 @@ def test_overflow_replacement_applies_only_when_retry_starts(
     assert harness.messages[-1].content == "done"
 
 
-def test_rebases_active_boundary_after_transcript_replacement() -> None:
+def test_replacement_rebases_active_boundary() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -282,7 +280,7 @@ def test_rebases_active_boundary_after_transcript_replacement() -> None:
 
 
 @pytest.mark.parametrize("transition", ["replacement", "rebase", "overflow"])
-def test_adopted_boundary_detaches_callback_and_provider_messages(transition: str) -> None:
+def test_adopted_boundary_detaches_messages(transition: str) -> None:
     class NativeProvider(ScriptedProvider):
         def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
             return True
@@ -351,7 +349,7 @@ def test_adopted_boundary_detaches_callback_and_provider_messages(transition: st
     anyio.run(run)
 
 
-def test_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
+def test_callback_cannot_mutate_boundary_context() -> None:
     original = message_with_nested_arguments(role="user")
     expected = original.model_copy(deep=True)
     harness = build_harness(ScriptedProvider([]), messages=(original,))
@@ -397,7 +395,7 @@ def test_callback_cannot_mutate_transcript_injections_or_fallback() -> None:
     anyio.run(run)
 
 
-def test_stale_rebase_is_rejected_without_touching_transcript() -> None:
+def test_rejects_stale_rebase_keeps_transcript() -> None:
     provider = ScriptedProvider(
         [
             [

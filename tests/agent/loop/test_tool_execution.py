@@ -174,7 +174,7 @@ def test_lifecycle_rejects_malformed_sequences(
         lifecycle.finish()
 
 
-def test_sequential_batch_streams_events_and_returns_results() -> None:
+def test_sequential_batch_streams_and_returns_results() -> None:
     call = _call()
     executor = _ScriptedExecutor((_approval(call), _resolution(call), _ended(call)))
     recorded: list[ToolResultReady] = []
@@ -207,7 +207,7 @@ def test_sequential_batch_streams_events_and_returns_results() -> None:
     assert recorded[0] is events[-1]
 
 
-def test_truncated_batch_synthesizes_results_without_execution() -> None:
+def test_truncated_batch_synthesizes_error_results() -> None:
     call = _call()
     recorded: list[ToolResultReady] = []
     batch = ToolBatch(
@@ -233,7 +233,7 @@ def test_truncated_batch_synthesizes_results_without_execution() -> None:
     assert recorded[0].failure_code == "invalid_arguments"
 
 
-def test_prepared_batch_orders_results_despite_reverse_completion() -> None:
+def test_prepared_batch_keeps_call_order() -> None:
     calls = (_call("call-1"), _call("call-2"))
     first_started = anyio.Event()
     release_first = anyio.Event()
@@ -363,7 +363,7 @@ _SEQUENTIAL_CANCEL_POINTS = [
     _SEQUENTIAL_CANCEL_POINTS,
     ids=[f"{call_id}:{event_type}" for (event_type, call_id), _, _ in _SEQUENTIAL_CANCEL_POINTS],
 )
-def test_sequential_cancellation_settles_every_requested_call(
+def test_sequential_cancellation_settles_every_call(
     cancel_at: tuple[str, str], executed: list[str], finished: list[str]
 ) -> None:
     calls = (_call("call-1"), _call("call-2"))
@@ -415,7 +415,7 @@ def test_sequential_cancellation_settles_every_requested_call(
         assert (denial.approved, denial.reason) == (False, "Agent run cancelled")
 
 
-def test_truncated_batch_rejects_every_call_even_if_cancelled() -> None:
+def test_cancelled_truncated_batch_rejects_all() -> None:
     calls = (_call("call-1"), _call("call-2"))
     cancelled = False
     batch = ToolBatch(
@@ -446,7 +446,7 @@ def test_truncated_batch_rejects_every_call_even_if_cancelled() -> None:
     assert [result.call_id for result in batch.outcome.results] == ["call-1", "call-2"]
 
 
-def test_sequential_batch_propagates_an_unrequested_cancellation() -> None:
+def test_sequential_batch_propagates_unrequested_cancellation() -> None:
     blocked = anyio.Event()
 
     class BlockingExecutor:

@@ -50,7 +50,7 @@ from wisp.providers.fake import ScriptedProvider
         ("response-1", "response-1", "response-1"),
     ],
 )
-def test_resolves_response_id_for_messages_and_tool_continuation(
+def test_resolves_response_id_for_continuation(
     started_id: str | None,
     terminal_id: str | None,
     tool_call_id: str | None,
@@ -226,7 +226,7 @@ def test_validates_failed_response_id() -> None:
         ),
     ],
 )
-def test_rejects_finish_reason_that_contradicts_tool_calls(
+def test_rejects_finish_reason_contradicting_tools(
     finish_reason: ProviderFinishReason,
     calls: tuple[ToolCall, ...],
     error: str,
@@ -271,7 +271,7 @@ def test_rejects_finish_reason_that_contradicts_tool_calls(
     assert not any(event.type.startswith("tool.") for event in events)
 
 
-def test_truncated_tool_batch_fails_without_running_tools() -> None:
+def test_truncated_batch_fails_without_running_tools() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"}),
         ToolCall(
@@ -354,7 +354,7 @@ def test_truncated_tool_batch_fails_without_running_tools() -> None:
     ]
 
 
-def test_truncated_batch_honors_cancel_after_synthetic_result() -> None:
+def test_truncated_batch_honors_cancel_after_result() -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     provider = ScriptedProvider(
         [
@@ -406,7 +406,7 @@ def test_truncated_batch_honors_cancel_after_synthetic_result() -> None:
     assert len(provider.calls) == 1
 
 
-def test_truncated_batches_count_toward_tool_iteration_limit() -> None:
+def test_truncated_batches_count_as_iterations() -> None:
     first = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     second = ToolCall(call_id="call-2", name="read", arguments={"path": "two.txt"})
     provider = ScriptedProvider(
@@ -453,7 +453,7 @@ def test_truncated_batches_count_toward_tool_iteration_limit() -> None:
     assert len(provider.calls) == 2
 
 
-def test_failed_response_does_not_execute_streamed_tool_calls() -> None:
+def test_failed_response_skips_streamed_calls() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -481,7 +481,7 @@ def test_failed_response_does_not_execute_streamed_tool_calls() -> None:
     assert not any(event.type in {"tool.call", "tool.execution.started"} for event in events)
 
 
-def test_failed_response_id_does_not_leak_into_a_later_run() -> None:
+def test_failed_response_id_never_leaks() -> None:
     provider = ScriptedProvider(
         [
             [

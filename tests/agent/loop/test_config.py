@@ -63,7 +63,7 @@ def test_rejects_invalid_runtime_limits(field: str, value: object, message: str)
         )
 
 
-def test_accepts_runtime_limits_at_their_bounds() -> None:
+def test_accepts_runtime_limits_at_bounds() -> None:
     config = AgentLoopConfig(
         provider=ScriptedProvider([]),
         tool_executor=NeverToolExecutor(),

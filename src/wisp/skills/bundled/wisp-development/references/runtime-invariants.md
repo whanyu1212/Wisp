@@ -71,9 +71,8 @@ provider response lifecycle rejects a response that repeats one before any call
 runs, so this is a per-call guarantee. Reusing an ID across separate batches
 does not share settlement state.
 
-Focused coverage includes `test_sequential_cancellation_settles_every_requested_call`,
-`test_cancel_settles_blocked_sequential_batch`, and
-`test_repeated_call_id_in_one_response_runs_no_tool`.
+Focused coverage includes `test_sequential_cancellation_settles_every_call`,
+`test_cancel_settles_blocked_sequential_batch`, and `test_duplicate_call_id_runs_no_tool`.
 
 Calls can still be left unsettled in two cases: a cancellation the run did not request (the caller's
 own scope, timeout, or task cancellation) propagates

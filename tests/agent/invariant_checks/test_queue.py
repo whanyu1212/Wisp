@@ -13,7 +13,7 @@ from wisp.events import (
 )
 
 
-def test_queue_order_check_rejects_priority_reversal() -> None:
+def test_rejects_priority_reversal() -> None:
     events = (
         QueueMessageInjected(kind="follow_up", content="follow 1"),
         TurnStarted(turn=1),
@@ -30,7 +30,7 @@ def test_queue_order_check_rejects_priority_reversal() -> None:
         )
 
 
-def test_queue_order_check_accepts_new_steering_before_follow_up() -> None:
+def test_accepts_new_steering_before_follow_up() -> None:
     events = (
         *completed_turn(1),
         QueueMessageInjected(kind="steering", content="initial steer"),
@@ -47,7 +47,7 @@ def test_queue_order_check_accepts_new_steering_before_follow_up() -> None:
     )
 
 
-def test_queue_order_check_accepts_steering_before_follow_up() -> None:
+def test_accepts_steering_before_follow_up() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer text"),
         QueueMessageInjected(kind="follow_up", content="follow text"),
@@ -57,7 +57,7 @@ def test_queue_order_check_accepts_steering_before_follow_up() -> None:
     assert_queue_ordering_invariants(events)
 
 
-def test_queue_order_check_rejects_follow_up_before_steering() -> None:
+def test_rejects_follow_up_before_steering() -> None:
     events = (
         QueueMessageInjected(kind="follow_up", content="follow text"),
         QueueMessageInjected(kind="steering", content="steer text"),
@@ -68,7 +68,7 @@ def test_queue_order_check_rejects_follow_up_before_steering() -> None:
         assert_queue_ordering_invariants(events)
 
 
-def test_queue_order_check_rejects_injection_mid_turn() -> None:
+def test_rejects_injection_mid_turn() -> None:
     events = (
         TurnStarted(turn=1),
         QueueMessageInjected(kind="steering", content="in flight"),
@@ -78,7 +78,7 @@ def test_queue_order_check_rejects_injection_mid_turn() -> None:
         assert_queue_ordering_invariants(events)
 
 
-def test_queue_order_check_rejects_within_kind_reorder() -> None:
+def test_rejects_within_kind_reorder() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer 2"),
         QueueMessageInjected(kind="steering", content="steer 1"),
@@ -89,7 +89,7 @@ def test_queue_order_check_rejects_within_kind_reorder() -> None:
         assert_queue_ordering_invariants(events, expected_steering=("steer 1", "steer 2"))
 
 
-def test_queue_order_check_accepts_matching_fifo_snapshot() -> None:
+def test_accepts_matching_fifo_snapshot() -> None:
     events = (
         QueueMessageInjected(kind="steering", content="steer 1"),
         QueueMessageInjected(kind="steering", content="steer 2"),

@@ -21,7 +21,7 @@ def _payloads(*events: WispEvent) -> list[dict[str, Any]]:
     return [event.model_dump(exclude={"timestamp"}) for event in events]
 
 
-def test_start_rejects_a_second_open_turn() -> None:
+def test_start_rejects_second_open_turn() -> None:
     lifecycle = TurnLifecycle()
     assert _payloads(lifecycle.start(1)) == [{"type": "turn.started", "turn": 1}]
 
@@ -31,7 +31,7 @@ def test_start_rejects_a_second_open_turn() -> None:
     assert (lifecycle.open_turn, lifecycle.latest_turn) == (1, 1)
 
 
-def test_complete_closes_the_turn_exactly_once() -> None:
+def test_complete_closes_turn_once() -> None:
     lifecycle = TurnLifecycle()
     lifecycle.start(3)
 
@@ -47,7 +47,7 @@ def test_complete_closes_the_turn_exactly_once() -> None:
     ("outcome", "finish_reason"),
     [("failed", "error"), ("cancelled", "cancelled")],
 )
-def test_terminal_events_close_an_open_turn(
+def test_terminal_events_close_open_turn(
     outcome: Literal["failed", "cancelled"], finish_reason: FinishReason
 ) -> None:
     lifecycle = TurnLifecycle()
@@ -71,7 +71,7 @@ def test_terminal_events_close_an_open_turn(
     ]
 
 
-def test_cancelled_events_without_a_turn_carry_only_the_error() -> None:
+def test_turnless_cancel_emits_only_error() -> None:
     lifecycle = TurnLifecycle()
 
     assert _payloads(*lifecycle.cancelled_events()) == [
@@ -80,7 +80,7 @@ def test_cancelled_events_without_a_turn_carry_only_the_error() -> None:
     assert lifecycle.latest_turn == 0
 
 
-def test_observe_tracks_events_and_resets_tool_calls_per_turn() -> None:
+def test_observe_resets_tool_calls_per_turn() -> None:
     lifecycle = TurnLifecycle()
     tool_call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
 
@@ -98,7 +98,7 @@ def test_observe_tracks_events_and_resets_tool_calls_per_turn() -> None:
     assert (lifecycle.open_turn, lifecycle.latest_turn, lifecycle.had_tool_calls) == (6, 6, False)
 
 
-def test_observe_counts_only_requested_tool_calls() -> None:
+def test_observe_counts_only_requested_calls() -> None:
     lifecycle = TurnLifecycle()
     lifecycle.observe(TurnStarted(turn=1))
 

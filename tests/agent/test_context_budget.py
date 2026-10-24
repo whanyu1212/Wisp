@@ -56,7 +56,7 @@ def _serialized_tokens(payload: object) -> int:
     return math.ceil(len(text.encode("utf-8")) / 4)
 
 
-def test_observed_prefix_plus_estimated_trailing_context() -> None:
+def test_observed_prefix_plus_trailing_estimate() -> None:
     prefix = (Message(role="system", content="system"), Message(role="user", content="hello"))
     trailing = Message(role="assistant", content="world 🌍")
     observation = observe_context(
@@ -85,7 +85,7 @@ def test_observed_prefix_plus_estimated_trailing_context() -> None:
 
 
 @pytest.mark.parametrize("change", ["prefix", "tools", "provider", "model"])
-def test_stale_provider_observation_falls_back_to_full_estimate(change: str) -> None:
+def test_stale_observation_uses_full_estimate(change: str) -> None:
     prefix = (Message(role="user", content="hello"),)
     tools = (ToolSpec(name="read", description="Read", input_schema={"type": "object"}),)
     observation = observe_context(prefix, tools, provider="test", model="model", input_tokens=10)
@@ -125,7 +125,7 @@ def test_estimate_keeps_ascii_heuristic() -> None:
 
 
 @pytest.mark.parametrize("content", ["漢字かな", "👩‍💻🚀", "e\u0301", "ASCII と emoji 🌍"])
-def test_estimate_uses_utf8_size_for_unicode_messages(content: str) -> None:
+def test_unicode_messages_use_utf8_size(content: str) -> None:
     payload = [{"role": "user", "content": content}]
 
     first = estimate_context((Message(role="user", content=content),))
@@ -152,7 +152,7 @@ def test_estimate_and_fingerprint_escape_lone_surrogates() -> None:
     assert first_fingerprint == context_fingerprint((message,))
 
 
-def test_estimate_uses_utf8_size_for_every_payload() -> None:
+def test_every_payload_uses_utf8_size() -> None:
     messages = (
         Message(role="system", content="系统 🌐"),
         Message(role="user", content="質問 e\u0301"),
@@ -190,7 +190,7 @@ def test_estimate_uses_utf8_size_for_every_payload() -> None:
     )
 
 
-def test_saved_native_output_leaves_fingerprint_unchanged() -> None:
+def test_native_output_keeps_fingerprint() -> None:
     """Rows reloaded with saved provider items keep the same context identity."""
 
     plain = Message(role="assistant", content="answer", response_id="response-1")
@@ -225,7 +225,7 @@ def test_unicode_context_fingerprint_remains_compatible() -> None:
     )
 
 
-def test_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
+def test_observed_budget_reports_over_budget() -> None:
     prefix = (Message(role="user", content="prefix"),)
     trailing = Message(role="assistant", content="trailing content")
     observation = observe_context(
@@ -252,7 +252,7 @@ def test_budget_uses_observed_prefix_plus_trailing_estimate() -> None:
     assert budget.over_budget is (trailing_tokens >= 10)
 
 
-def test_budget_allows_unknown_models_and_tracks_reserve() -> None:
+def test_allows_unknown_models_and_tracks_reserve() -> None:
     estimate = estimate_context((Message(role="user", content="x" * 400),))
 
     unknown = build_context_budget(estimate, context_window=None, reserve_tokens=16)

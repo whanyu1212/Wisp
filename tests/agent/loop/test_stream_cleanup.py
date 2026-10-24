@@ -30,7 +30,7 @@ class _ClosableIterator(_LegacyIterator):
             raise self.close_error
 
 
-def test_legacy_iterator_requires_no_close_capability() -> None:
+def test_accepts_iterator_without_aclose() -> None:
     async def run() -> None:
         iterator = _LegacyIterator()
         async with closing_stream(iterator) as stream:
@@ -52,7 +52,7 @@ def test_owned_iterator_is_closed_once(exhaust: bool) -> None:
     anyio.run(run)
 
 
-def test_cleanup_is_shielded_but_consumption_is_not() -> None:
+def test_shields_cleanup_not_consumption() -> None:
     async def run() -> None:
         iterator = _ClosableIterator()
         with anyio.CancelScope() as scope:
@@ -100,7 +100,7 @@ def test_cancellation_survives_cleanup_failure() -> None:
 
 
 @pytest.mark.parametrize("explicit_close", [False, True])
-def test_close_error_propagates_without_a_primary_failure(explicit_close: bool) -> None:
+def test_close_error_propagates_without_primary_failure(explicit_close: bool) -> None:
     async def run() -> None:
         cleanup = RuntimeError("close failed")
         iterator = _ClosableIterator(close_error=cleanup)

@@ -24,7 +24,7 @@ from wisp.events import (
 )
 
 
-def test_continuation_check_recognizes_truncated_tool_calls() -> None:
+def test_recognizes_truncated_tool_calls() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -37,7 +37,7 @@ def test_continuation_check_recognizes_truncated_tool_calls() -> None:
     assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_dropped_call() -> None:
+def test_rejects_dropped_call() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -52,7 +52,7 @@ def test_continuation_check_rejects_dropped_call() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_empty_completion_call_list() -> None:
+def test_rejects_empty_completion_call_list() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
@@ -67,7 +67,7 @@ def test_continuation_check_rejects_empty_completion_call_list() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_reconciles_completed_and_requested() -> None:
+def test_rejects_completion_call_never_requested() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -90,7 +90,7 @@ def test_continuation_check_reconciles_completed_and_requested() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_result_for_unrequested_call() -> None:
+def test_rejects_result_for_unrequested_call() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -113,7 +113,7 @@ def test_continuation_check_rejects_result_for_unrequested_call() -> None:
 
 
 @pytest.mark.parametrize("finish_reason", ["stop", "tool_calls"])
-def test_continuation_check_rejects_results_without_requests(
+def test_rejects_results_without_requests(
     finish_reason: Literal["stop", "tool_calls"],
 ) -> None:
     events = (
@@ -129,7 +129,7 @@ def test_continuation_check_rejects_results_without_requests(
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_call_missing_from_completion() -> None:
+def test_rejects_call_missing_from_completion() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -152,7 +152,7 @@ def test_continuation_check_rejects_call_missing_from_completion() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_empty_tool_continuation() -> None:
+def test_rejects_empty_tool_continuation() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=()),
@@ -172,7 +172,7 @@ def test_continuation_check_rejects_empty_tool_continuation() -> None:
     ],
 )
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_continuation_check_rejects_changed_request_payload(
+def test_rejects_changed_request_payload(
     request_event: ToolCallRequested,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -195,7 +195,7 @@ def test_continuation_check_rejects_changed_request_payload(
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_accepts_reordered_argument_keys() -> None:
+def test_accepts_reordered_argument_keys() -> None:
     events = (
         TurnStarted(turn=1),
         MessageCompleted(
@@ -219,7 +219,7 @@ def test_continuation_check_accepts_reordered_argument_keys() -> None:
 
 @pytest.mark.parametrize("include_completion", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_continuation_check_rejects_changed_result_name(
+def test_rejects_changed_result_name(
     include_completion: bool,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -241,7 +241,7 @@ def test_continuation_check_rejects_changed_result_name(
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_verifies_names_for_repeated_ids() -> None:
+def test_verifies_names_for_repeated_ids() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -257,7 +257,7 @@ def test_continuation_check_verifies_names_for_repeated_ids() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_reordered_requests() -> None:
+def test_rejects_reordered_requests() -> None:
     calls = (
         ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "a"}),
         ToolCallSnapshot(call_id="call-1", name="lookup", arguments={"path": "b"}),
@@ -285,7 +285,7 @@ def test_continuation_check_rejects_reordered_requests() -> None:
 @pytest.mark.parametrize("request_first", [True, False])
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_continuation_check_checks_completion_request_order(
+def test_checks_completion_request_order(
     request_first: bool,
     repeat_id: bool,
     outcome: Literal["completed", "failed", "cancelled"],
@@ -316,7 +316,7 @@ def test_continuation_check_checks_completion_request_order(
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("reverse_results", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_continuation_check_matches_result_occurrence_order(
+def test_matches_result_occurrence_order(
     repeat_id: bool,
     reverse_results: bool,
     outcome: Literal["completed", "failed", "cancelled"],
@@ -352,7 +352,7 @@ def test_continuation_check_matches_result_occurrence_order(
 
 @pytest.mark.parametrize("repeat_id", [True, False])
 @pytest.mark.parametrize("outcome", ["completed", "failed", "cancelled"])
-def test_continuation_check_rejects_result_before_request(
+def test_rejects_result_before_request(
     repeat_id: bool,
     outcome: Literal["completed", "failed", "cancelled"],
 ) -> None:
@@ -377,7 +377,7 @@ def test_continuation_check_rejects_result_before_request(
 
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
 @pytest.mark.parametrize("settled_id", [None, "call-1", "call-2"])
-def test_continuation_check_allows_partial_interrupted_turn(
+def test_allows_partial_interrupted_turn(
     outcome: Literal["failed", "cancelled"],
     settled_id: str | None,
 ) -> None:
@@ -399,7 +399,7 @@ def test_continuation_check_allows_partial_interrupted_turn(
 
 
 @pytest.mark.parametrize("outcome", ["failed", "cancelled"])
-def test_continuation_check_rejects_skipped_interrupted_call(
+def test_rejects_skipped_interrupted_call(
     outcome: Literal["failed", "cancelled"],
 ) -> None:
     events = (
@@ -423,7 +423,7 @@ def test_continuation_check_rejects_skipped_interrupted_call(
 
 
 @pytest.mark.parametrize("settled_first", [True, False])
-def test_continuation_check_skips_only_settled_duplicates(
+def test_skips_only_settled_duplicates(
     settled_first: bool,
 ) -> None:
     events = (
@@ -462,7 +462,7 @@ def test_continuation_check_skips_only_settled_duplicates(
         (("cancel-2", "cancel-1"), "cancellation settlements appeared out of request order"),
     ],
 )
-def test_continuation_check_verifies_cancellation_settlement(
+def test_verifies_cancellation_settlement(
     result_order: tuple[str, str],
     error: str | None,
 ) -> None:
@@ -501,7 +501,7 @@ def test_continuation_check_verifies_cancellation_settlement(
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_resettled_cancelled_call() -> None:
+def test_rejects_resettled_cancelled_call() -> None:
     cancellation = tool_ended().model_copy(
         update={
             "output": INTERRUPTED_TOOL_RESULT_TEXT,
@@ -523,7 +523,7 @@ def test_continuation_check_rejects_resettled_cancelled_call() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_allows_failed_final_tool_turn() -> None:
+def test_allows_failed_final_tool_turn() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -542,7 +542,7 @@ def test_continuation_check_allows_failed_final_tool_turn() -> None:
     assert_continuation_invariants(events)
 
 
-def test_continuation_check_accepts_tool_continuation() -> None:
+def test_accepts_tool_continuation() -> None:
     events = (
         TurnStarted(turn=1),
         tool_ended("call-1"),
@@ -554,7 +554,7 @@ def test_continuation_check_accepts_tool_continuation() -> None:
     assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_unfinished_calls_at_end() -> None:
+def test_rejects_unfinished_calls_at_end() -> None:
     events = (
         TurnStarted(turn=1),
         tool_ended("call-1"),
@@ -565,7 +565,7 @@ def test_continuation_check_rejects_unfinished_calls_at_end() -> None:
         assert_continuation_invariants(events)
 
 
-def test_continuation_check_rejects_call_without_result() -> None:
+def test_rejects_call_without_result() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="tool_calls"),

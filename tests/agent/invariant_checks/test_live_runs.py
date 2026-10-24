@@ -70,7 +70,7 @@ class _BlockingProvider:
         yield ProviderResponseCompleted(content="too late")
 
 
-def test_live_clean_turn_satisfies_turn_terminals() -> None:
+def test_clean_turn_satisfies_terminals() -> None:
     provider = ScriptedProvider([completed_stream("hello", response_id=None)])
 
     async def run() -> list[object]:
@@ -87,7 +87,7 @@ def test_live_clean_turn_satisfies_turn_terminals() -> None:
     assert_tool_result_pairing(events)
 
 
-def test_live_startless_provider_failure_settles_the_started_turn() -> None:
+def test_startless_failure_settles_turn() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -118,7 +118,7 @@ def test_live_startless_provider_failure_settles_the_started_turn() -> None:
     assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
 
 
-def test_live_sequential_tool_round_pairs_ended_and_ready() -> None:
+def test_tool_round_pairs_results() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -149,7 +149,7 @@ def test_live_sequential_tool_round_pairs_ended_and_ready() -> None:
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_live_harness_cancel_settles_the_started_turn() -> None:
+def test_harness_cancel_settles_turn() -> None:
     async def run() -> list[object]:
         provider = _BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
         harness = AgentHarness(
@@ -168,7 +168,7 @@ def test_live_harness_cancel_settles_the_started_turn() -> None:
     assert_tool_result_pairing(events)
 
 
-def test_live_prepared_batch_cancel_settles_each_requested_call() -> None:
+def test_batch_cancel_settles_each_call() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -213,7 +213,7 @@ def test_live_prepared_batch_cancel_settles_each_requested_call() -> None:
     assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
+def test_multi_turn_continuation_satisfies_invariants() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -246,7 +246,7 @@ def test_live_multi_turn_continuation_satisfies_all_invariants() -> None:
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_live_cancellation_settlement_satisfies_invariants() -> None:
+def test_cancellation_settlement_satisfies_invariants() -> None:
     provider = _BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
     harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=NeverToolExecutor()))
 
@@ -264,7 +264,7 @@ def test_live_cancellation_settlement_satisfies_invariants() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_cancel_after_completed_turn_settles_cleanly() -> None:
+def test_cancel_after_completed_turn_settles() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -290,7 +290,7 @@ def test_live_cancel_after_completed_turn_settles_cleanly() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_queue_drain_satisfies_ordering_invariants() -> None:
+def test_queue_drain_satisfies_ordering_invariants() -> None:
     provider = ScriptedProvider(
         [
             completed_stream("first response", response_id=None),
@@ -319,7 +319,7 @@ def test_live_queue_drain_satisfies_ordering_invariants() -> None:
     )
 
 
-def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
+def test_aborted_provider_satisfies_cancellation_invariants() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -343,7 +343,7 @@ def test_live_aborted_provider_satisfies_cancellation_invariants() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_cancel_after_tool_finishes_settles_cleanly() -> None:
+def test_cancel_after_tool_end_settles() -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider([tool_call_stream(call, content="checking")])
     harness = AgentHarness(
@@ -363,7 +363,7 @@ def test_live_cancel_after_tool_finishes_settles_cleanly() -> None:
     assert_cancellation_settled(events)
 
 
-def test_live_truncated_tool_limit_keeps_continuation_valid() -> None:
+def test_tool_limit_keeps_continuation_valid() -> None:
     first = ToolCall(call_id="call-1", name="read", arguments={"path": "one.txt"})
     second = ToolCall(call_id="call-2", name="read", arguments={"path": "two.txt"})
     provider = ScriptedProvider(

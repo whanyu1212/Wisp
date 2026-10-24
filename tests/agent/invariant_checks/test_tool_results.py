@@ -24,13 +24,13 @@ from wisp.events import (
 )
 
 
-def test_pairing_check_accepts_adjacent_ended_and_ready() -> None:
+def test_accepts_adjacent_ended_and_ready() -> None:
     events = (*completed_turn(), tool_ended(), tool_ready())
     assert_tool_result_pairing(events)
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_pairing_check_allows_requested_call_without_result() -> None:
+def test_allows_requested_call_without_result() -> None:
     events = (
         TurnStarted(turn=1),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
@@ -42,17 +42,17 @@ def test_pairing_check_allows_requested_call_without_result() -> None:
     assert_tool_result_pairing(events)
 
 
-def test_pairing_check_rejects_ready_without_ended() -> None:
+def test_rejects_ready_without_ended() -> None:
     with pytest.raises(AssertionError, match="without ToolExecutionEnded"):
         assert_tool_result_pairing((tool_ready(),))
 
 
-def test_pairing_check_rejects_ended_without_ready() -> None:
+def test_rejects_ended_without_ready() -> None:
     with pytest.raises(AssertionError, match="without ToolResultReady"):
         assert_tool_result_pairing((tool_ended(),))
 
 
-def test_pairing_check_allows_reused_call_id_across_rounds() -> None:
+def test_allows_reused_id_across_rounds() -> None:
     events = (
         TurnStarted(turn=1),
         tool_ended("call-lookup-0"),
@@ -68,17 +68,17 @@ def test_pairing_check_allows_reused_call_id_across_rounds() -> None:
     assert_settled_tool_calls(events, ("call-lookup-0",))
 
 
-def test_pairing_check_rejects_duplicate_ended() -> None:
+def test_rejects_duplicate_ended() -> None:
     with pytest.raises(AssertionError, match="appeared more than once"):
         assert_tool_result_pairing((tool_ended(), tool_ended(), tool_ready()))
 
 
-def test_pairing_check_rejects_nonadjacent_projection() -> None:
+def test_rejects_nonadjacent_projection() -> None:
     with pytest.raises(AssertionError, match="must immediately follow"):
         assert_tool_result_pairing((tool_ended(), ErrorEvent(message="gap"), tool_ready()))
 
 
-def test_pairing_check_rejects_mismatched_payload() -> None:
+def test_rejects_mismatched_payload() -> None:
     ended = tool_ended()
     ready = ToolResultReady(
         call_id=ended.call_id,
@@ -90,19 +90,19 @@ def test_pairing_check_rejects_mismatched_payload() -> None:
         assert_tool_result_pairing((ended, ready))
 
 
-def test_settlement_check_rejects_missing_listed_call() -> None:
+def test_settlement_rejects_missing_listed_call() -> None:
     events = (*completed_turn(), tool_ended("call-1"), tool_ready("call-1"))
     with pytest.raises(AssertionError, match="missing terminal tool results"):
         assert_settled_tool_calls(events, ("call-1", "call-2"))
 
 
-def test_settlement_check_counts_reused_call_id_occurrences() -> None:
+def test_settlement_counts_reused_id_occurrences() -> None:
     events = (*completed_turn(), tool_ended("call-lookup-0"), tool_ready("call-lookup-0"))
     with pytest.raises(AssertionError, match="missing terminal tool results"):
         assert_settled_tool_calls(events, ("call-lookup-0", "call-lookup-0"))
 
 
-def test_settlement_check_accepts_matching_reused_occurrences() -> None:
+def test_settlement_accepts_matching_reused_ids() -> None:
     events = (
         TurnStarted(turn=1),
         tool_ended("call-lookup-0"),

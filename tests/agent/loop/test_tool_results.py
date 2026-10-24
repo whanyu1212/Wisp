@@ -102,7 +102,7 @@ class ScriptedToolExecutor:
             yield cast(ToolExecutionEvent, event)
 
 
-def test_projection_keeps_the_complete_wire_payload() -> None:
+def test_projection_keeps_complete_wire_payload() -> None:
     ended = ToolExecutionEnded(
         message_entry_id="persisted-result",
         call_id="call-1",
@@ -167,7 +167,7 @@ def test_projection_keeps_the_complete_wire_payload() -> None:
     assert wisp_event_from_json(result.model_dump_json()) == result
 
 
-def test_snapshots_are_projected_once_and_isolated(
+def test_snapshots_isolated_from_consumer_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     call = ToolCall(
@@ -226,7 +226,7 @@ def test_snapshots_are_projected_once_and_isolated(
     )
 
 
-def test_execution_end_directly_precedes_tool_result() -> None:
+def test_execution_end_directly_precedes_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -322,7 +322,7 @@ def test_bash_exit_code_reaches_provider(
     assert result.output_has_exit_status is True
 
 
-def test_bash_timeout_reaches_provider_as_inconclusive_error(
+def test_bash_timeout_reports_inconclusive_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -467,7 +467,7 @@ def test_rejects_malformed_approval_lifecycle(
     assert len(provider.calls) == 1
 
 
-def test_accepts_denied_approval_with_error_result() -> None:
+def test_accepts_error_after_denied_approval() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
@@ -579,7 +579,7 @@ class WriteSnapshotExecutor:
         )
 
 
-def test_forwards_before_text_across_the_wire() -> None:
+def test_forwards_before_text_across_wire() -> None:
     # The write tool's pre-write snapshot AND its create flag must reach
     # ToolResultReady AND survive serialization: the TUI renderer only sees events
     # after the agent subprocess serializes them to JSON, so a field that doesn't
@@ -635,7 +635,7 @@ class SummaryExecutor:
         )
 
 
-def test_forwards_summary_across_the_wire() -> None:
+def test_forwards_summary_across_wire() -> None:
     # A read-type tool's one-line summary AND its truncation flag must reach
     # ToolResultReady AND survive serialization — the renderer shows the summary in
     # place of the raw output, and the card shows a "truncated" marker on expand, so a

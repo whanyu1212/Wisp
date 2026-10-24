@@ -125,9 +125,7 @@ def _provider_with_call(call: ToolCall) -> ScriptedProvider:
     "mutation_event",
     [MessageCompleted, ToolCallRequested, ToolExecutionStarted, ToolApprovalRequested],
 )
-def test_public_arguments_do_not_alias_execution_or_history(
-    prepared: bool, mutation_event: type[object]
-) -> None:
+def test_public_arguments_stay_detached(prepared: bool, mutation_event: type[object]) -> None:
     original = {"options": {"paths": ["original"]}}
     call = ToolCall(call_id="c1", name="lookup", arguments=deepcopy(original))
     executor = _PreparedExecutor() if prepared else _Executor()
@@ -180,7 +178,7 @@ def test_completion_message_owns_tool_snapshots() -> None:
 
 
 @pytest.mark.parametrize("offset", ["turn_offset", "tool_iteration_offset"])
-def test_invalid_startup_leaves_transcript_and_allows_retry(offset: str) -> None:
+def test_invalid_startup_keeps_transcript_for_retry(offset: str) -> None:
     initial = Message(role="user", content="earlier")
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]]
@@ -265,7 +263,7 @@ class _ClosingProvider:
 
 @pytest.mark.parametrize("interface", ["harness", "loop"])
 @pytest.mark.parametrize("ending", ["close", "cancel", "complete", "failure"])
-def test_provider_closes_before_outer_stream_finishes(
+def test_provider_closes_before_stream_ends(
     interface: str, ending: Literal["close", "cancel", "complete", "failure"]
 ) -> None:
     from wisp.agent.harness import RunCancellationToken
@@ -307,7 +305,7 @@ def test_provider_closes_before_outer_stream_finishes(
 
 @pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("ending", ["close", "cancel", "complete", "failure"])
-def test_outer_exit_finishes_active_tool_iterator(prepared: bool, ending: str) -> None:
+def test_outer_exit_closes_tool_iterator(prepared: bool, ending: str) -> None:
     from wisp.agent.tool_contracts import ToolExecutionProtocolError
 
     call = ToolCall(call_id="c1", name="lookup", arguments={})
@@ -344,7 +342,7 @@ def test_outer_exit_finishes_active_tool_iterator(prepared: bool, ending: str) -
     anyio.run(run)
 
 
-def test_child_close_failure_still_releases_harness() -> None:
+def test_child_close_failure_releases_harness() -> None:
     provider = _ClosingProvider(close_failure=True)
     harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=_Executor()))
 
@@ -364,7 +362,7 @@ def test_child_close_failure_still_releases_harness() -> None:
     anyio.run(run)
 
 
-def test_provider_protocol_failure_survives_close_failure() -> None:
+def test_protocol_failure_survives_close_failure() -> None:
     from wisp.providers.base import ProviderProtocolError
 
     provider = _ClosingProvider(failure=True, close_failure=True)
@@ -381,7 +379,7 @@ def test_provider_protocol_failure_survives_close_failure() -> None:
 
 
 @pytest.mark.parametrize("close_message", ["close failed", "maximum context length exceeded"])
-def test_cancelled_turn_completes_once_when_provider_close_fails(
+def test_cancelled_turn_completes_once_on_close_failure(
     close_message: str,
 ) -> None:
     from wisp.agent.harness import RunCancellationToken
@@ -407,7 +405,7 @@ def test_cancelled_turn_completes_once_when_provider_close_fails(
     anyio.run(run)
 
 
-def test_cancellation_terminals_publish_before_provider_cleanup() -> None:
+def test_cancellation_terminals_precede_cleanup() -> None:
     from wisp.agent.harness import RunCancellationToken
 
     provider = _ClosingProvider()
@@ -437,7 +435,7 @@ def test_cancellation_terminals_publish_before_provider_cleanup() -> None:
     anyio.run(run)
 
 
-def test_loop_rejects_model_response_events_after_cancellation(
+def test_loop_rejects_events_after_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import wisp.agent.loop.runner as runner_module
@@ -472,7 +470,7 @@ def test_loop_rejects_model_response_events_after_cancellation(
     anyio.run(run)
 
 
-def test_completed_turn_ignores_overflow_worded_provider_close() -> None:
+def test_overflow_worded_close_skips_recovery() -> None:
     class ForbiddenOverflowHook:
         async def recover_context_overflow(self, *, snapshot: object) -> None:
             del snapshot
@@ -502,7 +500,7 @@ def test_completed_turn_ignores_overflow_worded_provider_close() -> None:
 
 
 @pytest.mark.parametrize("truncated", [False, True])
-def test_synthetic_tool_requests_own_their_arguments(truncated: bool) -> None:
+def test_synthetic_requests_own_arguments(truncated: bool) -> None:
     from wisp.agent.loop.tool_execution import ToolBatch
 
     original = {"options": {"paths": ["original"]}}

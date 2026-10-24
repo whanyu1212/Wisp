@@ -423,7 +423,7 @@ class _FailingBoundary:
 
 
 @pytest.mark.parametrize("fault", ["provider", "tool", "boundary", "stale-rebase"])
-def test_execution_failure_keeps_accepted_state_and_recovers(
+def test_failure_keeps_accepted_state_and_recovers(
     fault: Literal["provider", "tool", "boundary", "stale-rebase"],
 ) -> None:
     async def run() -> None:

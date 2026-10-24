@@ -117,14 +117,14 @@ def _state_with_cursor(*, tool_history: bool = False) -> ContinuationState:
     return state
 
 
-def test_is_tool_shaped_detects_assistant_calls_and_tool_rows() -> None:
+def test_detects_tool_shaped_messages() -> None:
     assert is_tool_shaped(_assistant_with_tool())
     assert is_tool_shaped(_tool_result())
     assert not is_tool_shaped(_assistant())
     assert not is_tool_shaped(_user())
 
 
-def test_replacement_tool_order_rejects_orphans_and_mismatches() -> None:
+def test_tool_order_rejects_orphans_and_mismatches() -> None:
     assert has_valid_replacement_tool_order((_user(), _assistant()))
     assert has_valid_replacement_tool_order((_user(), _assistant_with_tool(), _tool_result()))
     assert not has_valid_replacement_tool_order((_tool_result(),))
@@ -152,7 +152,7 @@ def test_stop_does_not_mutate_continuation() -> None:
     assert [message.content for message in state.continuation_messages] == ["answer"]
 
 
-def test_messages_and_rebase_are_mutually_exclusive() -> None:
+def test_rejects_messages_with_rebase() -> None:
     state = _state_with_cursor()
     with pytest.raises(RequestBoundaryUnsupportedError, match="mutually exclusive"):
         apply_request_boundary_decision(
@@ -172,7 +172,7 @@ def test_messages_and_rebase_are_mutually_exclusive() -> None:
     assert state.previous_response_id == "resp-1"
 
 
-def test_extra_messages_must_be_plain_user_rows() -> None:
+def test_rejects_non_user_extra_messages() -> None:
     state = ContinuationState()
     with pytest.raises(RequestBoundaryUnsupportedError, match="plain user messages"):
         apply_request_boundary_decision(
@@ -241,7 +241,7 @@ def test_unpaired_replacement_is_rejected() -> None:
         )
 
 
-def test_explicit_false_structured_replacement_is_rejected() -> None:
+def test_rejects_opaque_structured_replacement() -> None:
     state = ContinuationState()
     with pytest.raises(RequestBoundaryUnsupportedError, match="cannot fresh-replay"):
         apply_request_boundary_decision(
@@ -256,7 +256,7 @@ def test_explicit_false_structured_replacement_is_rejected() -> None:
         )
 
 
-def test_rebase_keeps_cursor_and_pending_tool_results() -> None:
+def test_rebase_keeps_cursor_and_tool_results() -> None:
     state = _state_with_cursor(tool_history=True)
     replacement, stop = apply_request_boundary_decision(
         _config(),
@@ -281,7 +281,7 @@ def test_rebase_keeps_cursor_and_pending_tool_results() -> None:
     assert [message.role for message in state.continuation_messages] == ["assistant", "tool"]
 
 
-def test_clean_rebase_consumes_tool_results_and_queues_extras() -> None:
+def test_clean_rebase_consumes_tool_results() -> None:
     state = _state_with_cursor(tool_history=True)
     extra = _user("follow up")
     apply_request_boundary_decision(
@@ -343,7 +343,7 @@ def test_rebase_without_cursor_is_rejected() -> None:
         )
 
 
-def test_native_append_queues_extras_on_live_cursor() -> None:
+def test_queues_extras_on_live_cursor() -> None:
     state = _state_with_cursor()
     extra = _user("steered")
     messages = (_user(),)
@@ -363,7 +363,7 @@ def test_native_append_queues_extras_on_live_cursor() -> None:
     assert state.previous_response_id == "resp-1"
 
 
-def test_cursorless_tool_history_cannot_append_or_continue() -> None:
+def test_cursorless_tool_history_cannot_continue() -> None:
     state = ContinuationState(continuation_messages=[_assistant_with_tool(), _tool_result()])
     with pytest.raises(RequestBoundaryUnsupportedError, match="after a tool round"):
         apply_request_boundary_decision(
@@ -385,7 +385,7 @@ def test_cursorless_tool_history_cannot_append_or_continue() -> None:
         )
 
 
-def test_post_tool_round_continues_without_cursor() -> None:
+def test_tool_round_continues_without_cursor() -> None:
     state = ContinuationState(
         continuation_messages=[_assistant_with_tool(), _tool_result()],
         pending_tool_results=(ToolCallResult(call_id="call-1", output="ok"),),
@@ -405,7 +405,7 @@ def test_post_tool_round_continues_without_cursor() -> None:
     assert state.pending_tool_results == (ToolCallResult(call_id="call-1", output="ok"),)
 
 
-def test_cursorless_clean_response_folds_portable_history() -> None:
+def test_cursorless_clean_response_folds_history() -> None:
     state = ContinuationState(continuation_messages=[_assistant()])
     folded, stop = apply_request_boundary_decision(
         _config(provider=_CursorlessProvider()),
@@ -426,7 +426,7 @@ def test_cursorless_clean_response_folds_portable_history() -> None:
     assert state.continuation_messages == []
 
 
-def test_response_without_id_keeps_existing_cursor() -> None:
+def test_id_less_response_keeps_cursor() -> None:
     state = ContinuationState(previous_response_id="kept")
     state.record_response(_assistant(response_id=None), response_id=None)
     assert state.previous_response_id == "kept"
@@ -434,7 +434,7 @@ def test_response_without_id_keeps_existing_cursor() -> None:
     assert state.previous_response_id == "new"
 
 
-def test_snapshot_does_not_leak_live_tool_arguments() -> None:
+def test_state_snapshot_copies_tool_arguments() -> None:
     live = _assistant_with_tool()
     state = ContinuationState(continuation_messages=[live])
     snapshot = state.snapshot()
@@ -444,7 +444,7 @@ def test_snapshot_does_not_leak_live_tool_arguments() -> None:
     assert live.tool_calls[0].arguments == {"path": "a.txt"}
 
 
-def test_record_tool_result_appends_matching_tool_row() -> None:
+def test_record_tool_result_appends_row() -> None:
     state = ContinuationState()
     ended = ToolExecutionEnded(call_id="call-1", name="noop", output="ok", is_error=False)
     state.record_tool_result(ToolResultReady.from_execution_ended(ended))
@@ -456,7 +456,7 @@ def test_record_tool_result_appends_matching_tool_row() -> None:
     assert recorded.is_error is False
 
 
-def test_stops_by_default_without_boundary_hook() -> None:
+def test_stops_by_default_without_hook() -> None:
     original = (_user(),)
 
     async def run() -> None:
@@ -517,7 +517,7 @@ def test_boundary_snapshot_is_isolated() -> None:
     assert live.tool_calls[0].arguments == {"path": "a.txt"}
 
 
-def test_overflow_recovery_requires_replacement_or_rebase() -> None:
+def test_rejects_empty_overflow_recovery() -> None:
     class Hook:
         async def recover_context_overflow(
             self, *, snapshot: ContextOverflowSnapshot
@@ -576,7 +576,7 @@ _AGREEMENT_CASES = [
 @pytest.mark.parametrize(
     ("kind", "had_tool_calls", "with_extra", "allow_extra_messages"), _AGREEMENT_CASES
 )
-def test_loop_state_matches_the_decision_transcript(
+def test_state_matches_decision_transcript(
     kind: str, had_tool_calls: bool, with_extra: bool, allow_extra_messages: bool
 ) -> None:
     state = _state_with_cursor(tool_history=had_tool_calls)
