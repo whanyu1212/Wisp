@@ -73,6 +73,34 @@ test("the real collections expose the same section order, course sequence, and n
       .length,
   );
   assert.equal(new Set(pages.map((page) => page.source)).size, pages.length);
+  const using = groups.find((group) => group.key === "using")!.pages;
+  assert.deepEqual(
+    using.slice(0, 8).map((page) => page.source),
+    [
+      "guide/index.md",
+      "guide/installation.md",
+      "guide/quickstart.md",
+      "guide/providers.md",
+      "guide/tui.md",
+      "guide/tui/keybindings.md",
+      "guide/tui/commands.md",
+      "guide/tui/sessions.md",
+    ],
+  );
+  assert.deepEqual(
+    using.slice(-2).map((page) => page.source),
+    ["guide/upgrading-to-0.3.md", "guide/upgrading.md"],
+  );
+  for (const entry of metadata) {
+    assert.ok(
+      !entry.description.endsWith("…") && !entry.description.endsWith(":"),
+      `Truncated description in ${entry.source}: ${entry.description}`,
+    );
+    assert.ok(
+      !entry.description.includes("**") && !entry.description.startsWith("*"),
+      `Unstripped Markdown in ${entry.source} description: ${entry.description}`,
+    );
+  }
   const course = groups.find((group) => group.key === "learn")!.pages;
   assert.deepEqual(
     course.filter((page) => page.chapter).map((page) => page.chapter),

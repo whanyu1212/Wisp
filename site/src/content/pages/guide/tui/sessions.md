@@ -1,6 +1,6 @@
 ---
 title: TUI sessions and scrollback
-description: Resume sessions, navigate branches, browse tool details, and search prompt history.
+description: Review inline and working-tree diffs, browse tool output, resume or branch sessions, and search prompt history.
 route: guide/tui/sessions.html
 section: using
 order: 2
@@ -9,6 +9,7 @@ listed: true
 searchable: true
 navTitle: Sessions
 parent: guide/tui.md
+capture: diffs
 ---
 
 # TUI sessions and scrollback {#tui-sessions}
@@ -81,46 +82,53 @@ original bounded command. Process rows reuse the originating task name, such as
 `Browser tests · passed`, with process IDs, poll counts, and exit codes in expanded detail.
 
 Expanded shell and process cards show a framed output tail without fading. Click the
-`N earlier lines` row, or select it with F6/Tab and press Right or Enter, to show earlier retained
-output. Left folds those lines back while keeping the tail open. Output lost to retention limits
-or backend truncation is explicitly marked incomplete or unavailable; expanding cannot recover it.
-Routine tool rows use blank spacing rather than full-width rules. The
-footer shows the browse key once (`F6 browse`) whenever the transcript has rows, instead of a hint
-under every card. While following the tail, the latest user prompt stays pinned at the top of the conversation
-pane until you scroll away. The live view contains only that prompt and the replies and tools that
-follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label visible.
+`N earlier lines` row, or select it with `F6`/`Tab` and press `Right` or `Enter`, to show earlier
+retained output. `Left` folds those lines back while keeping the tail open. Output lost to
+retention limits or backend truncation is explicitly marked incomplete or unavailable; expanding
+cannot recover it. Routine tool rows use blank spacing rather than full-width rules. The footer
+shows the browse key once (`F6 browse`) whenever the transcript has rows, instead of a hint under
+every card.
+
+While following the tail, the latest user prompt stays pinned at the top of the conversation pane
+until you scroll away. The live view contains only that prompt and the replies and tools that
+follow it; older turns remain in scrollback. A clipped assistant reply keeps its `wisp` label
+visible.
+
 Before reply text arrives, a working row animates below the transcript, for example
 `⠹ Thinking · 12s · Esc to interrupt`. It shows a braille spinner, what the agent is waiting on
 (`Thinking` while reasoning streams, `Working` otherwise, or `Compacting context`), how long the
 current command has run, and the interrupt key; on a narrow row the interrupt hint and then the
 time are dropped rather than clipped. Once text starts streaming, the working row disappears. If a
-prompt fails, the reason stays as a red `✗ Prompt failed: …` row under the transcript until the next
-command starts, and the composer stays usable, so you can fix the cause and retry; for missing
-credentials the message names `/connect`. Only a lost connection to the backend ends the session. The `wisp` label stays visible at the live tail
-during intervening tool calls, and the working row returns after the final result while another
-model step is pending. A completed poll whose background process remains alive does not suppress
-this separate model activity.
-Compaction keeps its separate activity row. Each tool card's marker shows its state by shape as well
-as colour: `✓` completed, `✗` failed, `⊘` denied or cancelled, and `?` awaiting approval. A blank
-column separates the marker from the tool's name in bold, in that tool's colour (`Bash`, `Read`,
-`Search`, `List`, `Edit`, `Write`, `Process`, or `MCP` followed by `server/tool`). Plain padding after
-the name keeps every command or path in the same column; monochrome mode draws the name in bold. A state the marker alone does not name ends the row as a muted note, such as
-`· awaiting approval` or `· denied`. The first result row under an expanded card starts with `└`.
-Back-to-back collapsed cards are separated by a thin rule, so a run of tool calls reads as one list,
-and an open group's header is separated from its first call by the same rule;
-a card showing its results keeps a blank row before the next card, and a blank row separates your
-prompt from the reply or cards below it. A plain click on a card's action line, a grouped row, or a
-thought header expands or collapses it, as `Right` and `Left` do while browsing with `F6`. The click
-keeps typing in the prompt; while browsing, it also moves the selection to that row. Clicks on result
-rows only start a text selection. A card selected with `F6` looks like the rest and ends with
-`(click to expand)` or `(click to collapse)`, or `(→ to expand)` and `(← to collapse)` when mouse
-capture is off. While the
-run is active, an in-progress card's marker is an animated braille spinner; finished and
-approval-waiting cards stay steady. Because the spinner changes shape
-rather than brightness, it reads the same in monochrome mode. An in-progress card from a resumed
-session shows a steady `●`. The footer keeps a static status label. A scrollbar on the right shows
-the approximate position in retained history without laying out every offscreen row. Keyboard
-scrolling and wheel/trackpad scrolling update it.
+prompt fails, the reason stays as a red `✗ Prompt failed: …` row under the transcript until the
+next command starts, and the composer stays usable, so you can fix the cause and retry; for missing
+credentials the message names `/connect`. Only a lost connection to the backend ends the session.
+The `wisp` label stays visible at the live tail during intervening tool calls, and the working row
+returns after the final result while another model step is pending. A completed poll whose
+background process remains alive does not suppress this separate model activity. Compaction keeps
+its separate activity row.
+
+Each tool card's marker shows its state by shape as well as colour: `✓` completed, `✗` failed,
+`⊘` denied or cancelled, and `?` awaiting approval. A blank column separates the marker from the
+tool's name in bold, in that tool's colour (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
+`Process`, or `MCP` followed by `server/tool`). Plain padding after the name keeps every command or
+path in the same column; monochrome mode draws the name in bold. A state the marker alone does not
+name ends the row as a muted note, such as `· awaiting approval` or `· denied`. The first result
+row under an expanded card starts with `└`. Back-to-back collapsed cards are separated by a thin
+rule, so a run of tool calls reads as one list, and an open group's header is separated from its
+first call by the same rule; a card showing its results keeps a blank row before the next card, and
+a blank row separates your prompt from the reply or cards below it.
+
+A plain click on a card's action line, a grouped row, or a thought header expands or collapses it,
+as `Right` and `Left` do while browsing with `F6`. The click keeps typing in the prompt; while
+browsing, it also moves the selection to that row. Clicks on result rows only start a text
+selection. A card selected with `F6` looks like the rest and ends with `(click to expand)` or
+`(click to collapse)`, or `(→ to expand)` and `(← to collapse)` when mouse capture is off. While
+the run is active, an in-progress card's marker is an animated braille spinner; finished and
+approval-waiting cards stay steady. Because the spinner changes shape rather than brightness, it
+reads the same in monochrome mode. An in-progress card from a resumed session shows a steady `●`.
+The footer keeps a static status label. A scrollbar on the right shows the approximate position in
+retained history without laying out every offscreen row. Keyboard scrolling and wheel/trackpad
+scrolling update it.
 
 
 ## Resuming and starting sessions

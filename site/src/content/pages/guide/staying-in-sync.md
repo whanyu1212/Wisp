@@ -1,12 +1,13 @@
 ---
 title: Staying in sync
-description: Wisp keeps control and evidence in the same loop as the work. A live client can redirect an active run at a safe boundary, every frontend uses the same approval and…
+description: Steer active runs at safe request boundaries, queue follow-up tasks, cancel work cleanly, and answer approvals.
 route: guide/staying-in-sync.html
 section: using
-order: 14
+order: 5
 layout: docs
 listed: true
 searchable: true
+navGroup: Core concepts
 ---
 
 # Staying in sync

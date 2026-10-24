@@ -1,9 +1,9 @@
 ---
 title: Architecture
-description: How Wisp is put together, and why. This section explains design decisions; the Reference documents exact surfaces.
+description: How Wisp is put together, and why every interface drives the same typed agent runtime.
 route: architecture/index.html
 section: inside
-order: 30
+order: 0
 layout: docs
 listed: true
 searchable: true

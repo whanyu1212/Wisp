@@ -110,6 +110,31 @@ opener.addEventListener("click", () => {
   input.focus();
   search(0);
 });
+document.addEventListener("keydown", (event) => {
+  if (dialog.open || event.defaultPrevented) return;
+  const target = event.target;
+  const editable =
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName));
+  const slashShortcut =
+    event.key === "/" &&
+    !editable &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey;
+  const commandK =
+    event.key.toLowerCase() === "k" &&
+    (event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    !event.shiftKey;
+  if ((slashShortcut || commandK) && !opener.hidden) {
+    event.preventDefault();
+    dialog.showModal();
+    input.focus();
+    search(0);
+  }
+});
 close.addEventListener("click", () => dialog.close());
 dialog.addEventListener("keydown", (event) => {
   // Search inputs can consume Escape to clear themselves before native dialog

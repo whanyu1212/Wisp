@@ -1,9 +1,9 @@
 ---
 title: Wisp 0.2.0rc7 release decision and checklist
-description: 'Status: release preparation, October 15, 2026. This PR prepares the candidate; it does not create v0.2.0rc7, publish packages, or change the stable 0.1.0 installation pin. At…'
+description: Release decision, prepublication checklist, and verification record for Wisp 0.2.0rc7.
 route: maintainers/releases/rc7-release.html
 section: maintainers
-order: 49
+order: 14
 layout: archive
 listed: false
 searchable: false

@@ -1,9 +1,9 @@
 ---
 title: Agent Skills
-description: 'Wisp discovers metadata from directories that follow the Agent Skills specification. Inspect the current catalog and isolated validation diagnostics with:'
+description: Discover, validate, and invoke project and user skills that follow the Agent Skills specification.
 route: guide/skills.html
 section: using
-order: 21
+order: 10
 layout: docs
 listed: true
 searchable: true

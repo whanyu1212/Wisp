@@ -1,9 +1,9 @@
 ---
 title: Reference
-description: Exact surfaces — flags, fields, schemas. Narrative explanation lives in the Guide; design rationale lives in Architecture.
+description: Exact contracts for CLI commands and flags, configuration precedence, environment variables, project discovery, the Python SDK, and compatibility.
 route: reference/index.html
 section: reference
-order: 22
+order: 0
 layout: docs
 listed: true
 searchable: true

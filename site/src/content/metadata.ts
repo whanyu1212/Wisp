@@ -44,6 +44,8 @@ export const pageSchema = z
     listed: z.boolean(),
     searchable: z.boolean(),
     navTitle: z.string().trim().min(1).optional(),
+    navGroup: z.string().trim().min(1).optional(),
+    capture: z.enum(["diffs", "approval", "mcp", "working"]).optional(),
     parent: z.string().optional(),
     chapter: z.number().int().positive().optional(),
     checkpoint: z.string().optional(),

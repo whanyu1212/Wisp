@@ -1,12 +1,13 @@
 ---
 title: Installation
-description: Wisp is published on PyPI as wisp-ai, installs a wisp command, and requires Python 3.12 or newer. Wisp supports Linux and macOS; Windows remains best-effort until it has…
+description: Install wisp-ai with uv, verify the bundled Rust TUI on supported platforms, and manage updates.
 route: guide/installation.html
 section: using
-order: 10
+order: 1
 layout: docs
 listed: true
 searchable: true
+navGroup: Getting started
 ---
 
 # Installation

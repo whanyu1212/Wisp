@@ -1,12 +1,13 @@
 ---
 title: Rust terminal frontend boundary
-description: The Python launcher resolves the exact native executable, passes the Python interpreter and backend command, and remains alive as an external supervisor. Rust owns input,…
+description: Process supervision, JSONL-RPC transport, and subsystem ownership between the Rust TUI and Python backend.
 route: architecture/rust-tui-boundary.html
 section: inside
-order: 32
+order: 2
 layout: docs
 listed: true
 searchable: true
+navTitle: Rust TUI boundary
 ---
 
 # Rust terminal frontend boundary

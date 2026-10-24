@@ -1,9 +1,9 @@
 ---
 title: Testing
-description: The complete suite runs against deterministic fake or scripted providers, so the agent core, CLI, and JSONL sessions are exercised without API keys, live model calls, or…
+description: Run offline unit, integration, process, Rust, and documentation test suites locally and in CI.
 route: contributing/testing.html
 section: contributing
-order: 36
+order: 3
 layout: docs
 listed: true
 searchable: true

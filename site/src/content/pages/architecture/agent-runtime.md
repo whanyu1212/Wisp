@@ -1,9 +1,9 @@
 ---
 title: Agent runtime
-description: Wisp separates the stateful agent harness from the provider-neutral agent loop. The split keeps conversation policy and durable session concerns out of the model/tool cycle…
+description: Lifecycle, state ownership, and request-boundary coordination across run_agent_loop, AgentHarness, and CodingSession.
 route: architecture/agent-runtime.html
 section: inside
-order: 31
+order: 1
 layout: docs
 listed: true
 searchable: true

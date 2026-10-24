@@ -1,9 +1,9 @@
 ---
 title: Sessions
-description: 'Wisp persists each run as a JSONL session and can continue an existing one:'
+description: Persist, resume, branch, and inspect append-only JSONL session transcripts across CLI, TUI, and SDK workflows.
 route: guide/sessions.html
 section: using
-order: 19
+order: 8
 layout: docs
 listed: true
 searchable: true

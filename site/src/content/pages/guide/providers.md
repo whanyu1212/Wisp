@@ -1,9 +1,9 @@
 ---
 title: Providers & auth
-description: The built-in deepseek provider uses DeepSeek's OpenAI-format Chat Completions API at https://api.deepseek.com. Set DEEPSEEK_API_KEY or store a key with /connect deepseek. Wisp…
+description: Configure OpenAI Codex OAuth, API keys, DeepSeek, xAI, Anthropic, Google, and custom OpenAI-compatible endpoints.
 route: guide/providers.html
 section: using
-order: 17
+order: 3
 layout: docs
 listed: true
 searchable: true

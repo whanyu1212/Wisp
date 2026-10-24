@@ -1,12 +1,13 @@
 ---
 title: 1. The smallest coding agent
-description: Our task is to fix add(2, 3), which returns -1 instead of 5. A model could guess the cause from that sentence. A coding agent should be able to inspect the implementation and…
+description: Build the core model-action-observation loop with correlated tool results and an explicit stopping rule.
 route: crafting-agents/01-core-loop.html
 section: learn
-order: 2
+order: 1
 layout: course
 listed: true
 searchable: true
+navGroup: Chapters
 chapter: 1
 checkpoint: examples/crafting_agents/checkpoint_01.py
 ---

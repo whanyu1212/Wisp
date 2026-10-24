@@ -7,15 +7,27 @@ import TuiCapture from "./TuiCapture.astro";
 const groups = navigation(
   (await getCollection("pages")).map((page) => page.data),
 );
-const introductions: Record<string, string> = {
-  using: "Start with your repository",
-  reference: "Find the exact contract",
-  learn: "Build a coding agent",
+const introductions: Record<string, { title: string; summary: string }> = {
+  using: {
+    title: "Start with your repository",
+    summary:
+      "Install Wisp, connect a provider, and learn the interactive terminal and live controls.",
+  },
+  reference: {
+    title: "Find the exact contract",
+    summary:
+      "Look up CLI flags, configuration precedence, environment variables, and the Python SDK.",
+  },
+  learn: {
+    title: "Build a coding agent",
+    summary:
+      "Follow runnable chapters from a minimal model-tool loop to controlled side effects.",
+  },
 };
 ---
 
 <div class="home-intro">
-  <div>
+  <div class="home-hero-copy">
     <div class="eyebrow">Wisp · a coding agent you can steer</div>
     <h1 id="wisp" class="display-title">
       Your code.
@@ -27,10 +39,15 @@ const introductions: Record<string, string> = {
       while it works, approve tool actions before they run, and return to a
       saved conversation.
     </p>
-    <a class="primary" href={href("guide/quickstart.html")}>
-      Start using Wisp →
-    </a>
-    <section aria-labelledby="install-wisp">
+    <div class="hero-actions">
+      <a class="primary" href={href("guide/quickstart.html")}>
+        Start using Wisp →
+      </a>
+      <a class="secondary-action" href={href("guide/index.html")}>
+        Read the guide
+      </a>
+    </div>
+    <section class="home-install" aria-labelledby="install-wisp">
       <h2 id="install-wisp">Install Wisp</h2>
       <Code
         code={"uv tool install --python 3.12 wisp-ai\ncd path/to/project\nwisp"}
@@ -48,17 +65,18 @@ const introductions: Record<string, string> = {
   </div>
   <TuiCapture capture="diffs" eager />
 </div>
-<section aria-labelledby="choose-a-starting-point">
+<section class="home-section" aria-labelledby="choose-a-starting-point">
   <h2 id="choose-a-starting-point">Choose a starting point</h2>
   <div class="starting-points">
     {groups.slice(0, 3).map(
       (group, index) =>
         group.pages[0] && (
-          <a href={href(group.pages[0].route)}>
+          <a class="starting-card" href={href(group.pages[0].route)}>
             <span class="eyebrow">
               {String(index + 1).padStart(2, "0")} / {group.title}
             </span>
-            <strong>{introductions[group.key]} →</strong>
+            <strong>{introductions[group.key]?.title} →</strong>
+            <p>{introductions[group.key]?.summary}</p>
           </a>
         ),
     )}
@@ -67,42 +85,46 @@ const introductions: Record<string, string> = {
 <section class="home-workflows" aria-labelledby="work-with-wisp">
   <h2 id="work-with-wisp">Stay involved in the work</h2>
   <div class="workflow-grid">
-    <div>
+    <div class="workflow-card">
       <h3>Approve deliberately</h3>
       <p>
         Project trust and tool approval are separate decisions. Inspect a
         proposed command before it executes.
       </p>
       <TuiCapture capture="approval" />
-      <a href={href("guide/tools-and-safety.html")}>
+      <a class="workflow-link" href={href("guide/tools-and-safety.html")}>
         Understand tools and safety →
       </a>
     </div>
-    <div>
+    <div class="workflow-card">
       <h3>Steer without starting over</h3>
       <p>
         Send a correction at a safe boundary, queue the next task, or cancel the
         current run.
       </p>
       <TuiCapture capture="working" />
-      <a href={href("guide/staying-in-sync.html")}>Learn the live controls →</a>
+      <a class="workflow-link" href={href("guide/staying-in-sync.html")}>
+        Learn the live controls →
+      </a>
     </div>
   </div>
 </section>
 <section class="home-content" aria-labelledby="start-reading">
-  <h2 id="start-reading">Start reading</h2>
-  <p>
-    Use the terminal for interactive work, print mode for one-shot prompts,
-    JSONL RPC for a custom client, or the Python SDK to embed Wisp. They share
-    one typed runtime and append-only sessions; available live controls depend
-    on the interface.
-  </p>
-  <p>
-    <a href={href("guide/interfaces.html")}>Choose an interface</a>,{" "}
-    <a href={href("guide/sdk.html")}>embed Wisp</a>, or read the{" "}
-    <a href={href("changelog.html")}>release notes</a> and{" "}
-    <a href={href("guide/upgrading.html")}>upgrade guide</a>.
-  </p>
+  <div>
+    <h2 id="start-reading">Start reading</h2>
+    <p>
+      Use the terminal for interactive work, print mode for one-shot prompts,
+      JSONL RPC for a custom client, or the Python SDK to embed Wisp. They share
+      one typed runtime and append-only sessions; available live controls depend
+      on the interface.
+    </p>
+    <p>
+      <a href={href("guide/interfaces.html")}>Choose an interface</a>,{" "}
+      <a href={href("guide/sdk.html")}>embed Wisp</a>, or read the{" "}
+      <a href={href("changelog.html")}>release notes</a> and{" "}
+      <a href={href("guide/upgrading-to-0.3.html")}>upgrade guide</a>.
+    </p>
+  </div>
   <div class="secondary-starts">
     {groups
       .slice(3)

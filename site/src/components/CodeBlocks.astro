@@ -12,6 +12,13 @@
       const tools = document.createElement("div");
       tools.className = "code-tools";
       tools.dataset.pagefindIgnore = "";
+      const rawLang = pre.dataset.language ?? "";
+      if (rawLang && rawLang !== "plaintext" && rawLang !== "text") {
+        const lang = document.createElement("span");
+        lang.className = "code-lang";
+        lang.textContent = rawLang;
+        tools.append(lang);
+      }
       const status = document.createElement("span");
       status.setAttribute("role", "status");
       const button = document.createElement("button");

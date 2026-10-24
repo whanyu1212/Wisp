@@ -1,12 +1,13 @@
 ---
 title: 'Case study: Earning a Rust boundary'
-description: Once a tool works correctly, how do you decide whether part of it should move into another language? Wisp's search and process-output paths offer two concrete examples. Their…
+description: How benchmarks, profiling, and narrow native kernels shaped Wisp's Rust search and process-output boundaries.
 route: crafting-agents/case-studies/rust-boundary.html
 section: learn
-order: 8
+order: 7
 layout: course
 listed: true
 searchable: true
+navTitle: Earning a Rust boundary
 ---
 
 # Case study: Earning a Rust boundary

@@ -1,9 +1,9 @@
 ---
 title: Context & compaction
-description: 'Each turn sends an ordered system-instruction stack before the user prompt: Wisp''s core coding policy, bounded project context, guidance for exposed tools and skills when…'
+description: How Wisp assembles system instructions, loads trusted project context, estimates token budgets, and compacts history.
 route: guide/context-and-compaction.html
 section: using
-order: 20
+order: 9
 layout: docs
 listed: true
 searchable: true

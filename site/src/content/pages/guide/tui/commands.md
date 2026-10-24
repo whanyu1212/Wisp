@@ -1,6 +1,6 @@
 ---
 title: TUI commands
-description: Slash commands, provider and model selection, permissions, and MCP management.
+description: Slash commands for provider connections, model selection, permissions, context inspection, skills, and MCP servers.
 route: guide/tui/commands.html
 section: using
 order: 1
@@ -9,6 +9,7 @@ listed: true
 searchable: true
 navTitle: Commands
 parent: guide/tui.md
+capture: mcp
 ---
 
 # TUI commands {#tui-commands}

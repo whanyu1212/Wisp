@@ -1,12 +1,13 @@
 ---
 title: Python SDK
-description: Embed Wisp in an asyncio application with runnable examples for startup, events, safety requests, live control, sessions, and cleanup.
+description: Embed Wisp in an asyncio application with runnable examples for startup, events, safety requests, live control, and sessions.
 route: guide/sdk.html
 section: using
-order: 16
+order: 11
 layout: docs
 listed: true
 searchable: true
+navGroup: Integrate & upgrade
 ---
 
 # Python SDK

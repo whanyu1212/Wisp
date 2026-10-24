@@ -36,9 +36,8 @@ const toc = headings.filter(
   (heading) => heading.depth > 1 && heading.depth < 4,
 );
 const course = page.layout === "course";
-const firstCase = course
-  ? siblings.find((item) => !item.chapter && item.source !== root?.source)
-  : undefined;
+const caseStudy = course && !page.chapter && page.source !== root?.source;
+const hasToc = toc.length > 0 && page.layout !== "home";
 ---
 
 <!doctype html>
@@ -73,7 +72,12 @@ const firstCase = course
       Skip to content
     </a>
     <SiteHeader groups={groups} page={page} />
-    <div class:list={["page", { home: page.layout === "home", course }]}>
+    <div
+      class:list={[
+        "page",
+        { home: page.layout === "home", course, "no-toc": !hasToc },
+      ]}
+    >
       {page.layout !== "home" && (
         <aside class="sidebar">
           <nav
@@ -81,27 +85,44 @@ const firstCase = course
               course ? "Course chapters" : (current?.title ?? "Archive")
             }
           >
-            <strong>
+            <strong class="sidebar-title">
               {course
                 ? "Crafting Coding Agents"
                 : (current?.title ?? "Maintainer archive")}
             </strong>
-            {siblings.map((item) => (
+            {siblings.length > 0 ? (
+              siblings.map((item) => (
+                <>
+                  {item.navGroup && (
+                    <strong class="nav-group">{item.navGroup}</strong>
+                  )}
+                  <a
+                    href={href(item.route)}
+                    style={`--nav-depth: ${item.depth}`}
+                    aria-current={
+                      item.source === page.source ? "page" : undefined
+                    }
+                  >
+                    {item.navTitle ?? item.title}
+                  </a>
+                </>
+              ))
+            ) : (
               <>
-                {item.source === firstCase?.source && (
-                  <strong class="nav-group">Case studies</strong>
-                )}
                 <a
-                  href={href(item.route)}
-                  style={`--nav-depth: ${item.depth}`}
+                  href={href("maintainers/releases/index.html")}
                   aria-current={
-                    item.source === page.source ? "page" : undefined
+                    page.route === "maintainers/releases/index.html"
+                      ? "page"
+                      : undefined
                   }
                 >
-                  {item.navTitle ?? item.title}
+                  Release record archive
                 </a>
+                <a href={href(changelog.route)}>Changelog</a>
+                <a href={href("contributing/index.html")}>Contributing</a>
               </>
-            ))}
+            )}
           </nav>
         </aside>
       )}
@@ -111,7 +132,7 @@ const firstCase = course
         data-pagefind-body={page.searchable && !compatibility ? "" : undefined}
       >
         {page.layout !== "home" && (
-          <>
+          <div class="page-meta" data-pagefind-ignore>
             <nav
               class="breadcrumbs"
               aria-label="Breadcrumb"
@@ -137,15 +158,13 @@ const firstCase = course
                 : current?.title}
               {page.chapter
                 ? ` / Chapter ${page.chapter}`
-                : firstCase && page.source !== root?.source
+                : caseStudy
                   ? " / Case study"
                   : ""}
             </div>
-          </>
+          </div>
         )}
-        {toc.length > 0 && page.layout !== "home" && (
-          <TableOfContents headings={toc} mobile />
-        )}
+        {hasToc && <TableOfContents headings={toc} mobile />}
         <slot />
         {page.checkpoint && (
           <aside
@@ -187,9 +206,7 @@ const firstCase = course
           </nav>
         )}
       </main>
-      {toc.length > 0 && page.layout !== "home" && (
-        <TableOfContents headings={toc} />
-      )}
+      {hasToc && <TableOfContents headings={toc} />}
     </div>
     <footer class="site-footer">
       <span>One shared runtime. TUI · CLI · RPC · Python SDK.</span>

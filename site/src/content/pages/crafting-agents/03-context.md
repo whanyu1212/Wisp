@@ -1,9 +1,9 @@
 ---
 title: 3. Giving the model useful context
-description: 'Our agent can read, edit, and test code. But its scripted provider already knows the filename and the fix. A real model does not start with that knowledge: it needs the task,…'
+description: Assemble layered instructions, project orientation, and on-demand file discovery around the agent loop.
 route: crafting-agents/03-context.html
 section: learn
-order: 4
+order: 3
 layout: course
 listed: true
 searchable: true
