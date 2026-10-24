@@ -1,4 +1,4 @@
-"""Tool executors, request-boundary hooks, and streams shared by the agent loop tests."""
+"""Tool executors, request-boundary hooks, provider streams, and a fake clock for agent tests."""
 
 from __future__ import annotations
 

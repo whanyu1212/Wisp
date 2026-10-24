@@ -5,6 +5,7 @@ from __future__ import annotations
 import shlex
 import sys
 from collections.abc import AsyncIterator
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -546,6 +547,7 @@ def test_duration_skips_approval_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ended.duration_ms == result.duration_ms == 50
     assert ended.started_at is not None
     assert result.started_at == ended.started_at
+    assert result.timestamp - ended.started_at >= timedelta(milliseconds=50)
 
 
 def test_interrupted_results_have_no_duration() -> None:
