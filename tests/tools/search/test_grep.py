@@ -286,8 +286,10 @@ def test_grep_tool_no_match_without_glob_skips_display_path_work(
 
     monkeypatch.setattr(search_tools_module, "_display_walked_path", unexpected_display)
 
+    # The native scanner formats records itself, so it takes the display path before
+    # scanning; only the Python scanner can defer it until a line matches.
     result = run_tool(
-        GrepTool(),
+        GrepTool(_scanner_backend="python"),
         {"pattern": "needle", "path": ".", "literal": True},
         ToolContext(cwd=tmp_path),
     )
