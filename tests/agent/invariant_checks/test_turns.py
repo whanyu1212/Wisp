@@ -1,8 +1,10 @@
+"""Unit tests for assert_turn_terminals and assert_turn_invariants."""
+
 from __future__ import annotations
 
 import pytest
 
-from tests.agent.invariant_checks_support import (
+from tests.agent.invariant_checks.support import (
     completed_turn,
     tool_ended,
     tool_ready,

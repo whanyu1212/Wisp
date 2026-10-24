@@ -1,3 +1,5 @@
+"""Prepared tool batches through the loop: concurrency, ordering, timing, and cancellation."""
+
 from __future__ import annotations
 
 import asyncio

@@ -1,3 +1,5 @@
+"""AgentHarnessConfig validation and how it is forwarded to the loop config."""
+
 from __future__ import annotations
 
 from dataclasses import MISSING, fields

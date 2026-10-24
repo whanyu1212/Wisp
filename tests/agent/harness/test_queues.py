@@ -1,3 +1,5 @@
+"""Steering and follow-up queues: limits, revision tokens, drain modes, and injection order."""
+
 from __future__ import annotations
 
 from typing import cast

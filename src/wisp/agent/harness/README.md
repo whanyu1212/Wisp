@@ -133,7 +133,7 @@ The detailed compatibility list is in
 The focused harness checks are:
 
 ```bash
-uv run pytest tests/agent/harness tests/agent/test_runtime_invariants.py
+uv run pytest tests/agent/harness tests/agent/invariant_checks/test_live_runs.py
 ```
 
 `tests/agent/harness/test_interruptions.py` records a successful baseline for six small workflows:

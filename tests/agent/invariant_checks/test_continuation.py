@@ -1,10 +1,12 @@
+"""Unit tests for assert_continuation_invariants on hand-built event sequences."""
+
 from __future__ import annotations
 
 from typing import Literal
 
 import pytest
 
-from tests.agent.invariant_checks_support import (
+from tests.agent.invariant_checks.support import (
     completed_turn,
     tool_ended,
     tool_ready,

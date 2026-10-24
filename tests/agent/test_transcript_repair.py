@@ -1,3 +1,5 @@
+"""Pairing tool results with their calls and synthesizing results for interrupted calls."""
+
 from __future__ import annotations
 
 from wisp.agent.transcript_repair import (

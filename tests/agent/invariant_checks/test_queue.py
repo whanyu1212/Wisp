@@ -1,8 +1,10 @@
+"""Unit tests for assert_queue_ordering_invariants on hand-built event sequences."""
+
 from __future__ import annotations
 
 import pytest
 
-from tests.agent.invariant_checks_support import completed_turn
+from tests.agent.invariant_checks.support import completed_turn
 from tests.support.agent_runtime import assert_queue_ordering_invariants
 from wisp.events import (
     QueueMessageInjected,

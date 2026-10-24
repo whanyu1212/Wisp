@@ -1,3 +1,5 @@
+"""Request boundary hooks driving run_agent_loop: stop, inject, replace, rebase, and fold."""
+
 from __future__ import annotations
 
 from collections import deque
