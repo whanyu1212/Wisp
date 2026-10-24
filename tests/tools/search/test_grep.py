@@ -18,6 +18,10 @@ from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.search import tools as search_tools_module
 from wisp.tools.shell import supervisor as process_manager_module
 
+_LIMIT_HINT = (
+    "[truncated] Stopped at max_results=1. Narrow the search, or raise max_results to see more."
+)
+
 
 def test_grep_regex_timeout_is_actionable(
     tmp_path: Path,
@@ -840,7 +844,7 @@ def test_grep_tool_python_fallback_stops_after_extra_match(
         ToolContext(cwd=tmp_path),
     )
 
-    assert result.text == "first.txt:1:match\n[truncated]"
+    assert result.text == "first.txt:1:match\n" + _LIMIT_HINT
     assert result.truncated is True
     assert visited_later is False
 
@@ -959,7 +963,7 @@ def test_grep_tool_python_fallback_truncates_when_another_match_exists(
         context,
     )
 
-    assert result.text == "data.txt:1:match\n[truncated]"
+    assert result.text == "data.txt:1:match\n" + _LIMIT_HINT
     assert result.truncated is True
 
 
@@ -1087,3 +1091,13 @@ def test_python_grep_splitlines_bounds_a_line_ending_in_the_current_chunk(
 
     with pytest.raises(ToolError, match="line longer than 10 characters"):
         list(search_tools_module._iter_utf8_splitlines(path, max_line_chars=10))
+
+
+def test_grep_clips_long_lines(tmp_path: Path) -> None:
+    (tmp_path / "min.js").write_text("x" * 600 + "needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"), {"pattern": "needle"}, ToolContext(cwd=tmp_path)
+    )
+
+    assert result.text == "min.js:1:" + "x" * 500 + "... [106 more characters]"

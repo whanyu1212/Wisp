@@ -208,6 +208,7 @@ def test_native_literal_scanner_reads_the_open_descriptor_after_path_replacement
             max_output_lines=100,
             max_output_bytes=10_000,
             max_line_chars=1_000_000,
+            max_display_chars=500,
             cancellation=native.GrepCancellation(),
         )
     finally:
@@ -236,6 +237,7 @@ def test_native_literal_scanner_honors_cancellation_before_read(tmp_path: Path) 
             max_output_lines=100,
             max_output_bytes=10_000,
             max_line_chars=1_000_000,
+            max_display_chars=500,
             cancellation=cancellation,
         )
     finally:
@@ -243,3 +245,13 @@ def test_native_literal_scanner_honors_cancellation_before_read(tmp_path: Path) 
 
     assert result.status == "cancelled"
     assert result.lines == []
+
+
+def test_native_clips_long_lines(tmp_path: Path) -> None:
+    (tmp_path / "min.js").write_text(
+        "β" * 600 + " needle\nshort needle\n" + "x" * 499 + "needle\n", encoding="utf-8"
+    )
+
+    result = _assert_backends_agree(tmp_path, {"pattern": "needle", "literal": True, "context": 1})
+
+    assert result.data["matches"][0] == "min.js:1:" + "β" * 500 + "... [107 more characters]"

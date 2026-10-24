@@ -106,6 +106,7 @@ with tempfile.TemporaryFile() as source:
         max_output_lines=100,
         max_output_bytes=10_000,
         max_line_chars=1_000_000,
+        max_display_chars=500,
         cancellation=GrepCancellation(),
     )
 assert scan.status == "complete"

@@ -150,6 +150,7 @@ impl From<ScanResult> for GrepScanResult {
     max_output_lines,
     max_output_bytes,
     max_line_chars,
+    max_display_chars,
     cancellation
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -166,6 +167,7 @@ fn scan_literal_fd(
     max_output_lines: usize,
     max_output_bytes: usize,
     max_line_chars: usize,
+    max_display_chars: usize,
     cancellation: PyRef<'_, GrepCancellation>,
 ) -> PyResult<GrepScanResult> {
     let cancellation = Arc::clone(&cancellation.inner);
@@ -180,6 +182,7 @@ fn scan_literal_fd(
         max_output_lines,
         max_output_bytes,
         max_line_chars,
+        max_display_chars,
     };
     py.detach(move || wisp_search::scan_literal_fd(fd, &config, &cancellation))
         .map(GrepScanResult::from)

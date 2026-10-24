@@ -136,6 +136,7 @@ class _NativeGrepModule(Protocol):
         max_output_lines: int,
         max_output_bytes: int,
         max_line_chars: int,
+        max_display_chars: int,
         cancellation: _NativeGrepCancellation,
     ) -> _NativeGrepScanResult: ...
 
@@ -457,6 +458,7 @@ def _python_grep(
                                 max_output_lines=context.max_output_lines,
                                 max_output_bytes=context.max_output_bytes,
                                 max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
+                                max_display_chars=_GREP_MAX_DISPLAY_CHARS,
                                 cancellation=native_cancellation,
                             )
                         except ValueError as exc:
@@ -560,6 +562,7 @@ def _python_grep(
                     max_results=max_results,
                     context=context,
                     force_truncated=True,
+                    match_limit_reached=file_had_extra_match,
                 )
 
     if not output:
@@ -574,6 +577,9 @@ def _python_grep(
 
 _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
 _PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
+# Characters of a matched or context line shown in a record. Longer lines, such as
+# minified code, are clipped so one line cannot fill the output budget.
+_GREP_MAX_DISPLAY_CHARS = 500
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
@@ -694,6 +700,9 @@ def _format_grep_record(
     is_match: bool,
 ) -> str:
     separator = ":" if is_match else "-"
+    if len(line) > _GREP_MAX_DISPLAY_CHARS:
+        omitted = len(line) - _GREP_MAX_DISPLAY_CHARS
+        line = f"{line[:_GREP_MAX_DISPLAY_CHARS]}... [{omitted} more characters]"
     return f"{display_path}{separator}{line_number}{separator}{line}"
 
 
@@ -1650,6 +1659,7 @@ def _result_from_grep_lines(
     max_results: int,
     context: ToolContext,
     force_truncated: bool = False,
+    match_limit_reached: bool = False,
     known_match_count: int | None = None,
 ) -> ToolResult:
     kept: list[str] = []
@@ -1661,6 +1671,7 @@ def _result_from_grep_lines(
             kept.extend(pending_context_after_limit)
             pending_context_after_limit.clear()
             truncated_by_count = True
+            match_limit_reached = True
             break
         # Drop any line from a protected file that rg's --glob exclusions failed to
         # filter (case mismatch, or a caller --glob re-including it). is_protected_path
@@ -1680,6 +1691,7 @@ def _result_from_grep_lines(
             if match_count >= max_results:
                 pending_context_after_limit.clear()
                 truncated_by_count = True
+                match_limit_reached = True
                 break
             kept.extend(pending_context_after_limit)
             pending_context_after_limit.clear()
@@ -1720,7 +1732,7 @@ def _result_from_grep_lines(
 
     text = "\n".join(kept)
     if truncated_by_count:
-        text = f"{text}\n[truncated]"
+        text = f"{text}\n{_limit_marker(max_results, match_limit_reached)}"
     truncated = truncate_text(
         text,
         max_bytes=context.max_output_bytes,
@@ -1730,6 +1742,17 @@ def _result_from_grep_lines(
         text=truncated.text,
         data={"count": effective_match_count, "matches": kept},
         truncated=truncated.truncated or truncated_by_count,
+    )
+
+
+def _limit_marker(max_results: int, limit_reached: bool) -> str:
+    """Mark a truncated search result, saying how to see more when max_results cut it."""
+
+    if not limit_reached:
+        return "[truncated]"
+    return (
+        f"[truncated] Stopped at max_results={max_results}. "
+        "Narrow the search, or raise max_results to see more."
     )
 
 
@@ -1746,7 +1769,8 @@ def _result_from_lines(
     truncated_by_count = total > max_results or force_truncated
     text = "\n".join(limited)
     if truncated_by_count:
-        text = f"{text}\n[truncated]" if text else "[truncated]"
+        marker = _limit_marker(max_results, total > max_results)
+        text = f"{text}\n{marker}" if text else marker
     truncated = truncate_text(
         text,
         max_bytes=context.max_output_bytes,
