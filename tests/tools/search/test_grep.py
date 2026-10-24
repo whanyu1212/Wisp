@@ -632,13 +632,13 @@ def test_grep_tool_python_fallback_bounds_context_collection(
     monkeypatch.setenv("PATH", "")
     (tmp_path / "data.txt").write_text("match\n" * 100, encoding="utf-8")
     collected_line_counts: list[int] = []
-    original = search_tools_module._result_from_grep_lines
+    original = search_tools_module._grep_result
 
-    def tracking_result(lines: Sequence[str], **kwargs: object) -> ToolResult:
-        collected_line_counts.append(len(lines))
-        return original(lines, **kwargs)  # type: ignore[arg-type]
+    def tracking_result(records: Sequence[str], **kwargs: object) -> ToolResult:
+        collected_line_counts.append(len(records))
+        return original(records, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(search_tools_module, "_result_from_grep_lines", tracking_result)
+    monkeypatch.setattr(search_tools_module, "_grep_result", tracking_result)
     context = ToolContext(cwd=tmp_path, max_output_lines=5)
 
     result = run_tool(
@@ -968,3 +968,16 @@ def test_grep_clips_long_lines(tmp_path: Path) -> None:
     )
 
     assert result.text == "min.js:1:" + "x" * 500 + "... [106 more characters]"
+
+
+def test_grep_counts_colon_file_names(tmp_path: Path) -> None:
+    (tmp_path / "a:1:b.txt").write_text("needle\nother\nneedle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"pattern": "needle", "context": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["count"] == 2
+    assert result.text == "a:1:b.txt:1:needle\na:1:b.txt-2-other\na:1:b.txt:3:needle"
