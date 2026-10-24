@@ -162,7 +162,7 @@ class GrepTool:
 
     name = "grep"
     safety: ToolSafety = "read"
-    description = "Search UTF-8 text files without following symbolic links."
+    description = "Search UTF-8 text files. Symbolic links found while searching are skipped."
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -184,7 +184,7 @@ class GrepTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         pattern = _required_string(arguments, "pattern", allow_whitespace=True)
-        path = secure_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context, follow_links=True)
         glob = _optional_string(arguments, "glob")
         ignore_case = _optional_bool(arguments, "ignore_case", default=False)
         literal = _optional_bool(arguments, "literal", default=False)
@@ -240,7 +240,7 @@ class FindTool:
 
     name = "find"
     safety: ToolSafety = "read"
-    description = "Find files by glob without following symbolic links."
+    description = "Find files by glob. Symbolic links found while searching are skipped."
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -251,7 +251,7 @@ class FindTool:
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = secure_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context, follow_links=True)
         pattern = _optional_string(arguments, "pattern") or "*"
         max_results = _optional_int(arguments, "max_results", default=100)
         if max_results is None or max_results < 1:
@@ -288,7 +288,7 @@ class LsTool:
     }
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        path = secure_tool_path(_optional_string(arguments, "path"), context)
+        path = secure_tool_path(_optional_string(arguments, "path"), context, follow_links=True)
         include_hidden = _optional_bool(arguments, "all", default=False)
         return await anyio.to_thread.run_sync(
             lambda: _python_ls(path=path, include_hidden=include_hidden, context=context),

@@ -407,7 +407,7 @@ def test_write_tool_create_only_refuses_dangling_symlink(tmp_path: Path) -> None
     link = tmp_path / "new.txt"
     link.symlink_to(target)
 
-    with pytest.raises(ToolError, match="File already exists: new.txt"):
+    with pytest.raises(ToolError, match="goes through a symbolic link: new.txt"):
         run_tool(
             WriteTool(),
             {"path": "new.txt", "content": "content\n", "overwrite": False},

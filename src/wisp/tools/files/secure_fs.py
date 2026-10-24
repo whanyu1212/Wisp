@@ -1,7 +1,9 @@
 """Race-resistant filesystem access for built-in tools.
 
-Paths are policy-checked lexically, then opened component-by-component from the
-filesystem root.  No operation in this module follows a symlink.
+Paths are policy-checked, then opened component-by-component from the filesystem
+root. Opening never follows a symlink. A read can opt in to resolving the path it
+was given first; the resolved path must pass the same policy checks, and a link
+swapped in after resolution makes the open fail rather than escape.
 """
 
 from __future__ import annotations
@@ -66,8 +68,30 @@ def secure_tool_path(
     *,
     default: str = ".",
     write: bool = False,
+    follow_links: bool = False,
 ) -> SecureToolPath:
-    """Validate a path without dereferencing any user-selected component."""
+    """Validate a tool path against the working directory and protected paths.
+
+    The path as written is checked first. On POSIX, when ``follow_links`` or
+    ``write`` is set and the path goes through a symbolic link, the resolved path
+    must pass the same checks. A read then uses the resolved path; a write is
+    refused with a hint that names the link's target, because replacing the file
+    would replace the link.
+
+    Args:
+        selected (str | None): The path the caller gave, or ``None`` for ``default``.
+        context (ToolContext): Working directory and path policy.
+        default (str): Path used when ``selected`` is ``None``.
+        write (bool): Whether the path will be written.
+        follow_links (bool): Whether a read may go through symbolic links.
+
+    Returns:
+        SecureToolPath: The path to open, with the caller's text for messages.
+
+    Raises:
+        ToolError: When the path or its resolved target is outside the working
+            directory or protected, or a write goes through a symbolic link.
+    """
 
     raw = selected if selected is not None else default
     cwd = context.cwd.resolve(strict=False)
@@ -94,11 +118,43 @@ def secure_tool_path(
         }
         if absolute not in allowed:
             raise ToolError(f"Write path is not allowed for this operation: {raw}")
-    try:
-        display = str(absolute.relative_to(cwd))
-    except ValueError:
-        display = str(absolute)
+    display = _display(absolute, cwd)
+    # On Windows, realpath also rewrites mapped drives and short names, so a changed
+    # path does not mean a link; Windows keeps its own junction and link rejection.
+    if (follow_links or write) and os.name != "nt":
+        resolved = Path(os.path.realpath(absolute))
+        if resolved != absolute:
+            _check_resolved_target(resolved, raw, cwd, context)
+            if write:
+                raise ToolError(
+                    f"Path goes through a symbolic link: {raw}",
+                    failure_code="invalid_arguments",
+                    retryable=True,
+                    recovery_hint=(
+                        f"Write to the link's target instead: {_display(resolved, cwd)}"
+                    ),
+                )
+            absolute = resolved
     return SecureToolPath(absolute, raw, display)
+
+
+def _check_resolved_target(resolved: Path, raw: str, cwd: Path, context: ToolContext) -> None:
+    # Errors name only the path the caller gave, never the target it resolves to.
+    if not context.allow_outside_cwd and not resolved.is_relative_to(cwd):
+        raise ToolError(
+            f"Symbolic link points outside the tool working directory: {raw}",
+            failure_code="path_outside_workspace",
+            recovery_hint="Use a path inside the session working directory.",
+        )
+    if is_protected_path(resolved, context):
+        raise ToolError(f"Access to protected path denied: {raw}")
+
+
+def _display(path: Path, cwd: Path) -> str:
+    try:
+        return str(path.relative_to(cwd))
+    except ValueError:
+        return str(path)
 
 
 def _not_found_error(path: SecureToolPath) -> ToolError:

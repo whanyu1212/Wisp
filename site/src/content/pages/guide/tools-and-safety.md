@@ -12,7 +12,10 @@ searchable: true
 # Tools & safety
 
 Wisp includes built-in local tools for reading files, editing files, searching projects, and running
-shell commands. File tools are sandboxed to the tool context's working directory.
+shell commands. File tools are sandboxed to the tool context's working directory. On macOS and
+Linux, `read`, `grep`, `find`, and `ls` follow a symbolic link you name when its target is also
+inside that directory and not protected; `write` and `edit` refuse links and name the target to use
+instead. Links found while searching a directory are skipped.
 
 | Category | Tools | Approval |
 |----------|-------|----------|

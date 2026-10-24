@@ -29,6 +29,12 @@ descriptor-relative access with `O_NOFOLLOW` on POSIX and a junction-aware Windo
 path. File operations check identity and version information rather than relying
 only on a previously validated string.
 
+A read may name a path that goes through a symbolic link. Wisp resolves it first,
+requires the resolved path to pass the same workspace and protected-path checks,
+then opens that resolved path without following links. A link swapped in after the
+check makes the open fail rather than escape. Writes and edits refuse links and
+name the target to write instead, because an atomic replace would replace the link.
+
 On top of that, `src/wisp/tools/files/operations.py` supplies:
 
 - **Read:** 1-indexed offset/limit slicing inside the secured open, avoiding a
@@ -36,8 +42,9 @@ On top of that, `src/wisp/tools/files/operations.py` supplies:
 - **Write:** a same-directory temporary file and atomic replacement in the common
   case, preserving metadata and checking for concurrent replacement. Prior text
   snapshots are capped so diffs do not flood the event wire.
-- **Edit:** every `oldText` must match exactly once; replacements must not overlap;
-  a detected concurrent modification aborts rather than silently merging.
+- **Edit:** every `oldText` must match exactly once, apart from line endings and
+  trailing whitespace on whole lines; replacements must not overlap; a detected
+  concurrent modification aborts rather than silently merging.
 
 “Atomic write” is not a universal guarantee here. When the destination has
 multiple hard links, or a permission fallback requires it, Wisp writes in place
@@ -76,7 +83,8 @@ read-only call can still exhaust memory or tie up execution.
 
 Wisp's `GrepTool` and `FindTool` in `src/wisp/tools/search/tools.py` traverse with
 open directory descriptors, skip hidden names and symlinks, and honor
-`.gitignore`, `.ignore`, `.rgignore`, and `.git/info/exclude`. The traversal caps
+`.gitignore`, `.ignore`, `.rgignore`, and `.git/info/exclude`. Only the search root
+may be a link, resolved as for reads. The traversal caps
 directory entries and ignore-file size and pattern count. Scanning adds binary
 detection, incremental UTF-8 decoding, a per-line ceiling, and regex timeouts.
 
@@ -86,9 +94,9 @@ identical traversal semantics.
 
 Literal, case-sensitive grep can send an already-open descriptor to the optional
 `wisp-search` Rust scanner. Regex and case-insensitive matching remain in Python;
-unsupported native inputs or sandbox failures fall back. Protected-path filtering
-applies to emitted records regardless of engine and fails closed on ambiguous
-path parses. An acceleration path must not become a different permissions path.
+unsupported native inputs or sandbox failures fall back. Protected files are
+skipped during traversal, before either engine reads them. An acceleration path
+must not become a different permissions path.
 
 ## Execution: prepare approvals before side effects
 

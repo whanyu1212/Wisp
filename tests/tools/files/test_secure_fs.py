@@ -68,16 +68,147 @@ def test_windows_read_missing_leaf_is_actionable(
     assert caught.value.retryable is True
 
 
-def test_read_rejects_final_symlink_even_when_outside_access_is_allowed(tmp_path: Path) -> None:
-    target = tmp_path / "target.txt"
-    target.write_text("secret\n", encoding="utf-8")
-    link = tmp_path / "link.txt"
-    link.symlink_to(target)
+def test_read_follows_link_in_workspace(tmp_path: Path) -> None:
+    (tmp_path / "target.txt").write_text("content\n", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+
+    result = run_tool(ReadTool(), {"path": "link.txt"}, ToolContext(cwd=tmp_path))
+
+    assert result.text == "content\n"
+    assert result.data["path"] == "link.txt"
+
+
+def test_read_follows_directory_link(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "f.txt").write_text("inside\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    result = run_tool(ReadTool(), {"path": "linkdir/f.txt"}, ToolContext(cwd=tmp_path))
+
+    assert result.text == "inside\n"
+
+
+def test_search_roots_follow_link(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "f.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "real", target_is_directory=True)
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"pattern": "needle", "path": "linkdir"}, context)
+    find = run_tool(FindTool(), {"pattern": "*.txt", "path": "linkdir"}, context)
+    listing = run_tool(LsTool(), {"path": "linkdir"}, context)
+
+    assert grep.text == "real/f.txt:1:needle"
+    assert find.text == "real/f.txt"
+    assert listing.text == "f.txt"
+
+
+def _outside_secret(tmp_path: Path) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside secret\n", encoding="utf-8")
+    return workspace, outside
+
+
+@pytest.mark.parametrize("selected", ["file-link", "dir-link/secret.txt", "chain"])
+def test_link_outside_workspace_denied(tmp_path: Path, selected: str) -> None:
+    workspace, outside = _outside_secret(tmp_path)
+    (workspace / "file-link").symlink_to(outside / "secret.txt")
+    (workspace / "dir-link").symlink_to(outside, target_is_directory=True)
+    (workspace / "chain").symlink_to(workspace / "file-link")
+
+    with pytest.raises(ToolError, match="points outside the tool working directory") as raised:
+        run_tool(ReadTool(), {"path": selected}, ToolContext(cwd=workspace))
+
+    assert raised.value.failure_code == "path_outside_workspace"
+    assert "outside-dir" not in str(raised.value)
+
+
+def test_link_outside_allowed_with_outside_access(tmp_path: Path) -> None:
+    workspace, outside = _outside_secret(tmp_path)
+    (workspace / "file-link").symlink_to(outside / "secret.txt")
+
+    result = run_tool(
+        ReadTool(), {"path": "file-link"}, ToolContext(cwd=workspace, allow_outside_cwd=True)
+    )
+
+    assert result.text == "outside secret\n"
+
+
+def test_link_loop_is_an_error(tmp_path: Path) -> None:
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+
+    with pytest.raises(ToolError):
+        run_tool(ReadTool(), {"path": "loop"}, ToolContext(cwd=tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        (WriteTool(), {"path": "link.txt", "content": "new\n"}),
+        (EditTool(), {"path": "link.txt", "edits": [{"oldText": "old", "newText": "new"}]}),
+    ],
+)
+def test_write_through_link_names_target(
+    tmp_path: Path, tool: object, arguments: dict[str, object]
+) -> None:
+    (tmp_path / "target.txt").write_text("old\n", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "target.txt")
+
+    with pytest.raises(ToolError, match="goes through a symbolic link") as raised:
+        run_tool(tool, arguments, ToolContext(cwd=tmp_path))
+
+    assert raised.value.recovery_hint == "Write to the link's target instead: target.txt"
+    assert (tmp_path / "target.txt").read_text(encoding="utf-8") == "old\n"
+    assert (tmp_path / "link.txt").is_symlink()
+
+
+def test_write_link_to_protected_hides_target(tmp_path: Path) -> None:
+    (tmp_path / "secret.key").write_text("key\n", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(tmp_path / "secret.key")
+    context = ToolContext(cwd=tmp_path, protected_paths=("*.key",))
+
+    with pytest.raises(ToolError, match="Access to protected path denied: link.txt") as raised:
+        run_tool(WriteTool(), {"path": "link.txt", "content": "x"}, context)
+
+    assert raised.value.recovery_hint is None
+    assert (tmp_path / "secret.key").read_text(encoding="utf-8") == "key\n"
+
+
+def test_write_link_outside_hides_target(tmp_path: Path) -> None:
+    workspace, outside = _outside_secret(tmp_path)
+    (workspace / "file-link").symlink_to(outside / "secret.txt")
+
+    with pytest.raises(ToolError, match="points outside") as raised:
+        run_tool(WriteTool(), {"path": "file-link", "content": "x"}, ToolContext(cwd=workspace))
+
+    assert "outside-dir" not in f"{raised.value} {raised.value.recovery_hint}"
+    assert (outside / "secret.txt").read_text(encoding="utf-8") == "outside secret\n"
+
+
+def test_link_swapped_after_resolution_fails_closed(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    workspace, outside = _outside_secret(tmp_path)
+    target = workspace / "target.txt"
+    target.write_text("inside\n", encoding="utf-8")
+    (workspace / "link.txt").symlink_to(target)
+    real_open_parent = secure_fs_module.open_parent
+
+    @contextmanager
+    def swap_then_open(path: secure_fs_module.SecureToolPath) -> Iterator[object]:
+        # Policy checks have passed on the resolved path; swap it before the open.
+        target.unlink()
+        target.symlink_to(outside / "secret.txt")
+        with real_open_parent(path) as parent:
+            yield parent
+
+    monkeypatch.setattr(secure_fs_module, "open_parent", swap_then_open)
 
     with pytest.raises(ToolError, match="Symbolic links are not allowed"):
-        run_tool(
-            ReadTool(), {"path": "link.txt"}, ToolContext(cwd=tmp_path, allow_outside_cwd=True)
-        )
+        run_tool(ReadTool(), {"path": "link.txt"}, ToolContext(cwd=workspace))
 
 
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="requires no-follow descriptors")
@@ -330,7 +461,7 @@ def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:
     link = tmp_path / "link.txt"
     link.symlink_to(target)
 
-    with pytest.raises(ToolError, match="Symbolic links are not allowed"):
+    with pytest.raises(ToolError, match="goes through a symbolic link"):
         run_tool(
             WriteTool(),
             {"path": "link.txt", "content": "replacement\n"},
@@ -1260,5 +1391,5 @@ def test_ls_displays_but_does_not_follow_symlink(tmp_path: Path) -> None:
     listing = run_tool(LsTool(), {"path": "."}, ToolContext(cwd=workspace))
     assert listing.text == "linked"
 
-    with pytest.raises(ToolError, match="symbolic link|non-directory"):
+    with pytest.raises(ToolError, match="points outside the tool working directory"):
         run_tool(LsTool(), {"path": "linked"}, ToolContext(cwd=workspace))
