@@ -815,3 +815,25 @@ def test_posix_wrapper_leaves_no_group_member_when_it_exits(
 
     with pytest.raises(ProcessLookupError):
         os.killpg(wrapper.pid, 0)
+
+
+def test_failed_scan_still_kills_group(monkeypatch: MonkeyPatch) -> None:
+    signals: list[signal.Signals] = []
+    released: list[object] = []
+
+    def record_group_signal(
+        _process: object, selected_signal: signal.Signals
+    ) -> process_tools_module._PosixGroupSignal:
+        signals.append(selected_signal)
+        return process_tools_module._PosixGroupSignal.SENT  # noqa: SLF001
+
+    monkeypatch.setattr(process_tools_module, "_record_posix_descendant_pids", lambda _p: False)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_process_group", record_group_signal)
+    monkeypatch.setattr(process_tools_module, "_signal_posix_recorded_jobs", lambda _p, _s: True)
+    monkeypatch.setattr(process_tools_module, "_release_posix_tracking", released.append)
+
+    killed = process_tools_module._kill_posix_process_tree(object())  # type: ignore[arg-type]  # noqa: SLF001
+
+    assert killed is False
+    assert signals == [signal.SIGKILL]
+    assert released == []
