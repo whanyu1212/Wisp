@@ -24,6 +24,7 @@ from wisp.config.settings import (
     user_settings_path,
 )
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.mcp.credentials import mcp_auth_path
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetryPolicy
 from wisp.trust.permissions import permissions_directory
@@ -97,6 +98,7 @@ class WispConfig(BaseModel):
 
         required = (
             self.auth_path.expanduser().resolve(strict=False).as_posix(),
+            mcp_auth_path().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
             permissions_directory().resolve(strict=False).as_posix(),
             f"{permissions_directory().resolve(strict=False).as_posix()}/**",

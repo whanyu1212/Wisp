@@ -20,6 +20,7 @@ from wisp.config.settings import (
     try_persist_user_model_selection,
     user_settings_path,
 )
+from wisp.mcp.credentials import mcp_auth_path
 from wisp.trust.permissions import permissions_directory
 
 
@@ -692,8 +693,9 @@ def test_from_env_user_settings_can_disable_protected_paths(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
     # The USER (global) settings file may disable the general guard; Wisp still
-    # protects its own active credential and settings files. Point HOME at an explicit
-    # temp dir so the user-settings write is isolated from the real home.
+    # protects its own active credential, MCP credential, and settings files. Point
+    # HOME at an explicit temp dir so the user-settings write is isolated from the
+    # real home.
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
@@ -704,10 +706,12 @@ def test_from_env_user_settings_can_disable_protected_paths(
     config = WispConfig.from_env()
 
     auth_pattern = config.auth_path.resolve().as_posix()
+    mcp_auth_pattern = mcp_auth_path(home_dir=home).resolve().as_posix()
     settings_pattern = user_settings_path(home_dir=home).resolve().as_posix()
     permissions_pattern = permissions_directory().resolve().as_posix()
     assert config.protected_paths == (
         auth_pattern,
+        mcp_auth_pattern,
         settings_pattern,
         permissions_pattern,
         f"{permissions_pattern}/**",
