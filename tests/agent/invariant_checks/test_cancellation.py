@@ -19,7 +19,7 @@ from wisp.events import (
 )
 
 
-def test_cancellation_check_accepts_clean_cancellation() -> None:
+def test_accepts_clean_cancellation() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -28,7 +28,7 @@ def test_cancellation_check_accepts_clean_cancellation() -> None:
     assert_cancellation_settled(events)
 
 
-def test_cancellation_check_accepts_pre_turn_cancellation() -> None:
+def test_accepts_pre_turn_cancellation() -> None:
     events = (ErrorEvent(message="Agent run cancelled"),)
     assert_cancellation_settled(events)
 
@@ -40,7 +40,7 @@ def test_cancellation_check_accepts_pre_turn_cancellation() -> None:
         QueueMessageInjected(kind="follow_up", content="Late follow-up"),
     ],
 )
-def test_cancellation_check_rejects_trailing_boundary_events(trailing: object) -> None:
+def test_rejects_trailing_boundary_events(trailing: object) -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -52,7 +52,7 @@ def test_cancellation_check_rejects_trailing_boundary_events(trailing: object) -
 
 
 @pytest.mark.parametrize("position", ["before", "after", "next_turn"])
-def test_cancellation_check_rejects_activity_outside_turn(position: str) -> None:
+def test_rejects_activity_outside_turn(position: str) -> None:
     events: list[object] = [
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),
@@ -77,7 +77,7 @@ def test_cancellation_check_rejects_activity_outside_turn(position: str) -> None
         assert_cancellation_settled(events)
 
 
-def test_cancellation_check_rejects_activity_before_first_turn() -> None:
+def test_rejects_activity_before_first_turn() -> None:
     events = (
         tool_ended("call-1"),
         tool_ready("call-1"),
@@ -87,7 +87,7 @@ def test_cancellation_check_rejects_activity_before_first_turn() -> None:
         assert_cancellation_settled(events)
 
 
-def test_cancellation_check_accepts_error_after_completed_turn() -> None:
+def test_accepts_error_after_completed_turn() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
@@ -98,9 +98,7 @@ def test_cancellation_check_accepts_error_after_completed_turn() -> None:
 
 @pytest.mark.parametrize("boundary", ["pre_turn", "completed", "failed"])
 @pytest.mark.parametrize("tail_kind", ["queue_then_error", "error_then_queue", "two_errors"])
-def test_cancellation_check_requires_one_final_boundary_error(
-    boundary: str, tail_kind: str
-) -> None:
+def test_requires_one_final_boundary_error(boundary: str, tail_kind: str) -> None:
     events: list[object] = []
     if boundary == "completed":
         events.extend(completed_turn())
@@ -125,7 +123,7 @@ def test_cancellation_check_requires_one_final_boundary_error(
             assert_cancellation_settled(events)
 
 
-def test_cancellation_check_accepts_aborted_provider_wording() -> None:
+def test_accepts_aborted_provider_wording() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="request aborted"),
@@ -134,7 +132,7 @@ def test_cancellation_check_accepts_aborted_provider_wording() -> None:
     assert_cancellation_settled(events)
 
 
-def test_cancellation_check_rejects_ended_without_ready() -> None:
+def test_rejects_ended_without_ready() -> None:
     events = (
         TurnStarted(turn=1),
         tool_ended("call-1"),
@@ -145,7 +143,7 @@ def test_cancellation_check_rejects_ended_without_ready() -> None:
         assert_cancellation_settled(events)
 
 
-def test_cancellation_check_rejects_missing_error_event() -> None:
+def test_rejects_missing_error_event() -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="cancelled", finish_reason="cancelled"),
@@ -155,7 +153,7 @@ def test_cancellation_check_rejects_missing_error_event() -> None:
 
 
 @pytest.mark.parametrize("earlier_turn", [True, False])
-def test_cancellation_check_rejects_nonadjacent_error(earlier_turn: bool) -> None:
+def test_rejects_nonadjacent_error(earlier_turn: bool) -> None:
     events: list[object] = [TurnStarted(turn=1), ErrorEvent(message="Earlier failure")]
     if earlier_turn:
         events.extend(
@@ -173,7 +171,7 @@ def test_cancellation_check_rejects_nonadjacent_error(earlier_turn: bool) -> Non
         assert_cancellation_settled(events)
 
 
-def test_cancellation_check_rejects_completed_outcome() -> None:
+def test_rejects_completed_outcome() -> None:
     events = (
         TurnStarted(turn=1),
         ErrorEvent(message="Agent run cancelled"),

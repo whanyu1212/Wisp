@@ -80,7 +80,7 @@ def test_no_hook_matches_default_behavior() -> None:
     assert len(provider.calls) == 1
 
 
-def test_hook_can_stop_after_tool_round() -> None:
+def test_stops_after_tool_round() -> None:
     """A hook may still stop the run at the tool-round boundary."""
 
     provider = ScriptedProvider(
@@ -110,7 +110,7 @@ def test_hook_can_stop_after_tool_round() -> None:
     assert hook.snapshots[0].had_tool_calls is True
 
 
-def test_snapshot_edits_do_not_leak_to_next_boundary() -> None:
+def test_snapshot_edits_do_not_leak() -> None:
     """A snapshot mutation at one boundary must not appear in a later one.
 
     If `continuation_messages` were shared (not deep-copied) with
@@ -189,7 +189,7 @@ def test_snapshot_edits_do_not_leak_to_next_boundary() -> None:
     assert hook.second_boundary_arguments == {"path": "original"}
 
 
-def test_stop_wins_over_unused_message_edits() -> None:
+def test_stop_wins_over_message_edits() -> None:
     """`stop=True` is honored even when combined with `messages`/`extra_messages`.
 
     Regression for #363 review: the loop previously raised
@@ -229,7 +229,7 @@ def test_stop_wins_over_unused_message_edits() -> None:
     assert len(provider.calls) == 1
 
 
-def test_hook_injects_steering_after_tool_round() -> None:
+def test_injects_steering_after_tool_round() -> None:
     """A capable provider can receive steering injected right after a tool round.
 
     `ScriptedProvider` declares `supports_continuation_messages = True`, so
@@ -292,7 +292,7 @@ def test_hook_injects_steering_after_tool_round() -> None:
     assert second_call.messages == messages
 
 
-def test_rejects_tool_shaped_extra_message_without_history() -> None:
+def test_rejects_tool_shaped_extra_message() -> None:
     """A hook's own `extra_messages` must not carry tool-shaped content either.
 
     Regression for #363 review: earlier validation only checked the loop's
@@ -330,7 +330,7 @@ def test_rejects_tool_shaped_extra_message_without_history() -> None:
     assert len(provider.calls) == 1
 
 
-def test_replaces_context_with_active_tool_exchange() -> None:
+def test_replacement_keeps_active_tool_exchange() -> None:
     """A full replacement may retain the active structured tool pair."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -398,7 +398,7 @@ def test_rejects_orphaned_tool_replacement() -> None:
     assert len(provider.calls) == 1
 
 
-def test_rejects_interleaved_or_mismatched_tool_replacement() -> None:
+def test_rejects_interleaved_tool_replacement() -> None:
     """Structured replacements preserve the native assistant/result adjacency."""
 
     provider = ScriptedProvider([completed_stream("first")])
@@ -484,7 +484,7 @@ def test_rejects_opaque_structured_tool_replacement() -> None:
     assert len(provider.calls) == 1
 
 
-def test_rejects_mismatched_tool_name_in_replacement() -> None:
+def test_rejects_mismatched_replacement_tool_name() -> None:
     """A tool result must retain the provider-visible name of its matching call."""
 
     provider = ScriptedProvider([completed_stream("first")])
@@ -526,7 +526,7 @@ def test_rejects_mismatched_tool_name_in_replacement() -> None:
     assert len(provider.calls) == 1
 
 
-def test_hook_fires_after_clean_turn_and_can_continue() -> None:
+def test_continues_after_clean_turn() -> None:
     """A hook can turn a would-be-final turn (no tool calls) into a follow-up.
 
     `ScriptedProvider` is `ContinuationMessageProvider`-capable, so the
@@ -711,7 +711,7 @@ def test_combines_prompt_cache_and_native_append() -> None:
     ]
 
 
-def test_replacement_folds_extras_and_discards_old_state() -> None:
+def test_replacement_with_extras_starts_fresh() -> None:
     """Replacement plus extras is fresh and later snapshots cannot see old context."""
 
     provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
@@ -744,7 +744,7 @@ def test_replacement_folds_extras_and_discards_old_state() -> None:
     ]
 
 
-def test_folds_id_less_clean_response_before_appending() -> None:
+def test_folds_id_less_clean_response() -> None:
     """The loop does not invent a public response ID for a clean response."""
 
     provider = ScriptedProvider(
@@ -780,7 +780,7 @@ def test_folds_id_less_clean_response_before_appending() -> None:
 
 
 @pytest.mark.parametrize("had_tool_calls", [False, True])
-def test_hook_failure_does_not_complete_turn_twice(
+def test_hook_failure_completes_turn_once(
     had_tool_calls: bool,
 ) -> None:
     """A hook failure after a completed turn must not emit a second TurnCompleted.
@@ -818,7 +818,7 @@ def test_hook_failure_does_not_complete_turn_twice(
     assert_turn_terminals(collected)
 
 
-def test_hook_stops_clean_turn_after_earlier_tool_round() -> None:
+def test_stops_after_earlier_tool_round() -> None:
     """A clean turn that follows an earlier tool round can only stop, not continue.
 
     Regression for #363 review: no provider-native mechanism carries a tool
@@ -869,7 +869,7 @@ def test_hook_stops_clean_turn_after_earlier_tool_round() -> None:
     )
 
 
-def test_hook_continues_plain_after_earlier_tool_round() -> None:
+def test_continues_after_earlier_tool_round() -> None:
     """A capable provider can continue past a clean turn that followed a tool round.
 
     The provider's own `previous_response_id` continuation already carries
@@ -917,7 +917,7 @@ def test_hook_continues_plain_after_earlier_tool_round() -> None:
     assert provider.calls[2].previous_response_id is not None
 
 
-def test_hook_injects_after_earlier_tool_round() -> None:
+def test_injects_after_earlier_tool_round() -> None:
     """A capable provider can also receive injected content at that later boundary.
 
     `messages`/`extra_messages` were unsupported here before a real
@@ -1114,7 +1114,7 @@ def test_rebase_keeps_live_native_continuation() -> None:
     assert len(executor.calls) == 1
 
 
-def test_clean_rebase_drops_consumed_tool_results() -> None:
+def test_clean_rebase_drops_tool_results() -> None:
     """A clean response must not resend the prior round's tool results."""
 
     tool_call = ToolCall(call_id="call-1", name="noop", arguments={})

@@ -28,7 +28,7 @@ def _assistant_with_calls(*call_ids: str) -> Message:
     )
 
 
-def test_repair_plan_is_idempotent() -> None:
+def test_synthesizes_missing_result_idempotently() -> None:
     messages = (
         Message(role="user", content="inspect files"),
         _assistant_with_calls("call-1", "call-2"),
@@ -62,7 +62,7 @@ def test_repair_plan_is_idempotent() -> None:
     assert repeated.repairs == ()
 
 
-def test_repair_plan_leaves_complete_transcript_unchanged() -> None:
+def test_leaves_complete_transcript_unchanged() -> None:
     messages = (
         _assistant_with_calls("call-1"),
         Message(
@@ -80,7 +80,7 @@ def test_repair_plan_leaves_complete_transcript_unchanged() -> None:
     assert plan.repairs == ()
 
 
-def test_repair_plan_keeps_orphan_results() -> None:
+def test_keeps_orphan_results() -> None:
     orphan = Message(
         role="tool",
         content="legacy orphan",
@@ -96,7 +96,7 @@ def test_repair_plan_keeps_orphan_results() -> None:
     assert plan.repairs[0].tool_call_id == "call-1"
 
 
-def test_repair_plan_handles_empty_call_id_idempotently() -> None:
+def test_repairs_empty_call_id_idempotently() -> None:
     first = plan_interrupted_tool_repairs((_assistant_with_calls(""),))
 
     assert len(first.repairs) == 1
@@ -108,7 +108,7 @@ def test_repair_plan_handles_empty_call_id_idempotently() -> None:
     assert repeated.repairs == ()
 
 
-def test_repair_plan_consumes_reused_call_ids_per_occurrence() -> None:
+def test_consumes_reused_ids_per_occurrence() -> None:
     first_result = Message(
         role="tool",
         content="first completed",
@@ -142,7 +142,7 @@ def test_repair_plan_consumes_reused_call_ids_per_occurrence() -> None:
     assert repeated.repairs == ()
 
 
-def test_result_ordering_is_public_and_marks_missing_results() -> None:
+def test_public_ordering_marks_missing_results() -> None:
     # Regression for #358: sessions.replay depends on this ordering primitive
     # directly, so it must be importable as a public name.
     result = Message(
@@ -161,7 +161,7 @@ def test_result_ordering_is_public_and_marks_missing_results() -> None:
     assert ordered[2].tool_call.call_id == "call-2"
 
 
-def test_repair_plan_matches_reused_id_to_nearest_call() -> None:
+def test_reused_id_matches_nearest_call() -> None:
     later_result = Message(
         role="tool",
         content="later completed",

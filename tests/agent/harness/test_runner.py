@@ -107,7 +107,7 @@ def test_native_history_requires_explicit_opt_in(
         assert json.loads(replayed[1].content)["type"] == "wisp.portable_tool_exchange"
 
 
-def test_continue_treats_completed_tool_turn_as_history() -> None:
+def test_continue_replays_completed_tool_turn() -> None:
     class OpaqueProvider(ScriptedProvider):
         def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
             del effort
@@ -157,7 +157,7 @@ def test_continue_treats_completed_tool_turn_as_history() -> None:
 
 
 @pytest.mark.parametrize("entry_point", ["constructor", "append", "replace"])
-def test_transcript_inputs_and_snapshots_are_detached(entry_point: str) -> None:
+def test_transcript_inputs_and_snapshots_detached(entry_point: str) -> None:
     original = message_with_nested_arguments(role="assistant")
     expected = original.model_copy(deep=True)
     if entry_point == "constructor":
@@ -177,7 +177,7 @@ def test_transcript_inputs_and_snapshots_are_detached(entry_point: str) -> None:
     assert harness.messages[0].tool_calls[0].provider_call_id == "native-call"
 
 
-def test_prompt_snapshots_input_before_run_starts() -> None:
+def test_prompt_snapshots_input_before_run() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
     )
@@ -201,7 +201,7 @@ def test_prompt_snapshots_input_before_run_starts() -> None:
 
 
 @pytest.mark.parametrize("close_at_completion", [False, True])
-def test_keeps_detached_completion_before_exposing_it(close_at_completion: bool) -> None:
+def test_detaches_completion_before_exposing(close_at_completion: bool) -> None:
     call = ToolCall(call_id="call", name="read", arguments={"paths": ["original.txt"]})
     provider = ScriptedProvider(
         [
@@ -234,7 +234,7 @@ def test_keeps_detached_completion_before_exposing_it(close_at_completion: bool)
     anyio.run(run)
 
 
-def test_requeued_message_is_not_in_old_drain_snapshot() -> None:
+def test_requeued_message_joins_next_drain() -> None:
     provider = ScriptedProvider(
         [
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content=str(index))]
@@ -264,7 +264,7 @@ def test_requeued_message_is_not_in_old_drain_snapshot() -> None:
     anyio.run(run)
 
 
-def test_prompt_owns_transcript_and_returns_immutable_snapshots() -> None:
+def test_prompt_appends_without_mutating_snapshots() -> None:
     initial = Message(role="system", content="system prompt")
     provider = ScriptedProvider([completed_stream("hello", response_id=None)])
     harness = build_harness(provider, messages=(initial,))
@@ -320,7 +320,7 @@ def test_continue_adds_no_user_message() -> None:
     assert provider.calls[0].messages == (existing,)
 
 
-def test_keeps_assistant_and_tool_result_order_across_runs() -> None:
+def test_keeps_tool_result_order_across_runs() -> None:
     call = ToolCall(
         call_id="call-1",
         name="lookup",
@@ -401,7 +401,7 @@ def test_keeps_assistant_and_tool_result_order_across_runs() -> None:
     assert payload["calls"][0]["result"]["output"] == "found it"
 
 
-def test_drops_empty_tool_call_assistant_from_follow_up_history() -> None:
+def test_replay_drops_empty_tool_call_assistant() -> None:
     call = ToolCall(
         call_id="call-1",
         name="lookup",
@@ -449,7 +449,7 @@ def test_drops_empty_tool_call_assistant_from_follow_up_history() -> None:
     assert payload["calls"][0]["result"]["output"] == "found it"
 
 
-def test_repairs_interrupted_tool_call_before_next_request() -> None:
+def test_repairs_interrupted_call_before_request() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -500,7 +500,7 @@ def test_repairs_interrupted_tool_call_before_next_request() -> None:
 
 @pytest.mark.parametrize("field", ["turn_offset", "tool_iteration_offset"])
 @pytest.mark.parametrize("value", [-1, True, 1.5])
-def test_invalid_offsets_keep_transcript_and_allow_retry(field: str, value: object) -> None:
+def test_invalid_offsets_keep_transcript_for_retry(field: str, value: object) -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]]
     )
@@ -531,7 +531,7 @@ def test_invalid_offsets_keep_transcript_and_allow_retry(field: str, value: obje
     anyio.run(run)
 
 
-def test_history_preparation_failure_releases_run_state() -> None:
+def test_history_failure_releases_run_state() -> None:
     class FailingReplayProvider(ScriptedProvider):
         fail_preparation = True
 
@@ -603,7 +603,7 @@ def test_cleanup_failure_releases_run_state(
     anyio.run(run)
 
 
-def test_rejects_overlapping_runs_until_stream_closes() -> None:
+def test_rejects_overlapping_runs_until_close() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -676,9 +676,7 @@ def test_drops_empty_failed_completion() -> None:
 
 @pytest.mark.parametrize("entry_point", ["prompt", "prompt_message", "continue_"])
 @pytest.mark.parametrize("tool_iteration_offset", [1, 2])
-def test_offsets_keep_turn_numbers_and_tool_limit(
-    entry_point: str, tool_iteration_offset: int
-) -> None:
+def test_offsets_keep_turns_and_tool_limit(entry_point: str, tool_iteration_offset: int) -> None:
     call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [

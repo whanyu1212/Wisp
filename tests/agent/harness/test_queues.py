@@ -77,7 +77,7 @@ def test_queue_reads_keep_token() -> None:
 
 
 @pytest.mark.parametrize("kind", ["steering", "follow_up"])
-def test_queue_inputs_and_snapshots_are_detached(kind: QueueKind) -> None:
+def test_queue_inputs_and_snapshots_detached(kind: QueueKind) -> None:
     original = message_with_nested_arguments(role="user")
     expected = original.model_copy(deep=True)
     size = len(expected.model_dump_json().encode("utf-8"))
@@ -105,7 +105,7 @@ def test_queue_inputs_and_snapshots_are_detached(kind: QueueKind) -> None:
     assert harness.pending_message_bytes == size
 
 
-def test_queue_accounting_builds_no_message_snapshots(
+def test_queue_accounting_skips_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     harness = build_harness(ScriptedProvider([]))
@@ -121,7 +121,7 @@ def test_queue_accounting_builds_no_message_snapshots(
     assert harness.has_queued_messages()
 
 
-def test_queue_keeps_fifo_snapshots_and_transcript_boundary() -> None:
+def test_keeps_fifo_order_outside_transcript() -> None:
     harness = build_harness(ScriptedProvider([]))
 
     first_update = harness.steer("first steering")
@@ -156,7 +156,7 @@ def test_queue_keeps_fifo_snapshots_and_transcript_boundary() -> None:
     assert harness.messages == ()
 
 
-def test_queue_rejects_non_user_messages_without_partial_change() -> None:
+def test_rejects_non_user_messages_atomically() -> None:
     harness = build_harness(ScriptedProvider([]))
     assistant = Message(role="assistant", content="not user input")
 
@@ -171,7 +171,7 @@ def test_queue_rejects_non_user_messages_without_partial_change() -> None:
     assert harness.messages == ()
 
 
-def test_queue_capacity_is_shared_and_frees_on_removal() -> None:
+def test_shared_capacity_frees_on_removal() -> None:
     harness = AgentHarness(
         AgentHarnessConfig(
             provider=ScriptedProvider([]),
@@ -196,7 +196,7 @@ def test_queue_capacity_is_shared_and_frees_on_removal() -> None:
     assert recovered.follow_up == ()
 
 
-def test_queue_modes_are_independent_and_reported() -> None:
+def test_modes_independent_and_reported() -> None:
     harness = build_harness(ScriptedProvider([]))
 
     steering_update = harness.set_steering_mode("all")
@@ -239,7 +239,7 @@ def test_queue_modes_are_independent_and_reported() -> None:
     assert harness.config.follow_up_mode == "all"
 
 
-def test_queue_byte_limit_rejects_before_mutation() -> None:
+def test_byte_limit_rejects_before_mutation() -> None:
     harness = AgentHarness(
         AgentHarnessConfig(
             provider=ScriptedProvider([]),
@@ -265,7 +265,7 @@ def test_queue_updated_event_round_trips() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
-def test_drains_follow_ups_one_per_completed_turn() -> None:
+def test_drains_follow_ups_one_per_turn() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -315,7 +315,7 @@ def test_drains_follow_ups_one_per_completed_turn() -> None:
     assert [event.turn for event in events if event.type == "turn.started"] == [1, 2, 3]
 
 
-def test_all_mode_drains_follow_ups_as_one_batch() -> None:
+def test_all_mode_batches_follow_ups() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -356,7 +356,7 @@ def test_all_mode_drains_follow_ups_as_one_batch() -> None:
 
 @pytest.mark.parametrize("kind", ["steering", "follow_up"])
 @pytest.mark.parametrize("mutation", ["pop", "clear"])
-def test_all_mode_tolerates_queue_edits_during_drain(
+def test_all_mode_tolerates_drain_edits(
     kind: QueueKind,
     mutation: str,
 ) -> None:
@@ -419,7 +419,7 @@ def test_all_mode_tolerates_queue_edits_during_drain(
     assert queue_updates[-1].follow_up == ()
 
 
-def test_close_before_completion_keeps_follow_up_queue() -> None:
+def test_early_close_keeps_follow_ups() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -444,7 +444,7 @@ def test_close_before_completion_keeps_follow_up_queue() -> None:
     ]
 
 
-def test_failure_keeps_follow_up_queue_uninjected() -> None:
+def test_failure_keeps_follow_ups_queued() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), RuntimeError("provider failed")]]
     )
@@ -467,7 +467,7 @@ def test_failure_keeps_follow_up_queue_uninjected() -> None:
     ]
 
 
-def test_follow_up_keeps_tool_iteration_limit_across_segments() -> None:
+def test_tool_limit_spans_follow_ups() -> None:
     first_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     second_call = ToolCall(call_id="call-2", name="lookup", arguments={})
     provider = ScriptedProvider(
@@ -507,7 +507,7 @@ def test_follow_up_keeps_tool_iteration_limit_across_segments() -> None:
     assert events[-1].outcome == "failed"
 
 
-def test_one_loop_serves_tools_steering_and_follow_ups(
+def test_one_loop_serves_queue_boundaries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Queue boundaries continue the same loop rather than reconstructing offsets."""
@@ -553,7 +553,7 @@ def test_one_loop_serves_tools_steering_and_follow_ups(
     assert [message.content for message in provider.calls[2].extra_messages] == ["finish this"]
 
 
-def test_drains_steering_before_first_provider_request() -> None:
+def test_drains_preflight_steering_into_transcript() -> None:
     harness = build_harness(ScriptedProvider([]))
     harness.append_message(Message(role="user", content="initial"))
     harness.steer("preflight steering")
@@ -573,7 +573,7 @@ def test_queue_message_injected_event_round_trips() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
-def test_injects_steering_after_complete_tool_batch() -> None:
+def test_injects_steering_after_tool_batch() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
@@ -617,7 +617,7 @@ def test_injects_steering_after_complete_tool_batch() -> None:
     assert replayed[2].content == "change direction"
 
 
-def test_all_mode_injects_steering_before_follow_up() -> None:
+def test_steering_batch_precedes_follow_up() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -664,7 +664,7 @@ def test_all_mode_injects_steering_before_follow_up() -> None:
     ]
 
 
-def test_drains_steering_one_per_turn_boundary() -> None:
+def test_drains_steering_one_per_turn() -> None:
     provider = ScriptedProvider(
         [
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="first")],
@@ -696,7 +696,7 @@ def test_drains_steering_one_per_turn_boundary() -> None:
     ]
 
 
-def test_cancel_at_turn_boundary_keeps_steering() -> None:
+def test_cancel_at_boundary_keeps_steering() -> None:
     provider = ScriptedProvider(
         [
             [
@@ -760,7 +760,7 @@ def test_close_mid_batch_keeps_unexposed_steering() -> None:
     ]
 
 
-def test_close_mid_follow_up_batch_keeps_unexposed_messages() -> None:
+def test_close_mid_batch_keeps_unexposed_follow_ups() -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")]]
     )
@@ -793,7 +793,7 @@ def test_close_mid_follow_up_batch_keeps_unexposed_messages() -> None:
     ]
 
 
-def test_injects_steering_after_denied_tool_result() -> None:
+def test_injects_steering_after_denied_tool() -> None:
     tool_call = ToolCall(call_id="call-1", name="mutate", arguments={})
     provider = ScriptedProvider(
         [

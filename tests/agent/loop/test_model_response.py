@@ -116,7 +116,7 @@ def _config(*, provider: object | None = None, **kwargs: object) -> AgentLoopCon
     )
 
 
-def test_omits_optional_keywords_for_providers_without_them() -> None:
+def test_omits_unsupported_optional_keywords() -> None:
     provider = _LegacyProvider()
     config = _config(provider=provider, prompt_cache_key="wisp:session-1")
     messages = (Message(role="user", content="hi"),)
@@ -146,7 +146,7 @@ def test_omits_optional_keywords_for_providers_without_them() -> None:
     ]
 
 
-def test_project_usage_and_cost_covers_unavailable_reasons() -> None:
+def test_reports_cost_unavailable_reasons() -> None:
     config = _config()
     missing_usage = CompletedProviderResponse(
         response=ProviderResponseCompleted(content="done"),
@@ -178,7 +178,7 @@ def test_project_usage_and_cost_covers_unavailable_reasons() -> None:
     assert failed.unavailable_reason == "estimation_failed"
 
 
-def test_overflow_shaped_exception_becomes_context_overflow() -> None:
+def test_overflow_message_becomes_context_overflow() -> None:
     async def run() -> None:
         with pytest.raises(ContextOverflowError, match="maximum context length exceeded"):
             async for _event in iter_provider_events(_OverflowStream()):
@@ -187,7 +187,7 @@ def test_overflow_shaped_exception_becomes_context_overflow() -> None:
     anyio.run(run)
 
 
-def test_close_error_after_terminal_is_not_treated_as_overflow() -> None:
+def test_terminal_close_error_not_overflow() -> None:
     async def events() -> AsyncIterator[ProviderEvent]:
         try:
             yield ProviderResponseStarted(model="test")
@@ -227,7 +227,7 @@ def test_completed_response_ignores_overflow_worded_close() -> None:
     anyio.run(run)
 
 
-def test_cancellation_is_reported_to_loop_as_internal_outcome() -> None:
+def test_cancellation_becomes_internal_outcome() -> None:
     stream = ModelResponseStream(
         config=_config(cancellation_token=_CancelledToken()),
         messages=(Message(role="user", content="go"),),

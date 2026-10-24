@@ -45,7 +45,7 @@ def test_finished_stream_with_valid_turns_passes() -> None:
     assert violations == []
 
 
-def test_finished_stream_with_open_turn_is_reported() -> None:
+def test_finished_stream_open_turn_reported() -> None:
     violations: list[str] = []
 
     _consume(
@@ -56,7 +56,7 @@ def test_finished_stream_with_open_turn_is_reported() -> None:
     assert "turn.started" in violations[0]
 
 
-def test_raising_stream_is_checked_and_still_raises() -> None:
+def test_raising_stream_checked_and_reraised() -> None:
     violations: list[str] = []
     run = checked_run_agent_loop(
         _scripted_loop((TurnStarted(turn=1),), then_raise=RuntimeError("provider failed")),
@@ -69,7 +69,7 @@ def test_raising_stream_is_checked_and_still_raises() -> None:
     assert len(violations) == 1
 
 
-def test_stream_closed_by_consumer_is_not_checked() -> None:
+def test_consumer_closed_stream_not_checked() -> None:
     violations: list[str] = []
     run = checked_run_agent_loop(_scripted_loop(completed_turn()), lambda: violations.append)
 
@@ -103,7 +103,7 @@ def test_cancelled_stream_is_not_checked() -> None:
     assert violations == []
 
 
-def test_stream_without_a_sink_passes_through_unchecked() -> None:
+def test_stream_without_sink_passes_unchecked() -> None:
     """An exempt test's streams are delivered unchanged and never reported."""
 
     started = TurnStarted(turn=1)
@@ -119,7 +119,7 @@ def test_stream_without_a_sink_passes_through_unchecked() -> None:
     assert received == [started]
 
 
-def test_loop_is_checked_at_its_source() -> None:
+def test_loop_checked_at_source() -> None:
     """Every caller binds the checked loop, whenever it was imported."""
 
     checked = loop_runner.run_agent_loop
@@ -129,7 +129,7 @@ def test_loop_is_checked_at_its_source() -> None:
     assert compaction_module.run_agent_loop is checked
 
 
-def test_module_imported_during_a_test_binds_the_checked_loop() -> None:
+def test_late_import_binds_checked_loop() -> None:
     """A late import (in a fixture or test body) cannot bypass the checks."""
 
     late_module = types.ModuleType("late_loop_caller")
@@ -139,12 +139,12 @@ def test_module_imported_during_a_test_binds_the_checked_loop() -> None:
     assert getattr(late_module.run_agent_loop, "__wrapped__", None) is not None
 
 
-def test_checks_route_to_the_running_test() -> None:
+def test_checks_route_to_running_test() -> None:
     assert loop_stream_checks._active_sink is not None
 
 
 @pytest.mark.loop_invariants_exempt(reason="checks that an exempt test is not reported")
-def test_exempt_test_has_no_violation_sink() -> None:
+def test_exempt_test_lacks_violation_sink() -> None:
     assert loop_stream_checks._active_sink is None
 
 

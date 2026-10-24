@@ -129,7 +129,7 @@ def _scripted_tool_batch_provider(calls: tuple[ToolCall, ...]) -> ScriptedProvid
     )
 
 
-def test_overlaps_execution_and_publishes_in_source_order() -> None:
+def test_publishes_overlapped_calls_in_source_order() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -231,7 +231,7 @@ def test_parallel_calls_time_themselves(monkeypatch: pytest.MonkeyPatch) -> None
     assert durations == {"call-1": 300, "call-2": 0}
 
 
-def test_parallel_batch_isolates_one_tool_failure() -> None:
+def test_isolates_one_parallel_failure() -> None:
     calls = (
         ToolCall(call_id="call-1", name="first", arguments={}),
         ToolCall(call_id="call-2", name="second", arguments={}),
@@ -281,7 +281,7 @@ def test_parallel_batch_isolates_one_tool_failure() -> None:
 
 
 @pytest.mark.parametrize("first_raises", [True, False])
-def test_cancel_separates_tool_results_from_settlement(
+def test_cancel_separates_results_from_settlement(
     first_raises: bool,
 ) -> None:
     class Token:
@@ -340,7 +340,7 @@ def test_cancel_separates_tool_results_from_settlement(
 
 
 @pytest.mark.parametrize("path", ["sequential", "prepared"])
-def test_repeated_call_id_in_one_response_runs_no_tool(
+def test_duplicate_call_id_runs_no_tool(
     path: Literal["sequential", "prepared"],
 ) -> None:
     """A response that repeats a mutating call's ID fails before any tool runs."""
@@ -515,7 +515,7 @@ def test_settles_cancellation_requested_by_harness(
     assert_settled_tool_calls(events, ("call-1",))
 
 
-def test_does_not_start_after_cooperative_cancellation() -> None:
+def test_skips_start_after_cooperative_cancellation() -> None:
     call = ToolCall(call_id="call-1", name="read", arguments={})
     provider = _scripted_tool_batch_provider((call,))
 
@@ -646,7 +646,7 @@ def test_bounds_live_tasks(
     assert len([event for event in events if isinstance(event, ToolResultReady)]) == 5
 
 
-def test_publishes_sibling_results_before_fatal_error() -> None:
+def test_publishes_siblings_before_fatal_error() -> None:
     calls = (
         ToolCall(call_id="call-1", name="read", arguments={}),
         ToolCall(call_id="call-2", name="read", arguments={}),
@@ -771,7 +771,7 @@ def test_rejects_result_emitted_during_preparation() -> None:
     assert completed[-1].outcome == "failed"
 
 
-def test_one_sequential_call_makes_whole_batch_serial() -> None:
+def test_one_sequential_call_serializes_batch() -> None:
     calls = tuple(
         ToolCall(call_id=f"call-{index}", name="tool", arguments={}) for index in range(1, 4)
     )
@@ -921,7 +921,7 @@ def _labelled_call(call_id: str, name: str) -> ToolCall:
         ),
     ],
 )
-def test_rejected_call_keeps_parallel_safe_siblings_concurrent(
+def test_rejected_call_keeps_siblings_concurrent(
     rejected_call: ToolCall,
     failure_code: str,
 ) -> None:
@@ -1069,7 +1069,7 @@ def _builtin_metadata_executor(
         ),
     ],
 )
-def test_builtin_search_calls_run_one_at_a_time(calls: tuple[ToolCall, ...]) -> None:
+def test_builtin_search_calls_run_serially(calls: tuple[ToolCall, ...]) -> None:
     """Concurrent grep and find scans contend for the GIL, so a batch with them runs serially.
 
     A grep or find call also serializes read and ls siblings, because a batch only runs
@@ -1111,7 +1111,7 @@ def test_builtin_search_calls_run_one_at_a_time(calls: tuple[ToolCall, ...]) -> 
     assert_settled_tool_calls(events, tuple(call_ids))
 
 
-def test_builtin_read_and_ls_calls_overlap() -> None:
+def test_builtin_read_and_ls_overlap() -> None:
     calls = (
         _labelled_call("read-1", "read"),
         _labelled_call("ls-1", "ls"),

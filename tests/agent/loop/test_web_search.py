@@ -120,7 +120,7 @@ def _open(provider: object, *, web_search: bool) -> list[ProviderEvent]:
     return anyio.run(run)
 
 
-def test_web_search_is_requested_only_from_a_provider_that_offers_it() -> None:
+def test_requests_only_from_supporting_provider() -> None:
     searching = _SearchingProvider()
     _open(searching, web_search=True)
     _open(searching, web_search=False)
@@ -150,7 +150,7 @@ def _response_events(provider: object) -> list[object]:
     return anyio.run(run)
 
 
-def test_a_provider_search_becomes_a_bounded_public_event() -> None:
+def test_search_becomes_bounded_event() -> None:
     sources = tuple(
         ProviderWebSource(url=f"https://example.test/{index}" + "x" * 3_000, title="t" * 500)
         for index in range(30)
@@ -176,14 +176,14 @@ def test_a_provider_search_becomes_a_bounded_public_event() -> None:
     )
 
 
-def test_a_search_before_the_response_starts_is_a_protocol_error() -> None:
+def test_rejects_search_before_start() -> None:
     provider = _SearchingProvider([ProviderWebSearch(query="early")])
 
     with pytest.raises(ProviderProtocolError, match="before response_started"):
         _response_events(provider)
 
 
-def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
+def test_search_counts_as_output_on_overflow() -> None:
     stream = ModelResponseStream(
         config=AgentLoopConfig(
             provider=_OverflowingSearchProvider(  # type: ignore[arg-type]
@@ -207,7 +207,7 @@ def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
     assert stream.outcome.had_streamed_delta is True
 
 
-def test_a_response_cost_records_its_searches() -> None:
+def test_cost_records_searches() -> None:
     completed = CompletedProviderResponse(
         response=ProviderResponseCompleted(
             content="done",
