@@ -8,10 +8,11 @@ import anyio
 import pytest
 
 from tests.agent.loop.support import (
+    ApprovingToolExecutor,
     NeverToolExecutor,
     RecordingRequestBoundaryHook,
-    RecordingToolExecutor,
     completed_stream,
+    tool_call_stream,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.request_boundary import (
@@ -83,7 +84,7 @@ def test_resolves_response_id_for_messages_and_tool_continuation(
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=ApprovingToolExecutor()),
                 messages=(Message(role="user", content="run pwd"),),
             )
         ]
@@ -141,27 +142,10 @@ def test_resolves_response_id_for_messages_and_tool_continuation(
                 finish_reason="tool_calls",
             ),
         ],
-        [
-            ProviderResponseStarted(model="test"),
-            ProviderToolCallCompleted(
-                tool_call=ToolCall(
-                    call_id="call-1", name="bash", arguments={}, response_id="response-1"
-                )
-            ),
-            ProviderToolCallCompleted(
-                tool_call=ToolCall(
-                    call_id="call-2", name="bash", arguments={}, response_id="response-2"
-                )
-            ),
-            ProviderResponseCompleted(
-                content="",
-                tool_calls=(
-                    ToolCall(call_id="call-1", name="bash", arguments={}, response_id="response-1"),
-                    ToolCall(call_id="call-2", name="bash", arguments={}, response_id="response-2"),
-                ),
-                finish_reason="tool_calls",
-            ),
-        ],
+        tool_call_stream(
+            ToolCall(call_id="call-1", name="bash", arguments={}, response_id="response-1"),
+            ToolCall(call_id="call-2", name="bash", arguments={}, response_id="response-2"),
+        ),
     ],
 )
 def test_rejects_conflicting_response_ids(
@@ -257,7 +241,7 @@ def test_rejects_finish_reason_that_contradicts_tool_calls(
         )
     )
     provider = ScriptedProvider([provider_events])
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
     hook = RecordingRequestBoundaryHook([])
 
     async def run() -> list[object]:
@@ -480,7 +464,7 @@ def test_failed_response_does_not_execute_streamed_tool_calls() -> None:
             ]
         ]
     )
-    executor = RecordingToolExecutor()
+    executor = ApprovingToolExecutor()
 
     async def run() -> list[object]:
         return [

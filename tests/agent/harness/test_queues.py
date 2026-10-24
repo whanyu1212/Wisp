@@ -14,6 +14,7 @@ from tests.agent.harness.support import (
     build_harness,
     message_with_nested_arguments,
 )
+from tests.agent.loop.support import tool_call_stream
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.events import (
     QueueKind,
@@ -31,7 +32,6 @@ from wisp.providers.base import (
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
-    ProviderToolCallCompleted,
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
@@ -472,28 +472,12 @@ def test_follow_up_keeps_tool_iteration_limit_across_segments() -> None:
     second_call = ToolCall(call_id="call-2", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=first_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(first_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(first_call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="first answer"),
             ],
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=second_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(second_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(second_call),
         ]
     )
     executor = RecordingToolExecutor()
@@ -531,15 +515,7 @@ def test_one_loop_serves_tools_steering_and_follow_ups(
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call, content="checking"),
             [
                 ProviderResponseStarted(model="test", response_id="steered-response"),
                 ProviderResponseCompleted(content="steered", response_id="steered-response"),
@@ -601,15 +577,7 @@ def test_injects_steering_after_complete_tool_batch() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call, content="checking"),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="adjusted answer"),
@@ -829,15 +797,7 @@ def test_injects_steering_after_denied_tool_result() -> None:
     tool_call = ToolCall(call_id="call-1", name="mutate", arguments={})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=tool_call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(tool_call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(tool_call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="respected denial"),

@@ -5,10 +5,14 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Literal
 
+import anyio
+
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.tool_contracts import (
+    PreparedToolExecution,
     ToolExecutionEvent,
     ToolExecutor,
+    ToolPreparationEvent,
 )
 from wisp.events import (
     ToolCallSnapshot,
@@ -38,6 +42,34 @@ class RecordingToolExecutor:
             output=self.output,
             is_error=self.is_error,
         )
+
+
+class BlockingPreparedExecutor:
+    def __init__(self, all_started: anyio.Event) -> None:
+        self._all_started = all_started
+        self.started_call_ids: set[str] = set()
+
+    async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
+        async def run() -> ToolExecutionEnded:
+            self.started_call_ids.add(tool_call.call_id)
+            if len(self.started_call_ids) == 2:
+                self._all_started.set()
+            await anyio.sleep_forever()
+            raise AssertionError("unreachable")
+
+        yield PreparedToolExecution(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            parallel_safe=True,
+            runner=run,
+        )
+
+    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
+        async for event in self.prepare(tool_call):
+            if isinstance(event, PreparedToolExecution):
+                yield await event.run()
+            else:
+                yield event
 
 
 def build_harness(

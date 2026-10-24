@@ -8,12 +8,12 @@ from typing import Literal
 import anyio
 import pytest
 
+from tests.agent.loop.support import NeverToolExecutor
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.loop.model_response import ModelResponseStream, OverflowModelResponse
 from wisp.agent.loop.provider_lifecycle import CompletedProviderResponse
 from wisp.agent.loop.provider_request import open_provider_stream
 from wisp.agent.loop.response_projection import project_usage_and_cost
-from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import WebSearchPerformed, WebSearchSource
 from wisp.messages import Message
 from wisp.providers.base import (
@@ -29,14 +29,7 @@ from wisp.providers.events import (
     ProviderUsage,
     ProviderWebSearch,
     ProviderWebSource,
-    ToolCall,
 )
-
-
-class _NeverExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        raise AssertionError(f"Unexpected tool call: {tool_call.name}")
-        yield  # pragma: no cover - makes this an async generator
 
 
 class _MinimalProvider:
@@ -108,7 +101,7 @@ class _OverflowingSearchProvider(_SearchingProvider):
 def _open(provider: object, *, web_search: bool) -> list[ProviderEvent]:
     config = AgentLoopConfig(
         provider=provider,  # type: ignore[arg-type]
-        tool_executor=_NeverExecutor(),
+        tool_executor=NeverToolExecutor(),
         web_search=web_search,
     )
 
@@ -142,7 +135,7 @@ def _response_events(provider: object) -> list[object]:
     stream = ModelResponseStream(
         config=AgentLoopConfig(
             provider=provider,  # type: ignore[arg-type]
-            tool_executor=_NeverExecutor(),
+            tool_executor=NeverToolExecutor(),
             web_search=True,
         ),
         messages=(Message(role="user", content="go"),),
@@ -196,7 +189,7 @@ def test_a_search_counts_as_visible_output_for_overflow_recovery() -> None:
             provider=_OverflowingSearchProvider(  # type: ignore[arg-type]
                 [ProviderResponseStarted(model="searching"), ProviderWebSearch(query="q")]
             ),
-            tool_executor=_NeverExecutor(),
+            tool_executor=NeverToolExecutor(),
             web_search=True,
         ),
         messages=(Message(role="user", content="go"),),
@@ -227,7 +220,7 @@ def test_a_response_cost_records_its_searches() -> None:
     )
 
     _, cost = project_usage_and_cost(
-        AgentLoopConfig(provider=_SearchingProvider(), tool_executor=_NeverExecutor()),  # type: ignore[arg-type]
+        AgentLoopConfig(provider=_SearchingProvider(), tool_executor=NeverToolExecutor()),  # type: ignore[arg-type]
         completed,
     )
 

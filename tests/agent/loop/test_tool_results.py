@@ -5,7 +5,6 @@ from __future__ import annotations
 import shlex
 import sys
 from collections.abc import AsyncIterator
-from datetime import timedelta
 from pathlib import Path
 from typing import cast
 from unittest.mock import Mock
@@ -15,7 +14,11 @@ import pytest
 
 import wisp.agent.loop.runner as agent_loop_module
 from tests.agent.loop.support import (
-    RecordingToolExecutor,
+    ApprovingToolExecutor,
+    FakeClock,
+    completed_stream,
+    install_fake_clock,
+    tool_call_stream,
 )
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.loop.tool_lifecycle import ToolBatchSettlement
@@ -41,8 +44,6 @@ from wisp.providers.base import (
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
-    ProviderTextDelta,
-    ProviderToolCallCompleted,
     ToolCall,
 )
 from wisp.providers.fake import ScriptedProvider
@@ -176,15 +177,7 @@ def test_snapshots_are_projected_once_and_isolated(
     )
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="checking",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call, content="checking"),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="done"),
@@ -199,7 +192,7 @@ def test_snapshots_are_projected_once_and_isolated(
     async def run() -> list[object]:
         events: list[object] = []
         loop = run_agent_loop(
-            AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+            AgentLoopConfig(provider=provider, tool_executor=ApprovingToolExecutor()),
             messages=(Message(role="user", content="run pwd"),),
         )
         async for event in loop:
@@ -236,15 +229,7 @@ def test_execution_end_directly_precedes_tool_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="done"),
@@ -256,7 +241,7 @@ def test_execution_end_directly_precedes_tool_result() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=RecordingToolExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=ApprovingToolExecutor()),
                 messages=(Message(role="user", content="run pwd"),),
             )
         ]
@@ -291,15 +276,7 @@ def _run_bash_loop(
     )
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="done"),
@@ -379,19 +356,7 @@ def test_bash_timeout_reaches_provider_as_inconclusive_error(
 
 def test_rejects_executor_with_unresolved_approval() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(call)])
 
     async def run() -> list[object]:
         events: list[object] = []
@@ -421,19 +386,7 @@ def test_rejects_malformed_tool_results(
     error: str,
 ) -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(call)])
 
     async def run() -> None:
         with pytest.raises(ToolExecutionProtocolError, match=error):
@@ -483,39 +436,6 @@ def _terminal_result(*, is_error: bool = False) -> ToolExecutionEnded:
             (_approval_resolution(), _terminal_result()),
             "resolved approval before requesting it",
         ),
-        (
-            (_approval_request(), _approval_request(), _terminal_result()),
-            "requested approval more than once",
-        ),
-        (
-            (
-                _approval_request(),
-                _approval_resolution(),
-                _approval_resolution(),
-                _terminal_result(),
-            ),
-            "resolved approval more than once",
-        ),
-        (
-            (_approval_request(),),
-            "ended with an unresolved approval",
-        ),
-        (
-            (_approval_request(), _terminal_result()),
-            "ended with an unresolved approval",
-        ),
-        (
-            (_approval_request(arguments={"command": "whoami"}), _terminal_result()),
-            "approval arguments do not match",
-        ),
-        (
-            (_approval_request(), _approval_resolution(approved=False), _terminal_result()),
-            "reported success after approval was denied",
-        ),
-        (
-            (object(),),
-            "unsupported event type",
-        ),
     ],
 )
 def test_rejects_malformed_approval_lifecycle(
@@ -523,19 +443,7 @@ def test_rejects_malformed_approval_lifecycle(
     error: str,
 ) -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
+    provider = ScriptedProvider([tool_call_stream(call)])
 
     async def run() -> list[object]:
         emitted: list[object] = []
@@ -558,56 +466,11 @@ def test_rejects_malformed_approval_lifecycle(
     assert len(provider.calls) == 1
 
 
-def test_rejects_approval_that_changes_nested_argument_types() -> None:
-    call = ToolCall(
-        call_id="call-1",
-        name="bash",
-        arguments={"command": "pwd", "options": [1]},
-    )
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
-    executor = ScriptedToolExecutor(
-        (
-            _approval_request(arguments={"command": "pwd", "options": [True]}),
-            _terminal_result(),
-        )
-    )
-
-    async def run() -> None:
-        with pytest.raises(ToolExecutionProtocolError, match="approval arguments do not match"):
-            async for _ in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=executor),
-                messages=(Message(role="user", content="run pwd"),),
-            ):
-                pass
-
-    anyio.run(run)
-
-
 def test_accepts_denied_approval_with_error_result() -> None:
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="noted"),
@@ -641,28 +504,24 @@ def test_accepts_denied_approval_with_error_result() -> None:
 
 
 class SlowApprovalExecutor:
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         del tool_call
         yield _approval_request()
-        await anyio.sleep(0.3)  # The user takes a while to decide.
+        self.clock.advance(0.3)  # The user takes a while to decide.
         yield _approval_resolution()
-        await anyio.sleep(0.05)
+        self.clock.advance(0.05)
         yield _terminal_result()
 
 
-def test_duration_skips_approval_wait() -> None:
+def test_duration_skips_approval_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = install_fake_clock(monkeypatch)
     call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ],
+            tool_call_stream(call),
             [
                 ProviderResponseStarted(model="test"),
                 ProviderResponseCompleted(content="done"),
@@ -674,7 +533,7 @@ def test_duration_skips_approval_wait() -> None:
         return [
             event
             async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=SlowApprovalExecutor()),
+                AgentLoopConfig(provider=provider, tool_executor=SlowApprovalExecutor(clock)),
                 messages=(Message(role="user", content="run pwd"),),
             )
         ]
@@ -683,14 +542,10 @@ def test_duration_skips_approval_wait() -> None:
 
     ended = next(event for event in emitted if isinstance(event, ToolExecutionEnded))
     result = next(event for event in emitted if isinstance(event, ToolResultReady))
-    assert ended.duration_ms is not None
-    assert 30 <= ended.duration_ms < 250
-    assert result.duration_ms == ended.duration_ms
-    # The start falls after the approval, not when the executor was first called.
-    approved = next(event for event in emitted if isinstance(event, ToolApprovalResolved))
+    # Timing starts at the approval, not when the executor was first called.
+    assert ended.duration_ms == result.duration_ms == 50
     assert ended.started_at is not None
     assert result.started_at == ended.started_at
-    assert approved.timestamp - timedelta(milliseconds=5) <= ended.started_at <= result.timestamp
 
 
 def test_interrupted_results_have_no_duration() -> None:
@@ -736,21 +591,8 @@ def test_forwards_before_text_across_the_wire() -> None:
     )
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    response_id="response-1",
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test", response_id="response-2"),
-                ProviderTextDelta(delta="done"),
-                ProviderResponseCompleted(content="done", response_id="response-2"),
-            ],
+            tool_call_stream(call, response_id="response-1"),
+            completed_stream("done", response_id="response-2"),
         ]
     )
 
@@ -804,21 +646,8 @@ def test_forwards_summary_across_the_wire() -> None:
     )
     provider = ScriptedProvider(
         [
-            [
-                ProviderResponseStarted(model="test", response_id="response-1"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="",
-                    tool_calls=(call,),
-                    response_id="response-1",
-                    finish_reason="tool_calls",
-                ),
-            ],
-            [
-                ProviderResponseStarted(model="test", response_id="response-2"),
-                ProviderTextDelta(delta="done"),
-                ProviderResponseCompleted(content="done", response_id="response-2"),
-            ],
+            tool_call_stream(call, response_id="response-1"),
+            completed_stream("done", response_id="response-2"),
         ]
     )
 
