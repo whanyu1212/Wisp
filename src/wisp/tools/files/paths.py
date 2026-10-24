@@ -6,53 +6,6 @@ from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 
 from wisp.tools.context import ToolContext
-from wisp.tools.result import ToolError
-
-
-def resolve_tool_path(
-    path: str | None,
-    context: ToolContext,
-    *,
-    default: str = ".",
-    follow_leaf_symlink: bool = True,
-) -> Path:
-    """Resolve a tool path relative to the context working directory.
-
-    Set ``follow_leaf_symlink=False`` for exclusive creation: parent directories
-    are still resolved, but the final path component remains lexical so opening it
-    with create-only semantics cannot follow a symlink introduced by a race.
-
-    By default, tools are sandboxed to ``context.cwd``. Absolute paths and
-    ``~`` are accepted only when they resolve back inside that directory.
-
-    Paths matching the context's protected globs (secrets such as ``.env``) are
-    rejected so their contents never reach the model, regardless of the sandbox.
-    """
-
-    selected = path if path is not None else default
-    cwd = context.cwd.resolve(strict=False)
-    candidate = Path(selected).expanduser()
-    if not candidate.is_absolute():
-        candidate = cwd / candidate
-    resolved = candidate.resolve(strict=False)
-    if not context.allow_outside_cwd:
-        try:
-            resolved.relative_to(cwd)
-        except ValueError as exc:
-            raise ToolError(
-                f"Path is outside the tool working directory: {selected}",
-                failure_code="path_outside_workspace",
-                recovery_hint="Use a path inside the session working directory.",
-            ) from exc
-    # Check the lexical candidate (pre-symlink-dereference), not the resolved
-    # target: a protected name such as ``.env`` must be denied even when it is a
-    # symlink to an innocuously named file. is_protected_path also re-checks the
-    # resolved target, so a link *to* a secret is caught as well.
-    if is_protected_path(candidate, context):
-        raise ToolError(f"Access to protected path denied: {selected}")
-    if follow_leaf_symlink:
-        return resolved
-    return candidate.parent.resolve(strict=False) / candidate.name
 
 
 def is_protected_path(path: Path, context: ToolContext) -> bool:

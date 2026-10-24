@@ -28,18 +28,14 @@ def _run_grep(
     max_output_lines: int = 2_000,
 ) -> ToolResult:
     async def run() -> ToolResult:
-        tool = GrepTool(_scanner_backend=backend)
-        try:
-            return await tool.run(
-                arguments,
-                ToolContext(
-                    cwd=root,
-                    max_output_bytes=max_output_bytes,
-                    max_output_lines=max_output_lines,
-                ),
-            )
-        finally:
-            await tool.aclose()
+        return await GrepTool(_scanner_backend=backend).run(
+            arguments,
+            ToolContext(
+                cwd=root,
+                max_output_bytes=max_output_bytes,
+                max_output_lines=max_output_lines,
+            ),
+        )
 
     return anyio.run(run)
 

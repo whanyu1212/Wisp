@@ -14,7 +14,6 @@ from wisp.tools.builtin import FindTool
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolResult
 from wisp.tools.search import tools as search_tools_module
-from wisp.tools.shell import supervisor as process_manager_module
 
 _LIMIT_HINT = (
     "[truncated] Stopped at max_results=1. Narrow the search, or raise max_results to see more."
@@ -179,50 +178,6 @@ def test_find_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
 
     assert result.text == "No files found"
     assert result.data == {"count": 0, "files": []}
-
-
-@pytest.mark.skip(reason="ripgrep backend removed for descriptor-safe traversal")
-def test_find_tool_ripgrep_bounds_stdout_before_buffering(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    calls: list[tuple[list[str], int, int | None, int | None]] = []
-
-    async def fake_run(
-        command: list[str],
-        *,
-        cwd: Path,
-        process_supervisor: object,
-        max_stdout_lines: int,
-        stdout_line_filter: object = None,
-        max_buffered_stderr_bytes: int | None = None,
-        max_buffered_stderr_lines: int | None = None,
-    ) -> search_tools_module.ProcessResult:
-        assert cwd == tmp_path
-        assert isinstance(process_supervisor, process_manager_module.ProcessSupervisor)
-        assert callable(stdout_line_filter)
-        calls.append(
-            (command, max_stdout_lines, max_buffered_stderr_bytes, max_buffered_stderr_lines)
-        )
-        selected = [line for line in ["a.py", "b.txt", "c.py", "d.py"] if stdout_line_filter(line)]
-        return search_tools_module.ProcessResult(
-            exit_code=-9,
-            stdout="\n".join(selected[:max_stdout_lines]) + "\n",
-            stderr="",
-            stdout_truncated=True,
-        )
-
-    monkeypatch.setattr(search_tools_module.shutil, "which", lambda _name: "rg")
-    monkeypatch.setattr(search_tools_module, "_run_exec_limited_stdout", fake_run)
-    # This test asserts the exact rg argv for stdout bounding; opt out of the
-    # protected-path default so its --glob exclusions don't clutter the assertion.
-    context = ToolContext(cwd=tmp_path, protected_paths=())
-
-    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py", "max_results": 2}, context)
-
-    assert calls == [(["rg", "--no-config", "--no-follow", "--files", "--", "."], 3, 50000, 2000)]
-    assert result.text == "a.py\nc.py\n[truncated]"
-    assert result.truncated is True
 
 
 def test_find_tool_python_fallback_bounds_retained_matches(
