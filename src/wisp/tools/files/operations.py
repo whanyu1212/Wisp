@@ -6,7 +6,7 @@ import errno
 import os
 import shlex
 import stat
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
@@ -826,7 +826,9 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
     Edits are matched against the original rather than each other's results. An
     edit written with LF line endings is matched and written with CRLF where the
     file uses CRLF, so the model need not reproduce line endings it cannot see and
-    lines outside the edits keep their exact bytes.
+    lines outside the edits keep their exact bytes. An ``oldText`` with no exact
+    match may still match whole lines that differ only in trailing whitespace;
+    those lines are then replaced with ``newText``.
 
     Args:
         original (str): The file's current text.
@@ -843,23 +845,8 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
     replacements: list[tuple[int, int, str, int]] = []
     for index, (old_text, new_text) in enumerate(edits):
         old_text, new_text = _match_line_endings(original, old_text, new_text)
-        occurrences = _find_occurrences(original, old_text)
-        if not occurrences:
-            raise ToolError(
-                f"edits[{index}].oldText was not found in the file",
-                failure_code="stale_input",
-                retryable=True,
-                recovery_hint="Reread the relevant file range and retry with current exact text.",
-            )
-        if len(occurrences) > 1:
-            raise ToolError(
-                f"edits[{index}].oldText matches {len(occurrences)} places; it must match once",
-                failure_code="invalid_arguments",
-                retryable=True,
-                recovery_hint="Include enough surrounding lines in oldText to make it unique.",
-            )
-        start = occurrences[0]
-        replacements.append((start, start + len(old_text), new_text, index))
+        start, end, new_text = _locate_edit(original, old_text, new_text, index)
+        replacements.append((start, end, new_text, index))
     replacements.sort(key=lambda replacement: replacement[0])
     for previous, current in pairwise(replacements):
         if current[0] < previous[1]:
@@ -880,6 +867,116 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
             recovery_hint="Make newText differ from oldText, or skip the edit.",
         )
     return edited
+
+
+def _locate_edit(original: str, old_text: str, new_text: str, index: int) -> tuple[int, int, str]:
+    """Find where one edit applies and the text that replaces that span.
+
+    Args:
+        original (str): The file's current text.
+        old_text (str): The edit's ``oldText``, already in the file's line endings.
+        new_text (str): The edit's ``newText``, already in the file's line endings.
+        index (int): The edit's position in the call, for error messages.
+
+    Returns:
+        tuple[int, int, str]: Start and end offsets in ``original`` and the
+        replacement for that span.
+
+    Raises:
+        ToolError: When ``oldText`` matches nowhere, or more than one place.
+    """
+
+    occurrences = _find_occurrences(original, old_text)
+    if len(occurrences) == 1:
+        return occurrences[0], occurrences[0] + len(old_text), new_text
+    if len(occurrences) > 1:
+        raise _ambiguous_edit_error(index, len(occurrences))
+
+    file_lines = _line_spans(original)
+    old_lines, ends_with_newline = _edit_lines(old_text)
+    windows = _matching_line_windows(original, file_lines, old_lines, str.rstrip)
+    if len(windows) > 1:
+        raise _ambiguous_edit_error(index, len(windows))
+    if windows:
+        matched = file_lines[windows[0] : windows[0] + len(old_lines)]
+        endings = {original[line.end : line.end_with_newline] for line in matched}
+        endings.discard("")
+        if endings == {"\r\n"}:
+            new_text = _to_crlf(new_text)
+        end = matched[-1].end_with_newline if ends_with_newline else matched[-1].end
+        return matched[0].start, end, new_text
+
+    indented = _matching_line_windows(original, file_lines, old_lines, str.strip)
+    if indented:
+        raise ToolError(
+            f"edits[{index}].oldText matches line {indented[0] + 1} only if indentation is ignored",
+            failure_code="stale_input",
+            retryable=True,
+            recovery_hint="Reread those lines and copy their exact indentation into oldText.",
+        )
+    raise ToolError(
+        f"edits[{index}].oldText was not found in the file",
+        failure_code="stale_input",
+        retryable=True,
+        recovery_hint="Reread the relevant file range and retry with current exact text.",
+    )
+
+
+def _ambiguous_edit_error(index: int, count: int) -> ToolError:
+    return ToolError(
+        f"edits[{index}].oldText matches {count} places; it must match once",
+        failure_code="invalid_arguments",
+        retryable=True,
+        recovery_hint="Include enough surrounding lines in oldText to make it unique.",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LineSpan:
+    start: int
+    end: int
+    """Offset where the line's content ends, before any LF or CRLF."""
+    end_with_newline: int
+    """Offset after the line's LF or CRLF, or ``end`` for an unterminated last line."""
+
+
+def _line_spans(text: str) -> list[_LineSpan]:
+    spans: list[_LineSpan] = []
+    start = 0
+    while (newline := text.find("\n", start)) != -1:
+        end = newline - 1 if newline > start and text[newline - 1] == "\r" else newline
+        spans.append(_LineSpan(start, end, newline + 1))
+        start = newline + 1
+    if start < len(text):
+        spans.append(_LineSpan(start, len(text), len(text)))
+    return spans
+
+
+def _edit_lines(text: str) -> tuple[list[str], bool]:
+    """Split edit text into lines and report whether it ended with a line ending."""
+
+    ends_with_newline = text.endswith("\n")
+    lines = text.removesuffix("\n").split("\n")
+    return [line.removesuffix("\r") for line in lines], ends_with_newline
+
+
+def _matching_line_windows(
+    original: str,
+    file_lines: list[_LineSpan],
+    old_lines: list[str],
+    normalize: Callable[[str], str],
+) -> list[int]:
+    """Return the first line of every run of file lines equal to ``old_lines``."""
+
+    wanted = [normalize(line) for line in old_lines]
+    if not any(wanted):
+        return []
+    keys = [normalize(original[line.start : line.end]) for line in file_lines]
+    return [
+        first
+        for first in range(len(keys) - len(wanted) + 1)
+        if keys[first : first + len(wanted)] == wanted
+    ]
 
 
 def _match_line_endings(original: str, old_text: str, new_text: str) -> tuple[str, str]:
@@ -908,7 +1005,10 @@ class EditTool:
 
     name = "edit"
     safety: ToolSafety = "mutating"
-    description = "Apply unique, non-overlapping exact text replacements to a UTF-8 file."
+    description = (
+        "Apply unique, non-overlapping text replacements to a UTF-8 file. Each oldText "
+        "must match the file exactly, apart from line endings and trailing whitespace."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
