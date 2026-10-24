@@ -56,6 +56,8 @@ past a boundary Wisp promises to enforce. For example:
 Out of scope:
 
 - actions you approved, or anything done in YOLO mode, that do what you asked;
+- an approved `bash` command, or an MCP or extension tool, reading or changing a protected path.
+  Protected paths apply to Wisp's file tools only;
 - a model choosing a harmful action that still requires your approval;
 - vulnerabilities in model providers, third-party MCP servers, or tools Wisp runs on your behalf;
 - issues that need an attacker who already controls your user account.

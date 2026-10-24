@@ -28,6 +28,25 @@ It also accepts `operation=start|poll|cancel` for commands needing a retained pr
 return a `process_id`, process state, incremental output, and per-stream truncation metadata under
 the same safety category and approval policy.
 
+## Protected paths
+
+The file tools never open files that commonly hold secrets: `.env` and its variants, keys and
+certificates (`*.pem`, `*.key`, `*.p12`, `*.pfx`, and SSH keys such as `id_rsa`),
+`credentials.json`, `.netrc`, `.pgpass`, and Wisp's own `auth.json`, `mcp-auth.json`, and
+`settings.json`. Matching ignores case and checks both the path as written and the file a symlink
+points to. `read`, `write`, and `edit` refuse a protected path, and `grep`, `find`, and `ls` leave
+protected files out of their results.
+
+Change the list with the `protected_paths` setting in your user settings; a project's settings
+cannot change it. Wisp's credential, settings, and permission files stay protected even if you set
+the list to empty.
+
+Protected paths are not a sandbox. They apply only to Wisp's file tools. A `bash` command runs as
+your user, so `cat .env`, or a script that reads it, is not blocked, and neither are MCP or extension
+tools. For those, approval is the safeguard: keep `bash` on ask when secrets are within reach, read
+each command before allowing it, and run Wisp in a container or virtual machine for repositories you
+do not trust. YOLO and "allow this tool for the session" grants skip that review.
+
 ## Print mode exposes no tools unless you ask
 
 Read tools are enabled as a group; mutating and command tools require per-tool opt-in:
@@ -270,7 +289,8 @@ and deny. `/permissions` shows the current default; `/permissions ask` or `/perm
 changes it. Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
 canonical project directory, and survive restarts. Changing the default clears temporary grants.
 One-time and session grants are not saved, and starting or switching sessions expires session
-grants. YOLO allows mutating and command tools without approval; protected paths, project trust,
-and tool availability still apply. `--yes` alone remains a temporary startup choice. In the home
-folder or a folder above it, YOLO is not saved and lasts for the session; see
+grants. YOLO allows mutating and command tools without approval; project trust, tool availability,
+and the file tools' [protected paths](#protected-paths) still apply. `--yes` alone remains a
+temporary startup choice. In the home folder or a folder above it, YOLO is not saved and lasts for
+the session; see
 [Home folder and broad folders](#home-folder-and-broad-folders).
