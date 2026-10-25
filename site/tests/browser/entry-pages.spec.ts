@@ -9,6 +9,17 @@ test("homepage offers install, product context, and preserved entry anchors with
   page,
 }) => {
   await page.goto("");
+  const brandLogo = page.locator(
+    '.site-header .brand[aria-label="Wisp home"] img',
+  );
+  await expect(brandLogo).toBeVisible();
+  await expect
+    .poll(() =>
+      brandLogo.evaluate(
+        (img: HTMLImageElement) => img.complete && img.naturalWidth > 0,
+      ),
+    )
+    .toBe(true);
   await expect(page.locator("h1")).toHaveCount(1);
   await expect(page.locator(".home-intro")).toContainText("coding agent");
   await expect(page.locator(".home-intro pre")).toHaveText(
@@ -72,9 +83,14 @@ test("production-rendered demo captures load responsively with captions in both 
       await figure.scrollIntoViewIfNeeded();
       const image = figure.locator("img");
       await expect(image).toHaveAttribute("alt", /Wisp/);
-      await expect(image).toHaveAttribute("width", "1200");
-      await expect(image).toHaveAttribute("height", "720");
-      await expect(image).toHaveAttribute("srcset", /480w.*800w.*1200w/);
+      // Masters are drawn at 2× cell size: 2400 px for a 100-column frame.
+      expect(Number(await image.getAttribute("width"))).toBeGreaterThanOrEqual(
+        2400,
+      );
+      await expect(image).toHaveAttribute(
+        "srcset",
+        /480w.*800w.*1200w.*1600w.*2400w/,
+      );
       await expect
         .poll(() =>
           image.evaluate(
@@ -116,7 +132,7 @@ test("homepage and section navigation remain useful with JavaScript disabled", a
     await page.goto("http://127.0.0.1:4322/Wisp/");
     await expect(page.locator(".home-intro .primary")).toBeInViewport();
     await expect(page.locator(".home-intro pre")).toBeVisible();
-    await expect(page.locator(".home-intro .tui-capture img")).toBeVisible();
+    await expect(page.locator(".home-showcase .tui-capture img")).toBeVisible();
     await page.locator('.starting-points a[href="/Wisp/guide/"]').click();
     await page
       .locator('.section-index a[href="/Wisp/guide/quickstart.html"]')

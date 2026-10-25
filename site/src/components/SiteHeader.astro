@@ -13,7 +13,13 @@ const { groups, page } = Astro.props;
 
 <header class="site-header">
   <a class="brand" href={href("index.html")} aria-label="Wisp home">
-    wisp<span>.</span>
+    <img
+      src={href("assets/favicon.png")}
+      alt=""
+      width="38"
+      height="38"
+      decoding="async"
+    />
   </a>
   <nav aria-label="Primary">
     {groups.map(
