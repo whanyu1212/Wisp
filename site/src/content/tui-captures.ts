@@ -2,8 +2,15 @@ import diffs from "../../../assets/docs/tui-diff-previews.png";
 import approval from "../../../assets/docs/tui-approval.png";
 import mcp from "../../../assets/docs/tui-mcp.png";
 import working from "../../../assets/docs/tui-new-turn.png";
+import showcase from "../../../assets/docs/tui-showcase.png";
 
 export const tuiCaptures = {
+  showcase: {
+    image: showcase,
+    alt: "Wisp terminal with a finished turn of tool calls and an inline diff, beside a panel listing context use, MCP servers, skills, changed files, and recent turns.",
+    caption:
+      "Follow each tool call and edit inline while the side panel tracks context, connections, changed files, and turns.",
+  },
   diffs: {
     image: diffs,
     alt: "Wisp terminal showing edit and write cards with added and removed lines.",

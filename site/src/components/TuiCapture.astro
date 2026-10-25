@@ -4,8 +4,14 @@ import { tuiCaptures, type TuiCapture } from "../content/tui-captures";
 interface Props {
   capture: TuiCapture;
   eager?: boolean;
+  /** How wide the figure renders, for choosing among the generated widths. */
+  sizes?: string;
 }
-const { capture, eager = false } = Astro.props;
+const {
+  capture,
+  eager = false,
+  sizes = "(max-width: 760px) 100vw, 760px",
+} = Astro.props;
 const { image, alt, caption } = tuiCaptures[capture];
 ---
 
@@ -14,8 +20,8 @@ const { image, alt, caption } = tuiCaptures[capture];
     <Image
       src={image}
       alt={alt}
-      widths={[480, 800, 1200]}
-      sizes="(max-width: 760px) 100vw, 760px"
+      widths={[480, 800, 1200, 1600, 2400]}
+      sizes={sizes}
       format="webp"
       loading={eager ? "eager" : "lazy"}
       decoding="async"
