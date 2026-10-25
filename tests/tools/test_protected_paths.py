@@ -65,13 +65,13 @@ def test_ordinary_path_matches_protected_patterns_once(
     root = tmp_path.resolve()
     ordinary = root / "main.py"
     checked: list[Path] = []
-    original = path_helpers._candidate_is_protected
+    original = path_helpers.matches_protected_pattern
 
-    def track_candidate(path: Path, patterns: tuple[str, ...], cwd: Path) -> bool:
+    def track_candidate(path: Path, patterns: tuple[str, ...]) -> bool:
         checked.append(path)
-        return original(path, patterns, cwd)
+        return original(path, patterns)
 
-    monkeypatch.setattr(path_helpers, "_candidate_is_protected", track_candidate)
+    monkeypatch.setattr(path_helpers, "matches_protected_pattern", track_candidate)
 
     assert is_protected_path(ordinary, _context(root)) is False
     assert checked == [ordinary]
@@ -373,6 +373,59 @@ def test_grep_skips_protected_symlink(tmp_path: Path) -> None:
 
     # The .env symlink is skipped; the real (unprotected) file is fine to surface.
     assert ".env" not in result.text
+
+
+def test_walk_hides_file_protected_by_real_path(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # On Windows, realpath expands a short directory name such as WISP~1 to .wisp,
+    # so only the real path matches the pattern. Simulate that with a renamed copy.
+    import os
+
+    from wisp.tools.search import tools as search_tools
+
+    short = tmp_path / "WISP~1"
+    short.mkdir()
+    (short / "auth.json").write_text("{}", encoding="utf-8")
+    (short / "notes.txt").write_text("ok", encoding="utf-8")
+    original = os.path.realpath
+
+    def expand_short_name(path: str | os.PathLike[str], **kwargs: bool) -> str:
+        resolved = original(path, **kwargs)
+        if resolved == str(short) or resolved.startswith(f"{short}{os.sep}"):
+            return str(tmp_path / ".wisp") + resolved.removeprefix(str(short))
+        return resolved
+
+    monkeypatch.setattr(search_tools.os.path, "realpath", expand_short_name)
+    context = _context(tmp_path)
+
+    walked = list(search_tools._iter_files(secure_tool_path("WISP~1", context), context))
+
+    assert walked == [short / "notes.txt"]
+
+
+def test_walk_resolves_once_per_directory(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    import os
+
+    from wisp.tools.search import tools as search_tools
+
+    for directory in ("a", "b"):
+        (tmp_path / directory).mkdir()
+        for index in range(5):
+            (tmp_path / directory / f"{index}.txt").write_text("x", encoding="utf-8")
+    context = _context(tmp_path)
+    root = secure_tool_path(".", context)
+    resolved: list[str] = []
+    original = os.path.realpath
+
+    def track_realpath(path: str | os.PathLike[str], **kwargs: bool) -> str:
+        resolved.append(os.fspath(path))
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(search_tools.os.path, "realpath", track_realpath)
+
+    walked = list(search_tools._iter_files(root, context))
+
+    assert len(walked) == 10
+    assert not [path for path in resolved if path.endswith(".txt")]
 
 
 def test_configured_auth_file_is_protected(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
