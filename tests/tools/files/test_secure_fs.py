@@ -593,6 +593,20 @@ def test_non_repository_search_ignores_only_tool_specific_ignore_files(
     assert find.data["files"] == ["git-only.txt", "visible.txt"]
 
 
+def test_invalid_ignore_lines_are_skipped(tmp_path: Path) -> None:
+    mark_git_repository(tmp_path)
+    (tmp_path / ".gitignore").write_text("foo\\\n[z-a]\nskip.txt\n", encoding="utf-8")
+    for name in ("foo", "z", "skip.txt", "keep.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": "."}, context)
+
+    assert find.data["files"] == ["foo", "keep.txt", "z"]
+    assert grep.data["matches"] == ["foo:1:needle", "keep.txt:1:needle", "z:1:needle"]
+
+
 def test_subdirectory_search_inherits_ancestor_ignore_files(tmp_path: Path) -> None:
     mark_git_repository(tmp_path)
     (tmp_path / ".gitignore").write_text("subdir/ignored.txt\n", encoding="utf-8")
