@@ -21,6 +21,7 @@ from wisp.tools.mcp_servers import (
     ProposeMcpServerChangeTool,
     ProposeMcpServerTool,
 )
+from wisp.tools.search import native_walk_available
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
@@ -28,10 +29,12 @@ if TYPE_CHECKING:
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
 _PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)
-# grep and find stay sequential although they only read: their scans are CPU-bound Python
-# threads, and concurrent scans contend for the GIL. Benchmarks on `src/` ran a batch of
-# 2-8 such calls up to 1.9x (ignore-case grep 3.5x) slower in parallel than one at a time.
 _PARALLEL_SAFE_TOOL_NAMES = frozenset({"ls", "read"})
+# grep and find only read, but the Python directory walk holds the GIL: on `src/`, a batch
+# of 8 ran find 1.35x and grep up to 1.27x slower in parallel than one at a time. The native
+# walk releases it: the same batch runs find 1.09x and literal grep 1.27x faster, and regex
+# grep at most 1.16x slower, so they run in parallel only when it is available.
+_NATIVE_WALK_PARALLEL_SAFE_TOOL_NAMES = frozenset({"find", "grep"})
 _BUILTIN_TOOL_PROMPTS = {
     "read": ToolPromptMetadata(
         prompt_snippet="Use read with offset and limit instead of loading a large file at once.",
@@ -161,12 +164,13 @@ def activate(
     api.register_provider_factory("openai-codex", _openai_codex)
     api.register_provider_factory("anthropic", _anthropic)
     api.register_provider_factory("google", _google)
+    parallel_safe_names = _PARALLEL_SAFE_TOOL_NAMES
+    if native_walk_available():
+        parallel_safe_names |= _NATIVE_WALK_PARALLEL_SAFE_TOOL_NAMES
     for tool in builtin_tools(process_supervisor=process_supervisor):
         api.register_tool(
             tool,
-            execution=(
-                _PARALLEL_TOOL_EXECUTION if tool.name in _PARALLEL_SAFE_TOOL_NAMES else None
-            ),
+            execution=_PARALLEL_TOOL_EXECUTION if tool.name in parallel_safe_names else None,
             prompt=_BUILTIN_TOOL_PROMPTS.get(tool.name),
         )
     api.register_tool(SkillTool(), execution=_PARALLEL_TOOL_EXECUTION)

@@ -222,6 +222,12 @@ def _load_native_walk() -> _NativeWalkModule | None:
 _NATIVE_WALK = _load_native_walk()
 
 
+def native_walk_available() -> bool:
+    """Return whether grep and find walk directories natively, without holding the GIL."""
+
+    return _NATIVE_WALK is not None
+
+
 class GrepTool:
     """Search file contents."""
 
@@ -1700,7 +1706,12 @@ def _build_matcher(
     def regex_matcher(line: str) -> bool:
         nonlocal retry_budget
         try:
-            return expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS) is not None
+            # By default regex releases the GIL for every search. Per line that turns
+            # concurrent greps into a convoy of GIL handoffs, so the short attempt keeps it.
+            return (
+                expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS, concurrent=False)
+                is not None
+            )
         except TimeoutError as exc:
             if retry_budget <= 0:
                 raise time_limit_error() from exc
