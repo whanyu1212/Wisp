@@ -6,6 +6,7 @@ import codecs
 import errno
 import heapq
 import os
+import re
 import stat
 import sys
 import time
@@ -22,6 +23,8 @@ from typing import Literal, Protocol, cast
 import anyio
 import regex as bounded_regex
 from pathspec import GitIgnoreSpec
+from pathspec.patterns.gitignore import GitIgnorePatternError
+from pathspec.patterns.gitignore.spec import GitIgnoreSpecPattern
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
@@ -1187,7 +1190,7 @@ def _read_ignore_specs(
         specs.append(
             _IgnoreSpec(
                 directory,
-                GitIgnoreSpec.from_lines(lines),
+                _compile_ignore_lines(lines),
                 priority,
             )
         )
@@ -1241,7 +1244,7 @@ def _read_repository_exclude(
         return None
     if cancel_event is not None and cancel_event.is_set():
         return None
-    return _IgnoreSpec(directory, GitIgnoreSpec.from_lines(lines), 0)
+    return _IgnoreSpec(directory, _compile_ignore_lines(lines), 0)
 
 
 def _ordered_ignore_specs(ignore_specs: tuple[_IgnoreSpec, ...]) -> list[_IgnoreSpec]:
@@ -1396,6 +1399,20 @@ def _expand_brace_alternatives(pattern: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(expanded))
 
 
+def _compile_ignore_lines(lines: Iterable[str]) -> GitIgnoreSpec:
+    return GitIgnoreSpec.from_lines(lines, _lenient_gitignore_pattern)
+
+
+def _lenient_gitignore_pattern(line: str) -> GitIgnoreSpecPattern:
+    # pathspec raises on a line it cannot translate, such as a trailing backslash or
+    # an inverted range. Treat it as a blank line, as Git does for a trailing
+    # backslash, so one bad line cannot fail the whole search.
+    try:
+        return GitIgnoreSpecPattern(line)
+    except (GitIgnorePatternError, re.error):
+        return GitIgnoreSpecPattern("")
+
+
 @lru_cache(maxsize=512)
 def _compiled_gitignore_glob(pattern: str) -> GitIgnoreSpec:
     return GitIgnoreSpec.from_lines((pattern,))
@@ -1413,6 +1430,11 @@ def _prepare_glob_matcher(pattern: str) -> GlobMatcher:
     exclusion = _is_exclusion_glob(pattern)
     effective_pattern = pattern[1:] if exclusion else pattern
     alternatives = _expand_brace_alternatives(effective_pattern)
+    for alternative in alternatives:
+        try:
+            GitIgnoreSpecPattern(alternative)
+        except (GitIgnorePatternError, re.error):
+            raise ToolArgumentError(f"Invalid glob pattern: {pattern!r}") from None
     compiled = tuple(_compiled_gitignore_glob(alternative) for alternative in alternatives)
 
     if exclusion:

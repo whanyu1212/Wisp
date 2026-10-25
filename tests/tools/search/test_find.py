@@ -12,7 +12,7 @@ from pytest import MonkeyPatch
 from tests.tools.support import run_tool
 from wisp.tools.builtin import FindTool
 from wisp.tools.context import ToolContext
-from wisp.tools.result import ToolResult
+from wisp.tools.result import ToolArgumentError, ToolResult
 from wisp.tools.search import tools as search_tools_module
 
 _LIMIT_HINT = (
@@ -195,6 +195,12 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
 
     assert result.text == "a/first.py\n" + _LIMIT_HINT
     assert result.data == {"count": 2, "files": ["a/first.py"]}
+
+
+def test_find_rejects_invalid_glob(tmp_path: Path) -> None:
+    for pattern in ("[z-a]", "src/{a,b}\\"):
+        with pytest.raises(ToolArgumentError, match="Invalid glob pattern"):
+            run_tool(FindTool(), {"pattern": pattern}, ToolContext(cwd=tmp_path))
 
 
 def test_find_sorts_across_directories(tmp_path: Path) -> None:
