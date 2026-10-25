@@ -85,11 +85,13 @@ def test_init_dispatches_repository_specific_create_only_prompt(
                 {"read", "grep", "find", "ls", "write"}
             )
             target = context.cwd / "AGENTS.md"
-            assert context.allowed_write_paths == (target,)
-            assert context.conflicting_write_paths == (target.with_name("AGENTS.MD"),)
-            assert context.require_create_only_writes is True
-            assert context.require_non_empty_writes is True
-            receipt = context.create_only_write_receipt
+            constraint = context.write_constraint
+            assert constraint is not None
+            assert constraint.allowed_paths == (target,)
+            assert constraint.conflicting_paths == (target.with_name("AGENTS.MD"),)
+            assert constraint.create_only is True
+            assert constraint.non_empty is True
+            receipt = constraint.receipt
             assert receipt is not None
             target.write_text("# Agent guidance\n", encoding="utf-8")
             info = target.lstat()

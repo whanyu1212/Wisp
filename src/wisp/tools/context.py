@@ -15,6 +15,26 @@ if TYPE_CHECKING:
     from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 
+@dataclass(frozen=True, slots=True)
+class WriteConstraint:
+    """A narrower write contract for one operation, such as creating one guidance file.
+
+    Attributes:
+        allowed_paths: The only exact paths a write may mutate, or ``None`` for any path
+            the project-root sandbox allows.
+        conflicting_paths: Paths whose existence makes every write fail.
+        create_only: Whether writes must pass ``overwrite=false``.
+        non_empty: Whether writes must have content.
+        receipt: Records the identity of a file a create-only write published.
+    """
+
+    allowed_paths: tuple[Path, ...] | None = None
+    conflicting_paths: tuple[Path, ...] = ()
+    create_only: bool = False
+    non_empty: bool = False
+    receipt: CreateOnlyWriteReceipt | None = None
+
+
 @dataclass(frozen=True)
 class ToolContext:
     """Ambient state shared with tool invocations."""
@@ -23,13 +43,8 @@ class ToolContext:
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
     allow_outside_cwd: bool = False
-    # ``None`` permits the normal project-root sandbox. Operations with a narrower
-    # write contract can name the only exact paths that the write tool may mutate.
-    allowed_write_paths: tuple[Path, ...] | None = None
-    conflicting_write_paths: tuple[Path, ...] = ()
-    require_create_only_writes: bool = False
-    require_non_empty_writes: bool = False
-    create_only_write_receipt: CreateOnlyWriteReceipt | None = None
+    # ``None`` permits the normal project-root sandbox.
+    write_constraint: WriteConstraint | None = None
     # Secure by default: every construction path (including a bare
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a
     # caller explicitly passes ``protected_paths=()`` to opt out.
