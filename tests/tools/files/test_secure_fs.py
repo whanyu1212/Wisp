@@ -1000,7 +1000,7 @@ def test_grep_skips_file_replaced_after_directory_enumeration(
         leaf: str,
         *,
         display: str,
-        expected_stat: os.stat_result,
+        expected_identity: tuple[int, int],
     ) -> int:
         nonlocal replaced
         if leaf == candidate.name and not replaced:
@@ -1011,7 +1011,7 @@ def test_grep_skips_file_replaced_after_directory_enumeration(
             parent_descriptor,
             leaf,
             display=display,
-            expected_stat=expected_stat,
+            expected_identity=expected_identity,
         )
 
     monkeypatch.setattr(search_module, "open_regular_file_at", replace_before_open)
@@ -1042,7 +1042,7 @@ def test_grep_skips_regular_file_replacement_after_enumeration(
         leaf: str,
         *,
         display: str,
-        expected_stat: os.stat_result,
+        expected_identity: tuple[int, int],
     ) -> int:
         nonlocal replaced
         if leaf == candidate.name and not replaced:
@@ -1052,7 +1052,7 @@ def test_grep_skips_regular_file_replacement_after_enumeration(
             parent_descriptor,
             leaf,
             display=display,
-            expected_stat=expected_stat,
+            expected_identity=expected_identity,
         )
 
     monkeypatch.setattr(search_module, "open_regular_file_at", replace_before_open)
@@ -1085,7 +1085,7 @@ def test_grep_uses_authorized_parent_after_directory_replacement(
         leaf: str,
         *,
         display: str,
-        expected_stat: os.stat_result,
+        expected_identity: tuple[int, int],
     ) -> int:
         nonlocal swapped
         if leaf == "data.txt" and not swapped:
@@ -1096,7 +1096,7 @@ def test_grep_uses_authorized_parent_after_directory_replacement(
             parent_descriptor,
             leaf,
             display=display,
-            expected_stat=expected_stat,
+            expected_identity=expected_identity,
         )
 
     monkeypatch.setattr(search_module, "open_regular_file_at", replace_parent_before_open)
@@ -1125,13 +1125,13 @@ def test_grep_closes_walked_file_after_early_truncation(
         leaf: str,
         *,
         display: str,
-        expected_stat: os.stat_result,
+        expected_identity: tuple[int, int],
     ) -> int:
         descriptor = original(
             parent_descriptor,
             leaf,
             display=display,
-            expected_stat=expected_stat,
+            expected_identity=expected_identity,
         )
         opened.append(descriptor)
         return descriptor

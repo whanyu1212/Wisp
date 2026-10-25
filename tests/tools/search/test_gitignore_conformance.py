@@ -252,7 +252,7 @@ def _fixture_text() -> str:
     cases = []
     for content in contents:
         spec = _compile_ignore_lines(content.splitlines(keepends=True))
-        ignore_specs = (_IgnoreSpec(_BASE, spec, 1),)
+        ignore_specs = (_IgnoreSpec(_BASE, spec, 1, content.encode("utf-8", "surrogateescape")),)
         cases.append(
             {
                 "content": _hex(content),

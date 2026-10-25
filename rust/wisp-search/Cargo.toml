@@ -9,6 +9,11 @@ publish = false
 [dependencies]
 regex.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# 0.29 takes raw descriptors, which Python hands over as integers; later versions
+# take `AsFd`, which would need `unsafe` to wrap them.
+nix = { workspace = true, features = ["dir", "fs"] }
+
 [dev-dependencies]
 serde.workspace = true
 serde_json.workspace = true

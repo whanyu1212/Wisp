@@ -2,6 +2,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+mod walk;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -218,5 +221,13 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PendingText>()?;
     module.add_class::<GrepCancellation>()?;
     module.add_class::<GrepScanResult>()?;
+    #[cfg(unix)]
+    {
+        module.add_class::<walk::NativeWalk>()?;
+        module.add(
+            "NativeWalkError",
+            module.py().get_type::<walk::NativeWalkError>(),
+        )?;
+    }
     module.add_function(wrap_pyfunction!(scan_literal_fd, module)?)
 }

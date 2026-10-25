@@ -144,15 +144,54 @@ class _NativeGrepModule(Protocol):
     ) -> _NativeGrepScanResult: ...
 
 
-def _load_native_grep() -> _NativeGrepModule | None:
-    """Load the optional native grep API without making pure wheels depend on it."""
+type _NativeWalkBatch = tuple[int, str, list[tuple[str, int, int, bool]]]
 
+
+class _NativeWalk(Protocol):
+    """Runs of files from the optional native walk, as ``(fd, relative, files)``.
+
+    Each file is ``(name, st_dev, st_ino, hidden_or_ignored)``. A batch may be empty
+    after many entries, so the caller can check for cancellation. Its descriptor
+    stays open until the next batch is requested or the walk is closed.
+    """
+
+    def __iter__(self) -> Iterator[_NativeWalkBatch]: ...
+
+    def close(self) -> None: ...
+
+
+class _NativeWalkModule(Protocol):
+    """Subset of ``wisp._native`` used by the descriptor-relative walk."""
+
+    NativeWalkError: type[Exception]
+
+    def NativeWalk(
+        self,
+        descriptor: int,
+        *,
+        ancestors: list[tuple[str, int, bytes]],
+        in_git_repository: bool,
+        include_ignored: bool,
+        max_directory_entries: int,
+        max_ignore_file_bytes: int,
+        max_ignore_file_patterns: int,
+        max_git_marker_bytes: int,
+    ) -> _NativeWalk: ...
+
+
+def _import_native_module() -> object | None:
     try:
-        native_module = import_module("wisp._native")
+        return import_module("wisp._native")
     except ModuleNotFoundError as exc:
         if exc.name == "wisp._native":
             return None
         raise
+
+
+def _load_native_grep() -> _NativeGrepModule | None:
+    """Load the optional native grep API without making pure wheels depend on it."""
+
+    native_module = _import_native_module()
     if not hasattr(native_module, "GrepCancellation") or not hasattr(
         native_module, "scan_literal_fd"
     ):
@@ -161,6 +200,26 @@ def _load_native_grep() -> _NativeGrepModule | None:
 
 
 _NATIVE_GREP = _load_native_grep()
+
+
+def _load_native_walk() -> _NativeWalkModule | None:
+    """Load the optional native walk where it decodes names as ``os.scandir`` does."""
+
+    # The native walk matches names as UTF-8 with surrogateescape, which is how
+    # Python decodes them only when the filesystem encoding is UTF-8.
+    if (
+        os.name == "nt"
+        or sys.getfilesystemencoding() != "utf-8"
+        or sys.getfilesystemencodeerrors() != "surrogateescape"
+    ):
+        return None
+    native_module = _import_native_module()
+    if not hasattr(native_module, "NativeWalk"):
+        return None
+    return cast(_NativeWalkModule, native_module)
+
+
+_NATIVE_WALK = _load_native_walk()
 
 
 class GrepTool:
@@ -804,7 +863,7 @@ class _WalkedFile:
     path: Path
     parent_descriptor: int | None = None
     leaf: str | None = None
-    expected_stat: os.stat_result | None = None
+    expected_identity: tuple[int, int] | None = None
     opened_descriptor: int | None = None
 
     @contextmanager
@@ -817,14 +876,14 @@ class _WalkedFile:
         if (
             self.parent_descriptor is not None
             and self.leaf is not None
-            and self.expected_stat is not None
+            and self.expected_identity is not None
         ):
             try:
                 descriptor = open_regular_file_at(
                     self.parent_descriptor,
                     self.leaf,
                     display=str(self.path),
-                    expected_stat=self.expected_stat,
+                    expected_identity=self.expected_identity,
                 )
             except OSError as exc:
                 if exc.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
@@ -863,13 +922,38 @@ def _iter_walked_files(
                 context,
                 cancel_event=cancel_event,
             )
+            resolved_cwd = context.cwd.resolve(strict=False)
+            native = _NATIVE_WALK
+            native_walk = (
+                None
+                if native is None
+                else _open_native_walk(
+                    native,
+                    descriptor,
+                    secure_path.path,
+                    ancestor_specs,
+                    in_git_repository=in_git_repository,
+                    include_ignored=ignore_override_matcher is not None,
+                )
+            )
+            if native is not None and native_walk is not None:
+                yield from _native_walk_directory(
+                    native,
+                    native_walk,
+                    secure_path.path,
+                    context,
+                    ignore_override_matcher=ignore_override_matcher,
+                    resolved_cwd=resolved_cwd,
+                    cancel_event=cancel_event,
+                )
+                return
             yield from _walk_directory(
                 descriptor,
                 secure_path.path,
                 context,
                 ignore_specs=ancestor_specs,
                 ignore_override_matcher=ignore_override_matcher,
-                resolved_cwd=context.cwd.resolve(strict=False),
+                resolved_cwd=resolved_cwd,
                 in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
             )
@@ -887,11 +971,125 @@ def _iter_walked_files(
             raise directory_error from None
 
 
+def _open_native_walk(
+    native: _NativeWalkModule,
+    descriptor: int | Path,
+    root: Path,
+    ancestor_specs: tuple[_IgnoreSpec, ...],
+    *,
+    in_git_repository: bool,
+    include_ignored: bool,
+) -> _NativeWalk | None:
+    """Start the native walk below ``descriptor``, or return ``None`` to walk in Python."""
+
+    if isinstance(descriptor, Path):
+        return None
+    ancestors = [
+        (_ancestor_prefix(root, spec.base), spec.priority, spec.content) for spec in ancestor_specs
+    ]
+    try:
+        return native.NativeWalk(
+            descriptor,
+            ancestors=ancestors,
+            in_git_repository=in_git_repository,
+            include_ignored=include_ignored,
+            max_directory_entries=_MAX_DIRECTORY_ENTRIES,
+            max_ignore_file_bytes=_MAX_IGNORE_FILE_BYTES,
+            max_ignore_file_patterns=_MAX_IGNORE_FILE_PATTERNS,
+            max_git_marker_bytes=_MAX_GIT_MARKER_BYTES,
+        )
+    except OSError:
+        # The walk duplicates the descriptor; a sandbox may refuse that.
+        return None
+
+
+def _ancestor_prefix(root: Path, base: Path) -> str:
+    relative = root.relative_to(base)
+    return "" if relative == Path() else f"{relative.as_posix()}/"
+
+
+def _native_walk_directory(
+    native: _NativeWalkModule,
+    walk: _NativeWalk,
+    root: Path,
+    context: ToolContext,
+    *,
+    ignore_override_matcher: PathMatcher | None,
+    resolved_cwd: Path,
+    cancel_event: Event | None,
+) -> Iterator[_WalkedFile]:
+    """Yield the native walk's files, applying the checks that stay in Python.
+
+    The walk has already skipped links, non-regular files, pruned directories and,
+    unless ``ignore_override_matcher`` is set, hidden and ignored files.
+    """
+
+    # Entries opened through a descriptor are never links, so each one's real path
+    # is the root's real path plus its relative path.
+    real_root = Path(os.path.realpath(root))
+    in_cwd = context.allow_outside_cwd or real_root.is_relative_to(resolved_cwd)
+    cancelled = cancel_event is not None and cancel_event.is_set()
+    if cancelled or not in_cwd:
+        walk.close()
+        return
+    with closing(walk):
+        try:
+            for directory_descriptor, relative, files in walk:
+                directory = root / relative
+                real_directory = real_root / relative
+                for leaf, device, inode, hidden_or_ignored in files:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return
+                    candidate = directory / leaf
+                    if hidden_or_ignored and not (
+                        ignore_override_matcher is not None and ignore_override_matcher(candidate)
+                    ):
+                        continue
+                    if _is_protected_walked_file(candidate, real_directory / leaf, context):
+                        continue
+                    yield _WalkedFile(
+                        path=candidate,
+                        parent_descriptor=directory_descriptor,
+                        leaf=leaf,
+                        expected_identity=(device, inode),
+                    )
+                if cancel_event is not None and cancel_event.is_set():
+                    return
+        except native.NativeWalkError as exc:
+            raise _native_walk_error(root, exc) from None
+
+
+def _native_walk_error(root: Path, error: Exception) -> Exception:
+    """Rebuild the Python walk's error for a native walk failure."""
+
+    kind, relative, *details = error.args
+    if kind == "stat":
+        # DirEntry.stat raises the OSError itself, naming only the entry.
+        (error_number,) = details
+        return OSError(error_number, os.strerror(error_number), relative)
+    path = root / relative
+    if kind == "directory_entries":
+        return _DirectoryEntryLimitError(
+            f"Directory {path} exceeds {_MAX_DIRECTORY_ENTRIES} entries"
+        )
+    if kind == "ignore_file_bytes":
+        return _IgnoreFileLimitError(f"Ignore file {path} exceeds {_MAX_IGNORE_FILE_BYTES} bytes")
+    if kind == "ignore_file_patterns":
+        return _IgnoreFileLimitError(
+            f"Ignore file {path} exceeds {_MAX_IGNORE_FILE_PATTERNS} patterns"
+        )
+    (error_number,) = details
+    error_text = OSError(error_number, os.strerror(error_number))
+    return ToolError(f"Could not list directory {path}: {error_text}")
+
+
 @dataclass(frozen=True, slots=True)
 class _IgnoreSpec:
     base: Path
     spec: GitIgnoreSpec
     priority: int
+    # The raw file, which the native walk compiles again for ancestor directories.
+    content: bytes
 
 
 def _ancestor_ignore_specs(
@@ -1061,7 +1259,9 @@ def _walk_directory(
                 path=candidate,
                 parent_descriptor=descriptor if isinstance(descriptor, int) else None,
                 leaf=name if isinstance(descriptor, int) else None,
-                expected_stat=info if isinstance(descriptor, int) else None,
+                expected_identity=(
+                    (info.st_dev, info.st_ino) if isinstance(descriptor, int) else None
+                ),
             )
 
 
@@ -1085,17 +1285,23 @@ def _bounded_sorted_directory_entries(
     return retained
 
 
-def _read_bounded_ignore_lines(descriptor: int, source: str) -> tuple[str, ...]:
+def _read_bounded_ignore_content(descriptor: int, source: str) -> bytes:
     with os.fdopen(os.dup(descriptor), "rb") as file:
         content = file.read(_MAX_IGNORE_FILE_BYTES + 1)
     if len(content) > _MAX_IGNORE_FILE_BYTES:
         raise _IgnoreFileLimitError(f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_BYTES} bytes")
+    return content
+
+
+def _compile_ignore_file(
+    directory: Path, content: bytes, source: str, priority: int
+) -> _IgnoreSpec:
     lines = content.decode("utf-8", errors="surrogateescape").splitlines(keepends=True)
     if len(lines) > _MAX_IGNORE_FILE_PATTERNS:
         raise _IgnoreFileLimitError(
             f"Ignore file {source} exceeds {_MAX_IGNORE_FILE_PATTERNS} patterns"
         )
-    return tuple(lines)
+    return _IgnoreSpec(directory, _compile_ignore_lines(lines), priority, content)
 
 
 def _is_git_repository_root(
@@ -1174,26 +1380,20 @@ def _read_ignore_specs(
                 try:
                     if not stat.S_ISREG(os.fstat(ignore_fd).st_mode):
                         continue
-                    lines = _read_bounded_ignore_lines(ignore_fd, str(directory / name))
+                    content = _read_bounded_ignore_content(ignore_fd, str(directory / name))
                 finally:
                     os.close(ignore_fd)
             else:
                 ignore_path = secure_tool_path(str(directory / name), context)
                 with open_file(ignore_path) as ignore_fd:
-                    lines = _read_bounded_ignore_lines(ignore_fd, str(directory / name))
+                    content = _read_bounded_ignore_content(ignore_fd, str(directory / name))
         except _IgnoreFileLimitError:
             raise
         except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
             continue
         if cancel_event is not None and cancel_event.is_set():
             return tuple(specs)
-        specs.append(
-            _IgnoreSpec(
-                directory,
-                _compile_ignore_lines(lines),
-                priority,
-            )
-        )
+        specs.append(_compile_ignore_file(directory, content, str(directory / name), priority))
     return tuple(specs)
 
 
@@ -1208,6 +1408,7 @@ def _read_repository_exclude(
 
     if cancel_event is not None and cancel_event.is_set():
         return None
+    source = str(directory / ".git" / "info" / "exclude")
     try:
         if isinstance(descriptor, int):
             directory_flags = (
@@ -1225,9 +1426,7 @@ def _read_repository_exclude(
                     try:
                         if not stat.S_ISREG(os.fstat(exclude_fd).st_mode):
                             return None
-                        lines = _read_bounded_ignore_lines(
-                            exclude_fd, str(directory / ".git" / "info" / "exclude")
-                        )
+                        content = _read_bounded_ignore_content(exclude_fd, source)
                     finally:
                         os.close(exclude_fd)
                 finally:
@@ -1235,16 +1434,17 @@ def _read_repository_exclude(
             finally:
                 os.close(git_fd)
         else:
-            exclude_path = secure_tool_path(str(directory / ".git" / "info" / "exclude"), context)
+            exclude_path = secure_tool_path(source, context)
+            source = str(exclude_path.path)
             with open_file(exclude_path) as exclude_fd:
-                lines = _read_bounded_ignore_lines(exclude_fd, str(exclude_path.path))
+                content = _read_bounded_ignore_content(exclude_fd, source)
     except _IgnoreFileLimitError:
         raise
     except (FileNotFoundError, OSError, ToolError, UnicodeDecodeError):
         return None
     if cancel_event is not None and cancel_event.is_set():
         return None
-    return _IgnoreSpec(directory, _compile_ignore_lines(lines), 0)
+    return _compile_ignore_file(directory, content, source, 0)
 
 
 def _ordered_ignore_specs(ignore_specs: tuple[_IgnoreSpec, ...]) -> list[_IgnoreSpec]:
