@@ -1,6 +1,8 @@
-//! Bounded literal scanning for securely opened files.
+//! Bounded literal scanning for securely opened files, and gitignore matching.
 
 #![forbid(unsafe_code)]
+
+pub mod gitignore;
 
 use std::collections::VecDeque;
 use std::fs::File;
