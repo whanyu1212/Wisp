@@ -29,7 +29,15 @@ def test_grep_regex_timeout_is_actionable(
     holds_gil: list[bool] = []
 
     class _TimingOutExpression:
-        def search(self, _line: str, *, timeout: float, concurrent: bool = True) -> object:
+        def search(
+            self,
+            _line: str,
+            pos: None = None,
+            endpos: None = None,
+            concurrent: bool | None = None,
+            partial: bool = False,
+            timeout: float | None = None,
+        ) -> object:
             timeouts.append(timeout)
             holds_gil.append(concurrent is False)
             raise TimeoutError
@@ -53,6 +61,17 @@ def test_grep_regex_timeout_is_actionable(
     assert holds_gil == [True, False]
 
 
+def test_grep_times_out_real_backtracking(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # Uses the real regex module, so the positional search arguments must reach its timeout.
+    monkeypatch.setattr(search_tools_module, "_REGEX_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(search_tools_module, "_REGEX_RETRY_BUDGET_SECONDS", 0.05)
+    # Unbounded, this search takes about a second; bounded, it stops within 60 ms.
+    (tmp_path / "notes.txt").write_text("a" * 30 + "\n", encoding="utf-8")
+
+    with pytest.raises(ToolError, match="regex evaluation time limit"):
+        run_tool(GrepTool(), {"pattern": "(a|aa)+b"}, ToolContext(cwd=tmp_path))
+
+
 def test_grep_retries_lines_that_time_out_while_starved(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -62,7 +81,15 @@ def test_grep_retries_lines_that_time_out_while_starved(
     timeouts: list[float] = []
 
     class _StarvedExpression:
-        def search(self, line: str, *, timeout: float, concurrent: bool = True) -> object | None:
+        def search(
+            self,
+            line: str,
+            pos: None = None,
+            endpos: None = None,
+            concurrent: bool | None = None,
+            partial: bool = False,
+            timeout: float | None = None,
+        ) -> object | None:
             timeouts.append(timeout)
             if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
                 raise TimeoutError
@@ -96,7 +123,15 @@ def test_grep_fails_without_retry_once_the_retry_budget_is_spent(
     timeouts: list[float] = []
 
     class _SlowExpression:
-        def search(self, _line: str, *, timeout: float, concurrent: bool = True) -> object | None:
+        def search(
+            self,
+            _line: str,
+            pos: None = None,
+            endpos: None = None,
+            concurrent: bool | None = None,
+            partial: bool = False,
+            timeout: float | None = None,
+        ) -> object | None:
             timeouts.append(timeout)
             if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
                 raise TimeoutError
