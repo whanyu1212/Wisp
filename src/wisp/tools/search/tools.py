@@ -26,7 +26,11 @@ from pathspec import GitIgnoreSpec
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
-from wisp.tools.files.paths import display_tool_path, is_protected_path
+from wisp.tools.files.paths import (
+    display_tool_path,
+    is_protected_path,
+    matches_protected_pattern,
+)
 from wisp.tools.files.secure_fs import (
     SecureToolPath,
     open_directory,
@@ -956,6 +960,12 @@ def _walk_directory(
     except OSError as exc:
         raise ToolError(f"Could not list directory {path}: {exc}") from exc
 
+    # Files below are never links, so each one's real path is this directory's real
+    # path plus its name. Resolving once here keeps the walk from resolving every file.
+    real_directory = Path(os.path.realpath(path))
+    directory_in_cwd = context.allow_outside_cwd or real_directory.is_relative_to(
+        context.cwd.resolve(strict=False)
+    )
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -1030,7 +1040,8 @@ def _walk_directory(
                 )
                 or (ignore_override_matcher is not None and ignore_override_matcher(candidate))
             )
-            and _is_path_within_tool_cwd(candidate, context)
+            and directory_in_cwd
+            and not _is_protected_walked_file(candidate, real_directory / name, context)
         ):
             yield _WalkedFile(
                 path=candidate,
@@ -1303,6 +1314,14 @@ def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_protected_walked_file(path: Path, real_path: Path, context: ToolContext) -> bool:
+    # is_protected_path for a file whose real path the walk already knows.
+    patterns = context.protected_paths
+    return matches_protected_pattern(path, patterns) or (
+        real_path != path and matches_protected_pattern(real_path, patterns)
+    )
 
 
 def _is_hidden(name: str) -> bool:

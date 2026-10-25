@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
-from fnmatch import fnmatch
-from pathlib import Path, PurePosixPath
+import re
+from dataclasses import dataclass
+from fnmatch import translate
+from functools import lru_cache
+from pathlib import Path
 
 from wisp.tools.context import ToolContext
 
@@ -42,65 +45,66 @@ def is_protected_path(path: Path, context: ToolContext) -> bool:
     # Lexical form: make absolute against cwd WITHOUT dereferencing symlinks, so a
     # protected name that links elsewhere is still matched by its requested name.
     lexical = path if path.is_absolute() else cwd / path
-    if _candidate_is_protected(lexical, patterns, cwd):
+    if matches_protected_pattern(lexical, patterns):
         return True
 
     # os.path.realpath, unlike Path.resolve on Python 3.12, leaves a symlink loop in
     # place instead of raising; opening the path then fails cleanly.
     resolved = Path(os.path.realpath(lexical))
     # Keep the target check for symlinks, but avoid matching the same path twice.
-    return resolved != lexical and _candidate_is_protected(resolved, patterns, cwd)
+    return resolved != lexical and matches_protected_pattern(resolved, patterns)
 
 
-def _candidate_is_protected(path: Path, patterns: tuple[str, ...], cwd: Path) -> bool:
-    """Match one concrete path against the protected patterns (see is_protected_path)."""
+def matches_protected_pattern(path: Path, patterns: tuple[str, ...]) -> bool:
+    """Return whether an absolute path, taken as written, matches a protected glob.
 
-    name = path.name
-    abs_text = PurePosixPath(path.as_posix()).as_posix()
-    try:
-        rel_text: str | None = path.relative_to(cwd).as_posix()
-    except ValueError:
-        rel_text = None  # outside cwd; rely on basename + absolute-suffix matching
+    Unlike ``is_protected_path``, this does not resolve symbolic links. Callers
+    that already know the real path, such as a walk that never follows links,
+    use it to avoid resolving every file.
 
-    for pattern in patterns:
-        normalized = pattern.replace("\\", "/").lstrip("/")
-        if normalized.startswith("**/"):
-            normalized = normalized[3:]
+    Args:
+        path (Path): Absolute path to match.
+        patterns (tuple[str, ...]): Protected globs, as in ``ToolContext``.
 
-        if "/" not in normalized:
-            if _fn(name, normalized):
-                return True
-            continue
-
-        # Path pattern: match as a suffix of the relative or absolute path so it
-        # anchors to a trailing path segment rather than the filesystem root.
-        if rel_text is not None and _fn(rel_text, normalized):
-            return True
-        if _path_suffix_matches(abs_text, normalized):
-            return True
-    return False
-
-
-def _path_suffix_matches(path_text: str, pattern: str) -> bool:
-    """Return whether ``pattern`` matches ``path_text`` or any of its suffixes.
-
-    ``a/b/c.json`` is tested against the pattern, then ``b/c.json``, then
-    ``c.json`` — so ``b/c.json`` matches an absolute path ending in those
-    segments. This gives slash-bearing patterns depth-independent reach.
+    Returns:
+        bool: Whether a bare pattern matches the basename, or a path pattern
+            matches a trailing run of the path's segments.
     """
 
-    parts = path_text.split("/")
-    for start in range(len(parts)):
-        suffix = "/".join(parts[start:])
-        if _fn(suffix, pattern):
-            return True
-    return False
+    if not patterns:
+        return False
+    matcher = _protected_matcher(tuple(patterns))
+    text = path.as_posix().lower()
+    if matcher.name is not None and matcher.name.match(text.rsplit("/", 1)[-1]):
+        return True
+    return matcher.path is not None and matcher.path.match(text) is not None
 
 
-def _fn(value: str, pattern: str) -> bool:
-    """Case-insensitive fnmatch."""
+@dataclass(frozen=True, slots=True)
+class _ProtectedMatcher:
+    name: re.Pattern[str] | None
+    path: re.Pattern[str] | None
 
-    return fnmatch(value.lower(), pattern.lower())
+
+@lru_cache(maxsize=16)
+def _protected_matcher(patterns: tuple[str, ...]) -> _ProtectedMatcher:
+    name_patterns: list[str] = []
+    path_patterns: list[str] = []
+    for pattern in patterns:
+        normalized = pattern.replace("\\", "/").lstrip("/").lower()
+        if normalized.startswith("**/"):
+            normalized = normalized[3:]
+        if "/" in normalized:
+            path_patterns.append(translate(normalized))
+        else:
+            name_patterns.append(translate(normalized))
+    return _ProtectedMatcher(
+        name=re.compile("|".join(name_patterns)) if name_patterns else None,
+        # A path pattern matches the whole path or any suffix that starts after a
+        # "/", so it anchors to trailing segments wherever the path is rooted. That
+        # covers the cwd-relative path, which is itself such a suffix.
+        path=re.compile(f"(?s:.*/)?(?:{'|'.join(path_patterns)})") if path_patterns else None,
+    )
 
 
 def display_tool_path(path: Path, context: ToolContext) -> str:
