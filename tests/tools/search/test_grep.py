@@ -878,6 +878,20 @@ def test_python_grep_splitlines_preserves_crlf_across_chunks(
     assert list(search_tools_module._iter_utf8_splitlines(path)) == ["one", "two", "three"]
 
 
+@pytest.mark.parametrize("chunk_bytes", range(1, 12))
+def test_splitlines_matches_any_chunking(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    chunk_bytes: int,
+) -> None:
+    text = "a\r\nb\r\r\nc\n\rd\x85é \r\n\nf\v\f\x1c\x1d\x1eg\r"
+    path = tmp_path / "data.txt"
+    path.write_text(text, encoding="utf-8", newline="")
+    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", chunk_bytes)
+
+    assert list(search_tools_module._iter_utf8_splitlines(path)) == text.splitlines()
+
+
 def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
