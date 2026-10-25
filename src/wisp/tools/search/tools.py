@@ -650,24 +650,23 @@ def _yield_splitline_chunk(
     max_line_chars: int,
     final: bool = False,
 ) -> Generator[str, None, bool]:
-    start = 0
-    index = 0
-    while index < len(text):
-        character = text[index]
-        if character not in _SPLITLINES_BOUNDARIES:
-            index += 1
-            continue
-        line_parts.append(text[start:index])
-        if sum(map(len, line_parts)) > max_line_chars:
+    pieces = text.splitlines(keepends=True)
+    last_index = len(pieces) - 1
+    for index, piece in enumerate(pieces):
+        if piece[-1] not in _SPLITLINES_BOUNDARIES:
+            line_parts.append(piece)
+            break
+        line = piece[:-2] if piece.endswith("\r\n") else piece[:-1]
+        if line_parts:
+            line = "".join((*line_parts, line))
+            line_parts.clear()
+        if len(line) > max_line_chars:
             raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
-        if character == "\r" and index + 1 == len(text) and not final:
+        # A trailing CR may be the first half of a CRLF split across chunks.
+        if index == last_index and piece[-1] == "\r" and not final:
+            line_parts.append(line)
             return True
-        yield "".join(line_parts)
-        line_parts.clear()
-        index += 2 if character == "\r" and text[index + 1 : index + 2] == "\n" else 1
-        start = index
-    if start < len(text):
-        line_parts.append(text[start:])
+        yield line
     return False
 
 
