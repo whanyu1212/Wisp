@@ -402,7 +402,7 @@ def test_walk_hides_file_protected_by_real_path(tmp_path: Path, monkeypatch: Mon
     assert walked == [short / "notes.txt"]
 
 
-def test_walk_resolves_once_per_directory(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_walk_resolves_only_root(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     import os
 
     from wisp.tools.search import tools as search_tools
@@ -425,7 +425,44 @@ def test_walk_resolves_once_per_directory(tmp_path: Path, monkeypatch: MonkeyPat
     walked = list(search_tools._iter_files(root, context))
 
     assert len(walked) == 10
-    assert not [path for path in resolved if path.endswith(".txt")]
+    assert not [path for path in resolved if path.endswith((".txt", "/a", "/b"))]
+
+
+def test_path_walk_resolves_nested_short_name(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # A walk by path (as on Windows) may meet short names below its root, so it
+    # resolves each directory it enters. Passing a Path descriptor takes that branch.
+    import os
+
+    from wisp.tools.search import tools as search_tools
+
+    short = tmp_path / "WISP~1"
+    short.mkdir()
+    (short / "auth.json").write_text("{}", encoding="utf-8")
+    (short / "notes.txt").write_text("ok", encoding="utf-8")
+    original = os.path.realpath
+
+    def expand_short_name(path: str | os.PathLike[str], **kwargs: bool) -> str:
+        resolved = original(path, **kwargs)
+        if resolved == str(short) or resolved.startswith(f"{short}{os.sep}"):
+            return str(tmp_path / ".wisp") + resolved.removeprefix(str(short))
+        return resolved
+
+    monkeypatch.setattr(search_tools.os.path, "realpath", expand_short_name)
+    context = _context(tmp_path)
+
+    walked = [
+        candidate.path
+        for candidate in search_tools._walk_directory(
+            tmp_path,
+            tmp_path,
+            context,
+            ignore_specs=(),
+            ignore_override_matcher=None,
+            resolved_cwd=tmp_path.resolve(),
+        )
+    ]
+
+    assert walked == [short / "notes.txt"]
 
 
 def test_configured_auth_file_is_protected(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

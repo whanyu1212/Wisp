@@ -27,7 +27,6 @@ from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import (
-    display_tool_path,
     is_protected_path,
     matches_protected_pattern,
 )
@@ -568,10 +567,15 @@ _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 def _display_walked_path(path: Path, resolved_cwd: Path) -> str:
     """Display a secure-walk candidate without resolving the same file again."""
 
-    try:
-        return str(path.relative_to(resolved_cwd))
-    except ValueError:
-        return str(path)
+    if os.name == "nt":
+        # WindowsPath.relative_to ignores case, which a string prefix would not.
+        try:
+            return str(path.relative_to(resolved_cwd))
+        except ValueError:
+            return str(path)
+    # Walked paths are built from the resolved root, so the prefix is lexical.
+    # Path.relative_to costs more than the rest of the walk per file.
+    return str(path).removeprefix(str(resolved_cwd).rstrip("/") + "/")
 
 
 @dataclass(slots=True)
@@ -697,11 +701,12 @@ def _python_find(
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
-    # Display paths resolve file symlinks, so a lexically late candidate may sort
-    # before an earlier directory prefix. Scan the streamed candidates completely
-    # to preserve historical global ordering, but retain only the sorted prefix and
-    # one truncation lookahead in memory.
+    # The walk sorts each directory and descends in place, so "a/b" streams before
+    # "a-c" although "a-c" sorts first. Scan the streamed candidates completely to
+    # keep global ordering, but retain only the sorted prefix and one truncation
+    # lookahead in memory.
     glob_matcher = _prepare_glob_matcher(pattern)
+    resolved_cwd = context.cwd.resolve(strict=False)
 
     def matching_display_paths() -> Iterator[str]:
         for candidate in _iter_files(
@@ -709,7 +714,7 @@ def _python_find(
             context,
             cancel_event=cancel_event,
         ):
-            display_path = display_tool_path(candidate, context)
+            display_path = _display_walked_path(candidate, resolved_cwd)
             if glob_matcher(display_path):
                 yield display_path
 
@@ -861,6 +866,7 @@ def _iter_walked_files(
                 context,
                 ignore_specs=ancestor_specs,
                 ignore_override_matcher=ignore_override_matcher,
+                resolved_cwd=context.cwd.resolve(strict=False),
                 in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
             )
@@ -934,6 +940,8 @@ def _walk_directory(
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
     ignore_override_matcher: PathMatcher | None,
+    resolved_cwd: Path,
+    real_directory: Path | None = None,
     in_git_repository: bool = False,
     cancel_event: Event | None = None,
 ) -> Iterable[_WalkedFile]:
@@ -960,12 +968,12 @@ def _walk_directory(
     except OSError as exc:
         raise ToolError(f"Could not list directory {path}: {exc}") from exc
 
-    # Files below are never links, so each one's real path is this directory's real
-    # path plus its name. Resolving once here keeps the walk from resolving every file.
-    real_directory = Path(os.path.realpath(path))
-    directory_in_cwd = context.allow_outside_cwd or real_directory.is_relative_to(
-        context.cwd.resolve(strict=False)
-    )
+    # Entries opened through a descriptor are never links, so each one's real path is
+    # this directory's real path plus its name. Only the walk root and directories
+    # reached by path need resolving.
+    if real_directory is None:
+        real_directory = Path(os.path.realpath(path))
+    directory_in_cwd = context.allow_outside_cwd or real_directory.is_relative_to(resolved_cwd)
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -1000,6 +1008,7 @@ def _walk_directory(
                             context,
                             ignore_specs=ignore_specs,
                             ignore_override_matcher=ignore_override_matcher,
+                            resolved_cwd=resolved_cwd,
                             in_git_repository=in_git_repository,
                             cancel_event=cancel_event,
                         )
@@ -1021,6 +1030,8 @@ def _walk_directory(
                     context,
                     ignore_specs=ignore_specs,
                     ignore_override_matcher=ignore_override_matcher,
+                    resolved_cwd=resolved_cwd,
+                    real_directory=real_directory / name,
                     in_git_repository=in_git_repository,
                     cancel_event=cancel_event,
                 )
