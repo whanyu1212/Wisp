@@ -431,7 +431,9 @@ def test_known_file_access_works_below_execute_only_parent(tmp_path: Path) -> No
     assert target.read_text(encoding="utf-8") == "edited\n"
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX mode-bit semantics")
+@pytest.mark.skipif(
+    os.name == "nt" or os.geteuid() == 0, reason="POSIX mode bits, which root bypasses"
+)
 def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
     target = tmp_path / "target.txt"
     target.write_text("original\n", encoding="utf-8")
