@@ -10,7 +10,79 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.3.1 — Unreleased
+## 0.4.0 — Unreleased
+
+0.4.0 is a minor release focused on the built-in tools: faster `grep` and `find`, file tools that
+cope better with real files, and a more dependable `bash`. It changes no command, event, handshake
+model, or session format, so 0.3.x and 0.4.0 read each other's sessions; the backend and frontend
+must still come from the same release. Code that sets `ToolContext`'s operation write fields must
+migrate; see Python API below.
+
+### Tools
+
+- `bash` runs commands in bash (`/bin/bash`, then `bash` on `PATH`, falling back to `/bin/sh`)
+  instead of `/bin/sh`, so `[[ ]]`, arrays, and `pipefail` work on Debian and Ubuntu. (#827)
+- One-shot `bash` keeps the end of stdout and stderr separately instead of letting long stdout push
+  out stderr, starts commands with stdin from `/dev/null`, returns shortly after the shell exits,
+  and tells the model when it stopped background processes that still held the output. (#819,
+  #822)
+- Process cleanup on a busy machine no longer gives up before killing the process group, which had
+  ended runs as "Failed to terminate process tree" and could leave processes running. (#830)
+- `edit` matches LF edits in CRLF files, tolerates trailing whitespace the model did not copy,
+  names the failing edit and whether it matched nothing or several places, reports indentation
+  mismatches, and rejects edits that change nothing. (#821, #826)
+- `read` ends a cut-short read with the offset to continue from, rejects an offset past the end,
+  and suggests how to get past a line longer than the output limit. (#819)
+- `read`, `grep`, `find`, and `ls` follow a symbolic link whose target stays inside the workspace
+  and passes the protected-path check, which fixes monorepo and pnpm layouts; a symlink loop no
+  longer crashes. `write` and `edit` still refuse links and name the target to write instead.
+  Links found while walking a directory are still skipped. (#829)
+- `grep` clips matched and context lines to 500 characters, and `grep` and `find` say how to see
+  more when they stop at `max_results`. (#823)
+- An ignore-file line that cannot be translated, such as `foo\`, no longer fails the whole search,
+  and an invalid glob argument is reported as an argument error. (#839)
+- The MCP credential file stays protected even when `protected_paths` is emptied. The docs now
+  state that protected paths bind only the file tools, not `bash`, MCP, or extension tools. (#825)
+
+### Performance
+
+- With the native extension, `grep` and `find` walk directories in Rust, including gitignore
+  matching ported from pathspec, and run in parallel within a tool batch. `find` on Wisp's own
+  repository drops from about 114 ms to 29 ms. (#840, #841, #842)
+- Python `grep` (regex, ignore-case, and literal without the native scanner) searches each block
+  of lines once before its individual lines, splits lines with `str.splitlines`, and calls the
+  regex module more cheaply; the last two changes alone take a regex search with no match over
+  Wisp's `src/` from about 120 ms to 45 ms. Concurrent regex greps no longer slow each other
+  down several times over. (#833, #842, #843, #844)
+- The walk checks protected paths once per directory, `find` no longer resolves each file again,
+  and the native literal scanner searches whole chunks instead of each line. (#834, #836, #837)
+- A `bash` call on macOS skips a final job sample that cannot find anything, about 16 ms per
+  call. (#835)
+
+### Python API
+
+- `ToolContext`'s `allowed_write_paths`, `conflicting_write_paths`,
+  `require_create_only_writes`, `require_non_empty_writes`, and `create_only_write_receipt` are
+  replaced by one `write_constraint`, a `WriteConstraint` from `wisp.tools.context` with
+  `allowed_paths`, `conflicting_paths`, `create_only`, `non_empty`, and `receipt`. The fields
+  were undocumented and only `/init` set them, so they are removed without a deprecation period;
+  see the [0.4 compatibility notes](site/src/content/pages/reference/compatibility.md#wisp-04-compatibility).
+  A `ToolContext` built from a working directory, budgets, and protected paths is unaffected.
+  (#845)
+- `wisp.agent.harness`, which is not a supported namespace, renames `SimpleCancellationToken` to
+  `RunCancellationToken` and `queue_full_error` to `queue_full_message`, moves
+  `ToolResultProcessingError` to `wisp.coding.tool_execution`, and no longer re-exports
+  `QueueKind`; import it from `wisp.events`. (#815)
+
+### Documentation
+
+- Reorganized navigation and refreshed styling on the documentation site, and the README banner
+  and homepage now show the terminal UI. (#820, #838)
+
+<!-- Keeps links to the pre-release "0.3.1 — Unreleased" heading working. -->
+<a id="031--unreleased"></a>
+
+## 0.3.1 — 2026-10-23
 
 0.3.1 is a patch release on 0.3.0 with one terminal UI fix and the documentation site cutover.
 It changes no command, event, handshake model, or session format, so 0.3.0 and 0.3.1 read each
