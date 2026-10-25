@@ -817,6 +817,18 @@ def test_posix_wrapper_leaves_no_group_member_when_it_exits(
         os.killpg(wrapper.pid, 0)
 
 
+@pytest.mark.parametrize(("platform", "sampled"), [("linux", True), ("darwin", False)])
+def test_final_sample_only_on_linux(
+    tmp_path: Path, monkeypatch: MonkeyPatch, platform: str, sampled: bool
+) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+
+    wrapped = process_tools_module._wrap_posix_shell_command("true", tmp_path / "jobs")  # noqa: SLF001
+
+    assert wrapped.endswith("__wisp_record_jobs; exit $__wisp_status") is sampled
+    assert wrapped.endswith("exit $__wisp_status")
+
+
 def test_failed_scan_still_kills_group(monkeypatch: MonkeyPatch) -> None:
     signals: list[signal.Signals] = []
     released: list[object] = []
