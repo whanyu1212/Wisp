@@ -302,7 +302,7 @@ def open_regular_file_at(
     leaf: str,
     *,
     display: str,
-    expected_stat: os.stat_result,
+    expected_identity: tuple[int, int],
 ) -> int:
     """Open a regular file relative to an already-authorized directory.
 
@@ -315,7 +315,8 @@ def open_regular_file_at(
         parent_descriptor: Live descriptor for the authorized parent directory.
         leaf: Single untrusted directory-entry name to open.
         display: Path text used in errors.
-        expected_stat: No-follow entry metadata captured during enumeration.
+        expected_identity: ``(st_dev, st_ino)`` from the no-follow stat taken during
+            enumeration.
 
     Returns:
         A live descriptor for the regular file, owned by the caller.
@@ -328,7 +329,7 @@ def open_regular_file_at(
     descriptor = os.open(leaf, _FILE_FLAGS, dir_fd=parent_descriptor)
     try:
         opened_stat = os.fstat(descriptor)
-        if not os.path.samestat(opened_stat, expected_stat):
+        if (opened_stat.st_dev, opened_stat.st_ino) != expected_identity:
             raise FileNotFoundError(errno.ENOENT, f"File changed while opening: {display}")
         if not stat.S_ISREG(opened_stat.st_mode):
             raise ToolError(f"Not a regular file: {display}")

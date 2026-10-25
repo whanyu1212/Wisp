@@ -2600,6 +2600,7 @@ dependencies = [
 name = "wisp-search"
 version = "0.1.0"
 dependencies = [
+ "nix",
  "regex",
  "serde",
  "serde_json",
