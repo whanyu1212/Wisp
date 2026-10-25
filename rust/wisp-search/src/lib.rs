@@ -315,62 +315,103 @@ impl<'a> Scanner<'a> {
         self.cancellation.load(Ordering::Relaxed)
     }
 
+    /// Scans one validated chunk, returning true once scanning can stop.
+    ///
+    /// A line ending in `\r` at the end of the chunk is not emitted until the next chunk
+    /// shows whether `\n` follows, so the next chunk's binary check still runs first.
     fn push_text(&mut self, text: &str) -> Result<bool, ScanError> {
         if self.cancelled() {
             return Ok(true);
         }
-        for character in text.chars() {
-            if self.pending_carriage_return {
-                if self.emit_current_line()? {
-                    return Ok(true);
-                }
-                self.pending_carriage_return = false;
-                if character == '\n' {
-                    continue;
-                }
+        let bytes = text.as_bytes();
+        if bytes.is_empty() {
+            return Ok(false);
+        }
+        let mut start = 0;
+        if self.pending_carriage_return {
+            self.pending_carriage_return = false;
+            if self.emit_current_line()? {
+                return Ok(true);
             }
-
-            match character {
-                '\r' => self.pending_carriage_return = true,
-                '\n' | '\u{000b}' | '\u{000c}' | '\u{001c}' | '\u{001d}' | '\u{001e}'
-                | '\u{0085}' | '\u{2028}' | '\u{2029}' => {
-                    if self.emit_current_line()? {
-                        return Ok(true);
-                    }
-                }
-                _ => {
-                    self.current_line.push(character);
-                    self.current_line_chars = self.current_line_chars.saturating_add(1);
-                    if self.current_line_chars > self.config.max_line_chars {
-                        return Err(ScanError::LineTooLong {
-                            max_chars: self.config.max_line_chars,
-                        });
-                    }
-                }
+            if bytes[0] == b'\n' {
+                start = 1;
             }
         }
+        // The first pattern occurrence at or after the current line start. One search
+        // over the chunk replaces a search per line.
+        let mut next_hit = find_from(text, &self.config.pattern, start);
+        while let Some((end, width)) = next_line_boundary(bytes, start) {
+            let segment = &text[start..end];
+            self.check_line_length(segment)?;
+            if bytes[end] == b'\r' && end + 1 == bytes.len() {
+                self.current_line.push_str(segment);
+                self.current_line_chars = self
+                    .current_line_chars
+                    .saturating_add(segment.chars().count());
+                self.pending_carriage_return = true;
+                return Ok(false);
+            }
+            let stop = if self.current_line.is_empty() {
+                if next_hit.is_some_and(|hit| hit < start) {
+                    next_hit = find_from(text, &self.config.pattern, start);
+                }
+                let is_match = next_hit.is_some_and(|hit| hit + self.config.pattern.len() <= end);
+                self.emit_line(segment, is_match)
+            } else {
+                self.current_line.push_str(segment);
+                self.emit_current_line()
+            }?;
+            if stop {
+                return Ok(true);
+            }
+            start = end + width;
+            if width == 1 && bytes[end] == b'\r' && bytes[start] == b'\n' {
+                start += 1;
+            }
+        }
+        let rest = &text[start..];
+        self.check_line_length(rest)?;
+        self.current_line.push_str(rest);
+        self.current_line_chars = self.current_line_chars.saturating_add(rest.chars().count());
         Ok(false)
     }
 
-    fn end_of_file(&mut self) -> Result<(), ScanError> {
-        if self.pending_carriage_return {
-            self.emit_current_line()?;
-            self.pending_carriage_return = false;
-        } else if !self.current_line.is_empty() {
-            self.emit_current_line()?;
+    /// Fails when `segment` would take the current line past the character limit.
+    fn check_line_length(&self, segment: &str) -> Result<(), ScanError> {
+        let max_chars = self.config.max_line_chars;
+        // A line has at most as many characters as bytes, so count only long ones.
+        if self.current_line.len().saturating_add(segment.len()) > max_chars
+            && self
+                .current_line_chars
+                .saturating_add(segment.chars().count())
+                > max_chars
+        {
+            return Err(ScanError::LineTooLong { max_chars });
         }
         Ok(())
     }
 
-    /// Returns true once scanning can stop without looking at more input.
+    fn end_of_file(&mut self) -> Result<(), ScanError> {
+        if self.pending_carriage_return || !self.current_line.is_empty() {
+            self.emit_current_line()?;
+            self.pending_carriage_return = false;
+        }
+        Ok(())
+    }
+
     fn emit_current_line(&mut self) -> Result<bool, ScanError> {
+        let line = std::mem::take(&mut self.current_line);
+        self.current_line_chars = 0;
+        let is_match = line.contains(&self.config.pattern);
+        self.emit_line(&line, is_match)
+    }
+
+    /// Returns true once scanning can stop without looking at more input.
+    fn emit_line(&mut self, line: &str, is_match: bool) -> Result<bool, ScanError> {
         if self.cancelled() {
             return Ok(true);
         }
         self.line_number = self.line_number.saturating_add(1);
-        let line = std::mem::take(&mut self.current_line);
-        self.current_line_chars = 0;
-        let is_match = line.contains(&self.config.pattern);
 
         if is_match {
             if self.match_count >= self.config.remaining_matches {
@@ -390,7 +431,7 @@ impl<'a> Scanner<'a> {
                     }
                 }
                 self.output.append(
-                    format_record(self.config, self.line_number, &line, true),
+                    format_record(self.config, self.line_number, line, true),
                     true,
                 );
                 self.last_emitted_line = self.line_number;
@@ -400,7 +441,7 @@ impl<'a> Scanner<'a> {
             }
         } else if self.line_number <= self.group_end {
             self.output.append(
-                format_record(self.config, self.line_number, &line, false),
+                format_record(self.config, self.line_number, line, false),
                 false,
             );
             self.last_emitted_line = self.line_number;
@@ -410,7 +451,8 @@ impl<'a> Scanner<'a> {
             if self.preceding.len() == self.config.context_lines {
                 self.preceding.pop_front();
             }
-            self.preceding.push_back((self.line_number, line));
+            self.preceding
+                .push_back((self.line_number, line.to_owned()));
         }
         Ok(self.output.exhausted || self.had_extra_match || self.cancelled())
     }
@@ -428,6 +470,47 @@ impl<'a> Scanner<'a> {
             status: ScanStatus::Complete,
         }
     }
+}
+
+fn find_from(text: &str, pattern: &str, start: usize) -> Option<usize> {
+    text[start..].find(pattern).map(|offset| start + offset)
+}
+
+/// Bytes that end a line on their own or as the last byte of U+0085, U+2028 or U+2029.
+const LINE_BOUNDARY_BYTES: [bool; 256] = {
+    let mut table = [false; 256];
+    let mut index = 0;
+    let boundaries = [b'\n', b'\r', 0x0b, 0x0c, 0x1c, 0x1d, 0x1e, 0x85, 0xa8, 0xa9];
+    while index < boundaries.len() {
+        table[boundaries[index] as usize] = true;
+        index += 1;
+    }
+    table
+};
+
+/// Finds the next `str::splitlines` boundary at or after `start` in valid UTF-8.
+///
+/// Returns the boundary's byte offset and width. `\r\n` is reported as `\r`; the
+/// caller decides whether `\n` follows.
+fn next_line_boundary(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut from = start;
+    while let Some(offset) = bytes[from..]
+        .iter()
+        .position(|&byte| LINE_BOUNDARY_BYTES[usize::from(byte)])
+    {
+        let at = from + offset;
+        match bytes[at] {
+            // Continuation bytes: a boundary only as the end of C2 85 or E2 80 A8/A9.
+            // Earlier bytes of the same character are always at or after `start`.
+            0x85 if at > start && bytes[at - 1] == 0xc2 => return Some((at - 1, 2)),
+            0xa8 | 0xa9 if at > start + 1 && bytes[at - 2..at] == [0xe2, 0x80] => {
+                return Some((at - 2, 3));
+            }
+            0x85 | 0xa8 | 0xa9 => from = at + 1,
+            _ => return Some((at, 1)),
+        }
+    }
+    None
 }
 
 struct BoundedOutput {
@@ -701,6 +784,88 @@ mod tests {
             scan_literal(&mut reader, &config("β needle"), &AtomicBool::new(false)).unwrap();
 
         assert_eq!(result.lines, ["src/data.txt:2:β needle"]);
+    }
+
+    fn scan_in_chunks(bytes: &[u8], config: &ScanConfig, chunk_size: usize) -> ScanResult {
+        let mut reader = ChunkedReader {
+            bytes: Cursor::new(bytes.to_vec()),
+            chunk_size,
+        };
+        scan_literal(&mut reader, config, &AtomicBool::new(false)).unwrap()
+    }
+
+    /// Lines as Python's `str.splitlines` returns them, the Python backend's reference.
+    fn splitlines(text: &str) -> Vec<&str> {
+        let mut lines = Vec::new();
+        let mut rest = text;
+        while let Some(end) = rest.find([
+            '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+            '\u{2029}',
+        ]) {
+            lines.push(&rest[..end]);
+            let boundary = rest[end..]
+                .chars()
+                .next()
+                .expect("find returned a character");
+            rest = &rest[end + boundary.len_utf8()..];
+            if boundary == '\r' {
+                rest = rest.strip_prefix('\n').unwrap_or(rest);
+            }
+        }
+        if !rest.is_empty() {
+            lines.push(rest);
+        }
+        lines
+    }
+
+    #[test]
+    fn matches_splitlines_at_any_chunking() {
+        let pieces = [
+            "hit", "h", "it", "é", "Å", "\u{2026}", "\u{a8}", "\n", "\r", "\r\n", "\u{b}", "\u{c}",
+            "\u{1c}", "\u{1d}", "\u{1e}", "\u{85}", "\u{2028}", "\u{2029}",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..500 {
+            let mut text = String::new();
+            for _ in 0..30 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                text.push_str(pieces[(state % pieces.len() as u64) as usize]);
+            }
+            let expected: Vec<String> = splitlines(&text)
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.contains("hit"))
+                .map(|(index, line)| format!("src/data.txt:{}:{line}", index + 1))
+                .collect();
+            for chunk_size in [1, 2, 3, 7, READ_BUFFER_BYTES] {
+                let result = scan_in_chunks(text.as_bytes(), &config("hit"), chunk_size);
+                assert_eq!(
+                    result.lines, expected,
+                    "{text:?} in {chunk_size}-byte chunks"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_across_boundary_never_matches() {
+        let result = scan(b"hi\nt\nhi\r\nt\n", &config("hi\nt")).unwrap();
+
+        assert!(result.lines.is_empty());
+        assert_eq!(result.match_count, 0);
+    }
+
+    #[test]
+    fn trailing_carriage_return_waits_for_next_chunk() {
+        // The second line ends in `\r` at a chunk end, so it is not emitted (and cannot
+        // stop the scan) before the next chunk's NUL marks the file binary.
+        let mut config = config("hit");
+        config.remaining_matches = 1;
+        let result = scan_in_chunks(b"hit\nhit\r\0", &config, 8);
+
+        assert_eq!(result, ScanResult::discarded(ScanStatus::Binary));
     }
 
     #[test]
