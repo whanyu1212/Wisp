@@ -1694,6 +1694,7 @@ def _build_matcher(
         ) from exc
 
     retry_budget = _REGEX_RETRY_BUDGET_SECONDS
+    search = expression.search
 
     def time_limit_error() -> ToolError:
         return ToolError(
@@ -1708,10 +1709,10 @@ def _build_matcher(
         try:
             # By default regex releases the GIL for every search. Per line that turns
             # concurrent greps into a convoy of GIL handoffs, so the short attempt keeps it.
-            return (
-                expression.search(line, timeout=_REGEX_TIMEOUT_SECONDS, concurrent=False)
-                is not None
-            )
+            # The arguments are positional, (string, pos, endpos, concurrent, partial,
+            # timeout), because regex parses keywords slowly enough to cost a third of
+            # each per-line search.
+            return search(line, None, None, False, False, _REGEX_TIMEOUT_SECONDS) is not None
         except TimeoutError as exc:
             if retry_budget <= 0:
                 raise time_limit_error() from exc
