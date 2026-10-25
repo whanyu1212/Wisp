@@ -21,7 +21,7 @@ from wisp.tools.mcp_servers import (
     ProposeMcpServerChangeTool,
     ProposeMcpServerTool,
 )
-from wisp.tools.search import native_walk_available
+from wisp.tools.search.tools import native_walk_available
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
 if TYPE_CHECKING:
