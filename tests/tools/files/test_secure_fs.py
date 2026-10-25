@@ -1163,12 +1163,12 @@ def test_grep_closes_walked_descriptors_when_scanner_raises(
     (nested / "data.txt").write_text("needle\n", encoding="utf-8")
     active: list[int] = []
 
-    def fail_scanner(descriptor: int) -> Iterator[str]:
+    def fail_scanner(descriptor: int) -> Iterator[list[str]]:
         active.append(descriptor)
         raise RuntimeError("scanner failed")
-        yield "unreachable"
+        yield ["unreachable"]
 
-    monkeypatch.setattr(search_module, "_iter_utf8_splitlines", fail_scanner)
+    monkeypatch.setattr(search_module, "_iter_utf8_line_blocks", fail_scanner)
 
     with pytest.raises(RuntimeError, match="scanner failed") as caught:
         run_tool(
@@ -1192,12 +1192,12 @@ def test_grep_closes_walked_descriptors_when_cancelled(
     cancel_event = Event()
     active: list[int] = []
 
-    def cancel_scanner(descriptor: int) -> Iterator[str]:
+    def cancel_scanner(descriptor: int) -> Iterator[list[str]]:
         active.append(descriptor)
         cancel_event.set()
-        yield "needle"
+        yield ["needle"]
 
-    monkeypatch.setattr(search_module, "_iter_utf8_splitlines", cancel_scanner)
+    monkeypatch.setattr(search_module, "_iter_utf8_line_blocks", cancel_scanner)
 
     result = search_module._python_grep(
         pattern="needle",
