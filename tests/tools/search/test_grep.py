@@ -46,6 +46,7 @@ def test_grep_regex_timeout_is_actionable(
     monkeypatch.setattr(
         search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _TimingOutExpression()
     )
+    monkeypatch.setattr(search_tools_module, "_build_block_matcher", lambda *_a, **_kw: None)
 
     with pytest.raises(ToolError) as caught:
         run_tool(GrepTool(), {"pattern": "(text)+"}, ToolContext(cwd=tmp_path))
@@ -100,6 +101,7 @@ def test_grep_retries_lines_that_time_out_while_starved(
     monkeypatch.setattr(
         search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _StarvedExpression()
     )
+    monkeypatch.setattr(search_tools_module, "_build_block_matcher", lambda *_a, **_kw: None)
 
     result = run_tool(GrepTool(), {"pattern": "^match"}, ToolContext(cwd=tmp_path))
 
@@ -143,6 +145,7 @@ def test_grep_fails_without_retry_once_the_retry_budget_is_spent(
     monkeypatch.setattr(
         search_tools_module.bounded_regex, "compile", lambda *_a, **_kw: _SlowExpression()
     )
+    monkeypatch.setattr(search_tools_module, "_build_block_matcher", lambda *_a, **_kw: None)
 
     with pytest.raises(ToolError, match="regex evaluation time limit") as caught:
         run_tool(GrepTool(), {"pattern": "slow"}, ToolContext(cwd=tmp_path))
@@ -906,6 +909,10 @@ def test_grep_tool_python_fallback_preserves_splitlines_boundaries(
     ]
 
 
+def _lines(path: Path) -> list[str]:
+    return [line for block in search_tools_module._iter_utf8_line_blocks(path) for line in block]
+
+
 def test_python_grep_splitlines_preserves_crlf_across_chunks(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -914,7 +921,7 @@ def test_python_grep_splitlines_preserves_crlf_across_chunks(
     path.write_bytes(b"one\r\ntwo\rthree")
     monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 4)
 
-    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["one", "two", "three"]
+    assert _lines(path) == ["one", "two", "three"]
 
 
 @pytest.mark.parametrize("chunk_bytes", range(1, 12))
@@ -928,7 +935,7 @@ def test_splitlines_matches_any_chunking(
     path.write_text(text, encoding="utf-8", newline="")
     monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", chunk_bytes)
 
-    assert list(search_tools_module._iter_utf8_splitlines(path)) == text.splitlines()
+    assert _lines(path) == text.splitlines()
 
 
 def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
@@ -939,22 +946,23 @@ def test_python_grep_splitlines_scans_long_lines_once_per_chunk(
     path.write_text("x" * 100, encoding="utf-8")
     monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 8)
     scanned_chars = 0
-    original = search_tools_module._yield_splitline_chunk
+    original = search_tools_module._split_chunk_lines
 
     def tracking_chunk(
         text: str,
         line_parts: list[str],
+        lines: list[str],
         *,
         max_line_chars: int,
         final: bool = False,
-    ) -> object:
+    ) -> bool:
         nonlocal scanned_chars
         scanned_chars += len(text)
-        return original(text, line_parts, max_line_chars=max_line_chars, final=final)
+        return original(text, line_parts, lines, max_line_chars=max_line_chars, final=final)
 
-    monkeypatch.setattr(search_tools_module, "_yield_splitline_chunk", tracking_chunk)
+    monkeypatch.setattr(search_tools_module, "_split_chunk_lines", tracking_chunk)
 
-    assert list(search_tools_module._iter_utf8_splitlines(path)) == ["x" * 100]
+    assert _lines(path) == ["x" * 100]
     assert scanned_chars == 100
 
 
@@ -965,7 +973,7 @@ def test_python_grep_splitlines_bounds_a_line_ending_in_the_current_chunk(
     path.write_text("x" * 11 + "\n", encoding="utf-8")
 
     with pytest.raises(ToolError, match="line longer than 10 characters"):
-        list(search_tools_module._iter_utf8_splitlines(path, max_line_chars=10))
+        list(search_tools_module._iter_utf8_line_blocks(path, max_line_chars=10))
 
 
 def test_grep_clips_long_lines(tmp_path: Path) -> None:

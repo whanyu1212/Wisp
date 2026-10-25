@@ -422,6 +422,7 @@ def _python_grep(
         if native_module is not None
         else _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
     )
+    block_matcher = _build_block_matcher(pattern, ignore_case=ignore_case, literal=literal)
     effective_context_lines = _bounded_context_lines(context_lines, context)
     context_truncated = effective_context_lines < context_lines
     output: list[str] = []
@@ -543,53 +544,73 @@ def _python_grep(
                         preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
                         group_end = 0
                         last_emitted_line = 0
-                        lines = _iter_utf8_splitlines(descriptor)
-                        for line_number, line in enumerate(lines, start=1):
+                        line_number = 0
+                        for block in _iter_utf8_line_blocks(descriptor):
                             if cancel_event is not None and cancel_event.is_set():
                                 return ToolResult(
                                     text="Search cancelled",
                                     data={"count": 0, "matches": []},
                                 )
-                            if file_buffer.exhausted or file_had_extra_match:
-                                break
-
-                            is_match = matcher(line)
-                            if is_match:
-                                if match_count >= max_results:
-                                    file_had_extra_match = True
-                                else:
-                                    match_count += 1
+                            if (
+                                block_matcher is not None
+                                and line_number >= group_end
+                                and not block_matcher(block)
+                            ):
+                                # No line here matches and no context is pending, so
+                                # only the line count and the preceding context move.
+                                tail = block[max(0, len(block) - effective_context_lines) :]
+                                first = line_number + len(block) - len(tail) + 1
+                                preceding.extend(enumerate(tail, start=first))
+                                line_number += len(block)
+                                continue
+                            for line in block:
+                                line_number += 1
+                                if cancel_event is not None and cancel_event.is_set():
+                                    return ToolResult(
+                                        text="Search cancelled",
+                                        data={"count": 0, "matches": []},
+                                    )
+                                is_match = matcher(line)
+                                if is_match:
+                                    if match_count >= max_results:
+                                        file_had_extra_match = True
+                                    else:
+                                        match_count += 1
+                                        if file_display_path is None:
+                                            file_display_path = display_path(file_path)
+                                        if line_number > group_end:
+                                            for number, text in preceding:
+                                                if number > last_emitted_line:
+                                                    file_buffer.append(
+                                                        _format_grep_record(
+                                                            file_display_path, number, text, False
+                                                        )
+                                                    )
+                                                    last_emitted_line = number
+                                                    if file_buffer.exhausted:
+                                                        break
+                                        file_buffer.append(
+                                            _format_grep_record(
+                                                file_display_path, line_number, line, True
+                                            ),
+                                            preserve_match=True,
+                                        )
+                                        last_emitted_line = line_number
+                                        group_end = max(
+                                            group_end, line_number + effective_context_lines
+                                        )
+                                elif line_number <= group_end:
                                     if file_display_path is None:
                                         file_display_path = display_path(file_path)
-                                    if line_number > group_end:
-                                        for number, text in preceding:
-                                            if number > last_emitted_line:
-                                                file_buffer.append(
-                                                    _format_grep_record(
-                                                        file_display_path, number, text, False
-                                                    )
-                                                )
-                                                last_emitted_line = number
-                                                if file_buffer.exhausted:
-                                                    break
                                     file_buffer.append(
                                         _format_grep_record(
-                                            file_display_path, line_number, line, True
-                                        ),
-                                        preserve_match=True,
+                                            file_display_path, line_number, line, False
+                                        )
                                     )
                                     last_emitted_line = line_number
-                                    group_end = max(
-                                        group_end, line_number + effective_context_lines
-                                    )
-                            elif line_number <= group_end:
-                                if file_display_path is None:
-                                    file_display_path = display_path(file_path)
-                                file_buffer.append(
-                                    _format_grep_record(file_display_path, line_number, line, False)
-                                )
-                                last_emitted_line = line_number
-                            preceding.append((line_number, line))
+                                preceding.append((line_number, line))
+                                if file_buffer.exhausted or file_had_extra_match:
+                                    break
                             if file_buffer.exhausted or file_had_extra_match:
                                 break
             except _WalkedFileChanged:
@@ -677,10 +698,13 @@ class _BoundedGrepFileOutput:
         self.exhausted = would_exceed
 
 
-def _iter_utf8_splitlines(
+def _iter_utf8_line_blocks(
     path: Path | int, *, max_line_chars: int = _PYTHON_GREP_MAX_LINE_CHARS
-) -> Iterator[str]:
-    """Yield UTF-8 lines incrementally with ``str.splitlines()`` boundaries."""
+) -> Iterator[list[str]]:
+    """Yield UTF-8 lines with ``str.splitlines()`` boundaries, one list per chunk read.
+
+    A line that continues past a chunk is carried into the block of the chunk that ends it.
+    """
 
     decoder = codecs.getincrementaldecoder("utf-8")()
     line_parts: list[str] = []
@@ -691,41 +715,52 @@ def _iter_utf8_splitlines(
             decoded = decoder.decode(chunk)
             if "\0" in decoded:
                 raise _BinaryFileDetected
+            block: list[str] = []
             if pending_cr:
-                yield "".join(line_parts)
+                block.append("".join(line_parts))
                 line_parts.clear()
                 pending_cr = False
                 if decoded.startswith("\n"):
                     decoded = decoded[1:]
-            pending_cr = yield from _yield_splitline_chunk(
-                decoded, line_parts, max_line_chars=max_line_chars
+            pending_cr = _split_chunk_lines(
+                decoded, line_parts, block, max_line_chars=max_line_chars
             )
             if sum(map(len, line_parts)) > max_line_chars:
                 raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
+            if block:
+                yield block
         decoded = decoder.decode(b"", final=True)
     if "\0" in decoded:
         raise _BinaryFileDetected
+    block = []
     if pending_cr:
-        yield "".join(line_parts)
+        block.append("".join(line_parts))
         line_parts.clear()
         if decoded.startswith("\n"):
             decoded = decoded[1:]
-    _ = yield from _yield_splitline_chunk(
-        decoded, line_parts, max_line_chars=max_line_chars, final=True
-    )
+    _split_chunk_lines(decoded, line_parts, block, max_line_chars=max_line_chars, final=True)
     if sum(map(len, line_parts)) > max_line_chars:
         raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
     if line_parts:
-        yield "".join(line_parts)
+        block.append("".join(line_parts))
+    if block:
+        yield block
 
 
-def _yield_splitline_chunk(
+def _split_chunk_lines(
     text: str,
     line_parts: list[str],
+    lines: list[str],
     *,
     max_line_chars: int,
     final: bool = False,
-) -> Generator[str, None, bool]:
+) -> bool:
+    """Append the lines ``text`` completes to ``lines`` and keep the rest in ``line_parts``.
+
+    Returns:
+        bool: Whether ``text`` ended in a CR that may be the first half of a CRLF.
+    """
+
     pieces = text.splitlines(keepends=True)
     last_index = len(pieces) - 1
     for index, piece in enumerate(pieces):
@@ -742,7 +777,7 @@ def _yield_splitline_chunk(
         if index == last_index and piece[-1] == "\r" and not final:
             line_parts.append(line)
             return True
-        yield line
+        lines.append(line)
     return False
 
 
@@ -1729,6 +1764,131 @@ def _build_matcher(
     return regex_matcher
 
 
+def _build_block_matcher(
+    pattern: str,
+    *,
+    ignore_case: bool,
+    literal: bool,
+) -> BlockMatcher | None:
+    """Build a check that a block of lines may hold a match, if one can be exact.
+
+    Searching a block's lines joined by newlines once is far cheaper than searching each
+    line. Every match within one line is also a match in the block, so a block with no
+    match needs no per-line search; a block match may still span lines and is confirmed
+    line by line. With ``MULTILINE``, ``^`` and ``$`` match where a line starts and ends,
+    as they do on the line alone.
+
+    Returns:
+        BlockMatcher | None: The check, or ``None`` when a block search could miss a
+        line's match, so every line must be searched.
+    """
+
+    if literal:
+        needle = pattern.casefold() if ignore_case else pattern
+
+        def literal_block_matcher(lines: list[str]) -> bool:
+            text = "\n".join(lines)
+            return needle in (text.casefold() if ignore_case else text)
+
+        return literal_block_matcher
+
+    if not _can_search_blocks(pattern):
+        return None
+    flags = bounded_regex.MULTILINE | (bounded_regex.IGNORECASE if ignore_case else 0)
+    search = bounded_regex.compile(pattern, flags=flags).search
+    timed_out = False
+
+    def regex_block_matcher(lines: list[str]) -> bool:
+        nonlocal timed_out
+        if timed_out:
+            return True
+        try:
+            # Positional and GIL-holding for the reasons given in _build_matcher.
+            text = "\n".join(lines)
+            return search(text, None, None, False, False, _REGEX_TIMEOUT_SECONDS) is not None
+        except TimeoutError:
+            # A slow pattern: leave every line to the per-line search and its time budget.
+            timed_out = True
+            return True
+
+    return regex_block_matcher
+
+
+# Escapes that anchor to the whole string (\A, \Z, \z) or the search start (\G). Word
+# boundaries need no entry: the newline joining lines is not a word character, so a line
+# edge is a boundary in the block exactly when it is one on the line alone.
+_CONTEXT_ESCAPES = frozenset("AZzG")
+# Inline flags that keep a block search exact. Verbose mode (x) is excluded because its
+# comments and whitespace would hide constructs from the scan below, and turning a flag
+# off ("-m") would undo the MULTILINE that keeps ^ and $ at line edges.
+_BLOCK_SAFE_INLINE_FLAGS = frozenset("aiLmsuf")
+
+
+def _can_search_blocks(pattern: str) -> bool:
+    """Return whether a regex matches a line exactly when it matches that line in a block.
+
+    The block joins lines with newlines and is searched with ``MULTILINE``, so the pattern
+    may use ``^``, ``$`` and word boundaries, but nothing else that looks past the text it
+    covers. The scan is conservative: string anchors, lookarounds, backtracking verbs,
+    nested sets and any group form it does not recognize fail it.
+    """
+
+    index = 0
+    in_class = False
+    while index < len(pattern):
+        character = pattern[index]
+        if character == "\\":
+            if pattern[index + 1 : index + 2] in _CONTEXT_ESCAPES:
+                return False
+            index += 2
+            continue
+        if in_class:
+            if character == "[":
+                return False
+            if character == "]":
+                in_class = False
+            index += 1
+            continue
+        if character == "[":
+            in_class = True
+            index += 1
+            # A leading "^" negates the set, and a "]" right after it is a member.
+            if pattern[index : index + 1] == "^":
+                index += 1
+            if pattern[index : index + 1] == "]":
+                index += 1
+            continue
+        if character == "(" and pattern[index + 1 : index + 2] in {"?", "*"}:
+            opening = _plain_group_opening_length(pattern, index)
+            if opening is None:
+                return False
+            index += opening
+            continue
+        index += 1
+    return not in_class
+
+
+def _plain_group_opening_length(pattern: str, index: int) -> int | None:
+    """Return the length of a ``(?...`` group opening that only groups or sets flags."""
+
+    rest = pattern[index:]
+    if rest.startswith("(*"):
+        return None  # A backtracking verb such as (*SKIP).
+    for prefix in ("(?:", "(?P=", "(?P<", "(?<"):
+        if not rest.startswith(prefix):
+            continue
+        if prefix in {"(?P<", "(?<"} and not rest[len(prefix) : len(prefix) + 1].isidentifier():
+            return None  # (?<= and (?<! are lookbehinds.
+        return len(prefix)
+    end = 2
+    while end < len(rest) and rest[end] in _BLOCK_SAFE_INLINE_FLAGS:
+        end += 1
+    if end > 2 and rest[end : end + 1] in {")", ":"}:
+        return end + 1
+    return None
+
+
+type BlockMatcher = Callable[[list[str]], bool]
 type CallableMatcher = Callable[[str], bool]
 type GlobMatcher = Callable[[str], bool]
 type PathMatcher = Callable[[Path], bool]
