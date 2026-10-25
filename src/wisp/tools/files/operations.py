@@ -208,16 +208,21 @@ class WriteTool:
         selected_path = _required_string(arguments, "path")
         content = _required_string(arguments, "content", allow_empty=True)
         overwrite = _optional_bool(arguments, "overwrite", default=True)
-        if context.require_create_only_writes and overwrite:
+        constraint = context.write_constraint
+        if constraint is not None and constraint.create_only and overwrite:
             raise ToolError("This operation requires write calls with overwrite=false")
-        if context.require_non_empty_writes and not content:
+        if constraint is not None and constraint.non_empty and not content:
             raise ToolError("This operation requires non-empty write content")
         path = secure_tool_path(selected_path, context, write=True)
         outcome = await anyio.to_thread.run_sync(
             lambda: _atomic_write(path, content, overwrite=overwrite, context=context)
         )
-        if outcome.file_id is not None and context.create_only_write_receipt is not None:
-            context.create_only_write_receipt.record(path.path, outcome.file_id)
+        if (
+            outcome.file_id is not None
+            and constraint is not None
+            and constraint.receipt is not None
+        ):
+            constraint.receipt.record(path.path, outcome.file_id)
         byte_count = len(content.encode("utf-8"))
         data: dict[str, object] = {
             "path": path.display,
@@ -249,7 +254,9 @@ class _ReplacementMetadata:
 
 
 def _check_conflicting_paths(context: ToolContext) -> None:
-    for conflict in context.conflicting_write_paths:
+    if context.write_constraint is None:
+        return
+    for conflict in context.write_constraint.conflicting_paths:
         candidate = secure_tool_path(str(conflict), context)
         try:
             if os.name == "nt":

@@ -111,10 +111,11 @@ def secure_tool_path(
             ) from exc
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
-    if write and context.allowed_write_paths is not None:
+    constraint = context.write_constraint
+    if write and constraint is not None and constraint.allowed_paths is not None:
         allowed = {
             Path(os.path.abspath(os.path.normpath(p if p.is_absolute() else cwd / p)))
-            for p in context.allowed_write_paths
+            for p in constraint.allowed_paths
         }
         if absolute not in allowed:
             raise ToolError(f"Write path is not allowed for this operation: {raw}")

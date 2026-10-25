@@ -14,7 +14,7 @@ from wisp.tools.builtin import (
     ReadTool,
     WriteTool,
 )
-from wisp.tools.context import ToolContext
+from wisp.tools.context import ToolContext, WriteConstraint
 from wisp.tools.files import operations as file_ops_module
 from wisp.tools.result import ToolError
 
@@ -230,7 +230,7 @@ def test_write_tool_creates_parent_directories_and_overwrites(tmp_path: Path) ->
 
 def test_write_tool_create_only_creates_new_file(tmp_path: Path) -> None:
     receipt = file_ops_module.CreateOnlyWriteReceipt()
-    context = ToolContext(cwd=tmp_path, create_only_write_receipt=receipt)
+    context = ToolContext(cwd=tmp_path, write_constraint=WriteConstraint(receipt=receipt))
 
     result = run_tool(
         WriteTool(),
@@ -251,9 +251,9 @@ def test_write_tool_honors_operation_write_path_restriction(tmp_path: Path) -> N
     allowed = tmp_path / "AGENTS.md"
     context = ToolContext(
         cwd=tmp_path,
-        allowed_write_paths=(allowed,),
-        require_create_only_writes=True,
-        require_non_empty_writes=True,
+        write_constraint=WriteConstraint(
+            allowed_paths=(allowed,), create_only=True, non_empty=True
+        ),
     )
 
     run_tool(
@@ -290,9 +290,9 @@ def test_write_tool_refuses_operation_conflicting_path(tmp_path: Path) -> None:
     conflict.write_text("existing\n", encoding="utf-8")
     context = ToolContext(
         cwd=tmp_path,
-        allowed_write_paths=(target,),
-        conflicting_write_paths=(conflict,),
-        require_create_only_writes=True,
+        write_constraint=WriteConstraint(
+            allowed_paths=(target,), conflicting_paths=(conflict,), create_only=True
+        ),
     )
 
     with pytest.raises(ToolError, match="Conflicting write path already exists"):

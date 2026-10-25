@@ -12,7 +12,7 @@ import anyio
 import pytest
 from pytest import MonkeyPatch
 
-from wisp.tools.context import ToolContext
+from wisp.tools.context import ToolContext, WriteConstraint
 from wisp.tools.files import operations as file_ops_module
 from wisp.tools.files import secure_fs as secure_fs_module
 from wisp.tools.files.operations import EditTool, ReadTool, WriteTool
@@ -504,7 +504,7 @@ def test_guarded_windows_atomic_write_and_edit_algorithm(
 def test_write_allows_missing_conflict_parent(tmp_path: Path) -> None:
     context = ToolContext(
         cwd=tmp_path,
-        conflicting_write_paths=(Path("nested/AGENTS.MD"),),
+        write_constraint=WriteConstraint(conflicting_paths=(Path("nested/AGENTS.MD"),)),
     )
 
     run_tool(

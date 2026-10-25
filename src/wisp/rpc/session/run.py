@@ -47,7 +47,7 @@ from wisp.rpc.session.state import updated_rpc_session_state
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import resolve_session_tree
-from wisp.tools.context import ToolContext
+from wisp.tools.context import ToolContext, WriteConstraint
 from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
@@ -128,11 +128,13 @@ def _project_init_tool_context(
     return replace(
         agent.tool_context,
         cwd=target.parent,
-        allowed_write_paths=(target,),
-        conflicting_write_paths=(target.with_name("AGENTS.MD"),),
-        require_create_only_writes=True,
-        require_non_empty_writes=True,
-        create_only_write_receipt=receipt,
+        write_constraint=WriteConstraint(
+            allowed_paths=(target,),
+            conflicting_paths=(target.with_name("AGENTS.MD"),),
+            create_only=True,
+            non_empty=True,
+            receipt=receipt,
+        ),
     )
 
 
