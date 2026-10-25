@@ -111,10 +111,11 @@ must not be documented as a normal way to run Wisp; source launches use the abso
 `WISP_RUST_TUI_BINARY` override instead. Without the test-only variable, these tests skip.
 
 For visual review, an ignored Rust test renders the shared synthetic conversation
-(`tests/fixtures/tui_visual_conversation.json`) through the production draw path. For nine states
-(conversation, tools, working, tool running and dimmed, approval, permissions, new turn, scrollback)
-at 100 × 30, 80 × 24, 40 × 16 and 30 × 8, in dark, light and monochrome, it writes one JSON terminal
-buffer per frame: every cell's text, colors and attributes.
+(`tests/fixtures/tui_visual_conversation.json`) and a few built-in scenes through the production
+draw path. For each state (conversation, tools, working, tool running and dimmed, approval,
+permissions, new turn, scrollback, and the documentation showcase and welcome screens) at sizes from
+30 × 8 to 200 × 40, in dark, Ember, grove, light and monochrome, it writes one JSON terminal buffer
+per frame: every cell's text, colors and attributes.
 
 ```bash
 WISP_VISUAL_OUTPUT=/tmp/wisp-tui-captures \

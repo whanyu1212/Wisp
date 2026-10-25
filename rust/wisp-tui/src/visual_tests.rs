@@ -417,7 +417,244 @@ My pick for the next focused task: **HY-314, coordinated with HY-269’s navigat
         );
         ui.editor = PromptEditor::default();
     }
+    if matches!(scenario, "showcase" | "welcome") {
+        ui.state = showcase_state(scenario == "showcase");
+        ui.startup_logo = LogoChoice::WispBraille;
+        ui.editor = PromptEditor::default();
+    }
     ui
+}
+
+/// A synthetic project with every side-panel section loaded: the documentation's
+/// overview of a whole session. `worked` adds two finished turns and their changes;
+/// without it the session is new and the welcome screen shows.
+fn showcase_state(worked: bool) -> UiState {
+    use crate::reducer::git_diff::{GitDiffFile, GitDiffSnapshot};
+    use crate::transcript::{RunOutcome, RunResult};
+    use wisp_protocol::events::{
+        ContextAccountingMethod, ContextBudget, ContextEstimate, McpServerSnapshot,
+        McpServerStatus, McpStatusSnapshot, PermissionState, SessionCostSummary, SessionStats,
+        SessionTokenUsage, SkillCatalogEntry, SkillCatalogSnapshot, SkillSource,
+    };
+
+    let mut state = UiState::new("demo".into(), Some("demo-model".into()), None);
+    state.workspace_cwd = Some("/projects/demo-app".into());
+    state.git_branch = Some("feat/retry-limit".into());
+    let budget = ContextBudget {
+        estimate: ContextEstimate {
+            total_tokens: if worked { 61_400 } else { 18_200 },
+        },
+        observed_tokens: None,
+        observed_is_current: false,
+        effective_tokens: None,
+        accounting_method: ContextAccountingMethod::FullyEstimated,
+        context_window: Some(272_000),
+        reserve_tokens: 16_000,
+    };
+    state.context.budget = Some(budget.clone());
+    state.context.stats = Some(Box::new(SessionStats {
+        session_id: None,
+        active_message_count: if worked { 12 } else { 0 },
+        compaction_count: 0,
+        usage: SessionTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            cache_read_input_tokens: None,
+            cache_write_input_tokens: None,
+        },
+        context: budget,
+        compaction: None,
+        cost: SessionCostSummary {
+            known_usd: "0".into(),
+            complete: true,
+            priced_record_count: 0,
+            unpriced_record_count: 0,
+        },
+        context_breakdown: None,
+        branch: Default::default(),
+        used_skill_names: if worked {
+            vec!["python-testing".into()]
+        } else {
+            Vec::new()
+        },
+    }));
+    state.permissions.snapshot = Some(Arc::new(PermissionState {
+        mode: wisp_protocol::commands::PermissionMode::Ask,
+        saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
+        project_path: Some("/projects/demo-app".into()),
+        session_only_yolo: false,
+    }));
+    state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
+        servers: ["demo-docs", "demo-issues"]
+            .into_iter()
+            .map(|name| McpServerSnapshot {
+                name: name.into(),
+                status: McpServerStatus::Connected,
+                tool_names: Vec::new(),
+                error: None,
+                launch: None,
+                sign_in: None,
+            })
+            .collect(),
+    }));
+    state.skills.snapshot = Some(Arc::new(SkillCatalogSnapshot {
+        entries: ["python-testing", "release-notes"]
+            .into_iter()
+            .map(|name| SkillCatalogEntry {
+                name: name.into(),
+                description: format!("Instructions for {name}"),
+                source: SkillSource::PackageWisp,
+            })
+            .collect(),
+        diagnostics: Vec::new(),
+        project_trusted: true,
+    }));
+    if !worked {
+        state.git_diff.snapshot = Some(Arc::new(GitDiffSnapshot {
+            generation: 1,
+            head: "demo".into(),
+            files: Vec::new(),
+            truncated: false,
+        }));
+        return state;
+    }
+
+    let explain = state
+        .transcript
+        .append_prompt("How does the fetch client handle timeouts?".into());
+    state.transcript.complete_message(
+        1,
+        "Each request gets a 10-second timeout, and failures are retried with no upper limit."
+            .into(),
+    );
+    state.transcript.attach_run_result(
+        explain,
+        RunResult {
+            duration_ms: Some(18_000),
+            outcome: RunOutcome::Completed,
+        },
+    );
+    let prompt = state
+        .transcript
+        .append_prompt("Cap the retries at three and run the client tests.".into());
+    let edit = json!({
+        "path": "src/demo_app/client.py",
+        "edits": [{
+            "oldText": "    while True:\n        try:\n",
+            "newText": "    for attempt in range(MAX_RETRIES):\n        try:\n"
+        }]
+    });
+    for (id, name, arguments, duration_ms) in [
+        (
+            "docs",
+            "mcp__demo-docs__search_docs",
+            json!({"query": "retry policy"}),
+            400,
+        ),
+        (
+            "read",
+            "read",
+            json!({"path": "src/demo_app/client.py"}),
+            20,
+        ),
+        ("edit", "edit", edit, 30),
+        (
+            "tests",
+            "bash",
+            json!({"command": "uv run pytest tests/test_client.py -q"}),
+            3_200,
+        ),
+    ] {
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: id.into(),
+            name: name.into(),
+            detail_source: tool_detail::project_tool_detail_source(
+                name,
+                arguments.as_object().unwrap(),
+            ),
+            arguments: tool_cards::bounded_tool_arguments(name, &arguments),
+        });
+        state.transcript.observe_tool_result(ToolResultInput {
+            call_id: id.into(),
+            name: name.into(),
+            output: if name == "bash" {
+                "14 passed in 1.84s".into()
+            } else {
+                "ok".into()
+            },
+            output_source_bytes: 2,
+            output_source_lines: 1,
+            output_tail: None,
+            output_projection_cut_mid_line: false,
+            is_error: false,
+            failure_code: None,
+            retryable: false,
+            recovery_hint: None,
+            exit_code: (name == "bash").then_some(0),
+            output_has_exit_status: false,
+            before_text: None,
+            created: false,
+            summary: None,
+            truncated: false,
+            process_id: None,
+            process_state: None,
+            process_error: None,
+            stdout: None,
+            stdout_source_bytes: 0,
+            stderr: None,
+            stderr_source_bytes: 0,
+            stdout_truncated: false,
+            stderr_truncated: false,
+            stdout_dropped_bytes: 0,
+            stderr_dropped_bytes: 0,
+            duration_ms: Some(duration_ms),
+            started_at_ms: None,
+            process_started_at_ms: None,
+            process_ended_at_ms: None,
+        });
+    }
+    state.transcript.complete_message(
+        2,
+        "Done. Requests now stop after `MAX_RETRIES = 3` attempts and raise the last error.\n\n\
+         - **Changed:** `src/demo_app/client.py` and a new test for the limit.\n\
+         - **Checked:** `uv run pytest tests/test_client.py` · 14 passed."
+            .into(),
+    );
+    state.transcript.attach_run_result(
+        prompt,
+        RunResult {
+            duration_ms: Some(74_000),
+            outcome: RunOutcome::Completed,
+        },
+    );
+    let file = |path: &str, status: &str, before: &str, after: &str| GitDiffFile {
+        path: path.into(),
+        status: status.into(),
+        before: before.into(),
+        after: after.into(),
+        ..Default::default()
+    };
+    state.git_diff.snapshot = Some(Arc::new(GitDiffSnapshot {
+        generation: 1,
+        head: "demo".into(),
+        files: vec![
+            file(
+                "src/demo_app/client.py",
+                "modified",
+                "    while True:\n",
+                "    for attempt in range(MAX_RETRIES):\n",
+            ),
+            file(
+                "tests/test_client.py",
+                "modified",
+                "",
+                "def test_retry_limit():\n    ...\n",
+            ),
+        ],
+        truncated: false,
+    }));
+    state
 }
 
 fn rgb(color: Color) -> String {
@@ -1117,14 +1354,49 @@ fn documentation_mcp_capture_shows_synthetic_server_and_tools() {
 }
 
 #[test]
+fn showcase_capture_docks_panel() {
+    let text = screen_text(&draw(&mut fixture("showcase"), 150, 34));
+    for expected in [
+        "Cap the retries at three and run the client tests.",
+        "demo-docs/search_docs",
+        "for attempt in range(MAX_RETRIES):",
+        "2/2 connected",
+        "python-testing",
+        "M src/demo_app/client.py",
+        "Recent turns",
+        "Permissions",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+}
+
+#[test]
+fn welcome_capture_shows_mascot() {
+    let text = screen_text(&draw(&mut fixture("welcome"), 150, 34));
+    assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
+    assert!(text.contains("A coding agent that stays in sync"));
+    assert!(text.contains("No changes"));
+}
+
+#[test]
 #[ignore = "writes review artifacts only when explicitly requested"]
 fn capture_conversation_screens() {
     let output =
         PathBuf::from(std::env::var_os("WISP_VISUAL_OUTPUT").expect("set WISP_VISUAL_OUTPUT"));
     fs::create_dir_all(&output).unwrap();
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8), (100, 64), (200, 40)] {
+    for (width, height) in [
+        (100, 30),
+        (80, 24),
+        (40, 16),
+        (30, 8),
+        (100, 64),
+        (150, 34),
+        (150, 40),
+        (200, 40),
+    ] {
         for (variant, selected, no_color) in [
             ("dark", theme::default_theme(), false),
+            ("ember", theme::resolve("ember").unwrap(), false),
             ("grove", theme::resolve("grove").unwrap(), false),
             ("light", theme::paper_theme(), false),
             ("mono", theme::default_theme(), true),
@@ -1145,6 +1417,8 @@ fn capture_conversation_screens() {
                 "scrollback",
                 "activity-rail",
                 "activity-rail-expanded",
+                "showcase",
+                "welcome",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
@@ -1166,7 +1440,7 @@ fn capture_conversation_screens() {
                     ui.draw(
                         &mut terminal,
                         &ConnectionInfo {
-                            backend_version: "visual".into(),
+                            backend_version: env!("CARGO_PKG_VERSION").into(),
                         },
                     )
                     .unwrap();
