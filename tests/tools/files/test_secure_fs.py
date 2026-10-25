@@ -943,6 +943,7 @@ def test_path_fallback_propagates_nested_ignore_file_limit(
                 context,
                 ignore_specs=(),
                 ignore_override_matcher=None,
+                resolved_cwd=tmp_path.resolve(),
             )
         )
 

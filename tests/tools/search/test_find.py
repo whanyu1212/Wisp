@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterable
 from pathlib import Path
@@ -65,18 +66,18 @@ def test_find_tool_prepares_glob_once_and_reuses_display_paths(
     expanded: list[str] = []
     displayed: list[Path] = []
     original_expand = search_tools_module._expand_brace_alternatives
-    original_display = search_tools_module.display_tool_path
+    original_display = search_tools_module._display_walked_path
 
     def tracking_expand(pattern: str) -> tuple[str, ...]:
         expanded.append(pattern)
         return original_expand(pattern)
 
-    def tracking_display(candidate: Path, tool_context: ToolContext) -> str:
+    def tracking_display(candidate: Path, resolved_cwd: Path) -> str:
         displayed.append(candidate)
-        return original_display(candidate, tool_context)
+        return original_display(candidate, resolved_cwd)
 
     monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
-    monkeypatch.setattr(search_tools_module, "display_tool_path", tracking_display)
+    monkeypatch.setattr(search_tools_module, "_display_walked_path", tracking_display)
 
     result = run_tool(
         FindTool(),
@@ -194,6 +195,34 @@ def test_find_tool_python_fallback_preserves_global_sorted_prefix(
 
     assert result.text == "a/first.py\n" + _LIMIT_HINT
     assert result.data == {"count": 2, "files": ["a/first.py"]}
+
+
+def test_find_sorts_across_directories(tmp_path: Path) -> None:
+    # The walk yields a/b.py first, but "a-c.py" sorts before it.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "b.py").write_text("", encoding="utf-8")
+    (tmp_path / "a-c.py").write_text("", encoding="utf-8")
+
+    result = run_tool(
+        FindTool(),
+        {"path": ".", "pattern": "*.py", "max_results": 1},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data == {"count": 2, "files": ["a-c.py"]}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires symlink creation")
+def test_find_under_symlinked_cwd(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "app.py").write_text("", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(project, target_is_directory=True)
+
+    result = run_tool(FindTool(), {"path": "src", "pattern": "*.py"}, ToolContext(cwd=link))
+
+    assert result.data == {"count": 1, "files": ["src/app.py"]}
 
 
 def test_find_tool_python_fallback_skips_file_symlinks(
