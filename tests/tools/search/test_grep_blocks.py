@@ -46,6 +46,8 @@ _PATTERNS = (
     ("^a.c$", False, False),
     (r"(?m)^\w+$", False, False),
     ("absent", False, False),
+    ("^[^x]*+$", False, False),
+    ("[^x]++c", False, False),
 )
 
 
@@ -64,6 +66,8 @@ _PATTERNS = (
         r"\\b",
         "(?P=name)",
         r"\p{L}+",
+        r"\N{LATIN SMALL LETTER E WITH ACUTE}",
+        r"\x{41}{2}",
         "a{2,3}",
         "^foo",
         "foo$",
@@ -95,6 +99,12 @@ def test_block_search_accepts_local_patterns(pattern: str) -> None:
         "(?(1)a|b)",
         "(*SKIP)",
         "(*i)",
+        "^[^x]*+$",
+        "a++",
+        "a?+",
+        "a{2}+",
+        "(?:fo){e<=1}",
+        "a{x}",
         "(?x)a b",
         "[[:alpha:]]",
         "[abc",
@@ -150,6 +160,17 @@ def test_block_search_keeps_results(tmp_path: Path, monkeypatch: MonkeyPatch, se
         )
 
         assert actual == expected, arguments
+
+
+def test_possessive_match_is_kept(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    # In a block, [^x]*+ would consume the joining newline and could not give it back.
+    (tmp_path / "notes.txt").write_text("foo\nx\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"), {"pattern": "^[^x]*+$"}, ToolContext(cwd=tmp_path)
+    )
+
+    assert result.text == "notes.txt:1:foo"
 
 
 def test_missed_blocks_skip_line_search(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:

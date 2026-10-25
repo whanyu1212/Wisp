@@ -1822,6 +1822,8 @@ _CONTEXT_ESCAPES = frozenset("AZzG")
 # comments and whitespace would hide constructs from the scan below, and turning a flag
 # off ("-m") would undo the MULTILINE that keeps ^ and $ at line edges.
 _BLOCK_SAFE_INLINE_FLAGS = frozenset("aiLmsuf")
+_REPEAT_COUNT_CHARACTERS = frozenset("0123456789,")
+_BRACED_ESCAPES = frozenset("pPNx")
 
 
 def _can_search_blocks(pattern: str) -> bool:
@@ -1829,8 +1831,10 @@ def _can_search_blocks(pattern: str) -> bool:
 
     The block joins lines with newlines and is searched with ``MULTILINE``, so the pattern
     may use ``^``, ``$`` and word boundaries, but nothing else that looks past the text it
-    covers. The scan is conservative: string anchors, lookarounds, backtracking verbs,
-    nested sets and any group form it does not recognize fail it.
+    covers. Nor may it commit to a match it cannot give back, as possessive quantifiers
+    and atomic groups do: one that consumes the joining newline then fails where the line
+    alone would match. The scan is conservative: string anchors, lookarounds, backtracking
+    verbs, nested sets, fuzzy constraints and any group form it does not recognize fail it.
     """
 
     index = 0
@@ -1838,9 +1842,16 @@ def _can_search_blocks(pattern: str) -> bool:
     while index < len(pattern):
         character = pattern[index]
         if character == "\\":
-            if pattern[index + 1 : index + 2] in _CONTEXT_ESCAPES:
+            escaped = pattern[index + 1 : index + 2]
+            if escaped in _CONTEXT_ESCAPES:
                 return False
             index += 2
+            # \p{L}, \N{name} and \x{41} take a braced argument, not a repeat count.
+            if escaped in _BRACED_ESCAPES and pattern[index : index + 1] == "{":
+                closing = pattern.find("}", index)
+                if closing == -1:
+                    return False
+                index = closing + 1
             continue
         if in_class:
             if character == "[":
@@ -1858,6 +1869,13 @@ def _can_search_blocks(pattern: str) -> bool:
             if pattern[index : index + 1] == "]":
                 index += 1
             continue
+        if character in "*+?}" and pattern[index + 1 : index + 2] == "+":
+            return False  # A possessive quantifier.
+        if character == "{":
+            closing = pattern.find("}", index)
+            # Only a counted repeat; a fuzzy constraint such as {e<=1} is not checked.
+            if closing == -1 or not set(pattern[index + 1 : closing]) <= _REPEAT_COUNT_CHARACTERS:
+                return False
         if character == "(" and pattern[index + 1 : index + 2] in {"?", "*"}:
             opening = _plain_group_opening_length(pattern, index)
             if opening is None:
