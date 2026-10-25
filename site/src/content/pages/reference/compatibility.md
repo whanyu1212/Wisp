@@ -104,6 +104,18 @@ supported rollback procedure. Settings, credentials, and trust formats are uncha
 0.3.1 changes no command, event, handshake, session, or trust format, so 0.3.0 and 0.3.1 read
 each other's sessions. The backend and every frontend must still be the same release.
 
+## Wisp 0.4 compatibility
+
+0.4.0 changes no command, event, handshake, session, settings, credential, or trust format, so
+0.3.x and 0.4.0 read each other's sessions. The backend and every frontend must still be the same
+release, and external RPC clients keep using the schema bundle of the installed release.
+
+The supported Python API changes in one place: `ToolContext` replaces five operation write fields
+with `write_constraint`, under the exception below. Tool behavior changes are listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md); the most visible are that
+`bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
+symbolic links whose targets stay inside the workspace.
+
 ## Deprecation and removal
 
 Except for an explicit exception documented below, a public API may be removed only when all of
@@ -153,6 +165,18 @@ migration or containment advice.
 >
 > This exception covers only the names listed here; the normal policy continues to apply to other
 > public APIs.
+
+> [!WARNING]
+> **0.4 `ToolContext` write-field exception**
+>
+> The 0.4 minor-release boundary replaces these `ToolContext` fields before the normal deprecation
+> window: `allowed_write_paths`, `conflicting_write_paths`, `require_create_only_writes`,
+> `require_non_empty_writes`, and `create_only_write_receipt`. They were never documented and only
+> the `/init` operation set them. Pass `write_constraint=WriteConstraint(...)` instead, with
+> `WriteConstraint` from `wisp.tools.context` and its fields `allowed_paths`, `conflicting_paths`,
+> `create_only`, `non_empty`, and `receipt`. A `ToolContext` that sets none of the five is
+> unaffected. This exception covers only these fields; the normal policy continues to apply to
+> other public APIs.
 
 ## Event schemas
 

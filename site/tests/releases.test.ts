@@ -15,7 +15,7 @@ test("changelog metadata is supplied once without a duplicate Markdown source", 
   const archive = pages
     .filter((page) => page.layout === "archive")
     .sort((a, b) => a.order - b.order);
-  assert.equal(archive[0]?.source, "maintainers/releases/0.3.1-release.md");
+  assert.equal(archive[0]?.source, "maintainers/releases/0.4.0-release.md");
   assert.equal(archive.at(-1)?.source, "maintainers/releases/rc2-release.md");
   assert.ok(
     archive.findIndex((p) => p.source.endsWith("/rc13-release.md")) <

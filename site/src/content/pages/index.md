@@ -35,12 +35,12 @@ wisp
 ```
 
 > [!TIP]
-> **Wisp 0.3 is available**
+> **Wisp 0.4 is available**
 >
-> 0.3 brings a redesigned terminal conversation and sidebar, working-tree diff review, context
-> breakdowns, richer tool activity, and more concise default replies. Read the
-> [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and, if you are coming
-> from 0.2, the [upgrade guide](guide/upgrading-to-0.3.md).
+> 0.4 makes `grep` and `find` much faster and runs them in parallel, helps `edit` and `read` with
+> line endings, whitespace, long lines, and in-workspace symbolic links, and runs `bash` commands
+> in bash. Read the [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and,
+> if you are coming from 0.2, the [0.3 upgrade guide](guide/upgrading-to-0.3.md).
 
 ## Start reading
 
