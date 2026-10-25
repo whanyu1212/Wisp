@@ -40,6 +40,7 @@ from wisp.runtime import (
 from wisp.runtime.extensions import activate_builtin_extensions, activate_extensions, build_runtime
 from wisp.tools.builtin import ReadTool
 from wisp.tools.search import FindTool, GrepTool
+from wisp.tools.search import tools as search_tools_module
 from wisp.tools.selection import select_tools
 from wisp.tools.shell import BashTool
 
@@ -692,6 +693,25 @@ def test_build_runtime_wires_process_tools_to_runtime_supervisor_and_closes_it()
     anyio.run(run)
 
 
+@pytest.mark.parametrize("native_walk", [False, True])
+def test_search_tools_parallel_with_native_walk(
+    monkeypatch: pytest.MonkeyPatch, native_walk: bool
+) -> None:
+    monkeypatch.setattr(search_tools_module, "_NATIVE_WALK", object() if native_walk else None)
+
+    async def run() -> ToolRegistry:
+        tools = ToolRegistry()
+        await activate_builtin_extensions(
+            ExtensionAPI(providers=ProviderRegistry(), tools=tools, events=EventBus())
+        )
+        return tools
+
+    tools = anyio.run(run)
+
+    for name in ("find", "grep"):
+        assert tools.execution_metadata_for(name).parallel_safe is native_walk
+
+
 def test_direct_runtime_construction_uses_extension_api_command_registry() -> None:
     async def run() -> tuple[str, ...]:
         template = await build_runtime()
@@ -719,7 +739,11 @@ def test_direct_runtime_construction_uses_extension_api_command_registry() -> No
     assert anyio.run(run) == ("help",)
 
 
-def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor() -> None:
+def test_direct_runtime_activation_wires_process_tools_to_runtime_supervisor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(search_tools_module, "_NATIVE_WALK", None)
+
     async def run() -> None:
         providers = ProviderRegistry()
         tools = ToolRegistry()

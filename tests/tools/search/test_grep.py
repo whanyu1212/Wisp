@@ -26,10 +26,12 @@ def test_grep_regex_timeout_is_actionable(
     monkeypatch: MonkeyPatch,
 ) -> None:
     timeouts: list[float] = []
+    holds_gil: list[bool] = []
 
     class _TimingOutExpression:
-        def search(self, _line: str, *, timeout: float) -> object:
+        def search(self, _line: str, *, timeout: float, concurrent: bool = True) -> object:
             timeouts.append(timeout)
+            holds_gil.append(concurrent is False)
             raise TimeoutError
 
     (tmp_path / "notes.txt").write_text("text\n", encoding="utf-8")
@@ -47,6 +49,8 @@ def test_grep_regex_timeout_is_actionable(
         search_tools_module._REGEX_TIMEOUT_SECONDS,
         search_tools_module._REGEX_RETRY_BUDGET_SECONDS,
     ]
+    # Only the short attempt may hold the GIL; the long retry must let other threads run.
+    assert holds_gil == [True, False]
 
 
 def test_grep_retries_lines_that_time_out_while_starved(
@@ -58,7 +62,7 @@ def test_grep_retries_lines_that_time_out_while_starved(
     timeouts: list[float] = []
 
     class _StarvedExpression:
-        def search(self, line: str, *, timeout: float) -> object | None:
+        def search(self, line: str, *, timeout: float, concurrent: bool = True) -> object | None:
             timeouts.append(timeout)
             if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
                 raise TimeoutError
@@ -92,7 +96,7 @@ def test_grep_fails_without_retry_once_the_retry_budget_is_spent(
     timeouts: list[float] = []
 
     class _SlowExpression:
-        def search(self, _line: str, *, timeout: float) -> object | None:
+        def search(self, _line: str, *, timeout: float, concurrent: bool = True) -> object | None:
             timeouts.append(timeout)
             if timeout == search_tools_module._REGEX_TIMEOUT_SECONDS:
                 raise TimeoutError

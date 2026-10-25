@@ -51,6 +51,7 @@ from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.search import tools as search_tools_module
 
 
 class CallbackTool:
@@ -1069,12 +1070,16 @@ def _builtin_metadata_executor(
         ),
     ],
 )
-def test_builtin_search_calls_run_serially(calls: tuple[ToolCall, ...]) -> None:
-    """Concurrent grep and find scans contend for the GIL, so a batch with them runs serially.
+def test_builtin_search_calls_run_serially(
+    calls: tuple[ToolCall, ...], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without the native walk, grep and find contend for the GIL, so a batch with them is serial.
 
     A grep or find call also serializes read and ls siblings, because a batch only runs
     concurrently when every call is parallel safe.
     """
+
+    monkeypatch.setattr(search_tools_module, "_NATIVE_WALK", None)
 
     async def run() -> tuple[list[object], list[str], int]:
         started: list[str] = []
