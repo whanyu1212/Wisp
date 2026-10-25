@@ -406,6 +406,10 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
         'while :; do sleep 0.25 & __wisp_sleep_pid=$!; wait "$__wisp_sleep_pid"; '
         "__wisp_sleep_pid=; __wisp_record_jobs; done; }; "
     )
+    # Only on Linux is the outer shell a child subreaper, inheriting descendants the
+    # command orphaned. Elsewhere it has no children left by now, and the sample
+    # would cost a pgrep run (about 16 ms on macOS) to find nothing.
+    final_sample = "__wisp_record_jobs; " if sys.platform.startswith("linux") else ""
     return "".join(
         (
             recorder_prelude,
@@ -417,7 +421,7 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
             "kill $__wisp_recorder_pid 2>/dev/null || true; ",
             "wait $__wisp_recorder_pid 2>/dev/null || true; ",
             "trap - EXIT HUP INT TERM; ",
-            "__wisp_record_jobs; ",
+            final_sample,
             "exit $__wisp_status",
         )
     )
