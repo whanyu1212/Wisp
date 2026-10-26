@@ -15,9 +15,11 @@ import pytest
 
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
+    complete_frames,
     complete_logged_commands,
     frame_cursor,
     reap,
+    screen_rows,
     screen_shows,
     welcome_ready,
 )
@@ -161,6 +163,7 @@ for line in sys.stdin:
     phase = "startup"
     phase_output_offset = 0
     commands: list[dict[str, object]] = []
+    composer_start: tuple[int, int] | None = None
     restore_output_offset: int | None = None
     queue_update_output_offset: int | None = None
     idle_output_offset: int | None = None
@@ -215,6 +218,7 @@ for line in sys.stdin:
                 # The status line can appear after the cursor was read and move the
                 # composer up a row, so only the column marks the end of the text.
                 and (cursor := frame_cursor(output)) is not None
+                and composer_start is not None
                 and cursor[1] == composer_start[1] + len("steer-via-alt-enter")
                 and screen_shows(output, "steer-via-alt-enter")
             ):
@@ -337,9 +341,14 @@ for line in sys.stdin:
                 status = waited_status
                 break
         if status is None:
+            # A tail of differential frames rarely shows the composer, so replay the
+            # screen and report the cursor the typing phases compare against.
+            screen = "\n".join(screen_rows(complete_frames(output)))
             pytest.fail(
                 f"Rust TUI queue lifecycle timed out in phase {phase!r}; "
+                f"composer start={composer_start!r}; cursor={frame_cursor(output)!r}; "
                 f"recent commands={commands[-8:]!r}; "
+                f"screen=\n{screen}\n"
                 f"terminal tail={bytes(output[-6000:])!r}"
             )
     finally:
