@@ -69,7 +69,7 @@ pub enum ScanStatus {
     Complete,
     /// The file contained NUL or invalid UTF-8; all results were discarded.
     Binary,
-    /// Cancellation was requested; all results were discarded.
+    /// Cancellation was requested; the results hold the records found before it.
     Cancelled,
     /// A line exceeded `max_line_chars`; all results were discarded.
     LineTooLong,
@@ -203,7 +203,7 @@ fn scan_literal_lines(
 
     loop {
         if scanner.cancelled() {
-            return Ok(ScanResult::discarded(ScanStatus::Cancelled));
+            return Ok(scanner.finish());
         }
         let read = reader.read(&mut buffer)?;
         if read == 0 {
@@ -240,7 +240,7 @@ fn scan_literal_lines(
         return Ok(ScanResult::discarded(ScanStatus::Binary));
     }
     if scanner.cancelled() {
-        return Ok(ScanResult::discarded(ScanStatus::Cancelled));
+        return Ok(scanner.finish());
     }
     scanner.end_of_file()?;
     Ok(scanner.finish())
@@ -481,16 +481,19 @@ impl<'a> Scanner<'a> {
     }
 
     fn finish(self) -> ScanResult {
-        if self.cancelled() {
-            return ScanResult::discarded(ScanStatus::Cancelled);
-        }
+        // A search stopped at its deadline reports what it found so far.
+        let status = if self.cancelled() {
+            ScanStatus::Cancelled
+        } else {
+            ScanStatus::Complete
+        };
         ScanResult {
             lines: self.output.lines,
             byte_count: self.output.byte_count,
             match_count: self.match_count,
             had_extra_match: self.had_extra_match,
             exhausted: self.output.exhausted,
-            status: ScanStatus::Complete,
+            status,
         }
     }
 }
@@ -906,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_discards_pending_results() {
+    fn cancellation_keeps_records_found() {
         struct CancellingReader<'a> {
             inner: Cursor<&'a [u8]>,
             cancellation: &'a AtomicBool,
@@ -932,7 +935,17 @@ mod tests {
         };
         let result = scan_literal(&mut reader, &config("hit"), &cancellation).unwrap();
 
-        assert_eq!(result, ScanResult::discarded(ScanStatus::Cancelled));
+        assert_eq!(
+            result,
+            ScanResult {
+                lines: vec!["src/data.txt:1:hit".to_owned()],
+                byte_count: "src/data.txt:1:hit".len(),
+                match_count: 1,
+                had_extra_match: false,
+                exhausted: false,
+                status: ScanStatus::Cancelled,
+            }
+        );
     }
 
     #[test]
