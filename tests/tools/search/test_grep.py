@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import errno
+import os
 import sys
 import threading
 import time
@@ -1011,6 +1013,69 @@ def test_grep_keeps_skip_notice_within_budget(tmp_path: Path) -> None:
 
     assert result.truncated is True
     assert result.text.splitlines()[-1].startswith("[skipped 1 file")
+
+
+def _make_unreadable(path: Path, failure: str, monkeypatch: MonkeyPatch) -> str:
+    """Make ``path`` fail to open or to read, returning the reason grep reports."""
+
+    if failure == "open":
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("needs POSIX permissions that apply to the current user")
+        path.chmod(0o000)
+        return os.strerror(errno.EACCES)
+    unreadable = path.stat().st_ino
+    original = search_tools_module._iter_utf8_line_blocks
+
+    def fail_read(descriptor: int, **kwargs: int) -> Iterable[list[str]]:
+        if os.fstat(descriptor).st_ino == unreadable:
+            # What reading an iCloud placeholder file raises on macOS.
+            raise OSError(errno.EDEADLK, os.strerror(errno.EDEADLK))
+        return original(descriptor, **kwargs)
+
+    monkeypatch.setattr(search_tools_module, "_iter_utf8_line_blocks", fail_read)
+    return os.strerror(errno.EDEADLK)
+
+
+@pytest.mark.parametrize("failure", ["open", "read"])
+def test_grep_skips_unreadable_files(
+    tmp_path: Path, monkeypatch: MonkeyPatch, failure: str
+) -> None:
+    (tmp_path / "a.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "c.min.js").write_text("x" * 1_000_001, encoding="utf-8")
+    reason = _make_unreadable(tmp_path / "b.txt", failure, monkeypatch)
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"), {"pattern": "needle"}, ToolContext(cwd=tmp_path)
+    )
+
+    assert result.data["matches"] == ["a.txt:1:needle"]
+    assert result.text == (
+        "a.txt:1:needle\n"
+        "[skipped 1 file with a line longer than 1000000 characters: c.min.js]\n"
+        f"[skipped 1 file that could not be read: b.txt ({reason})]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("open", "Could not open file b.txt: .*{reason}"),
+        ("read", "grep cannot read b.txt: {reason}"),
+    ],
+)
+def test_grep_names_unreadable_target_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch, failure: str, message: str
+) -> None:
+    (tmp_path / "b.txt").write_text("needle\n", encoding="utf-8")
+    reason = _make_unreadable(tmp_path / "b.txt", failure, monkeypatch)
+
+    with pytest.raises(ToolError, match=message.format(reason=reason)):
+        run_tool(
+            GrepTool(_scanner_backend="python"),
+            {"pattern": "needle", "path": "b.txt"},
+            ToolContext(cwd=tmp_path),
+        )
 
 
 def test_grep_clips_long_lines(tmp_path: Path) -> None:

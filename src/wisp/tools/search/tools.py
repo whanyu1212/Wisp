@@ -531,8 +531,10 @@ def _python_grep(
     output: list[str] = []
     output_bytes = 0
     match_count = 0
-    # Minified bundles and source maps are skipped, not fatal, during a directory search.
+    # Minified bundles and source maps are skipped, not fatal, during a directory search,
+    # and so are files that cannot be opened or read, such as iCloud placeholders.
     oversized_files: list[str] = []
+    unreadable_files: list[str] = []
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
     walked_display_root = context.cwd.resolve(strict=False)
     cached_file_path: Path | None = None
@@ -731,6 +733,14 @@ def _python_grep(
                 match_count = file_match_start
                 oversized_files.append(oversized_path)
                 continue
+            except OSError as exc:
+                unreadable_path = display_path(file_path)
+                reason = exc.strerror or str(exc)
+                if file_path == secure_path.path:
+                    raise ToolError(f"grep cannot read {unreadable_path}: {reason}") from exc
+                match_count = file_match_start
+                unreadable_files.append(f"{unreadable_path} ({reason})")
+                continue
 
             if file_buffer.lines:
                 if effective_context_lines and output:
@@ -750,6 +760,7 @@ def _python_grep(
                     truncated=True,
                     match_limit_reached=file_had_extra_match,
                     oversized_files=oversized_files,
+                    unreadable_files=unreadable_files,
                 )
 
     # The walk also ends early, without saying so, once the search is stopped. A walk that
@@ -766,6 +777,7 @@ def _python_grep(
         truncated=deadline_reached or (context_truncated and bool(output)),
         deadline_reached=deadline_reached,
         oversized_files=oversized_files,
+        unreadable_files=unreadable_files,
     )
 
 
@@ -774,8 +786,8 @@ _PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
 # Characters of a matched or context line shown in a record. Longer lines, such as
 # minified code, are clipped so one line cannot fill the output budget.
 _GREP_MAX_DISPLAY_CHARS = 500
-# Skipped oversized files named in a grep notice; the rest are counted.
-_OVERSIZED_NOTICE_NAMES = 5
+# Skipped files named in each grep notice; the rest are counted.
+_SKIPPED_NOTICE_NAMES = 5
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
@@ -1077,9 +1089,9 @@ class _WalkedFile:
                     expected_identity=self.expected_identity,
                 )
             except OSError as exc:
-                if exc.errno in {errno.ENOENT, errno.ELOOP, errno.ENOTDIR}:
+                if exc.errno in _MISSING_OR_LINK_ERRNOS:
                     raise _WalkedFileChanged from exc
-                raise ToolError(f"Could not open file {self.path}: {exc}") from exc
+                raise
             try:
                 yield descriptor
             finally:
@@ -1088,6 +1100,9 @@ class _WalkedFile:
         candidate = secure_tool_path(str(self.path), context)
         with open_file(candidate) as descriptor:
             yield descriptor
+
+
+_MISSING_OR_LINK_ERRNOS = frozenset({errno.ENOENT, errno.ELOOP, errno.ENOTDIR})
 
 
 class _WalkedFileChanged(Exception):
@@ -1158,7 +1173,12 @@ def _iter_walked_files(
                         opened_descriptor=descriptor,
                     )
                 return
-        except ToolError:
+        except ToolError as file_error:
+            # A file that exists but cannot be opened, such as one without read
+            # permission, is better described by its own error than the directory's.
+            cause = file_error.__cause__
+            if isinstance(cause, OSError) and cause.errno not in _MISSING_OR_LINK_ERRNOS:
+                raise
             raise directory_error from None
 
 
@@ -2145,6 +2165,7 @@ def _grep_result(
     match_limit_reached: bool = False,
     deadline_reached: bool = False,
     oversized_files: Sequence[str] = (),
+    unreadable_files: Sequence[str] = (),
 ) -> ToolResult:
     """Build grep's result from the records its scan kept.
 
@@ -2161,12 +2182,25 @@ def _grep_result(
         deadline_reached (bool): Whether the call's deadline is what stopped it.
         oversized_files (Sequence[str]): Files skipped for a line over the scan limit,
             named in a final notice that the output budget cannot cut.
+        unreadable_files (Sequence[str]): Files skipped because they could not be
+            opened or read, each with the reason, named in a notice after that one.
 
     Returns:
         ToolResult: The bounded text, with ``count`` and ``matches`` data.
     """
 
-    notice = _oversized_files_notice(oversized_files)
+    notices = [
+        notice
+        for notice in (
+            _skipped_files_notice(
+                oversized_files,
+                f"with a line longer than {_PYTHON_GREP_MAX_LINE_CHARS} characters",
+            ),
+            _skipped_files_notice(unreadable_files, "that could not be read"),
+        )
+        if notice is not None
+    ]
+    notice = "\n".join(notices) if notices else None
     if not records and not truncated:
         text = "No matches" if notice is None else f"No matches\n{notice}"
         return ToolResult(text=text, data={"count": 0, "matches": []})
@@ -2178,7 +2212,7 @@ def _grep_result(
     bounded = truncate_text(
         text,
         max_bytes=max(0, context.max_output_bytes - notice_bytes),
-        max_lines=max(0, context.max_output_lines - (notice is not None)),
+        max_lines=max(0, context.max_output_lines - len(notices)),
     )
     return ToolResult(
         text=bounded.text if notice is None else f"{bounded.text}\n{notice}",
@@ -2187,17 +2221,14 @@ def _grep_result(
     )
 
 
-def _oversized_files_notice(paths: Sequence[str]) -> str | None:
+def _skipped_files_notice(paths: Sequence[str], reason: str) -> str | None:
     if not paths:
         return None
-    shown = ", ".join(paths[:_OVERSIZED_NOTICE_NAMES])
-    more = len(paths) - _OVERSIZED_NOTICE_NAMES
+    shown = ", ".join(paths[:_SKIPPED_NOTICE_NAMES])
+    more = len(paths) - _SKIPPED_NOTICE_NAMES
     names = f"{shown}, and {more} more" if more > 0 else shown
     files = "file" if len(paths) == 1 else "files"
-    return (
-        f"[skipped {len(paths)} {files} with a line longer than "
-        f"{_PYTHON_GREP_MAX_LINE_CHARS} characters: {names}]"
-    )
+    return f"[skipped {len(paths)} {files} {reason}: {names}]"
 
 
 def _deadline_marker() -> str:
