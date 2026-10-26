@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import signal
 from pathlib import Path
 
@@ -422,6 +423,55 @@ def test_supervisor_close_bounds_post_termination_stream_drain(tmp_path: Path) -
     retained_pipe_tasks = anyio.run(run)
 
     assert all(task.cancelled() for task in retained_pipe_tasks)
+
+
+# A daemon that leaves the process group and its tracking descriptors but keeps the
+# inherited stdout, so the pipe stays open after the shell is killed.
+_STDOUT_HOLDING_DAEMON = (
+    "import os, pathlib, sys, time\n"
+    "if os.fork():\n"
+    "    os._exit(0)\n"
+    "os.setsid()\n"
+    "if os.fork():\n"
+    "    os._exit(0)\n"
+    "os.closerange(3, 4096)\n"
+    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+    "time.sleep(20)\n"
+)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX daemonization")
+@pytest.mark.parametrize("ending", ["cancel", "lifetime", "close"])
+def test_managed_end_ignores_escaped_pipe(tmp_path: Path, ending: str) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    command = f"{python_command(_STDOUT_HOLDING_DAEMON)} {shlex.quote(str(pid_path))}; sleep 30"
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                command, cwd=tmp_path, timeout=1 if ending == "lifetime" else 30
+            )
+            await wait_for_pid_file(pid_path)
+            # The daemon holds stdout for 20 s; ending well before that proves the
+            # shell's end did not wait for the pipe.
+            with anyio.fail_after(10):
+                if ending == "cancel":
+                    await supervisor.cancel(process_id)
+                elif ending == "lifetime":
+                    await poll_until_terminal(supervisor, process_id)
+                else:
+                    await supervisor.aclose()
+        finally:
+            await supervisor.aclose()
+
+    try:
+        anyio.run(run)
+    finally:
+        try:
+            os.kill(int(pid_path.read_text()), signal.SIGKILL)
+        except (FileNotFoundError, ProcessLookupError, ValueError):
+            pass
 
 
 def test_supervisor_close_bounds_one_shot_capture_drain(
