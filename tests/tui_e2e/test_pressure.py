@@ -17,8 +17,6 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
-    complete_frames,
-    rendered_without_spacing,
     run_settled,
     screen_shows,
 )
@@ -419,13 +417,12 @@ def test_hostile_live_payloads_cannot_inject_terminal_controls(tmp_path: Path) -
         assert backend_pid_path.exists()
 
         # Enter acts on what was painted, like the other slash-command tests: wait
-        # for a complete frame showing the command before submitting it.
-        offset = len(tui.output)
+        # for a complete frame showing the command before submitting it. A footer
+        # repaint can land between typed characters, so read the replayed composer
+        # row; the welcome screen also shows "/connect", but not after the prompt mark.
         tui.send(b"/connect")
         tui.wait_until(
-            lambda output: (
-                b"/connect" in rendered_without_spacing(complete_frames(output[offset:]))
-            ),
+            lambda output: screen_shows(output, "› /connect"),
             failure="typed /connect did not render",
         )
         tui.send(b"\r")
