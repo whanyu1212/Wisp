@@ -26,6 +26,7 @@ from typing import Any, Protocol, cast
 import anyio
 
 from wisp.tools.result import ToolError
+from wisp.tools.shell.watchdog import WatchedCommand, release_command, watch_command
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
 
@@ -152,6 +153,22 @@ class _PosixExitPipe:
     read_fd: int
     close: weakref.finalize[[int], asyncio.subprocess.Process]
     """Closes ``read_fd`` exactly once, explicitly or when the process object is collected."""
+
+
+class _PosixCommandLeader(Protocol):
+    """The parts of a command's shell leader that POSIX cleanup uses.
+
+    The backend passes its ``asyncio`` process. The watchdog, which did not start the
+    command, passes a stand-in rebuilt from the command's registration.
+    """
+
+    @property
+    def pid(self) -> int: ...
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    def kill(self) -> None: ...
 
 
 class _PosixGroupSignal(Enum):
@@ -369,6 +386,16 @@ async def _create_shell_process(
             close=weakref.finalize(process, _close_posix_fd, posix_exit_pipe_read_fd),
         )
         setattr(process, _POSIX_EXIT_PIPE_ATTR, exit_pipe)
+    if command_token is not None and posix_jobs_file is not None:
+        watch_command(
+            WatchedCommand(
+                pid=process.pid,
+                token=command_token,
+                started_at=started_at,
+                jobs_file=str(posix_jobs_file),
+                leader_start=_posix_process_start_time(process.pid),
+            )
+        )
 
     if os.name == "nt":
         try:
@@ -669,7 +696,7 @@ async def _terminate_posix_process_tree(process: asyncio.subprocess.Process) -> 
     return await asyncio.to_thread(_kill_posix_process_tree, process)
 
 
-def _kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
+def _kill_posix_process_tree(process: _PosixCommandLeader) -> bool:
     """SIGKILL the command's process group and every recorded job.
 
     Descendants that left the group are recorded first. When that scan fails, the
@@ -677,7 +704,7 @@ def _kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
     reported so the caller retries the cleanup.
 
     Args:
-        process (asyncio.subprocess.Process): The command's shell leader.
+        process (_PosixCommandLeader): The command's shell leader.
 
     Returns:
         bool: Whether every process in the tree is known and was signalled.
@@ -697,7 +724,7 @@ def _kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
 
 
 def _signal_posix_process_group(
-    process: asyncio.subprocess.Process,
+    process: _PosixCommandLeader,
     selected_signal: signal.Signals,
 ) -> _PosixGroupSignal:
     if process.returncode is not None and not _posix_group_has_members_without_live_leader(
@@ -760,7 +787,7 @@ def _posix_group_has_members_without_live_leader(pgid: int) -> bool:
 
 
 def _signal_posix_recorded_jobs(
-    process: asyncio.subprocess.Process,
+    process: _PosixCommandLeader,
     selected_signal: signal.Signals,
 ) -> bool:
     succeeded = True
@@ -834,7 +861,7 @@ def stopped_detached_processes(process: asyncio.subprocess.Process) -> bool:
 
 
 def _signal_posix_detached_processes(
-    process: asyncio.subprocess.Process,
+    process: _PosixCommandLeader,
     selected_signal: signal.Signals,
 ) -> bool:
     """Signal processes that carry the command's token but left its process group.
@@ -847,7 +874,7 @@ def _signal_posix_detached_processes(
     stayed in the group is not counted as detached.
 
     Args:
-        process (asyncio.subprocess.Process): The command's shell leader.
+        process (_PosixCommandLeader): The command's shell leader.
         selected_signal (signal.Signals): Signal to send.
 
     Returns:
@@ -1012,6 +1039,77 @@ def _macos_libproc() -> Any | None:
     return libproc
 
 
+def _posix_process_start_time(pid: int) -> int | None:
+    """Return when ``pid`` started, in a platform unit, or ``None`` if it cannot be read.
+
+    Two processes that had the same pid have different start times, so this tells a
+    command's leader apart from a process that reused its pid.
+    """
+
+    if sys.platform.startswith("linux"):
+        try:
+            stat_text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        # The command name in parentheses may contain spaces; starttime is field 22,
+        # the 20th after the name.
+        fields = stat_text.rpartition(")")[2].split()
+        try:
+            return int(fields[19])
+        except (IndexError, ValueError):
+            return None
+    if sys.platform == "darwin":
+        libproc = _macos_libproc()
+        if libproc is None:
+            return None
+        info = _MacosProcBsdInfo()
+        filled = libproc.proc_pidinfo(
+            pid, _MACOS_PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if filled != ctypes.sizeof(info):
+            return None
+        return int(info.pbi_start_tvsec) * 1_000_000 + int(info.pbi_start_tvusec)
+    return None
+
+
+class _WatchedLeader:
+    """A registered command's shell leader, as the watchdog finds it after the backend died."""
+
+    def __init__(self, command: WatchedCommand) -> None:
+        self.pid = command.pid
+        leader_alive = (
+            command.leader_start is not None
+            and _posix_process_start_time(command.pid) == command.leader_start
+        )
+        # A leader that exited, or whose pid now belongs to another process, counts as
+        # finished, so the group is signalled only if its own members remain.
+        self.returncode: int | None = None if leader_alive else 0
+        setattr(self, _POSIX_JOBS_FILE_ATTR, Path(command.jobs_file))
+        setattr(self, _POSIX_COMMAND_TOKEN_ATTR, command.token)
+        setattr(self, _POSIX_STARTED_AT_ATTR, command.started_at)
+
+    def kill(self) -> None:
+        if self.returncode is None:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def stop_watched_command(command: WatchedCommand) -> None:
+    """Stop a command whose backend died, as the backend's own cleanup would.
+
+    Used by the watchdog. A failed step is not retried: there is no backend left to
+    report it to, and the jobs file is removed either way.
+    """
+
+    leader = _WatchedLeader(command)
+    try:
+        _kill_posix_process_tree(leader)
+    finally:
+        _remove_posix_jobs_file(Path(command.jobs_file))
+
+
 def _signal_verified_posix_pid(
     pid: int,
     selected_signal: signal.Signals,
@@ -1028,7 +1126,7 @@ def _signal_verified_posix_pid(
     return True
 
 
-def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, ...]:
+def _posix_recorded_job_pids(process: _PosixCommandLeader) -> tuple[int, ...]:
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if not isinstance(jobs_file, Path):
         return ()
@@ -1047,7 +1145,7 @@ def _posix_recorded_job_pids(process: asyncio.subprocess.Process) -> tuple[int, 
     return tuple(dict.fromkeys(pids))
 
 
-def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> set[int] | None:
+def _posix_current_owned_pids(process: _PosixCommandLeader) -> set[int] | None:
     pids: list[int] = []
     if process.returncode is None:
         descendant_pids = _posix_descendant_pids(process.pid)
@@ -1062,7 +1160,7 @@ def _posix_current_owned_pids(process: asyncio.subprocess.Process) -> set[int] |
     return {pid for pid in pids if pid > 0 and pid != process.pid}
 
 
-def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
+def _record_posix_descendant_pids(process: _PosixCommandLeader) -> bool:
     jobs_file = getattr(process, _POSIX_JOBS_FILE_ATTR, None)
     if not isinstance(jobs_file, Path):
         return True
@@ -1088,7 +1186,7 @@ def _record_posix_descendant_pids(process: asyncio.subprocess.Process) -> bool:
 
 
 def _posix_current_jobs_file_holder_pids(
-    process: asyncio.subprocess.Process,
+    process: _PosixCommandLeader,
     jobs_file: Path,
 ) -> tuple[int, ...] | None:
     """Return the processes holding the command's jobs file.
@@ -1098,7 +1196,7 @@ def _posix_current_jobs_file_holder_pids(
     open. That is the usual state after a command exits cleanly.
 
     Args:
-        process (asyncio.subprocess.Process): The command's shell leader.
+        process (_PosixCommandLeader): The command's shell leader.
         jobs_file (Path): The jobs file whose descriptor the command tree inherited.
 
     Returns:
@@ -1111,7 +1209,7 @@ def _posix_current_jobs_file_holder_pids(
     return _posix_jobs_file_holder_pids(jobs_file)
 
 
-def _posix_exit_pipe_reached_eof(process: asyncio.subprocess.Process) -> bool:
+def _posix_exit_pipe_reached_eof(process: _PosixCommandLeader) -> bool:
     exit_pipe = getattr(process, _POSIX_EXIT_PIPE_ATTR, None)
     if not isinstance(exit_pipe, _PosixExitPipe) or not exit_pipe.close.alive:
         return False
@@ -1287,7 +1385,8 @@ def _parse_posix_pid_tokens(tokens: Sequence[str]) -> tuple[int, ...]:
     return tuple(pids)
 
 
-def _release_posix_tracking(process: asyncio.subprocess.Process) -> None:
+def _release_posix_tracking(process: _PosixCommandLeader) -> None:
+    release_command(process.pid)
     _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
     exit_pipe = getattr(process, _POSIX_EXIT_PIPE_ATTR, None)
     if isinstance(exit_pipe, _PosixExitPipe):
