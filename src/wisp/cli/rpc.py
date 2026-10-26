@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import signal
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Queue
 from threading import Thread
@@ -41,6 +43,13 @@ _RPC_TRANSPORT_LIMITS = RpcTransportLimits(
 # event ahead of the coordinator so the per-frame limit also bounds aggregate
 # transport memory under downstream backpressure.
 _RPC_CONTROL_STREAM_BUFFER_SIZE = 1
+# Closing the terminal sends SIGHUP to the frontend's process group, which includes
+# this backend, and supervisors such as the SDK send SIGTERM. Either would otherwise
+# end the process before it stops the managed processes it started, which run in
+# their own sessions and would keep running.
+_SHUTDOWN_SIGNALS = tuple(
+    signum for signum in (getattr(signal, "SIGHUP", None), signal.SIGTERM) if signum is not None
+)
 _MAX_RPC_STARTUP_ERROR_CHARS = 1_000
 
 
@@ -84,23 +93,44 @@ async def _run_rpc(
     if not handshake_complete and not await _negotiate_rpc_connection():
         return
     runtime = await build_session_runtime(config)
-    try:
-        await _run_rpc_with_runtime(
-            config,
-            runtime,
-            all_tools=all_tools,
-            allow_read_tools=allow_read_tools,
-            allowed_tools=allowed_tools,
-            resume=resume,
-            continue_latest=continue_latest,
-            approve_unsafe_tools=approve_unsafe_tools,
-            max_tool_iterations=max_tool_iterations,
-            startup_trusted=startup_trusted,
-            config_overrides=config_overrides,
-            project_context_root=project_context_root,
-        )
-    finally:
-        await runtime.aclose()
+    # The receiver stays open through runtime.aclose(), so a second signal sent while
+    # cleanup runs waits in its queue instead of ending the process mid-cleanup.
+    with _shutdown_signal_receiver() as shutdown_signals:
+        try:
+            await _run_rpc_with_runtime(
+                config,
+                runtime,
+                all_tools=all_tools,
+                allow_read_tools=allow_read_tools,
+                allowed_tools=allowed_tools,
+                resume=resume,
+                continue_latest=continue_latest,
+                approve_unsafe_tools=approve_unsafe_tools,
+                max_tool_iterations=max_tool_iterations,
+                startup_trusted=startup_trusted,
+                config_overrides=config_overrides,
+                project_context_root=project_context_root,
+                shutdown_signals=shutdown_signals,
+            )
+        finally:
+            await runtime.aclose()
+
+
+@contextmanager
+def _shutdown_signal_receiver() -> Iterator[AsyncIterator[int] | None]:
+    """Receive shutdown signals as events where the platform supports it."""
+
+    if os.name != "posix":
+        yield None
+        return
+    with anyio.open_signal_receiver(*_SHUTDOWN_SIGNALS) as signals:
+        yield signals
+
+
+async def _stop_on_signal(signals: AsyncIterator[int], scope: anyio.CancelScope) -> None:
+    async for _signum in signals:
+        scope.cancel()
+        return
 
 
 async def _negotiate_rpc_connection() -> bool:
@@ -128,8 +158,12 @@ async def _run_rpc_with_runtime(
     startup_trusted: bool = False,
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
+    shutdown_signals: AsyncIterator[int] | None = None,
 ) -> None:
-    """Run the CLI's stdin/stdout adapter over the shared RPC host."""
+    """Run the CLI's stdin/stdout adapter over the shared RPC host.
+
+    A signal from ``shutdown_signals`` ends the run as if stdin had closed.
+    """
 
     startup_error: Exception | None = None
     async with anyio.create_task_group() as task_group:
@@ -139,6 +173,8 @@ async def _run_rpc_with_runtime(
             await _render_json_events(events, write_event=event_writer)
 
         stop_reader: anyio.Event | None = None
+        if shutdown_signals is not None:
+            task_group.start_soon(_stop_on_signal, shutdown_signals, task_group.cancel_scope)
         try:
             host = await RpcHost.create(
                 config,
