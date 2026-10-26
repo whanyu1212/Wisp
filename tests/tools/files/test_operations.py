@@ -54,10 +54,7 @@ def test_read_line_slice_consumes_only_one_line_beyond_limit() -> None:
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def __iter__(self) -> CountingLines:
-            return self
-
-        def __next__(self) -> str:
+        def readline(self, _limit: int) -> str:
             nonlocal consumed
             consumed += 1
             return f"line {consumed}\n"

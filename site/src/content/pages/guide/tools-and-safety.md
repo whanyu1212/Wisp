@@ -29,6 +29,8 @@ why that boundary matters and how the shared runtime enforces it.
 A `grep`, `find`, or `ls` call stops after 30 seconds and returns what it has found so far, with a
 note saying the results are incomplete. If a filesystem call is still blocked 5 seconds later, for
 example on an unresponsive network mount, the call fails with a timeout instead of waiting for it.
+`grep` and `find` search at most 100 directory levels below where they start, and say how many
+deeper directories they skipped. `edit` refuses files larger than 16 MiB; change those with `bash`.
 
 `write` and `edit` change an existing file only if the model has read it in the current
 conversation and it has not changed since. A file you edited, reformatted, or regenerated after the
