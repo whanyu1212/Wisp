@@ -248,3 +248,29 @@ def test_one_shot_evicts_observed_terminal_handle_for_capacity(tmp_path: Path) -
             await supervisor.aclose()
 
     assert anyio.run(run) == "one-shot\n"
+
+
+def test_capacity_error_names_held_processes(tmp_path: Path) -> None:
+    async def run() -> tuple[list[str], str]:
+        supervisor = ProcessSupervisor(max_processes=2)
+        try:
+            held = [
+                await supervisor.start(
+                    python_command(f"import time; time.sleep(10)  # job {index}"),
+                    cwd=tmp_path,
+                    timeout=10,
+                )
+                for index in (1, 2)
+            ]
+            with pytest.raises(ToolError) as caught:
+                await supervisor.start(python_command("print(3)"), cwd=tmp_path, timeout=2)
+            return held, str(caught.value)
+        finally:
+            await supervisor.aclose()
+
+    held, message = anyio.run(run)
+
+    assert message.startswith("Cannot start command: managed process limit (2) reached.")
+    for index, process_id in enumerate(held, start=1):
+        assert f"{process_id} (running):" in message
+        assert f"# job {index}" in message

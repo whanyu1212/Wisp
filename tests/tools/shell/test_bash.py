@@ -440,11 +440,21 @@ def test_bash_tool_requires_supervisor_for_resumable_operations(tmp_path: Path) 
         ({"operation": "bogus"}, "bash.operation must be one of"),
         (
             {"operation": "start", "command": "pwd", "yield_seconds": -1},
-            "bash.yield_seconds must be greater than or equal to zero",
+            "bash.yield_seconds must be from 0 to 600",
         ),
         (
             {"operation": "poll", "process_id": "p1", "wait_seconds": float("inf")},
             "bash.wait_seconds must be finite",
+        ),
+        ({"command": "pwd", "timeout": 3_601}, "bash.timeout must be from 1 to 3600 seconds"),
+        ({"command": "pwd", "timeout": 10**309}, "bash.timeout must be from 1 to 3600 seconds"),
+        (
+            {"operation": "start", "command": "pwd", "lifetime_seconds": 86_401},
+            "bash.lifetime_seconds must be greater than zero and at most 86400",
+        ),
+        (
+            {"operation": "poll", "process_id": "p1", "wait_seconds": 601},
+            "bash.wait_seconds must be from 0 to 600",
         ),
     ],
 )

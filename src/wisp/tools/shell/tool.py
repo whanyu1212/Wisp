@@ -23,6 +23,11 @@ _DEFAULT_BASH_TIMEOUT_SECONDS = 30
 _DEFAULT_MANAGED_LIFETIME_SECONDS = 300.0
 _DEFAULT_MANAGED_YIELD_SECONDS = 1.0
 _DEFAULT_MANAGED_WAIT_SECONDS = 0.0
+# Upper bounds keep a mistyped or runaway value from tying up a call or a process
+# slot indefinitely. Longer work belongs in operation=start, which can run for a day.
+_MAX_BASH_TIMEOUT_SECONDS = 3_600
+_MAX_MANAGED_LIFETIME_SECONDS = 86_400
+_MAX_MANAGED_WAIT_SECONDS = 600
 _BACKGROUND_STOPPED_NOTICE = (
     "[Processes the command left running were stopped when it exited. "
     "To keep a process running, use operation=start and run it in the foreground.]"
@@ -52,21 +57,29 @@ class BashTool:
                 "default": "run",
             },
             "command": {"type": "string"},
-            "timeout": {"type": "integer", "minimum": 1, "default": 30},
+            "timeout": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": _MAX_BASH_TIMEOUT_SECONDS,
+                "default": 30,
+            },
             "process_id": {"type": "string"},
             "lifetime_seconds": {
                 "type": "number",
                 "exclusiveMinimum": 0,
+                "maximum": _MAX_MANAGED_LIFETIME_SECONDS,
                 "default": 300,
             },
             "yield_seconds": {
                 "type": "number",
                 "minimum": 0,
+                "maximum": _MAX_MANAGED_WAIT_SECONDS,
                 "default": 1,
             },
             "wait_seconds": {
                 "type": "number",
                 "minimum": 0,
+                "maximum": _MAX_MANAGED_WAIT_SECONDS,
                 "default": 0,
             },
         },
@@ -125,8 +138,11 @@ class BashTool:
     ) -> ToolResult:
         command = _required_string(arguments, "command")
         timeout = _optional_int(arguments, "timeout", default=_DEFAULT_BASH_TIMEOUT_SECONDS)
-        if timeout is None or timeout < 1:
-            raise ToolArgumentError("bash.timeout must be greater than or equal to 1")
+        if timeout is None or not 1 <= timeout <= _MAX_BASH_TIMEOUT_SECONDS:
+            raise ToolArgumentError(
+                f"bash.timeout must be from 1 to {_MAX_BASH_TIMEOUT_SECONDS} seconds; "
+                "use operation=start for longer commands"
+            )
 
         if self._process_supervisor is None:
             # Preserve the direct-construction and monkeypatch seam used by
@@ -212,10 +228,15 @@ class BashTool:
             "yield_seconds",
             default=_DEFAULT_MANAGED_YIELD_SECONDS,
         )
-        if lifetime_seconds is None or lifetime_seconds <= 0:
-            raise ToolArgumentError("bash.lifetime_seconds must be greater than zero")
-        if yield_seconds is None or yield_seconds < 0:
-            raise ToolArgumentError("bash.yield_seconds must be greater than or equal to zero")
+        if lifetime_seconds is None or not 0 < lifetime_seconds <= _MAX_MANAGED_LIFETIME_SECONDS:
+            raise ToolArgumentError(
+                "bash.lifetime_seconds must be greater than zero and at most "
+                f"{_MAX_MANAGED_LIFETIME_SECONDS}"
+            )
+        if yield_seconds is None or not 0 <= yield_seconds <= _MAX_MANAGED_WAIT_SECONDS:
+            raise ToolArgumentError(
+                f"bash.yield_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
+            )
 
         process_id = await supervisor.start(
             command,
@@ -241,8 +262,10 @@ class BashTool:
             "wait_seconds",
             default=_DEFAULT_MANAGED_WAIT_SECONDS,
         )
-        if wait_seconds is None or wait_seconds < 0:
-            raise ToolArgumentError("bash.wait_seconds must be greater than or equal to zero")
+        if wait_seconds is None or not 0 <= wait_seconds <= _MAX_MANAGED_WAIT_SECONDS:
+            raise ToolArgumentError(
+                f"bash.wait_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
+            )
         update = await supervisor.poll(process_id, wait_seconds=wait_seconds)
         return _managed_update_result(update, context=context)
 

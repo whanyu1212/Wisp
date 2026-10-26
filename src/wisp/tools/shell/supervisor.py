@@ -331,6 +331,7 @@ _PendingText = _pending_text_class()
 class _ManagedProcess:
     process_id: str
     process: asyncio.subprocess.Process
+    command: str
     stdout: _PendingTextLike
     stderr: _PendingTextLike
     state: ProcessState = "running"
@@ -407,9 +408,7 @@ class ProcessSupervisor:
             self._ensure_open()
             self._evict_terminals_for_capacity()
             if self._owned_process_count() >= self._max_processes:
-                raise ToolError(
-                    f"Cannot start command: managed process limit ({self._max_processes}) reached"
-                )
+                raise self._capacity_error()
             process = await self._spawn(command, cwd=cwd, env=env)
             self._one_shot_locks[process] = asyncio.Lock()
             capture_task = asyncio.create_task(_collect_limited_output(process, max_output_bytes))
@@ -525,9 +524,7 @@ class ProcessSupervisor:
             self._ensure_open()
             self._evict_terminals_for_capacity()
             if self._owned_process_count() >= self._max_processes:
-                raise ToolError(
-                    f"Cannot start command: managed process limit ({self._max_processes}) reached"
-                )
+                raise self._capacity_error()
             stdout = self._pending_text_class(max_retained_bytes, max_retained_lines)
             stderr = self._pending_text_class(max_retained_bytes, max_retained_lines)
             process = await self._spawn(command, cwd=cwd, env=env)
@@ -535,6 +532,7 @@ class ProcessSupervisor:
             managed = _ManagedProcess(
                 process_id=process_id,
                 process=process,
+                command=command,
                 stdout=stdout,
                 stderr=stderr,
             )
@@ -634,6 +632,28 @@ class ProcessSupervisor:
 
     def _owned_process_count(self) -> int:
         return len(self._managed) + len(self._one_shot)
+
+    def _capacity_error(self) -> ToolError:
+        """Name the processes holding every slot, so the caller can free one.
+
+        After compaction the model may no longer have the process ids it started.
+        """
+
+        held = [
+            f"{managed.process_id} ({managed.state}): {_command_summary(managed.command)}"
+            for managed in self._managed.values()
+        ]
+        if self._one_shot:
+            held.append(f"{len(self._one_shot)} one-shot command(s) still running")
+        return ToolError(
+            f"Cannot start command: managed process limit ({self._max_processes}) reached. "
+            f"Held by: {'; '.join(held)}",
+            retryable=True,
+            recovery_hint=(
+                "Poll a finished process or cancel one you no longer need by its "
+                "process_id, then retry."
+            ),
+        )
 
     async def _terminate_one_shot(
         self,
@@ -1036,3 +1056,15 @@ __all__ = [
     "ProcessSupervisor",
     "ProcessUpdate",
 ]
+
+
+_COMMAND_SUMMARY_CHARS = 80
+
+
+def _command_summary(command: str) -> str:
+    """Return a command on one line, shortened to fit a list of processes."""
+
+    one_line = " ".join(command.split())
+    if len(one_line) <= _COMMAND_SUMMARY_CHARS:
+        return one_line
+    return f"{one_line[: _COMMAND_SUMMARY_CHARS - 3]}..."

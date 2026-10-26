@@ -34,7 +34,10 @@ unseen. Changes the model makes through `bash` count as changes too, and new fil
 `bash` defaults to one-shot execution and reports stdout, stderr, truncation state, and exit code.
 It also accepts `operation=start|poll|cancel` for commands needing a retained process handle; those
 return a `process_id`, process state, incremental output, and per-stream truncation metadata under
-the same safety category and approval policy.
+the same safety category and approval policy. A one-shot `timeout` is at most 3,600 seconds, a
+started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds` and `wait_seconds`
+at most 600. When every process slot is taken, the error lists the processes holding them, so the
+model can poll or cancel one.
 
 Commands inherit Wisp's environment except the variables Wisp reads provider API keys from:
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`,
