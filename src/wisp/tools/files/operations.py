@@ -7,7 +7,7 @@ import os
 import shlex
 import stat
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +28,7 @@ from wisp.tools.files.secure_fs import (
     stat_leaf,
 )
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
+from wisp.tools.seen_files import FileVersion, SeenFiles
 from wisp.tools.truncation import truncate_text
 
 # A write can overwrite an arbitrarily large file. The before-snapshot rides the RPC
@@ -110,6 +111,9 @@ class ReadTool:
                 retryable=True,
                 recovery_hint=f"Use an offset from 1 to {max(line_count, 1)}.",
             )
+        # A partial read counts: the model has seen this version of the file.
+        if context.seen_files is not None and slice_result.version is not None:
+            context.seen_files.record(path.path, slice_result.version)
 
         notice = _read_continuation_notice(
             slice_result,
@@ -192,7 +196,8 @@ class WriteTool:
     safety: ToolSafety = "mutating"
     description = (
         "Create or overwrite a UTF-8 text file, creating parent directories. "
-        "Set overwrite=false to fail if the target already exists."
+        "Set overwrite=false to fail if the target already exists. Read an existing "
+        "file before overwriting it; a file changed since you read it must be read again."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -217,6 +222,7 @@ class WriteTool:
         outcome = await anyio.to_thread.run_sync(
             lambda: _atomic_write(path, content, overwrite=overwrite, context=context)
         )
+        _record_written_version(path, context.seen_files)
         if (
             outcome.file_id is not None
             and constraint is not None
@@ -519,7 +525,9 @@ def _atomic_write(
 ) -> _WriteOutcome:
     _check_conflicting_paths(context)
     if os.name == "nt":
-        return _atomic_write_windows(path, content, overwrite=overwrite)
+        return _atomic_write_windows(
+            path, content, overwrite=overwrite, seen_files=context.seen_files
+        )
     with open_parent(path, create=True) as parent:
         initial = stat_leaf(parent)
         if initial is not None and stat.S_ISLNK(initial.st_mode):
@@ -580,6 +588,8 @@ def _atomic_write(
                 finally:
                     os.close(descriptor)
 
+        if initial_version is not None and context.seen_files is not None:
+            context.seen_files.require_current(path.path, initial_version, display=path.display)
         if overwrite and initial_version is not None and (link_count > 1 or requires_in_place):
             _write_existing_in_place(parent, content, expected=initial_version)
             return _WriteOutcome(False, before_text, None)
@@ -629,9 +639,11 @@ def _atomic_write(
         return _WriteOutcome(initial is None, before_text, file_id if not overwrite else None)
 
 
-def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
+def _atomic_edit(
+    path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
+) -> None:
     if os.name == "nt":
-        _atomic_edit_windows(path, edits)
+        _atomic_edit_windows(path, edits, seen_files)
         return
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
@@ -646,6 +658,8 @@ def _atomic_edit(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
         try:
             opened = os.fstat(descriptor)
             version = file_version(opened)
+            if seen_files is not None:
+                seen_files.require_current(path.path, version, display=path.display)
             link_count = opened.st_nlink
             metadata = _snapshot_replacement_metadata(descriptor, opened)
             try:
@@ -743,7 +757,13 @@ def _cleanup_windows_temporary(temporary: Path, *, destination: Path, published:
         raise ToolError(f"Could not clean up failed write {temporary}: {exc}") from exc
 
 
-def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool) -> _WriteOutcome:
+def _atomic_write_windows(
+    path: SecureToolPath,
+    content: str,
+    *,
+    overwrite: bool,
+    seen_files: SeenFiles | None = None,
+) -> _WriteOutcome:
     with open_windows_parent(path, create=True):
         initial = _windows_leaf_info(path)
         if not overwrite and initial is not None:
@@ -766,6 +786,8 @@ def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool
             except ToolError as exc:
                 if not isinstance(exc.__cause__, PermissionError):
                     raise
+        if initial_version is not None and seen_files is not None:
+            seen_files.require_current(path.path, initial_version, display=path.display)
         if overwrite and initial_version is not None:
             _write_path_existing_in_place(
                 path,
@@ -798,7 +820,9 @@ def _atomic_write_windows(path: SecureToolPath, content: str, *, overwrite: bool
         return _WriteOutcome(initial is None, before_text, file_id if not overwrite else None)
 
 
-def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> None:
+def _atomic_edit_windows(
+    path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
+) -> None:
     with open_windows_parent(path):
         initial = _windows_leaf_info(path)
         if initial is None:
@@ -814,6 +838,8 @@ def _atomic_edit_windows(path: SecureToolPath, edits: list[tuple[str, str]]) -> 
             version = file_version(opened)
             if version != initial_version:
                 raise ToolError(f"File changed while opening: {path.selected}")
+            if seen_files is not None:
+                seen_files.require_current(path.path, version, display=path.display)
             try:
                 original = _read_descriptor(descriptor)
             except UnicodeDecodeError as exc:
@@ -1014,7 +1040,8 @@ class EditTool:
     safety: ToolSafety = "mutating"
     description = (
         "Apply unique, non-overlapping text replacements to a UTF-8 file. Each oldText "
-        "must match the file exactly, apart from line endings and trailing whitespace."
+        "must match the file exactly, apart from line endings and trailing whitespace. "
+        "Read the file first; a file changed since you read it must be read again."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -1038,11 +1065,26 @@ class EditTool:
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = secure_tool_path(_required_string(arguments, "path"), context, write=True)
         edits = _parse_edits(arguments)
-        await anyio.to_thread.run_sync(lambda: _atomic_edit(path, edits))
+        await anyio.to_thread.run_sync(lambda: _atomic_edit(path, edits, context.seen_files))
+        _record_written_version(path, context.seen_files)
         return ToolResult(
             text=f"Applied {len(edits)} edit(s) to {path.display}",
             data={"path": path.display, "edits": len(edits)},
         )
+
+
+def _record_written_version(path: SecureToolPath, seen_files: SeenFiles | None) -> None:
+    """Record the file's version after a successful write or edit as seen."""
+
+    if seen_files is None:
+        return
+    try:
+        info = os.stat(path.path, follow_symlinks=False)
+    except FileNotFoundError:
+        # Something removed the file right after the write; the next change will
+        # ask for a read, which is the safe direction.
+        return
+    seen_files.record(path.path, file_version(info))
 
 
 def _secure_read_line_slice(
@@ -1055,7 +1097,7 @@ def _secure_read_line_slice(
     notice_bytes: int,
 ) -> _ReadSlice:
     with open_file(path) as descriptor:
-        return _read_line_slice(
+        result = _read_line_slice(
             descriptor,
             offset=offset,
             limit=limit,
@@ -1063,6 +1105,7 @@ def _secure_read_line_slice(
             max_lines=max_lines,
             notice_bytes=notice_bytes,
         )
+        return replace(result, version=file_version(os.fstat(descriptor)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1075,6 +1118,8 @@ class _ReadSlice:
     truncated: bool
     partial_line: int | None = None
     """1-indexed line that ends ``text`` cut short because it exceeds the byte budget."""
+    version: FileVersion | None = None
+    """The read file's version, recorded as seen once the read succeeds."""
 
 
 def _read_line_slice(

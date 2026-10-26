@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from wisp.auth.connections import provider_credential_environment
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 from wisp.mcp.credentials import mcp_auth_path
+from wisp.tools.seen_files import SeenFiles
 from wisp.trust.permissions import permissions_directory
 
 if TYPE_CHECKING:
@@ -53,6 +54,10 @@ class ToolContext:
     # Environment variables commands do not inherit. Like ``protected_paths``, a bare
     # context withholds Wisp's own provider API keys; pass ``frozenset()`` to opt out.
     withheld_environment: frozenset[str] = field(default_factory=provider_credential_environment)
+    # The files the model has seen, which write and edit check before changing one.
+    # None leaves the check off, as for tools an embedding calls directly; contexts
+    # built from config turn it on, and a coding session keeps one per conversation.
+    seen_files: SeenFiles | None = None
 
     @classmethod
     def default(cls) -> ToolContext:
@@ -97,6 +102,7 @@ class ToolContext:
         return cls(
             cwd=cwd if cwd is not None else Path.cwd(),
             protected_paths=protected_paths,
+            seen_files=SeenFiles(),
             withheld_environment=(
                 provider_credential_environment()
                 if endpoint is None
