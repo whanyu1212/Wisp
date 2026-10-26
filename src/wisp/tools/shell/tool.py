@@ -340,8 +340,11 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         data["process_started_at"] = update.started_at
     if update.ended_at is not None:
         data["process_ended_at"] = update.ended_at
+    text = (
+        f"{output.text}\n{_BACKGROUND_STOPPED_NOTICE}" if update.background_stopped else output.text
+    )
     return ToolResult(
-        text=output.text,
+        text=text,
         data=data,
         truncated=stdout_truncated or stderr_truncated or output.truncated,
     )

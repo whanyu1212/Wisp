@@ -870,34 +870,71 @@ def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
     assert not marker.exists()
 
 
+_DAEMON = (
+    "import os, pathlib, sys, time\n"
+    "if os.fork():\n"
+    "    os._exit(0)\n"
+    "os.setsid()\n"
+    "if os.fork():\n"
+    "    os._exit(0)\n"
+    "null = os.open(os.devnull, os.O_RDWR)\n"
+    "for fd in (0, 1, 2):\n"
+    "    os.dup2(null, fd)\n"
+    "os.closerange(3, 4096)\n"
+    "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+    "time.sleep(30)\n"
+)
+
+
+def _daemon_command(pid_path: Path) -> str:
+    quoted_pid = shlex.quote(str(pid_path))
+    return (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(_DAEMON)} {quoted_pid}; "
+        f"while [ ! -s {quoted_pid} ]; do sleep 0.01; done; echo started"
+    )
+
+
 @pytest.mark.process
 @pytest.mark.skipif(os.name != "posix", reason="POSIX daemonization")
 def test_stopped_daemon_gets_notice(tmp_path: Path) -> None:
-    pid_path = tmp_path / "daemon.pid"
-    daemon = (
-        "import os, pathlib, sys, time\n"
-        "if os.fork():\n"
-        "    os._exit(0)\n"
-        "os.setsid()\n"
-        "if os.fork():\n"
-        "    os._exit(0)\n"
-        "null = os.open(os.devnull, os.O_RDWR)\n"
-        "for fd in (0, 1, 2):\n"
-        "    os.dup2(null, fd)\n"
-        "os.closerange(3, 4096)\n"
-        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-        "time.sleep(30)\n"
-    )
-    quoted_pid = shlex.quote(str(pid_path))
-    command = (
-        f"{shlex.quote(sys.executable)} -c {shlex.quote(daemon)} {quoted_pid}; "
-        f"while [ ! -s {quoted_pid} ]; do sleep 0.01; done; echo started"
-    )
+    command = _daemon_command(tmp_path / "daemon.pid")
 
     result = run_tool(BashTool(), {"command": command, "timeout": 30}, ToolContext(cwd=tmp_path))
 
     assert result.text == (
         "Command exited with code 0: started\n"
+        "[Processes the command left running were stopped when it exited. "
+        "To keep a process running, use operation=start and run it in the foreground.]"
+    )
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX daemonization")
+def test_managed_stopped_daemon_gets_notice(tmp_path: Path) -> None:
+    command = _daemon_command(tmp_path / "daemon.pid")
+    tool = BashTool()
+
+    async def run() -> ToolResult:
+        try:
+            result = await tool.run(
+                {"operation": "start", "command": command, "yield_seconds": 0},
+                ToolContext(cwd=tmp_path),
+            )
+            process_id = result.data["process_id"]
+            with anyio.fail_after(10):
+                while result.data["process_state"] == "running":
+                    result = await tool.run(
+                        {"operation": "poll", "process_id": process_id, "wait_seconds": 0.5},
+                        ToolContext(cwd=tmp_path),
+                    )
+            return result
+        finally:
+            await tool.aclose()
+
+    result = anyio.run(run)
+
+    assert result.data["process_state"] == "completed"
+    assert result.text.endswith(
         "[Processes the command left running were stopped when it exited. "
         "To keep a process running, use operation=start and run it in the foreground.]"
     )

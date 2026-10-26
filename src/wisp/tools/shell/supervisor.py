@@ -64,6 +64,8 @@ class ProcessUpdate:
     # runs). Both are UTC wall-clock times.
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    # Whether cleanup stopped processes the command had detached, such as a daemon.
+    background_stopped: bool = False
 
 
 @dataclass
@@ -988,6 +990,9 @@ class ProcessSupervisor:
             stderr_source_byte_lengths=stderr_source_byte_lengths,
             started_at=managed.started_at,
             ended_at=managed.ended_at if managed.state != "running" else None,
+            background_stopped=(
+                managed.state != "running" and stopped_detached_processes(managed.process)
+            ),
         )
 
     def _evict_terminals_for_capacity(self) -> None:
