@@ -90,6 +90,10 @@ class _BinaryFileDetected(Exception):
     """Stop grep and discard pending output when a streamed file contains NUL."""
 
 
+class _OversizedLineDetected(Exception):
+    """Stop grep and discard pending output when a line exceeds the scan limit."""
+
+
 type _GrepScannerBackend = Literal["auto", "python", "native"]
 
 
@@ -429,6 +433,8 @@ def _python_grep(
     output: list[str] = []
     output_bytes = 0
     match_count = 0
+    # Minified bundles and source maps are skipped, not fatal, during a directory search.
+    oversized_files: list[str] = []
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
     walked_display_root = context.cwd.resolve(strict=False)
     cached_file_path: Path | None = None
@@ -530,6 +536,8 @@ def _python_grep(
                                 )
                             if native_result.status == "binary":
                                 continue
+                            if native_result.status == "line_too_long":
+                                raise _OversizedLineDetected
                             if native_result.status != "complete":
                                 raise RuntimeError(
                                     f"native grep returned unknown status: {native_result.status}"
@@ -619,6 +627,16 @@ def _python_grep(
             except (_BinaryFileDetected, UnicodeDecodeError):
                 match_count = file_match_start
                 continue
+            except _OversizedLineDetected:
+                oversized_path = display_path(file_path)
+                if file_path == secure_path.path:
+                    raise ToolError(
+                        f"grep cannot search {oversized_path}: it has a line longer than "
+                        f"{_PYTHON_GREP_MAX_LINE_CHARS} characters"
+                    ) from None
+                match_count = file_match_start
+                oversized_files.append(oversized_path)
+                continue
 
             if file_buffer.lines:
                 if effective_context_lines and output:
@@ -635,6 +653,7 @@ def _python_grep(
                     context=context,
                     truncated=True,
                     match_limit_reached=file_had_extra_match,
+                    oversized_files=oversized_files,
                 )
 
     return _grep_result(
@@ -643,6 +662,7 @@ def _python_grep(
         max_results=max_results,
         context=context,
         truncated=context_truncated and bool(output),
+        oversized_files=oversized_files,
     )
 
 
@@ -651,6 +671,8 @@ _PYTHON_GREP_MAX_LINE_CHARS = 1_000_000
 # Characters of a matched or context line shown in a record. Longer lines, such as
 # minified code, are clipped so one line cannot fill the output budget.
 _GREP_MAX_DISPLAY_CHARS = 500
+# Skipped oversized files named in a grep notice; the rest are counted.
+_OVERSIZED_NOTICE_NAMES = 5
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
@@ -727,7 +749,7 @@ def _iter_utf8_line_blocks(
                 decoded, line_parts, block, max_line_chars=max_line_chars
             )
             if sum(map(len, line_parts)) > max_line_chars:
-                raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
+                raise _OversizedLineDetected
             if block:
                 yield block
         decoded = decoder.decode(b"", final=True)
@@ -741,7 +763,7 @@ def _iter_utf8_line_blocks(
             decoded = decoded[1:]
     _split_chunk_lines(decoded, line_parts, block, max_line_chars=max_line_chars, final=True)
     if sum(map(len, line_parts)) > max_line_chars:
-        raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
+        raise _OversizedLineDetected
     if line_parts:
         block.append("".join(line_parts))
     if block:
@@ -773,7 +795,7 @@ def _split_chunk_lines(
             line = "".join((*line_parts, line))
             line_parts.clear()
         if len(line) > max_line_chars:
-            raise ToolError(f"grep encountered a line longer than {max_line_chars} characters")
+            raise _OversizedLineDetected
         # A trailing CR may be the first half of a CRLF split across chunks.
         if index == last_index and piece[-1] == "\r" and not final:
             line_parts.append(line)
@@ -2001,6 +2023,7 @@ def _grep_result(
     context: ToolContext,
     truncated: bool,
     match_limit_reached: bool = False,
+    oversized_files: Sequence[str] = (),
 ) -> ToolResult:
     """Build grep's result from the records its scan kept.
 
@@ -2014,26 +2037,44 @@ def _grep_result(
         context (ToolContext): Supplies the output budget.
         truncated (bool): Whether the scan stopped early or reduced context lines.
         match_limit_reached (bool): Whether ``max_results`` is what stopped it.
+        oversized_files (Sequence[str]): Files skipped for a line over the scan limit,
+            named in a final notice that the output budget cannot cut.
 
     Returns:
         ToolResult: The bounded text, with ``count`` and ``matches`` data.
     """
 
+    notice = _oversized_files_notice(oversized_files)
     if not records and not truncated:
-        return ToolResult(text="No matches", data={"count": 0, "matches": []})
+        text = "No matches" if notice is None else f"No matches\n{notice}"
+        return ToolResult(text=text, data={"count": 0, "matches": []})
     text = "\n".join(records)
     if truncated:
         marker = _limit_marker(max_results, match_limit_reached)
         text = f"{text}\n{marker}" if text else marker
+    notice_bytes = 0 if notice is None else len(notice.encode("utf-8")) + 1
     bounded = truncate_text(
         text,
-        max_bytes=context.max_output_bytes,
-        max_lines=context.max_output_lines,
+        max_bytes=max(0, context.max_output_bytes - notice_bytes),
+        max_lines=max(0, context.max_output_lines - (notice is not None)),
     )
     return ToolResult(
-        text=bounded.text,
+        text=bounded.text if notice is None else f"{bounded.text}\n{notice}",
         data={"count": match_count, "matches": list(records)},
         truncated=truncated or bounded.truncated,
+    )
+
+
+def _oversized_files_notice(paths: Sequence[str]) -> str | None:
+    if not paths:
+        return None
+    shown = ", ".join(paths[:_OVERSIZED_NOTICE_NAMES])
+    more = len(paths) - _OVERSIZED_NOTICE_NAMES
+    names = f"{shown}, and {more} more" if more > 0 else shown
+    files = "file" if len(paths) == 1 else "files"
+    return (
+        f"[skipped {len(paths)} {files} with a line longer than "
+        f"{_PYTHON_GREP_MAX_LINE_CHARS} characters: {names}]"
     )
 
 

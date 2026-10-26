@@ -136,9 +136,28 @@ def test_native_literal_grep_matches_output_bounds(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("terminator", ["", "\n"])
-def test_native_literal_grep_matches_long_line_error(tmp_path: Path, terminator: str) -> None:
+def test_native_literal_grep_skips_long_line_file(tmp_path: Path, terminator: str) -> None:
     (tmp_path / "minified.txt").write_text("x" * 1_000_001 + terminator, encoding="utf-8")
+    (tmp_path / "plain.txt").write_text("needle\n", encoding="utf-8")
     arguments = {"pattern": "needle", "literal": True}
+
+    texts = [
+        _run_grep(tmp_path, arguments, backend=backend).text for backend in ("python", "native")
+    ]
+
+    assert (
+        texts
+        == [
+            "plain.txt:1:needle\n"
+            "[skipped 1 file with a line longer than 1000000 characters: minified.txt]"
+        ]
+        * 2
+    )
+
+
+def test_native_literal_grep_matches_long_line_target_error(tmp_path: Path) -> None:
+    (tmp_path / "minified.txt").write_text("x" * 1_000_001, encoding="utf-8")
+    arguments = {"pattern": "needle", "literal": True, "path": "minified.txt"}
 
     messages: list[str] = []
     for backend in ("python", "native"):
@@ -146,10 +165,10 @@ def test_native_literal_grep_matches_long_line_error(tmp_path: Path, terminator:
             _run_grep(tmp_path, arguments, backend=backend)
         messages.append(str(caught.value))
 
-    assert messages == [
-        "grep encountered a line longer than 1000000 characters",
-        "grep encountered a line longer than 1000000 characters",
-    ]
+    assert (
+        messages
+        == ["grep cannot search minified.txt: it has a line longer than 1000000 characters"] * 2
+    )
 
 
 def test_native_literal_grep_falls_back_for_surrogateescaped_paths(

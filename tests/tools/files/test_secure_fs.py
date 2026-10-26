@@ -1380,15 +1380,18 @@ def test_regex_search_times_out_pathological_backtracking(tmp_path: Path) -> Non
     assert time.monotonic() - started < 5
 
 
-def test_grep_rejects_unbounded_newline_free_file(tmp_path: Path) -> None:
+def test_grep_skips_unbounded_newline_free_file(tmp_path: Path) -> None:
     (tmp_path / "minified.txt").write_text("x" * 1_000_001, encoding="utf-8")
 
-    with pytest.raises(ToolError, match="line longer than 1000000 characters"):
-        run_tool(
-            GrepTool(),
-            {"path": ".", "pattern": "needle", "literal": True},
-            ToolContext(cwd=tmp_path),
-        )
+    result = run_tool(
+        GrepTool(),
+        {"path": ".", "pattern": "needle", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == (
+        "No matches\n[skipped 1 file with a line longer than 1000000 characters: minified.txt]"
+    )
 
 
 def test_grep_stops_reading_after_output_is_truncated(tmp_path: Path) -> None:

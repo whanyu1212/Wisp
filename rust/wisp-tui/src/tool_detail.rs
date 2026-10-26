@@ -836,7 +836,7 @@ fn build_grep_presentation(
         return DetailAvailability::None;
     };
     let retained = bounded_result_records(
-        result.output,
+        without_grep_skip_notice(result.output),
         result.truncated,
         result.projection_cut_mid_line,
         true,
@@ -1141,6 +1141,15 @@ fn bounded_result_records(
         lines,
         hidden_rows,
         hidden_bytes,
+    }
+}
+
+/// Grep names the files it skipped for an over-long line on a final line after
+/// the records and any truncation marker.
+fn without_grep_skip_notice(output: &str) -> &str {
+    match output.rsplit_once('\n') {
+        Some((records, last)) if last.starts_with("[skipped ") => records,
+        _ => output,
     }
 }
 
@@ -1453,6 +1462,30 @@ mod tests {
             build_tool_detail(&find, result("a\n", Some("find: 2 files"))),
             DetailAvailability::None
         );
+    }
+
+    #[test]
+    fn grep_skip_notice_is_not_a_record() {
+        let notice = "[skipped 1 file with a line longer than 1000000 characters: app.min.js]";
+        let grep = project_tool_detail_source(
+            "grep",
+            serde_json::json!({"pattern": "x", "path": "."})
+                .as_object()
+                .unwrap(),
+        );
+        let DetailAvailability::LiveRetained(detail) = build_tool_detail(
+            &grep,
+            DetailResult {
+                truncated: true,
+                ..result(
+                    &format!("a.rs:1:x\nb.rs:2:x\n[truncated]\n{notice}"),
+                    Some("grep: 2 matches (+ more)"),
+                )
+            },
+        ) else {
+            panic!("grep detail expected");
+        };
+        assert!(!detail.rows.iter().any(|row| row.text.contains("skipped")));
     }
 
     #[test]
