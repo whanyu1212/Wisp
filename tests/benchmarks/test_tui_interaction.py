@@ -121,6 +121,36 @@ def test_incomplete_repaints_cannot_form_a_visible_marker() -> None:
     assert not rust_tui_interaction._marker_painted(partial_repaints, marker)
 
 
+# The reveal painted the end marker in two frames, with the spinner, a border and
+# the elapsed time between its halves in the byte stream (CI run 40202385811).
+_SPLIT_SUFFIX = (
+    b"\x1b[?2026h\x1b[10;3HWISP_INTERACTION_RESPONSE"
+    b"\x1b[22;1H\xe2\x97\x92\x1b[11;1H\xe2\x94\x82\x1b[?2026l"
+    b"\x1b[?2026h\x1b[10;28H_DONE_6E2C\x1b[22;1H\xe2\x97\x90 6.5s\x1b[?2026l"
+)
+
+
+@pytest.mark.parametrize(
+    ("output", "split", "shown"),
+    [
+        pytest.param(_SPLIT_SUFFIX, 0, True, id="one-read"),
+        pytest.param(_SPLIT_SUFFIX, _SPLIT_SUFFIX.index(b"28H"), True, id="read-mid-escape"),
+        pytest.param(
+            _SPLIT_SUFFIX, _SPLIT_SUFFIX.index(b"\x97\x92"), True, id="read-mid-character"
+        ),
+        pytest.param(_SPLIT_SUFFIX.replace(b"6E2C", b"6E2"), 0, False, id="last-character-missing"),
+        pytest.param(_SPLIT_SUFFIX.removesuffix(b"\x1b[?2026l"), 0, False, id="frame-incomplete"),
+    ],
+)
+def test_screen_joins_split_marker(output: bytes, split: int, shown: bool) -> None:
+    screen = rust_tui_interaction._PaintedScreen()
+
+    screen.feed(output[:split])
+    screen.feed(output[split:])
+
+    assert screen.shows(rust_tui_interaction._RESPONSE_SUFFIX) is shown
+
+
 def test_run_order_alternates_histories(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

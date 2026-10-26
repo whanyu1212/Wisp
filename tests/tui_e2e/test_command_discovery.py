@@ -209,12 +209,16 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/he")
                 phase = "prefix"
                 output.clear()
-            elif phase == "prefix" and b"/help" in output:
+            # Enter only accepts a completion the user saw, so wait for the frame that
+            # placed the cursor after "/he" and painted its menu. Menu text painted for
+            # "/" or "/h" can arrive first while the TUI still has keys to process.
+            elif phase == "prefix" and b"/help" in output and frame_cursor(output) == (20, 9):
                 os.write(terminal_fd, b"\r")
                 phase = "completed"
                 output.clear()
-            # Differential terminal output may contain only the newly filled suffix.
-            elif phase == "completed" and b"lp" in output:
+            # A second Enter before the filled "/help" is painted can reach a menu the
+            # user never saw; the cursor after the fill proves it was painted.
+            elif phase == "completed" and frame_cursor(output) == (20, 11):
                 assert not any(command["type"] == "prompt" for command in commands)
                 os.write(terminal_fd, b"\r")
                 phase = "help"

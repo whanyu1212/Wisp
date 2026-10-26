@@ -13,6 +13,7 @@ import json
 import math
 import os
 import pty
+import re
 import secrets
 import select
 import struct
@@ -21,6 +22,7 @@ import tempfile
 import termios
 import threading
 import time
+import unicodedata
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -29,6 +31,8 @@ from typing import Literal, cast
 import psutil
 
 from benchmarks.rust_tui_e2e import (
+    _DCS,
+    _OSC,
     START_TOKEN,
     Distribution,
     Renderer,
@@ -51,6 +55,11 @@ type NavigationDirection = Literal["page_up", "page_down"]
 _RESPONSE_SUFFIX = "WISP_INTERACTION_RESPONSE_DONE_6E2C"
 _RESPONSE_PREFIX = "WISP_INTERACTION_RESPONSE_BEGIN_A7C8D9E01234"
 _HISTORY_READY = "RC2 saved history ready"
+# The TUI wraps every frame in a synchronized update; output up to the last end
+# marker holds only complete frames, so no escape or character is cut in half.
+_FRAME_END = b"\x1b[?2026l"
+_CSI_COMMAND = re.compile(rb"\x1b\[([0-?]*)[ -/]*([@-~])")
+_OTHER_ESCAPE = re.compile(rb"\x1b[ -/]*[0-~]")
 _SAMPLE_INTERVAL_SECONDS = 0.02
 _OUTPUT_TAIL_LIMIT = 65_536
 
@@ -419,6 +428,7 @@ def _run_sample(
         output = bytearray()
         probe_output = bytearray()
         response_output = bytearray()
+        response_screen = _PaintedScreen()
         settled_output = bytearray()
         terminal_output_bytes = 0
         context_redrawn = False
@@ -463,12 +473,13 @@ def _run_sample(
                         probe_output.extend(chunk)
                     if submitted_ns is not None:
                         response_output.extend(chunk)
+                        response_screen.feed(chunk)
                     if final_response_ns is not None:
                         settled_output.extend(chunk)
                 now_ns = time.perf_counter_ns()
                 if pending_navigation is not None and chunk:
                     direction, sent_ns = pending_navigation
-                    if _response_has_final(_plain_text(response_output)):
+                    if response_screen.shows(_RESPONSE_SUFFIX):
                         raise RuntimeError(f"{renderer} stream ended before {direction} output")
                     navigation.append(NavigationSample(direction, _elapsed_ms(sent_ns, now_ns)))
                     pending_navigation = None
@@ -504,9 +515,7 @@ def _run_sample(
                     if pending_probe is not None:
                         phase, index, marker, sent_ns = pending_probe
                         if _marker_painted(probe_plain, marker):
-                            if phase == "streaming" and _response_has_final(
-                                _plain_text(response_output)
-                            ):
+                            if phase == "streaming" and response_screen.shows(_RESPONSE_SUFFIX):
                                 raise RuntimeError(
                                     f"{renderer} stream completed before probe {index} was visible"
                                 )
@@ -528,15 +537,15 @@ def _run_sample(
                         else:
                             submitted_ns = time.perf_counter_ns()
                             response_output.clear()
+                            response_screen = _PaintedScreen()
                             os.write(terminal_fd, f"{prompt}\r".encode())
                     elif submitted_ns is not None:
-                        plain = _plain_text(response_output)
-                        if first_response_ns is None and _response_prefix_visible(plain):
+                        if first_response_ns is None and response_screen.shows(_RESPONSE_PREFIX):
                             first_response_ns = now_ns
                         if (
                             first_response_ns is not None
                             and final_response_ns is None
-                            and _response_has_final(plain)
+                            and response_screen.shows(_RESPONSE_SUFFIX)
                         ):
                             final_response_ns = now_ns
                             # Request a complete post-stream frame; the suffix may
@@ -725,12 +734,90 @@ def _marker_painted(output: str, marker: str) -> bool:
     return marker[-12:] in output
 
 
-def _response_prefix_visible(output: str) -> bool:
-    return _RESPONSE_PREFIX[-12:] in output
+class _PaintedScreen:
+    """Screen cells replayed from the complete frames the TUI has written.
 
+    Incremental frames repaint only changed cells, so a word revealed across two
+    frames reaches the PTY with other cells (spinner, borders, status) painted
+    between its halves. Placing text at its cursor position joins the halves, which
+    matching the printable byte stream cannot do. Only the sequences the TUI paints
+    with are interpreted: cursor position, clearing the screen or the rest of a
+    line, and text.
+    """
 
-def _response_has_final(output: str) -> bool:
-    return _RESPONSE_SUFFIX in output[-8192:]
+    def __init__(self) -> None:
+        self._cells: dict[tuple[int, int], str] = {}
+        self._row = 1
+        self._column = 1
+        self._unframed = bytearray()
+        self._rows: list[str] | None = []
+
+    def feed(self, chunk: bytes) -> None:
+        """Replay each frame that ``chunk`` completes and keep a partial frame for later.
+
+        Args:
+            chunk: PTY output in the order it was read.
+        """
+
+        self._unframed.extend(chunk)
+        end = self._unframed.rfind(_FRAME_END)
+        if end < 0:
+            return
+        end += len(_FRAME_END)
+        frames = _OSC.sub(b"", _DCS.sub(b"", bytes(self._unframed[:end])))
+        del self._unframed[:end]
+        self._rows = None
+        position = 0
+        while position < len(frames):
+            command = _CSI_COMMAND.match(frames, position)
+            if command is not None:
+                self._apply(command.group(1), command.group(2))
+                position = command.end()
+                continue
+            escape = _OTHER_ESCAPE.match(frames, position)
+            if escape is not None:
+                position = escape.end()
+                continue
+            text_end = frames.find(b"\x1b", position)
+            text_end = len(frames) if text_end < 0 else text_end
+            self._paint(frames[position:text_end].decode("utf-8", "replace"))
+            position = text_end
+
+    def shows(self, text: str) -> bool:
+        """Return whether one screen row contains ``text``."""
+
+        if self._rows is None:
+            self._rows = self._render_rows()
+        return any(text in row for row in self._rows)
+
+    def _apply(self, params: bytes, final: bytes) -> None:
+        if final == b"H":
+            values = [int(value or 1) for value in params.split(b";")] if params else [1]
+            self._row, self._column = values[0], values[1] if len(values) > 1 else 1
+        elif final == b"J" and params == b"2":
+            self._cells.clear()
+        elif final == b"K" and params in (b"", b"0"):
+            erased = [
+                cell for cell in self._cells if cell[0] == self._row and cell[1] >= self._column
+            ]
+            for cell in erased:
+                del self._cells[cell]
+
+    def _paint(self, text: str) -> None:
+        for character in text:
+            if not character.isprintable():
+                continue
+            self._cells[(self._row, self._column)] = character
+            self._column += 2 if unicodedata.east_asian_width(character) in "WF" else 1
+
+    def _render_rows(self) -> list[str]:
+        columns_by_row: dict[int, dict[int, str]] = {}
+        for (row, column), character in self._cells.items():
+            columns_by_row.setdefault(row, {})[column] = character
+        return [
+            "".join(columns.get(column, " ") for column in range(1, max(columns) + 1))
+            for columns in columns_by_row.values()
+        ]
 
 
 def _history_ready(output: str, renderer: Renderer, history_marker_seen: bool) -> bool:
