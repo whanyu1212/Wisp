@@ -42,6 +42,7 @@ from wisp.tools.files.secure_fs import (
 )
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
+from wisp.trust.scope import is_broad_root
 
 # The TUI file picker imports this curated pruning set to keep indexing bounded.
 # Recursive grep/find use repository ignore rules instead of pruning these names.
@@ -1151,8 +1152,9 @@ def _ancestor_ignore_specs(
         relative = path.relative_to(cwd)
     except ValueError:
         return (), False
-    specs: list[_IgnoreSpec] = []
-    in_git_repository = False
+    enclosing = _enclosing_repository_ignore_specs(cwd, context, cancel_event=cancel_event)
+    specs = list(enclosing or ())
+    in_git_repository = enclosing is not None
     current = cwd
     for part in relative.parts:
         if cancel_event is not None and cancel_event.is_set():
@@ -1180,6 +1182,78 @@ def _ancestor_ignore_specs(
             return tuple(specs), in_git_repository
         current /= part
     return tuple(specs), in_git_repository
+
+
+def _enclosing_repository_ignore_specs(
+    cwd: Path,
+    context: ToolContext,
+    *,
+    cancel_event: Event | None = None,
+) -> tuple[_IgnoreSpec, ...] | None:
+    """Load ignore files from the Git work tree enclosing ``cwd`` down to its parent.
+
+    Git applies every ``.gitignore`` from the work-tree root down, so a session started
+    in ``repo/pkg`` must still ignore what ``repo/.gitignore`` names. The folders above
+    ``cwd`` lie outside the sandbox, but their ignore files only filter results and are
+    never shown. A repository at the home folder or above, such as tracked dotfiles that
+    ignore ``*``, is not treated as enclosing.
+
+    Args:
+        cwd (Path): Resolved tool working directory.
+        context (ToolContext): Tool context, for ignore-file limits.
+        cancel_event (Event | None, optional): Stops the search when set.
+            Defaults to None.
+
+    Returns:
+        tuple[_IgnoreSpec, ...] | None: Specs from the root down, or None when no
+        work tree root lies above ``cwd`` and below the home folder.
+    """
+
+    root = _enclosing_repository_root(cwd, context, cancel_event=cancel_event)
+    # When ``cwd`` is the root, the walk reads its ignore files itself.
+    if root is None or root == cwd:
+        return None
+    specs: list[_IgnoreSpec] = []
+    for folder in reversed(cwd.parents[: cwd.parents.index(root) + 1]):
+        try:
+            with _open_ancestor(folder) as descriptor:
+                specs.extend(
+                    _read_ignore_specs(
+                        descriptor,
+                        folder,
+                        context,
+                        include_gitignore=True,
+                        cancel_event=cancel_event,
+                    )
+                )
+        except OSError:
+            return None
+    return tuple(specs)
+
+
+def _enclosing_repository_root(
+    cwd: Path, context: ToolContext, *, cancel_event: Event | None
+) -> Path | None:
+    for folder in (cwd, *cwd.parents):
+        if is_broad_root(folder) or (cancel_event is not None and cancel_event.is_set()):
+            return None
+        try:
+            with _open_ancestor(folder) as descriptor:
+                if _is_git_repository_root(descriptor, folder, context):
+                    return folder
+        except OSError:
+            return None
+    return None
+
+
+@contextmanager
+def _open_ancestor(folder: Path) -> Iterator[int]:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(folder, flags)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
 
 
 def _walk_directory(

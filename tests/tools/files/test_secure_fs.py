@@ -625,6 +625,41 @@ def test_subdirectory_search_inherits_ancestor_ignore_files(tmp_path: Path) -> N
     assert find.data["files"] == ["subdir/visible.txt"]
 
 
+def test_subfolder_cwd_honors_repository_ignores(tmp_path: Path) -> None:
+    repository = tmp_path / "repo"
+    repository.mkdir()
+    mark_git_repository(repository)
+    (repository / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (repository / ".git" / "info").mkdir()
+    (repository / ".git" / "info" / "exclude").write_text("local.py\n", encoding="utf-8")
+    package = repository / "pkg"
+    (package / "build").mkdir(parents=True)
+    for name in ("build/out.py", "local.py", "visible.py"):
+        (package / name).write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=package)
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
+    find = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
+
+    assert grep.data["matches"] == ["visible.py:1:needle"]
+    assert find.data["files"] == ["visible.py"]
+
+
+def test_home_repository_ignores_do_not_apply() -> None:
+    # A dotfiles repository at the home folder often ignores everything ("*").
+    # The test suite already points Path.home() at an isolated folder.
+    home = Path.home()
+    project = home / "project"
+    project.mkdir()
+    mark_git_repository(home)
+    (home / ".gitignore").write_text("*\n", encoding="utf-8")
+    (project / "visible.py").write_text("needle\n", encoding="utf-8")
+
+    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, ToolContext(cwd=project))
+
+    assert grep.data["matches"] == ["visible.py:1:needle"]
+
+
 def test_recursive_tools_honor_repository_local_excludes(tmp_path: Path) -> None:
     info = tmp_path / ".git" / "info"
     info.mkdir(parents=True)
