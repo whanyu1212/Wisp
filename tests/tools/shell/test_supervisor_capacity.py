@@ -254,9 +254,11 @@ def test_capacity_error_names_held_processes(tmp_path: Path) -> None:
     async def run() -> tuple[list[str], str]:
         supervisor = ProcessSupervisor(max_processes=2)
         try:
+            # Each marker leads its command: the list shortens long commands, and the
+            # interpreter path alone can fill the shortened length on CI.
             held = [
                 await supervisor.start(
-                    python_command(f"import time; time.sleep(10)  # job {index}"),
+                    f"echo job{index} && {python_command('import time; time.sleep(10)')}",
                     cwd=tmp_path,
                     timeout=10,
                 )
@@ -272,5 +274,4 @@ def test_capacity_error_names_held_processes(tmp_path: Path) -> None:
 
     assert message.startswith("Cannot start command: managed process limit (2) reached.")
     for index, process_id in enumerate(held, start=1):
-        assert f"{process_id} (running):" in message
-        assert f"# job {index}" in message
+        assert f"{process_id} (running): echo job{index} && " in message
