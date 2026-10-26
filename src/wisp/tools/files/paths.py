@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import unicodedata
 from dataclasses import dataclass
 from fnmatch import translate
 from functools import lru_cache
@@ -74,10 +75,17 @@ def matches_protected_pattern(path: Path, patterns: tuple[str, ...]) -> bool:
     if not patterns:
         return False
     matcher = _protected_matcher(tuple(patterns))
-    text = path.as_posix().lower()
+    text = _caseless(path.as_posix())
     if matcher.name is not None and matcher.name.match(text.rsplit("/", 1)[-1]):
         return True
     return matcher.path is not None and matcher.path.match(text) is not None
+
+
+def _caseless(text: str) -> str:
+    # Canonical caseless matching (Unicode 3.13). Case-insensitive filesystems fold
+    # more than str.lower(): APFS opens "credentialſ.json" as "credentials.json",
+    # and it treats composed and decomposed characters as the same name.
+    return unicodedata.normalize("NFD", unicodedata.normalize("NFD", text).casefold())
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +99,7 @@ def _protected_matcher(patterns: tuple[str, ...]) -> _ProtectedMatcher:
     name_patterns: list[str] = []
     path_patterns: list[str] = []
     for pattern in patterns:
-        normalized = pattern.replace("\\", "/").lstrip("/").lower()
+        normalized = _caseless(pattern.replace("\\", "/").lstrip("/"))
         if normalized.startswith("**/"):
             normalized = normalized[3:]
         if "/" in normalized:

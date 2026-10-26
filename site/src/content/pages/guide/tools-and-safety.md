@@ -36,9 +36,10 @@ the same safety category and approval policy.
 The file tools never open files that commonly hold secrets: `.env` and its variants, keys and
 certificates (`*.pem`, `*.key`, `*.p12`, `*.pfx`, and SSH keys such as `id_rsa`),
 `credentials.json`, `.netrc`, `.pgpass`, and Wisp's own `auth.json`, `mcp-auth.json`, and
-`settings.json`. Matching ignores case and checks both the path as written and the file a symlink
-points to. `read`, `write`, and `edit` refuse a protected path, and `grep`, `find`, and `ls` leave
-protected files out of their results.
+`settings.json`. Matching ignores case and accent composition the way case-insensitive filesystems
+do, so `credentialſ.json` (long s) counts as `credentials.json`, and it checks both the path as
+written and the file a symlink points to. `read`, `write`, and `edit` refuse a protected path, and
+`grep`, `find`, and `ls` leave protected files out of their results.
 
 Change the list with the `protected_paths` setting in your user settings; a project's settings
 cannot change it. Wisp's credential files, including MCP sign-ins, and its settings and permission

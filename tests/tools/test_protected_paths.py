@@ -9,7 +9,7 @@ from pytest import MonkeyPatch
 
 from tests.tools.support import run_tool
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS
-from wisp.tools.builtin import FindTool, GrepTool, ReadTool
+from wisp.tools.builtin import FindTool, GrepTool, LsTool, ReadTool
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
 from wisp.tools.files.secure_fs import secure_tool_path
@@ -89,9 +89,21 @@ def test_no_patterns_means_nothing_protected(tmp_path: Path) -> None:
     assert is_protected_path(tmp_path / ".env", context) is False
 
 
-def test_matching_is_case_insensitive(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path, protected_paths=(".env",))
-    assert is_protected_path(tmp_path / ".ENV", context) is True
+# APFS and NTFS fold more than str.lower() does, and APFS also ignores the
+# difference between composed and decomposed characters.
+@pytest.mark.parametrize(
+    ("pattern", "relative"),
+    [
+        pytest.param(".env", ".ENV", id="ascii"),
+        pytest.param("credentials.json", "credentialſ.json", id="long-s"),
+        pytest.param("*.key", "server.\u212aey", id="kelvin-sign"),
+        pytest.param(".wisp/auth.json", ".WISP/auth.jſon", id="path-pattern"),
+        pytest.param("geheim-\u00e4.txt", "GEHEIM-A\u0308.txt", id="decomposed"),
+    ],
+)
+def test_matching_ignores_case_and_composition(tmp_path: Path, pattern: str, relative: str) -> None:
+    context = ToolContext(cwd=tmp_path, protected_paths=(pattern,))
+    assert is_protected_path(tmp_path / relative, context) is True
 
 
 # --- secure_tool_path enforcement ---
@@ -145,6 +157,26 @@ def test_find_skips_protected_files(tmp_path: Path) -> None:
 
     assert ".env" not in result.text.split()  # the bare .env file is hidden
     assert "keep.env.py" in result.text
+
+
+@pytest.mark.parametrize(
+    ("directory", "protected"),
+    [
+        pytest.param(".", ("api.key", "credentials.json"), id="name-pattern"),
+        pytest.param(".wisp", ("auth.json",), id="path-pattern"),
+    ],
+)
+def test_ls_hides_protected_names(
+    tmp_path: Path, directory: str, protected: tuple[str, ...]
+) -> None:
+    listed = tmp_path / directory
+    listed.mkdir(exist_ok=True)
+    for name in (*protected, "main.py"):
+        (listed / name).write_text("x\n", encoding="utf-8")
+
+    result = run_tool(LsTool(), {"path": directory}, _context(tmp_path))
+
+    assert result.text.split() == ["main.py"]
 
 
 def test_find_pointed_directly_at_protected_file_is_denied(tmp_path: Path) -> None:

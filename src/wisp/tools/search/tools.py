@@ -836,12 +836,19 @@ def _python_ls(
     secure_path = _coerce_secure_path(path, context)
 
     entry_count = 0
+    # A listed directory may be a link the caller named, and a path pattern such as
+    # ".wisp/auth.json" must match through it, so check names against both paths.
+    real_directory = Path(os.path.realpath(secure_path.path))
 
     def eligible_entries(descriptor: int | Path) -> Iterator[tuple[str, bool]]:
         nonlocal entry_count
         with os.scandir(descriptor) as entries:
             for entry in entries:
                 if not include_hidden and entry.name.startswith("."):
+                    continue
+                if _is_protected_walked_file(
+                    secure_path.path / entry.name, real_directory / entry.name, context
+                ):
                     continue
                 entry_count += 1
                 yield entry.name, entry.is_dir(follow_symlinks=False)
