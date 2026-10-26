@@ -71,6 +71,8 @@ pub enum ScanStatus {
     Binary,
     /// Cancellation was requested; all results were discarded.
     Cancelled,
+    /// A line exceeded `max_line_chars`; all results were discarded.
+    LineTooLong,
 }
 
 impl ScanStatus {
@@ -81,6 +83,7 @@ impl ScanStatus {
             Self::Complete => "complete",
             Self::Binary => "binary",
             Self::Cancelled => "cancelled",
+            Self::LineTooLong => "line_too_long",
         }
     }
 }
@@ -122,7 +125,8 @@ pub enum ScanError {
     InvalidConfig(String),
     /// Opening or reading the duplicated descriptor failed.
     Io(io::Error),
-    /// A source line exceeded the configured character limit.
+    /// A source line exceeded the configured character limit. Used while scanning;
+    /// `scan_literal` reports it as [`ScanStatus::LineTooLong`].
     LineTooLong { max_chars: usize },
     /// Descriptor duplication is not implemented on this target.
     UnsupportedTarget,
@@ -173,7 +177,21 @@ pub fn scan_literal_fd(
 }
 
 /// Scans valid UTF-8 from `reader` for a bounded, case-sensitive literal.
+///
+/// A file with a line longer than `max_line_chars` is discarded like a binary one,
+/// so a directory search can skip it and keep its other results.
 pub fn scan_literal(
+    reader: &mut impl Read,
+    config: &ScanConfig,
+    cancellation: &AtomicBool,
+) -> Result<ScanResult, ScanError> {
+    match scan_literal_lines(reader, config, cancellation) {
+        Err(ScanError::LineTooLong { .. }) => Ok(ScanResult::discarded(ScanStatus::LineTooLong)),
+        outcome => outcome,
+    }
+}
+
+fn scan_literal_lines(
     reader: &mut impl Read,
     config: &ScanConfig,
     cancellation: &AtomicBool,
@@ -722,11 +740,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lines_over_character_limit() {
+    fn discards_lines_over_character_limit() {
         let mut config = config("x");
         config.max_line_chars = 3;
-        let error = scan("éééé\n".as_bytes(), &config).unwrap_err();
-        assert!(matches!(error, ScanError::LineTooLong { max_chars: 3 }));
+        let result = scan("x\néééé\n".as_bytes(), &config).unwrap();
+        assert_eq!(result, ScanResult::discarded(ScanStatus::LineTooLong));
     }
 
     #[test]

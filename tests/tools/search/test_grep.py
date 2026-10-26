@@ -972,8 +972,45 @@ def test_python_grep_splitlines_bounds_a_line_ending_in_the_current_chunk(
     path = tmp_path / "data.txt"
     path.write_text("x" * 11 + "\n", encoding="utf-8")
 
-    with pytest.raises(ToolError, match="line longer than 10 characters"):
+    with pytest.raises(search_tools_module._OversizedLineDetected):
         list(search_tools_module._iter_utf8_line_blocks(path, max_line_chars=10))
+
+
+def test_grep_skips_files_with_oversized_lines(tmp_path: Path) -> None:
+    (tmp_path / "app.min.js").write_text("x" * 1_000_001 + "needle\n", encoding="utf-8")
+    (tmp_path / "src.js").write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"), {"pattern": "needle"}, ToolContext(cwd=tmp_path)
+    )
+
+    assert result.data["matches"] == ["src.js:1:needle"]
+    assert result.text == (
+        "src.js:1:needle\n[skipped 1 file with a line longer than 1000000 characters: app.min.js]"
+    )
+
+
+def test_grep_names_oversized_target_file(tmp_path: Path) -> None:
+    (tmp_path / "app.min.js").write_text("x" * 1_000_001, encoding="utf-8")
+
+    with pytest.raises(ToolError, match="grep cannot search app.min.js: it has a line longer"):
+        run_tool(
+            GrepTool(_scanner_backend="python"),
+            {"pattern": "needle", "path": "app.min.js"},
+            ToolContext(cwd=tmp_path),
+        )
+
+
+def test_grep_keeps_skip_notice_within_budget(tmp_path: Path) -> None:
+    (tmp_path / "a.min.js").write_text("x" * 1_000_001, encoding="utf-8")
+    for name in ("b.js", "c.js", "d.js"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+    context = ToolContext(cwd=tmp_path, max_output_lines=2)
+
+    result = run_tool(GrepTool(_scanner_backend="python"), {"pattern": "needle"}, context)
+
+    assert result.truncated is True
+    assert result.text.splitlines()[-1].startswith("[skipped 1 file")
 
 
 def test_grep_clips_long_lines(tmp_path: Path) -> None:
