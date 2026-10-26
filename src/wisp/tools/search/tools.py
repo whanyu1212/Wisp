@@ -66,6 +66,12 @@ _REGEX_TIMEOUT_SECONDS = 0.05
 # The regex timeout is wall-clock, so a CPU-starved thread can exceed it on a benign line.
 # Each search may spend this much wall time re-trying timed-out lines before failing.
 _REGEX_RETRY_BUDGET_SECONDS = 1.0
+# One grep, find or ls call stops here and returns what it has found, so a huge tree or
+# a pattern that is slow on every line cannot hold the turn.
+_SEARCH_DEADLINE_SECONDS = 30
+# A stopped worker returns within milliseconds unless it is blocked in a filesystem call,
+# such as on an unresponsive network mount, which Python cannot interrupt.
+_SEARCH_DEADLINE_GRACE_SECONDS = 5
 _IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
 _MAX_IGNORE_FILE_BYTES = 1_000_000
 _MAX_IGNORE_FILE_PATTERNS = 10_000
@@ -92,6 +98,10 @@ class _BinaryFileDetected(Exception):
 
 class _OversizedLineDetected(Exception):
     """Stop grep and discard pending output when a line exceeds the scan limit."""
+
+
+class _SearchStopped(Exception):
+    """Stop grep mid-file because the awaiting task cancelled it or its deadline passed."""
 
 
 type _GrepScannerBackend = Literal["auto", "python", "native"]
@@ -288,27 +298,27 @@ class GrepTool:
             native_module.GrepCancellation() if native_module is not None else None
         )
         cancel_event = Event()
-        try:
-            return await anyio.to_thread.run_sync(
-                lambda: _python_grep(
-                    pattern=pattern,
-                    path=path,
-                    glob=glob,
-                    ignore_case=ignore_case,
-                    literal=literal,
-                    context_lines=context_lines,
-                    max_results=max_results,
-                    context=context,
-                    cancel_event=cancel_event,
-                    native_module=native_module,
-                    native_cancellation=native_cancellation,
-                ),
-                abandon_on_cancel=True,
-            )
-        finally:
-            cancel_event.set()
-            if native_cancellation is not None:
-                native_cancellation.cancel()
+        deadline_expired = Event()
+        return await _run_search_worker(
+            self.name,
+            lambda: _python_grep(
+                pattern=pattern,
+                path=path,
+                glob=glob,
+                ignore_case=ignore_case,
+                literal=literal,
+                context_lines=context_lines,
+                max_results=max_results,
+                context=context,
+                cancel_event=cancel_event,
+                deadline_expired=deadline_expired,
+                native_module=native_module,
+                native_cancellation=native_cancellation,
+            ),
+            cancel_event=cancel_event,
+            deadline_expired=deadline_expired,
+            native_cancellation=native_cancellation,
+        )
 
 
 class FindTool:
@@ -334,19 +344,20 @@ class FindTool:
             raise ToolArgumentError("find.max_results must be greater than or equal to 1")
 
         cancel_event = Event()
-        try:
-            return await anyio.to_thread.run_sync(
-                lambda: _python_find(
-                    path=path,
-                    pattern=pattern,
-                    max_results=max_results,
-                    context=context,
-                    cancel_event=cancel_event,
-                ),
-                abandon_on_cancel=True,
-            )
-        finally:
-            cancel_event.set()
+        deadline_expired = Event()
+        return await _run_search_worker(
+            self.name,
+            lambda: _python_find(
+                path=path,
+                pattern=pattern,
+                max_results=max_results,
+                context=context,
+                cancel_event=cancel_event,
+                deadline_expired=deadline_expired,
+            ),
+            cancel_event=cancel_event,
+            deadline_expired=deadline_expired,
+        )
 
 
 class LsTool:
@@ -366,10 +377,96 @@ class LsTool:
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = secure_tool_path(_optional_string(arguments, "path"), context, follow_links=True)
         include_hidden = _optional_bool(arguments, "all", default=False)
-        return await anyio.to_thread.run_sync(
-            lambda: _python_ls(path=path, include_hidden=include_hidden, context=context),
-            abandon_on_cancel=True,
+        cancel_event = Event()
+        deadline_expired = Event()
+        return await _run_search_worker(
+            self.name,
+            lambda: _python_ls(
+                path=path,
+                include_hidden=include_hidden,
+                context=context,
+                cancel_event=cancel_event,
+                deadline_expired=deadline_expired,
+            ),
+            cancel_event=cancel_event,
+            deadline_expired=deadline_expired,
         )
+
+
+async def _wait_for_search_deadline() -> None:
+    await anyio.sleep(_SEARCH_DEADLINE_SECONDS)
+
+
+async def _run_search_worker(
+    tool_name: str,
+    search: Callable[[], ToolResult],
+    *,
+    cancel_event: Event,
+    deadline_expired: Event,
+    native_cancellation: _NativeGrepCancellation | None = None,
+) -> ToolResult:
+    """Run a search in a worker thread, stopping it at the call's deadline.
+
+    At the deadline ``deadline_expired`` is set before ``cancel_event``, so the worker
+    returns what it has found rather than reporting a cancelled search. Both are set
+    when the call ends for any other reason.
+
+    Args:
+        tool_name (str): The tool named in the timeout error.
+        search (Callable[[], ToolResult]): The worker, which stops once ``cancel_event``
+            is set.
+        cancel_event (Event): Tells the worker to stop.
+        deadline_expired (Event): Tells the worker the deadline is why it stopped.
+        native_cancellation (_NativeGrepCancellation | None): Stops a native scan that
+            does not check ``cancel_event``.
+
+    Returns:
+        ToolResult: The worker's result, partial if the deadline stopped it.
+
+    Raises:
+        ToolError: With failure code ``timeout`` when the worker is still running a
+            grace period after the deadline. The worker thread is abandoned.
+    """
+
+    def stop() -> None:
+        cancel_event.set()
+        if native_cancellation is not None:
+            native_cancellation.cancel()
+
+    worker_scope = anyio.CancelScope()
+
+    async def stop_at_deadline() -> None:
+        await _wait_for_search_deadline()
+        deadline_expired.set()
+        stop()
+        await anyio.sleep(_SEARCH_DEADLINE_GRACE_SECONDS)
+        worker_scope.cancel()
+
+    result: ToolResult | None = None
+    failure: Exception | None = None
+    try:
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(stop_at_deadline)
+            with worker_scope:
+                try:
+                    result = await anyio.to_thread.run_sync(search, abandon_on_cancel=True)
+                except Exception as exc:
+                    # Raised below, so the caller sees it rather than an ExceptionGroup.
+                    failure = exc
+            tasks.cancel_scope.cancel()
+    finally:
+        stop()
+    if failure is not None:
+        raise failure
+    if result is None:
+        raise ToolError(
+            f"{tool_name} did not stop within {_SEARCH_DEADLINE_GRACE_SECONDS} seconds of "
+            f"its {_SEARCH_DEADLINE_SECONDS}-second limit; a filesystem call may be blocked, "
+            "for example on an unresponsive network mount",
+            failure_code="timeout",
+            recovery_hint="Search a path that avoids the unresponsive filesystem.",
+        )
+    return result
 
 
 def _bounded_context_lines(requested_context_lines: int, context: ToolContext) -> int:
@@ -417,6 +514,7 @@ def _python_grep(
     max_results: int,
     context: ToolContext,
     cancel_event: Event | None = None,
+    deadline_expired: Event | None = None,
     native_module: _NativeGrepModule | None = None,
     native_cancellation: _NativeGrepCancellation | None = None,
 ) -> ToolResult:
@@ -465,11 +563,13 @@ def _python_grep(
             cancel_event=cancel_event,
         )
     )
+    stopped = False
     with closing(files):
         for walked_file in files:
             file_path = walked_file.path
             if cancel_event is not None and cancel_event.is_set():
-                return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
+                stopped = True
+                break
             file_display_path: str | None = None
             if glob_matcher is not None:
                 file_display_path = display_path(file_path)
@@ -530,10 +630,7 @@ def _python_grep(
                             )
                         if file_native_module is not None:
                             if native_result.status == "cancelled":
-                                return ToolResult(
-                                    text="Search cancelled",
-                                    data={"count": 0, "matches": []},
-                                )
+                                raise _SearchStopped
                             if native_result.status == "binary":
                                 continue
                             if native_result.status == "line_too_long":
@@ -556,10 +653,7 @@ def _python_grep(
                         line_number = 0
                         for block in _iter_utf8_line_blocks(descriptor):
                             if cancel_event is not None and cancel_event.is_set():
-                                return ToolResult(
-                                    text="Search cancelled",
-                                    data={"count": 0, "matches": []},
-                                )
+                                raise _SearchStopped
                             if (
                                 block_matcher is not None
                                 and line_number >= group_end
@@ -575,10 +669,7 @@ def _python_grep(
                             for line in block:
                                 line_number += 1
                                 if cancel_event is not None and cancel_event.is_set():
-                                    return ToolResult(
-                                        text="Search cancelled",
-                                        data={"count": 0, "matches": []},
-                                    )
+                                    raise _SearchStopped
                                 is_match = matcher(line)
                                 if is_match:
                                     if match_count >= max_results:
@@ -622,6 +713,9 @@ def _python_grep(
                                     break
                             if file_buffer.exhausted or file_had_extra_match:
                                 break
+            except _SearchStopped:
+                # Matches already found in this file are kept; the rest is unread.
+                stopped = True
             except _WalkedFileChanged:
                 continue
             except (_BinaryFileDetected, UnicodeDecodeError):
@@ -645,6 +739,8 @@ def _python_grep(
                 output.extend(file_buffer.lines)
                 output_bytes += file_buffer.byte_count
 
+            if stopped:
+                break
             if file_had_extra_match or file_buffer.exhausted:
                 return _grep_result(
                     output,
@@ -656,12 +752,18 @@ def _python_grep(
                     oversized_files=oversized_files,
                 )
 
+    # The walk also ends early, without saying so, once the search is stopped.
+    stopped = stopped or (cancel_event is not None and cancel_event.is_set())
+    deadline_reached = stopped and deadline_expired is not None and deadline_expired.is_set()
+    if stopped and not deadline_reached:
+        return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
     return _grep_result(
         output,
         match_count=match_count,
         max_results=max_results,
         context=context,
-        truncated=context_truncated and bool(output),
+        truncated=deadline_reached or (context_truncated and bool(output)),
+        deadline_reached=deadline_reached,
         oversized_files=oversized_files,
     )
 
@@ -824,6 +926,7 @@ def _python_find(
     max_results: int,
     context: ToolContext,
     cancel_event: Event | None = None,
+    deadline_expired: Event | None = None,
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
@@ -849,12 +952,21 @@ def _python_find(
         matching_display_paths(),
     )
     return _result_from_lines(
-        matches, max_results=max_results, context=context, count_label="files"
+        matches,
+        max_results=max_results,
+        context=context,
+        count_label="files",
+        deadline_reached=deadline_expired is not None and deadline_expired.is_set(),
     )
 
 
 def _python_ls(
-    *, path: Path | SecureToolPath, include_hidden: bool, context: ToolContext
+    *,
+    path: Path | SecureToolPath,
+    include_hidden: bool,
+    context: ToolContext,
+    cancel_event: Event | None = None,
+    deadline_expired: Event | None = None,
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
@@ -867,6 +979,8 @@ def _python_ls(
         nonlocal entry_count
         with os.scandir(descriptor) as entries:
             for entry in entries:
+                if cancel_event is not None and cancel_event.is_set():
+                    return
                 if not include_hidden and entry.name.startswith("."):
                     continue
                 if _is_protected_walked_file(
@@ -887,8 +1001,12 @@ def _python_ls(
             key=lambda entry: entry[0].lower(),
         )
     names = [f"{name}/" if is_directory else name for name, is_directory in retained]
+    text = "\n".join(names)
+    deadline_reached = deadline_expired is not None and deadline_expired.is_set()
+    if deadline_reached:
+        text = f"{text}\n{_DEADLINE_MARKER}" if text else _DEADLINE_MARKER
     truncated = truncate_text(
-        "\n".join(names),
+        text,
         max_bytes=context.max_output_bytes,
         max_lines=context.max_output_lines,
     )
@@ -899,7 +1017,7 @@ def _python_ls(
             "entries": names[:retained_limit],
             "entry_count": entry_count,
         },
-        truncated=truncated.truncated,
+        truncated=deadline_reached or truncated.truncated,
     )
 
 
@@ -2023,6 +2141,7 @@ def _grep_result(
     context: ToolContext,
     truncated: bool,
     match_limit_reached: bool = False,
+    deadline_reached: bool = False,
     oversized_files: Sequence[str] = (),
 ) -> ToolResult:
     """Build grep's result from the records its scan kept.
@@ -2037,6 +2156,7 @@ def _grep_result(
         context (ToolContext): Supplies the output budget.
         truncated (bool): Whether the scan stopped early or reduced context lines.
         match_limit_reached (bool): Whether ``max_results`` is what stopped it.
+        deadline_reached (bool): Whether the call's deadline is what stopped it.
         oversized_files (Sequence[str]): Files skipped for a line over the scan limit,
             named in a final notice that the output budget cannot cut.
 
@@ -2050,7 +2170,7 @@ def _grep_result(
         return ToolResult(text=text, data={"count": 0, "matches": []})
     text = "\n".join(records)
     if truncated:
-        marker = _limit_marker(max_results, match_limit_reached)
+        marker = _limit_marker(max_results, match_limit_reached, deadline_reached=deadline_reached)
         text = f"{text}\n{marker}" if text else marker
     notice_bytes = 0 if notice is None else len(notice.encode("utf-8")) + 1
     bounded = truncate_text(
@@ -2078,9 +2198,18 @@ def _oversized_files_notice(paths: Sequence[str]) -> str | None:
     )
 
 
-def _limit_marker(max_results: int, limit_reached: bool) -> str:
-    """Mark a truncated search result, saying how to see more when max_results cut it."""
+_DEADLINE_MARKER = (
+    f"[truncated] Stopped at the {_SEARCH_DEADLINE_SECONDS}-second search limit, so results "
+    "are incomplete. Search a narrower path to see the rest."
+)
 
+
+def _limit_marker(max_results: int, limit_reached: bool, *, deadline_reached: bool = False) -> str:
+    """Mark a truncated search result, saying how to see more when a limit cut it."""
+
+    # The deadline wins: the search did not see everything, so max_results may not apply.
+    if deadline_reached:
+        return _DEADLINE_MARKER
     if not limit_reached:
         return "[truncated]"
     return (
@@ -2095,14 +2224,14 @@ def _result_from_lines(
     max_results: int,
     context: ToolContext,
     count_label: str,
-    force_truncated: bool = False,
+    deadline_reached: bool = False,
 ) -> ToolResult:
     total = len(lines)
     limited = list(lines[:max_results])
-    truncated_by_count = total > max_results or force_truncated
+    truncated_by_count = total > max_results or deadline_reached
     text = "\n".join(limited)
     if truncated_by_count:
-        marker = _limit_marker(max_results, total > max_results)
+        marker = _limit_marker(max_results, total > max_results, deadline_reached=deadline_reached)
         text = f"{text}\n{marker}" if text else marker
     truncated = truncate_text(
         text,
