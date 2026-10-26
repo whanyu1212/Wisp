@@ -18,9 +18,12 @@ if os.name != "posix":
 pytestmark = pytest.mark.process
 
 # Runs the real backend entry point with a runtime that has already started one
-# managed process, standing in for one the model started with operation=start.
+# managed process, standing in for one the model started with operation=start. The
+# process starts while the runtime is built, before the backend handles signals, so
+# the backend also writes a ready file once its signal receiver is installed.
 _BACKEND = """
 import sys
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 
@@ -30,7 +33,9 @@ from wisp.cli import rpc as cli_rpc
 from wisp.config.runtime import WispConfig
 
 pid_path = Path(sys.argv[1])
+ready_path = Path(sys.argv[2])
 build_runtime = cli_rpc.build_session_runtime
+signal_receiver = cli_rpc._shutdown_signal_receiver
 
 
 async def build_with_managed_process(config):
@@ -41,21 +46,29 @@ async def build_with_managed_process(config):
     return runtime
 
 
+@contextmanager
+def announced_signal_receiver():
+    with signal_receiver() as signals:
+        ready_path.write_text("ready")
+        yield signals
+
+
 cli_rpc.build_session_runtime = build_with_managed_process
+cli_rpc._shutdown_signal_receiver = announced_signal_receiver
 anyio.run(partial(cli_rpc._run_rpc, WispConfig(), handshake_complete=True))
 """
 
 
-def _wait_for_pid(path: Path, backend: subprocess.Popen[bytes]) -> int:
+def _wait_for_text(path: Path, backend: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if backend.poll() is not None:
             pytest.fail(f"backend exited with {backend.returncode} before starting")
         text = path.read_text().strip() if path.exists() else ""
         if text:
-            return int(text)
+            return text
         time.sleep(0.02)
-    pytest.fail("backend did not start its managed process")
+    pytest.fail(f"backend did not write {path.name}")
 
 
 def _process_gone(pid: int) -> bool:
@@ -74,8 +87,9 @@ def test_signal_stops_managed_processes(tmp_path: Path, shutdown_signal: signal.
     script = tmp_path / "backend.py"
     script.write_text(_BACKEND, encoding="utf-8")
     pid_path = tmp_path / "managed.pid"
+    ready_path = tmp_path / "ready"
     backend = subprocess.Popen(
-        [sys.executable, str(script), str(pid_path)],
+        [sys.executable, str(script), str(pid_path), str(ready_path)],
         cwd=tmp_path,
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
@@ -83,7 +97,8 @@ def test_signal_stops_managed_processes(tmp_path: Path, shutdown_signal: signal.
     )
     managed_pid: int | None = None
     try:
-        managed_pid = _wait_for_pid(pid_path, backend)
+        managed_pid = int(_wait_for_text(pid_path, backend))
+        _wait_for_text(ready_path, backend)
 
         backend.send_signal(shutdown_signal)
 
