@@ -836,7 +836,7 @@ fn build_grep_presentation(
         return DetailAvailability::None;
     };
     let retained = bounded_result_records(
-        without_grep_skip_notice(result.output),
+        without_grep_skip_notices(result.output),
         result.truncated,
         result.projection_cut_mid_line,
         true,
@@ -1144,13 +1144,16 @@ fn bounded_result_records(
     }
 }
 
-/// Grep names the files it skipped for an over-long line on a final line after
-/// the records and any truncation marker.
-fn without_grep_skip_notice(output: &str) -> &str {
-    match output.rsplit_once('\n') {
-        Some((records, last)) if last.starts_with("[skipped ") => records,
-        _ => output,
+/// Grep names the files it skipped, for an over-long line or because they could
+/// not be read, on final lines after the records and any truncation marker.
+fn without_grep_skip_notices(mut output: &str) -> &str {
+    while let Some((records, last)) = output.rsplit_once('\n') {
+        if !last.starts_with("[skipped ") {
+            break;
+        }
+        output = records;
     }
+    output
 }
 
 /// A truncated result ends with `[truncated]`, possibly cut short by the output
@@ -1465,8 +1468,9 @@ mod tests {
     }
 
     #[test]
-    fn grep_skip_notice_is_not_a_record() {
-        let notice = "[skipped 1 file with a line longer than 1000000 characters: app.min.js]";
+    fn grep_skip_notices_are_not_records() {
+        let notice = "[skipped 1 file with a line longer than 1000000 characters: app.min.js]\n\
+                      [skipped 1 file that could not be read: c.txt (Permission denied)]";
         let grep = project_tool_detail_source(
             "grep",
             serde_json::json!({"pattern": "x", "path": "."})
