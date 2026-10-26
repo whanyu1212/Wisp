@@ -62,6 +62,9 @@ Out of scope:
   Protected paths apply to Wisp's file tools only;
 - an approved `bash` command reading other environment variables, including tokens you export for
   your own tools or forward to MCP servers;
+- a process an approved `bash` command started that outlives it after clearing its environment,
+  running as another user (for example through `sudo`), or as a protected macOS system program;
+  Wisp finds detached processes by the `WISP_COMMAND_TOKEN` variable they inherit;
 - a model choosing a harmful action that still requires your approval;
 - vulnerabilities in model providers, third-party MCP servers, or tools Wisp runs on your behalf;
 - issues that need an attacker who already controls your user account.

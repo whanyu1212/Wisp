@@ -38,6 +38,15 @@ endpoint, such as `OPENROUTER_API_KEY`. A command's output reaches the model and
 `env` would otherwise publish them. Other variables, including tokens your own tools need, pass
 through unchanged.
 
+A one-shot command does not leave processes behind. When it exits, Wisp stops everything it
+started, including a daemon that detached itself, such as `redis-server --daemonize yes`, and tells
+the model it did. For a process that should keep running, use `operation=start` and run it in the
+foreground: a managed command's detached processes are also stopped when it ends. To recognise a
+detached process, Wisp gives each command a `WISP_COMMAND_TOKEN` environment variable with a random
+value. Some processes cannot be found this way: one that clears its environment or runs as another
+user, and, on macOS, a protected system program such as those in `/bin` and `/usr/bin`, whose
+environment macOS keeps private.
+
 ## Protected paths
 
 The file tools never open files that commonly hold secrets: `.env` and its variants, keys and

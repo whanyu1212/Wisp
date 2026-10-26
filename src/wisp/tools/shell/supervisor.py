@@ -24,6 +24,7 @@ from wisp.tools.shell.process import (
     _kill_process_tree_and_wait,
     _terminate_process_tree,
     _wait_for_exit,
+    stopped_detached_processes,
 )
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
@@ -63,6 +64,8 @@ class ProcessUpdate:
     # runs). Both are UTC wall-clock times.
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    # Whether cleanup stopped processes the command had detached, such as a daemon.
+    background_stopped: bool = False
 
 
 @dataclass
@@ -490,7 +493,9 @@ class ProcessSupervisor:
                 stderr_retained_bytes=len(stderr_result.output),
                 stdout_source_byte_lengths=stdout_source_byte_lengths,
                 stderr_source_byte_lengths=stderr_source_byte_lengths,
-                background_stopped=captured.pipes_held_after_exit,
+                background_stopped=(
+                    captured.pipes_held_after_exit or stopped_detached_processes(process)
+                ),
             )
             release_ownership = True
             return result
@@ -985,6 +990,9 @@ class ProcessSupervisor:
             stderr_source_byte_lengths=stderr_source_byte_lengths,
             started_at=managed.started_at,
             ended_at=managed.ended_at if managed.state != "running" else None,
+            background_stopped=(
+                managed.state != "running" and stopped_detached_processes(managed.process)
+            ),
         )
 
     def _evict_terminals_for_capacity(self) -> None:
