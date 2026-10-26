@@ -881,3 +881,35 @@ def test_supervisor_close_terminates_abandoned_processes(tmp_path: Path) -> None
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, signal.SIGCONT)
+
+
+def test_cancel_all_retries_failed_cleanup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    original_terminate = process_manager_module._terminate_process_tree  # type: ignore[attr-defined]
+    cleanup_succeeds = False
+
+    async def fail_until_allowed(process: asyncio.subprocess.Process) -> bool:
+        await original_terminate(process)
+        return cleanup_succeeds
+
+    monkeypatch.setattr(process_manager_module, "_terminate_process_tree", fail_until_allowed)
+
+    async def run() -> tuple[list[str], list[str], str]:
+        nonlocal cleanup_succeeds
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; time.sleep(30)"), cwd=tmp_path, timeout=60
+            )
+            first = [update.process_id for update in await supervisor.cancel_all()]
+            cleanup_succeeds = True
+            # The failed handle is no longer running, so only a retry reaches it.
+            second = [update.process_id for update in await supervisor.cancel_all()]
+            return [process_id, *first], second, (await supervisor.poll(process_id)).state
+        finally:
+            await supervisor.aclose()
+
+    first, second, state = anyio.run(run)
+
+    assert first[1:] == first[:1]
+    assert second == []
+    assert state == "cancelled"

@@ -580,20 +580,26 @@ class ProcessSupervisor:
                 await self._await_task_before_propagating_cancellation(cleanup_task)
             return self._snapshot(managed)
 
-    async def cancel_all(self) -> None:
+    async def cancel_all(self) -> tuple[ProcessUpdate, ...]:
         """Terminate every running managed process; the supervisor stays open.
 
-        The processes keep their final state, so a later poll reports each as
-        cancelled rather than unknown.
+        A process whose earlier cleanup failed is retried, as ``aclose`` does. The
+        processes keep their final state, so a later poll reports each as cancelled
+        rather than unknown.
+
+        Returns:
+            tuple[ProcessUpdate, ...]: The processes whose tree still could not be
+            terminated. They stay registered, so a later call retries them.
         """
 
         async with self._lock:
-            running = [
+            pending = [
                 process_id
                 for process_id, managed in self._managed.items()
-                if managed.state == "running"
+                if managed.state == "running" or managed.error == PROCESS_TREE_CLEANUP_ERROR
             ]
-        await asyncio.gather(*(self.cancel(process_id) for process_id in running))
+        updates = await asyncio.gather(*(self.cancel(process_id) for process_id in pending))
+        return tuple(update for update in updates if update.error == PROCESS_TREE_CLEANUP_ERROR)
 
     async def aclose(self) -> None:
         """Terminate all owned process trees. Safe to call repeatedly or concurrently."""
