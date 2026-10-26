@@ -629,13 +629,11 @@ def _python_grep(
                                 pattern, ignore_case=ignore_case, literal=literal
                             )
                         if file_native_module is not None:
-                            if native_result.status == "cancelled":
-                                raise _SearchStopped
                             if native_result.status == "binary":
                                 continue
                             if native_result.status == "line_too_long":
                                 raise _OversizedLineDetected
-                            if native_result.status != "complete":
+                            if native_result.status not in {"complete", "cancelled"}:
                                 raise RuntimeError(
                                     f"native grep returned unknown status: {native_result.status}"
                                 )
@@ -644,6 +642,8 @@ def _python_grep(
                             file_buffer.lines = list(native_result.lines)
                             file_buffer.byte_count = native_result.byte_count
                             file_buffer.exhausted = native_result.exhausted
+                            if native_result.status == "cancelled":
+                                raise _SearchStopped
                     if file_native_module is None:
                         if matcher is None:  # pragma: no cover - internal invariant
                             raise RuntimeError("Python grep matcher was not initialized")

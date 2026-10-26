@@ -170,3 +170,46 @@ def test_abandons_blocked_worker(
 
     assert error.failure_code == "timeout"
     assert "a filesystem call may be blocked" in str(error)
+
+
+def test_keeps_native_matches_in_current_file(
+    tmp_path: Path, monkeypatch: MonkeyPatch, reached: threading.Event
+) -> None:
+    (tmp_path / "log.txt").write_text("needle one\nneedle two\n", encoding="utf-8")
+
+    class Cancellation:
+        def __init__(self) -> None:
+            self.cancelled = threading.Event()
+
+        def cancel(self) -> None:
+            self.cancelled.set()
+
+    class StoppedScan:
+        lines = ["log.txt:1:needle one"]
+        byte_count = len(lines[0])
+        match_count = 1
+        had_extra_match = False
+        exhausted = False
+        status = "cancelled"
+
+    class Native:
+        def GrepCancellation(self) -> Cancellation:
+            return Cancellation()
+
+        def scan_literal_fd(
+            self, *_args: object, cancellation: Cancellation, **_kwargs: object
+        ) -> StoppedScan:
+            reached.set()
+            assert cancellation.cancelled.wait(5)
+            return StoppedScan()
+
+    monkeypatch.setattr(search_module, "_NATIVE_GREP", Native())
+
+    result = run_tool(
+        GrepTool(_scanner_backend="native"),
+        {"pattern": "needle", "path": "log.txt", "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.text == f"log.txt:1:needle one\n{_DEADLINE_MARKER}"
+    assert result.data["count"] == 1
