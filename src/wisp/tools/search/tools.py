@@ -752,7 +752,8 @@ def _python_grep(
                     oversized_files=oversized_files,
                 )
 
-    # The walk also ends early, without saying so, once the search is stopped.
+    # The walk also ends early, without saying so, once the search is stopped. A walk that
+    # finished just before the deadline is then reported as incomplete, which is harmless.
     stopped = stopped or (cancel_event is not None and cancel_event.is_set())
     deadline_reached = stopped and deadline_expired is not None and deadline_expired.is_set()
     if stopped and not deadline_reached:
@@ -1004,7 +1005,8 @@ def _python_ls(
     text = "\n".join(names)
     deadline_reached = deadline_expired is not None and deadline_expired.is_set()
     if deadline_reached:
-        text = f"{text}\n{_DEADLINE_MARKER}" if text else _DEADLINE_MARKER
+        marker = _deadline_marker()
+        text = f"{text}\n{marker}" if text else marker
     truncated = truncate_text(
         text,
         max_bytes=context.max_output_bytes,
@@ -2198,10 +2200,11 @@ def _oversized_files_notice(paths: Sequence[str]) -> str | None:
     )
 
 
-_DEADLINE_MARKER = (
-    f"[truncated] Stopped at the {_SEARCH_DEADLINE_SECONDS}-second search limit, so results "
-    "are incomplete. Search a narrower path to see the rest."
-)
+def _deadline_marker() -> str:
+    return (
+        f"[truncated] Stopped at the {_SEARCH_DEADLINE_SECONDS}-second search limit, so "
+        "results are incomplete. Search a narrower path to see the rest."
+    )
 
 
 def _limit_marker(max_results: int, limit_reached: bool, *, deadline_reached: bool = False) -> str:
@@ -2209,7 +2212,7 @@ def _limit_marker(max_results: int, limit_reached: bool, *, deadline_reached: bo
 
     # The deadline wins: the search did not see everything, so max_results may not apply.
     if deadline_reached:
-        return _DEADLINE_MARKER
+        return _deadline_marker()
     if not limit_reached:
         return "[truncated]"
     return (
