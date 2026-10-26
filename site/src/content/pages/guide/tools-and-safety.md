@@ -73,6 +73,11 @@ do, so `credentialſ.json` (long s) counts as `credentials.json`, and it checks 
 written and the file a symlink points to. `read`, `write`, and `edit` refuse a protected path, and
 `grep`, `find`, and `ls` leave protected files out of their results.
 
+Protection goes by path. A hard link is another path to the same file, so a hard link inside the
+working directory to a protected file, or to a file outside it, is read and changed like any other
+file. Git does not store hard links, so one has to be created on your machine, usually by a `bash`
+command you approve.
+
 Change the list with the `protected_paths` setting in your user settings; a project's settings
 cannot change it. Wisp's credential files, including MCP sign-ins, and its settings and permission
 files stay protected even if you set the list to empty.

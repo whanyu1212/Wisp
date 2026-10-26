@@ -65,6 +65,10 @@ Out of scope:
 - a process an approved `bash` command started that outlives it after clearing its environment,
   running as another user (for example through `sudo`), or as a protected macOS system program;
   Wisp finds detached processes by the `WISP_COMMAND_TOKEN` variable they inherit;
+- a hard link inside the working directory to a file outside it or to a protected file. Protection
+  goes by path, and a hard link is another path to the same file, so the file tools read it and
+  `write` and `edit` change the original. Creating one takes an approved `bash` command or access
+  to your account, since Git does not store hard links;
 - a model choosing a harmful action that still requires your approval;
 - vulnerabilities in model providers, third-party MCP servers, or tools Wisp runs on your behalf;
 - issues that need an attacker who already controls your user account.

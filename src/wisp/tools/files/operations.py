@@ -333,7 +333,14 @@ def _write_existing_in_place(
     """Rewrite the open file in place and return the version this write produced."""
 
     encoded = memoryview(content.encode("utf-8"))
-    flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    # O_NONBLOCK keeps a FIFO swapped in after the type check from blocking the open; it
+    # has no effect on writes to the regular file the check below requires.
+    flags = (
+        os.O_WRONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
     try:
         descriptor = os.open(parent.leaf, flags, dir_fd=parent.fd)
     except OSError as exc:
@@ -415,7 +422,14 @@ def _snapshot_descriptor(descriptor: int) -> str | None:
     return before if len(before) <= _WRITE_SNAPSHOT_MAX_CHARS else None
 
 
-def _allocate_temporary(parent: OpenParent) -> tuple[int, str]:
+def _allocate_temporary(parent: OpenParent, *, private: bool) -> tuple[int, str]:
+    """Create an empty temporary file beside the target.
+
+    A private file is readable only by its owner, so content replacing a file with
+    stricter permissions is never exposed before the original mode is applied.
+    """
+
+    mode = 0o600 if private else 0o666
     flags = (
         os.O_WRONLY
         | os.O_CREAT
@@ -426,7 +440,7 @@ def _allocate_temporary(parent: OpenParent) -> tuple[int, str]:
     for _attempt in range(10):
         name = f".wisp-write-{uuid4().hex}"
         try:
-            return os.open(name, flags, 0o666, dir_fd=parent.fd), name
+            return os.open(name, flags, mode, dir_fd=parent.fd), name
         except FileExistsError:
             continue
         except OSError as exc:
@@ -489,7 +503,7 @@ def _write_temporary(
     *,
     metadata: _ReplacementMetadata | None,
 ) -> tuple[str, os.stat_result]:
-    descriptor, name = _allocate_temporary(parent)
+    descriptor, name = _allocate_temporary(parent, private=metadata is not None)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
             descriptor = -1
@@ -526,6 +540,47 @@ def _cleanup_temporary(parent: OpenParent, name: str, *, published: bool) -> Non
         raise ToolError(f"Could not clean up failed write {name}: {exc}") from exc
 
 
+# Errors meaning the directory cannot be synced at all, rather than that syncing failed.
+_DIRECTORY_SYNC_UNSUPPORTED = frozenset(
+    {errno.EACCES, errno.EPERM, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}
+)
+
+
+def _sync_directory(parent: OpenParent) -> None:
+    """Make a rename in ``parent`` survive a crash, where the filesystem allows it.
+
+    The rename has already published the file, so a directory that cannot be opened
+    or synced, such as on some network filesystems, is skipped rather than reported
+    as a failed write.
+
+    Raises:
+        ToolError: When the sync itself fails, for example with an I/O error.
+    """
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        # The parent descriptor may be O_PATH on Linux, which cannot be synced.
+        descriptor = os.open(".", flags, dir_fd=parent.fd)
+    except OSError as exc:
+        if exc.errno in _DIRECTORY_SYNC_UNSUPPORTED:
+            return
+        raise _directory_sync_error(parent, exc) from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in _DIRECTORY_SYNC_UNSUPPORTED:
+            raise _directory_sync_error(parent, exc) from exc
+    finally:
+        os.close(descriptor)
+
+
+def _directory_sync_error(parent: OpenParent, error: OSError) -> ToolError:
+    return ToolError(
+        f"Wrote {parent.path.display} but could not sync its directory, so the change "
+        f"may not survive a crash: {error}"
+    )
+
+
 def _atomic_write(
     path: SecureToolPath,
     content: str,
@@ -546,6 +601,10 @@ def _atomic_write(
             raise ToolError(f"File already exists: {path.selected}")
         if not overwrite and initial is not None:
             raise ToolError(f"File already exists: {path.selected}")
+        # Opening a FIFO for writing waits for a reader, and replacing a device or socket
+        # with a regular file would break whatever uses it.
+        if initial is not None and not stat.S_ISREG(initial.st_mode):
+            raise ToolError(f"Not a regular file: {path.display}")
 
         before_text: str | None = None
         initial_version: tuple[int, int, int, int, int] | None = None
@@ -646,6 +705,7 @@ def _atomic_write(
             raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_temporary(parent, temporary, published=published)
+        _sync_directory(parent)
         file_id = (written.st_dev, written.st_ino)
         return _WriteOutcome(
             initial is None,
@@ -713,6 +773,7 @@ def _atomic_edit(
             raise ToolError(f"Could not edit file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_temporary(parent, temporary, published=published)
+        _sync_directory(parent)
         return _published_version(stat_leaf(parent), written)
 
 
