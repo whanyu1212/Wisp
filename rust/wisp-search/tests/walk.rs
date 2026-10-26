@@ -42,6 +42,7 @@ fn config() -> WalkConfig {
         max_ignore_file_bytes: 1_000,
         max_ignore_file_patterns: 100,
         max_git_marker_bytes: 4_096,
+        max_depth: 100,
     }
 }
 
@@ -163,4 +164,64 @@ fn reports_limits() {
         walk(&tree.0, patterns),
         Err(WalkError::TooManyIgnorePatterns { file }) if file == b".ignore"
     ));
+}
+
+#[test]
+fn skips_directories_past_max_depth() {
+    let tree = TempTree::new("depth");
+    for path in [
+        "top.txt",
+        "a/one.txt",
+        "a/b/two.txt",
+        "a/b/c/three.txt",
+        "x/one.txt",
+    ] {
+        tree.file(path, "");
+    }
+    let directory = fs::File::open(&tree.0).unwrap();
+    let mut walk = Walk::new(
+        directory.as_raw_fd(),
+        WalkConfig {
+            max_depth: 2,
+            ..config()
+        },
+    )
+    .unwrap();
+    let mut files = Vec::new();
+    while let Some(batch) = walk.next_batch().unwrap() {
+        for file in batch.files {
+            let directory = String::from_utf8(batch.directory.clone()).unwrap();
+            let name = String::from_utf8(file.name).unwrap();
+            files.push(if directory.is_empty() {
+                name
+            } else {
+                format!("{directory}/{name}")
+            });
+        }
+    }
+
+    // a/b/c is three levels down, so only it is skipped.
+    assert_eq!(files, ["a/b/two.txt", "a/one.txt", "top.txt", "x/one.txt"]);
+    assert_eq!(walk.deep_directories_skipped(), 1);
+}
+
+#[test]
+fn skips_directories_it_cannot_search() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tree = TempTree::new("list-only");
+    tree.file("open/a.txt", "");
+    tree.file("list-only/b.txt", "");
+    let list_only = tree.0.join("list-only");
+    // Readable but not searchable: listing works, but stat of its entries fails.
+    fs::set_permissions(&list_only, fs::Permissions::from_mode(0o444)).unwrap();
+    // Root ignores permissions, so the case only arises for other users.
+    let enforced = fs::metadata(list_only.join("b.txt")).is_err();
+
+    let walked = walk(&tree.0, config());
+    fs::set_permissions(&list_only, fs::Permissions::from_mode(0o755)).unwrap();
+
+    if enforced {
+        assert_eq!(names(walked.unwrap()), ["open/a.txt"]);
+    }
 }

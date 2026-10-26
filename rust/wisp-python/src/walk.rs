@@ -41,7 +41,8 @@ impl NativeWalk {
         max_directory_entries,
         max_ignore_file_bytes,
         max_ignore_file_patterns,
-        max_git_marker_bytes
+        max_git_marker_bytes,
+        max_depth
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -53,6 +54,7 @@ impl NativeWalk {
         max_ignore_file_bytes: usize,
         max_ignore_file_patterns: usize,
         max_git_marker_bytes: usize,
+        max_depth: usize,
     ) -> PyResult<Self> {
         let ancestors = ancestors
             .into_iter()
@@ -72,6 +74,7 @@ impl NativeWalk {
             max_ignore_file_bytes,
             max_ignore_file_patterns,
             max_git_marker_bytes,
+            max_depth,
         };
         let walk = Walk::new(descriptor, config)?;
         Ok(Self {
@@ -91,6 +94,15 @@ impl NativeWalk {
         batch
             .map(|batch| batch.map(python_batch))
             .map_err(walk_error_to_python)
+    }
+
+    /// Directories skipped for lying deeper than `max_depth`, counted so far. It
+    /// reads 0 once the walk is closed.
+    #[getter]
+    fn deep_directories_skipped(&self) -> usize {
+        self.lock()
+            .as_ref()
+            .map_or(0, Walk::deep_directories_skipped)
     }
 
     /// Closes every descriptor the walk holds; later iteration yields nothing.
@@ -136,6 +148,11 @@ fn walk_error_to_python(error: WalkError) -> PyErr {
         }
         WalkError::ListDirectory { directory, error } => NativeWalkError::new_err((
             "list_directory",
+            OsString::from_vec(directory),
+            error as i32,
+        )),
+        WalkError::OpenDirectory { directory, error } => NativeWalkError::new_err((
+            "open_directory",
             OsString::from_vec(directory),
             error as i32,
         )),

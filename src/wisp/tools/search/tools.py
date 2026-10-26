@@ -76,6 +76,10 @@ _IGNORE_FILES = (".gitignore", ".ignore", ".rgignore")
 _MAX_IGNORE_FILE_BYTES = 1_000_000
 _MAX_IGNORE_FILE_PATTERNS = 10_000
 _MAX_DIRECTORY_ENTRIES = 100_000
+# Directory levels below the search root that grep and find enter. Both walks hold one
+# descriptor per level, and the Python walk a few stack frames, so an unbounded tree
+# could exhaust either: macOS allows a process 256 descriptors by default.
+_MAX_WALK_DEPTH = 100
 _MAX_GIT_MARKER_BYTES = 4_096
 _MAX_GLOB_ALTERNATIVES = 256
 
@@ -172,6 +176,9 @@ class _NativeWalk(Protocol):
 
     def __iter__(self) -> Iterator[_NativeWalkBatch]: ...
 
+    @property
+    def deep_directories_skipped(self) -> int: ...
+
     def close(self) -> None: ...
 
 
@@ -191,6 +198,7 @@ class _NativeWalkModule(Protocol):
         max_ignore_file_bytes: int,
         max_ignore_file_patterns: int,
         max_git_marker_bytes: int,
+        max_depth: int,
     ) -> _NativeWalk: ...
 
 
@@ -555,14 +563,16 @@ def _python_grep(
 
         ignore_override_matcher = matches_ignore_override
 
+    report = _WalkReport()
     files = (
-        _iter_walked_files(secure_path, context, cancel_event=cancel_event)
+        _iter_walked_files(secure_path, context, cancel_event=cancel_event, report=report)
         if ignore_override_matcher is None
         else _iter_walked_files(
             secure_path,
             context,
             ignore_override_matcher=ignore_override_matcher,
             cancel_event=cancel_event,
+            report=report,
         )
     )
     stopped = False
@@ -759,6 +769,7 @@ def _python_grep(
                     context=context,
                     truncated=True,
                     match_limit_reached=file_had_extra_match,
+                    deep_directories_skipped=report.deep_directories_skipped,
                     oversized_files=oversized_files,
                     unreadable_files=unreadable_files,
                 )
@@ -774,8 +785,13 @@ def _python_grep(
         match_count=match_count,
         max_results=max_results,
         context=context,
-        truncated=deadline_reached or (context_truncated and bool(output)),
+        truncated=(
+            deadline_reached
+            or report.deep_directories_skipped > 0
+            or (context_truncated and bool(output))
+        ),
         deadline_reached=deadline_reached,
+        deep_directories_skipped=report.deep_directories_skipped,
         oversized_files=oversized_files,
         unreadable_files=unreadable_files,
     )
@@ -950,11 +966,14 @@ def _python_find(
     glob_matcher = _prepare_glob_matcher(pattern)
     resolved_cwd = context.cwd.resolve(strict=False)
 
+    report = _WalkReport()
+
     def matching_display_paths() -> Iterator[str]:
         for candidate in _iter_files(
             secure_path,
             context,
             cancel_event=cancel_event,
+            report=report,
         ):
             display_path = _display_walked_path(candidate, resolved_cwd)
             if glob_matcher(display_path):
@@ -970,6 +989,7 @@ def _python_find(
         context=context,
         count_label="files",
         deadline_reached=deadline_expired is not None and deadline_expired.is_set(),
+        deep_directories_skipped=report.deep_directories_skipped,
     )
 
 
@@ -1041,12 +1061,21 @@ def _coerce_secure_path(path: Path | SecureToolPath, context: ToolContext) -> Se
     return secure_tool_path(str(path), context)
 
 
+@dataclass(slots=True)
+class _WalkReport:
+    """What a walk left out, filled in as it runs."""
+
+    deep_directories_skipped: int = 0
+    """Directories more than ``_MAX_WALK_DEPTH`` levels below the root."""
+
+
 def _iter_files(
     path: Path | SecureToolPath,
     context: ToolContext,
     *,
     ignore_override_matcher: PathMatcher | None = None,
     cancel_event: Event | None = None,
+    report: _WalkReport | None = None,
 ) -> Iterable[Path]:
     """Yield regular files through a descriptor-relative, non-following walk."""
 
@@ -1055,6 +1084,7 @@ def _iter_files(
         context,
         ignore_override_matcher=ignore_override_matcher,
         cancel_event=cancel_event,
+        report=report,
     ):
         yield walked_file.path
 
@@ -1115,6 +1145,7 @@ def _iter_walked_files(
     *,
     ignore_override_matcher: PathMatcher | None = None,
     cancel_event: Event | None = None,
+    report: _WalkReport | None = None,
 ) -> Generator[_WalkedFile, None, None]:
     """Yield grep candidates while their descriptor-relative parent stays open."""
 
@@ -1151,6 +1182,7 @@ def _iter_walked_files(
                     ignore_override_matcher=ignore_override_matcher,
                     resolved_cwd=resolved_cwd,
                     cancel_event=cancel_event,
+                    report=report,
                 )
                 return
             yield from _walk_directory(
@@ -1162,6 +1194,7 @@ def _iter_walked_files(
                 resolved_cwd=resolved_cwd,
                 in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
+                report=report,
             )
             return
     except ToolError as directory_error:
@@ -1208,6 +1241,7 @@ def _open_native_walk(
             max_ignore_file_bytes=_MAX_IGNORE_FILE_BYTES,
             max_ignore_file_patterns=_MAX_IGNORE_FILE_PATTERNS,
             max_git_marker_bytes=_MAX_GIT_MARKER_BYTES,
+            max_depth=_MAX_WALK_DEPTH,
         )
     except OSError:
         # The walk duplicates the descriptor; a sandbox may refuse that.
@@ -1228,6 +1262,7 @@ def _native_walk_directory(
     ignore_override_matcher: PathMatcher | None,
     resolved_cwd: Path,
     cancel_event: Event | None,
+    report: _WalkReport | None = None,
 ) -> Iterator[_WalkedFile]:
     """Yield the native walk's files, applying the checks that stay in Python.
 
@@ -1268,6 +1303,10 @@ def _native_walk_directory(
                     return
         except native.NativeWalkError as exc:
             raise _native_walk_error(root, exc) from None
+        finally:
+            # Read before closing: a closed walk no longer reports the count.
+            if report is not None:
+                report.deep_directories_skipped += walk.deep_directories_skipped
 
 
 def _native_walk_error(root: Path, error: Exception) -> Exception:
@@ -1290,8 +1329,17 @@ def _native_walk_error(root: Path, error: Exception) -> Exception:
             f"Ignore file {path} exceeds {_MAX_IGNORE_FILE_PATTERNS} patterns"
         )
     (error_number,) = details
+    if kind == "open_directory":
+        return _out_of_descriptors_error(path, error_number)
     error_text = OSError(error_number, os.strerror(error_number))
     return ToolError(f"Could not list directory {path}: {error_text}")
+
+
+def _out_of_descriptors_error(path: Path, error_number: int) -> ToolError:
+    """Fail a walk that ran out of descriptors instead of dropping a subtree."""
+
+    error_text = OSError(error_number, os.strerror(error_number))
+    return ToolError(f"Could not open directory {path}: {error_text}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1429,6 +1477,8 @@ def _walk_directory(
     real_directory: Path | None = None,
     in_git_repository: bool = False,
     cancel_event: Event | None = None,
+    depth: int = 0,
+    report: _WalkReport | None = None,
 ) -> Iterable[_WalkedFile]:
     if cancel_event is not None and cancel_event.is_set():
         return
@@ -1472,7 +1522,9 @@ def _walk_directory(
         candidate = path / name
         try:
             info = entry.stat(follow_symlinks=False)
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
+            # A removed entry, or one in a directory that can be listed but not
+            # searched, is skipped like a directory that cannot be opened.
             continue
         if stat.S_ISLNK(info.st_mode):
             continue
@@ -1482,6 +1534,10 @@ def _walk_directory(
                 and not _may_reinclude_descendant(candidate, ignore_specs)
                 and ignore_override_matcher is None
             ):
+                continue
+            if depth >= _MAX_WALK_DEPTH:
+                if report is not None:
+                    report.deep_directories_skipped += 1
                 continue
             if isinstance(descriptor, Path):
                 child_path = secure_tool_path(str(candidate), context)
@@ -1496,6 +1552,8 @@ def _walk_directory(
                             resolved_cwd=resolved_cwd,
                             in_git_repository=in_git_repository,
                             cancel_event=cancel_event,
+                            depth=depth + 1,
+                            report=report,
                         )
                 except _SearchInputLimitError:
                     raise
@@ -1504,7 +1562,10 @@ def _walk_directory(
                 continue
             try:
                 child = os.open(name, directory_flags, dir_fd=descriptor)
-            except OSError:
+            except OSError as exc:
+                # Out of descriptors, the subtree would be dropped silently.
+                if exc.errno in {errno.EMFILE, errno.ENFILE}:
+                    raise _out_of_descriptors_error(candidate, exc.errno) from exc
                 # A rename, replacement, or newly introduced link invalidates this
                 # candidate; skip it rather than falling back to path traversal.
                 continue
@@ -1519,6 +1580,8 @@ def _walk_directory(
                     real_directory=real_directory / name,
                     in_git_repository=in_git_repository,
                     cancel_event=cancel_event,
+                    depth=depth + 1,
+                    report=report,
                 )
             finally:
                 os.close(child)
@@ -2164,6 +2227,7 @@ def _grep_result(
     truncated: bool,
     match_limit_reached: bool = False,
     deadline_reached: bool = False,
+    deep_directories_skipped: int = 0,
     oversized_files: Sequence[str] = (),
     unreadable_files: Sequence[str] = (),
 ) -> ToolResult:
@@ -2180,6 +2244,8 @@ def _grep_result(
         truncated (bool): Whether the scan stopped early or reduced context lines.
         match_limit_reached (bool): Whether ``max_results`` is what stopped it.
         deadline_reached (bool): Whether the call's deadline is what stopped it.
+        deep_directories_skipped (int): Directories too deep to search, named in the
+            truncation marker when no deadline stopped the search first.
         oversized_files (Sequence[str]): Files skipped for a line over the scan limit,
             named in a final notice that the output budget cannot cut.
         unreadable_files (Sequence[str]): Files skipped because they could not be
@@ -2206,7 +2272,12 @@ def _grep_result(
         return ToolResult(text=text, data={"count": 0, "matches": []})
     text = "\n".join(records)
     if truncated:
-        marker = _limit_marker(max_results, match_limit_reached, deadline_reached=deadline_reached)
+        marker = _limit_marker(
+            max_results,
+            match_limit_reached,
+            deadline_reached=deadline_reached,
+            deep_directories_skipped=deep_directories_skipped,
+        )
         text = f"{text}\n{marker}" if text else marker
     notice_bytes = 0 if notice is None else len(notice.encode("utf-8")) + 1
     bounded = truncate_text(
@@ -2238,12 +2309,28 @@ def _deadline_marker() -> str:
     )
 
 
-def _limit_marker(max_results: int, limit_reached: bool, *, deadline_reached: bool = False) -> str:
-    """Mark a truncated search result, saying how to see more when a limit cut it."""
+def _limit_marker(
+    max_results: int,
+    limit_reached: bool,
+    *,
+    deadline_reached: bool = False,
+    deep_directories_skipped: int = 0,
+) -> str:
+    """Mark a truncated search result, saying how to see more when a limit cut it.
 
-    # The deadline wins: the search did not see everything, so max_results may not apply.
+    Only one cause is named. The deadline comes first and then skipped deep
+    directories, because either means the search did not see everything, so raising
+    ``max_results`` would not show the rest.
+    """
+
     if deadline_reached:
         return _deadline_marker()
+    if deep_directories_skipped:
+        directories = "directory" if deep_directories_skipped == 1 else "directories"
+        return (
+            f"[truncated] Skipped {deep_directories_skipped} {directories} more than "
+            f"{_MAX_WALK_DEPTH} levels deep. Search inside one to see its files."
+        )
     if not limit_reached:
         return "[truncated]"
     return (
@@ -2259,13 +2346,19 @@ def _result_from_lines(
     context: ToolContext,
     count_label: str,
     deadline_reached: bool = False,
+    deep_directories_skipped: int = 0,
 ) -> ToolResult:
     total = len(lines)
     limited = list(lines[:max_results])
-    truncated_by_count = total > max_results or deadline_reached
+    truncated_by_count = total > max_results or deadline_reached or deep_directories_skipped > 0
     text = "\n".join(limited)
     if truncated_by_count:
-        marker = _limit_marker(max_results, total > max_results, deadline_reached=deadline_reached)
+        marker = _limit_marker(
+            max_results,
+            total > max_results,
+            deadline_reached=deadline_reached,
+            deep_directories_skipped=deep_directories_skipped,
+        )
         text = f"{text}\n{marker}" if text else marker
     truncated = truncate_text(
         text,

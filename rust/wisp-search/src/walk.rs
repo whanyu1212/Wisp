@@ -44,6 +44,9 @@ pub struct WalkConfig {
     pub max_ignore_file_patterns: usize,
     /// Bytes read from a `.git` file when checking for a worktree marker.
     pub max_git_marker_bytes: usize,
+    /// Directory levels below the root the walk enters. Deeper directories are
+    /// skipped and counted in [`Walk::deep_directories_skipped`].
+    pub max_depth: usize,
 }
 
 /// An ignore file from a directory above the walk root.
@@ -93,6 +96,9 @@ pub enum WalkError {
     TooManyIgnorePatterns { file: Vec<u8> },
     /// Reading a directory's entries failed.
     ListDirectory { directory: Vec<u8>, error: Errno },
+    /// The process ran out of file descriptors opening a directory, so its
+    /// subtree could not be searched.
+    OpenDirectory { directory: Vec<u8>, error: Errno },
     /// A no-follow stat of an entry failed for a reason other than its removal.
     /// Holds the entry's name, as Python's `DirEntry.stat` reports it.
     Stat { name: Vec<u8>, error: Errno },
@@ -121,6 +127,11 @@ impl fmt::Display for WalkError {
                 "could not list directory {}: {error}",
                 String::from_utf8_lossy(directory)
             ),
+            Self::OpenDirectory { directory, error } => write!(
+                formatter,
+                "could not open directory {}: {error}",
+                String::from_utf8_lossy(directory)
+            ),
             Self::Stat { name, error } => write!(
                 formatter,
                 "could not stat {}: {error}",
@@ -141,6 +152,7 @@ pub struct Walk {
     limits: Limits,
     rules: Vec<ActiveRules>,
     frames: Vec<Frame>,
+    deep_directories_skipped: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -149,6 +161,7 @@ struct Limits {
     ignore_file_bytes: usize,
     ignore_file_patterns: usize,
     git_marker_bytes: usize,
+    depth: usize,
 }
 
 #[derive(Debug)]
@@ -219,10 +232,19 @@ impl Walk {
                 ignore_file_bytes: config.max_ignore_file_bytes,
                 ignore_file_patterns: config.max_ignore_file_patterns,
                 git_marker_bytes: config.max_git_marker_bytes,
+                depth: config.max_depth,
             },
             rules,
             frames: Vec::new(),
+            deep_directories_skipped: 0,
         })
+    }
+
+    /// Directories the walk did not enter because they lie deeper than
+    /// [`WalkConfig::max_depth`], counted so far.
+    #[must_use]
+    pub fn deep_directories_skipped(&self) -> usize {
+        self.deep_directories_skipped
     }
 
     /// Returns the next run of files, or `None` when the walk is complete.
@@ -264,7 +286,9 @@ impl Walk {
                     AtFlags::AT_SYMLINK_NOFOLLOW,
                 ) {
                     Ok(stat) => stat,
-                    Err(Errno::ENOENT) => {
+                    // A removed entry, or one in a directory that can be listed but
+                    // not searched, is skipped like a directory that cannot be opened.
+                    Err(Errno::ENOENT | Errno::EACCES | Errno::EPERM) => {
                         frame.next += 1;
                         continue;
                     }
@@ -288,15 +312,28 @@ impl Walk {
                 if is_hidden(&entry.raw) || self.prunes_directory(&wtf8_path) {
                     continue;
                 }
+                // The root is depth 0, so the frame count is the child's depth. Each
+                // level holds a descriptor, and a recursive walk a stack frame.
+                if self.frames.len() > self.limits.depth {
+                    self.deep_directories_skipped += 1;
+                    continue;
+                }
                 let frame = self.frames.last().expect("the current frame is live");
                 let entry = &frame.entries[frame.next - 1];
-                let Some(child) = open_child_directory(frame.directory.as_raw_fd(), &entry.raw)
-                else {
+                let raw_path = join(&frame.raw_path, &entry.raw);
+                let child = match open_child_directory(frame.directory.as_raw_fd(), &entry.raw) {
+                    Ok(child) => child,
+                    // Out of descriptors, the subtree would be dropped silently.
+                    Err(error @ (Errno::EMFILE | Errno::ENFILE)) => {
+                        return Err(WalkError::OpenDirectory {
+                            directory: raw_path,
+                            error,
+                        });
+                    }
                     // A rename, replacement or new link invalidates the entry; skip it
                     // rather than fall back to path traversal.
-                    continue;
+                    Err(_) => continue,
                 };
-                let raw_path = join(&frame.raw_path, &entry.raw);
                 let in_git_repository = frame.in_git_repository;
                 self.enter(child, raw_path, wtf8_path, in_git_repository)?;
                 continue;
@@ -431,8 +468,8 @@ fn file_flags() -> OFlag {
     OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC
 }
 
-fn open_child_directory(parent: RawFd, name: &[u8]) -> Option<Dir> {
-    Dir::openat(Some(parent), name, directory_flags(), Mode::empty()).ok()
+fn open_child_directory(parent: RawFd, name: &[u8]) -> Result<Dir, Errno> {
+    Dir::openat(Some(parent), name, directory_flags(), Mode::empty())
 }
 
 fn open_at(parent: RawFd, name: &[u8], flags: OFlag) -> Option<Descriptor> {

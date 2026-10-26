@@ -276,22 +276,30 @@ def test_limit_errors_match(
 
 
 @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs POSIX permissions")
-def test_stat_errors_match(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+def test_unsearchable_entries_are_skipped(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     unsearchable = tmp_path / "sub"
     unsearchable.mkdir()
     (unsearchable / "name.txt").write_text("", encoding="utf-8")
+    (tmp_path / "kept.txt").write_text("", encoding="utf-8")
     # Readable but not searchable: the directory lists, but its entries cannot be stat'd.
     unsearchable.chmod(0o600)
-    errors = []
     try:
-        for backend in ("python", "native"):
-            with pytest.raises(OSError) as caught:
-                _walk(tmp_path, ".", monkeypatch, backend)
-            errors.append(str(caught.value))
+        walked = _assert_backends_agree(tmp_path, ".", monkeypatch)
     finally:
         unsearchable.chmod(0o700)
 
-    assert errors[0] == errors[1] == "[Errno 13] Permission denied: 'name.txt'"
+    assert [path for path, _identity in walked] == ["kept.txt"]
+
+
+def test_depth_limit_matches(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    for relative in ("a/one.txt", "a/b/two.txt", "a/b/c/three.txt", "a/b/c/d/four.txt"):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("", encoding="utf-8")
+    monkeypatch.setattr(search_tools_module, "_MAX_WALK_DEPTH", 2)
+
+    walked = _assert_backends_agree(tmp_path, ".", monkeypatch)
+
+    assert [path for path, _identity in walked] == ["a/b/two.txt", "a/one.txt"]
 
 
 @pytest.mark.parametrize("backend", ["python", "native"])
