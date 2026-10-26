@@ -112,7 +112,7 @@ def test_coordinator_ignores_selected_session_on_failed_completion(tmp_path: Pat
 
 @pytest.mark.parametrize("command_type", ["select_session", "clone_session", "fork_session"])
 @pytest.mark.parametrize("outcome", ["changed", "same", "failed"])
-def test_session_grants_reset_only_after_successful_session_change(
+def test_session_changed_only_after_successful_change(
     tmp_path: Path, command_type: str, outcome: str
 ) -> None:
     async def scenario() -> None:
@@ -121,9 +121,11 @@ def test_session_grants_reset_only_after_successful_session_change(
         selected = previous if outcome == "same" else store.create()
         state = _RpcSessionState(session=previous, history=(), entry_count=0)
         resets: list[object] = []
-        coordinator = RpcCoordinator(
-            state, session_grants_reset=lambda: resets.append(state.session)
-        )
+
+        async def session_changed() -> None:
+            resets.append(state.session)
+
+        coordinator = RpcCoordinator(state, session_changed=session_changed)
         coordinator.running_command = _RpcRunningCommand(
             "switch", command_type, anyio.CancelScope()
         )

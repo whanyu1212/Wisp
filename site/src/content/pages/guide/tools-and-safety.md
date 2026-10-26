@@ -61,8 +61,10 @@ value. Some processes cannot be found this way: one that clears its environment 
 user, and, on macOS, a protected system program such as those in `/bin` and `/usr/bin`, whose
 environment macOS keeps private.
 
-Processes started with `operation=start` stop when Wisp shuts down, including when you close the
-terminal (SIGHUP) or a supervisor sends SIGTERM. On macOS and Linux they also stop if Wisp is
+Processes started with `operation=start` belong to the session that started them: they stop when
+you start a new session or switch to another one, and when Wisp shuts down, including when you close
+the terminal (SIGHUP) or a supervisor sends SIGTERM. A stopped process still answers a poll, as
+cancelled. On macOS and Linux they also stop if Wisp is
 killed outright (SIGKILL) or crashes: a small watchdog process, started with Wisp's first command,
 notices that Wisp has gone and stops every command still running, including detached processes it
 can recognise by their `WISP_COMMAND_TOKEN`. On Windows, a crash still leaves them running.

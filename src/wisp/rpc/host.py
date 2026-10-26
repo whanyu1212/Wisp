@@ -730,9 +730,27 @@ class RpcHost:
             assert host is not None
             await host._render_event_batch(events)
 
+        async def end_session_scope() -> None:
+            # Tool grants and background processes belong to the session that was
+            # left: an approval or a dev server is not inherited by another one.
+            approval_policy.reset_session_grants()
+            failed = await runtime.process_supervisor.cancel_all()
+            if failed:
+                processes = "process" if len(failed) == 1 else "processes"
+                process_ids = ", ".join(update.process_id for update in failed)
+                publish_event(
+                    ErrorEvent(
+                        message=(
+                            f"Could not stop {len(failed)} background {processes} from the "
+                            f"previous session: {process_ids}. Wisp retries when the session "
+                            "changes again and when it exits."
+                        )
+                    )
+                )
+
         coordinator = RpcCoordinator(
             session_state,
-            session_grants_reset=approval_policy.reset_session_grants,
+            session_changed=end_session_scope,
             input_closed_handlers=(
                 approval_policy.deny_pending_on_input_closed,
                 trust_gate.deny_pending_on_input_closed,
