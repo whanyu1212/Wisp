@@ -580,6 +580,12 @@ def test_from_config_backstops_auth_protection_after_model_copy(tmp_path: Path) 
         run_tool(ReadTool(), {"path": "codex-auth.json"}, context)
 
 
+def test_from_config_checks_seen_files() -> None:
+    from wisp.config.runtime import WispConfig
+
+    assert ToolContext.from_config(WispConfig()).seen_files is not None
+
+
 def test_from_config_backstops_ca_bundle_protection_after_model_copy(tmp_path: Path) -> None:
     from wisp.config.runtime import WispConfig
     from wisp.openai_compatible import OpenAICompatibleSettings

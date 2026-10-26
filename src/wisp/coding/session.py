@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -131,6 +131,7 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.seen_files import SeenFiles
 
 # A resumed session reuses its persisted Git snapshot only while the provider may
 # still hold the cached prefix built from it. After a longer pause the cache has
@@ -256,6 +257,10 @@ class CodingSession:
         self._last_session_id: str | None = None
         self._accepting_queued_messages = False
         self._retained_queues: dict[str, _RetainedQueueState] = {}
+        # One record per conversation of the files its model has seen. It outlives
+        # reconfiguration, which replaces the tool context, and compaction, after
+        # which the model can still edit a file it read before.
+        self._seen_files: dict[str, SeenFiles] = {}
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -642,6 +647,9 @@ class CodingSession:
         assert session is not None
         self._active_session_id = session.session_id
         self._last_session_id = session.session_id
+        if operation_context.seen_files is not None:
+            seen_files = self._seen_files.setdefault(session.session_id, SeenFiles())
+            operation_context = replace(operation_context, seen_files=seen_files)
         recover_history = session.session_id in self._history_refresh_session_ids or any(
             pending.entry.session_id == session.session_id for pending in self._pending_entries
         )

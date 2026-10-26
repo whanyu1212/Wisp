@@ -26,6 +26,11 @@ instead. Links found while searching a directory are skipped.
 Approval decisions stay outside the model's control — see [Staying in sync](staying-in-sync.md) for
 why that boundary matters and how the shared runtime enforces it.
 
+`write` and `edit` change an existing file only if the model has read it in the current
+conversation and it has not changed since. A file you edited, reformatted, or regenerated after the
+model read it is refused with a request to read it again, so your changes are never overwritten
+unseen. Changes the model makes through `bash` count as changes too, and new files need no read.
+
 `bash` defaults to one-shot execution and reports stdout, stderr, truncation state, and exit code.
 It also accepts `operation=start|poll|cancel` for commands needing a retained process handle; those
 return a `process_id`, process state, incremental output, and per-stream truncation metadata under

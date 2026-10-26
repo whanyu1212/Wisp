@@ -57,9 +57,11 @@ from wisp.tools.base import (
     ToolInputSchema,
     ToolPromptMetadata,
 )
+from wisp.tools.builtin import ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
+from wisp.tools.seen_files import SeenFiles
 
 
 class _RaisingTextResult:
@@ -1201,3 +1203,47 @@ def test_edit_results_record_folder(tmp_path: Path) -> None:
     }
     assert results["edit-1"] is not None and results["edit-1"].cwd == str(project.resolve())
     assert results["echo-1"] is not None and results["echo-1"].cwd is None
+
+
+@pytest.mark.parametrize(("conversation", "write_allowed"), [("same", True), ("new", False)])
+def test_seen_files_belong_to_one_conversation(
+    tmp_path: Path, conversation: str, write_allowed: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_text("old\n", encoding="utf-8")
+    read_call = ToolCall(
+        call_id="call-1", name="read", arguments={"path": "notes.txt"}, response_id="r1"
+    )
+    write_call = ToolCall(
+        call_id="call-2",
+        name="write",
+        arguments={"path": "notes.txt", "content": "new\n"},
+        response_id="r2",
+    )
+    provider = ToolLoopProvider([[read_call], ["read"], [write_call], ["done"]])
+    tools = ToolRegistry()
+    tools.register(ReadTool())
+    tools.register(WriteTool())
+
+    async def run_agent() -> list[object]:
+        sessions = JsonlSessionStore(tmp_path / "sessions")
+        agent = CodingSession(
+            provider=provider,
+            sessions=sessions,
+            tool_registry=tools,
+            tool_context=ToolContext(cwd=workspace, seen_files=SeenFiles()),
+            tool_policy=ToolPolicy.allow_tool_names({"read", "write"}),
+            tool_approval_policy=ToolApprovalPolicy.approve_all(),
+        )
+        first = sessions.create()
+        [event async for event in agent.run("read it", session=first)]
+        second = first if conversation == "same" else sessions.create()
+        return [event async for event in agent.run("write it", session=second)]
+
+    events = anyio.run(run_agent)
+
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.is_error is not write_allowed
+    expected = "new\n" if write_allowed else "old\n"
+    assert (workspace / "notes.txt").read_text(encoding="utf-8") == expected
