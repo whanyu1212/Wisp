@@ -736,7 +736,9 @@ class RpcController:
 
 
 _SUBPROCESS_CLOSE_TIMEOUT_SECONDS = 2
-_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS = 5
+# Matches the Rust TUI: the backend answers before building its runtime, but a first
+# launch after install compiles bytecode and can take several seconds.
+_SUBPROCESS_HANDSHAKE_TIMEOUT_SECONDS = 30
 
 
 class RpcHandshakeError(RuntimeError):

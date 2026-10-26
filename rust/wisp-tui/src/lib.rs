@@ -151,7 +151,11 @@ const STDERR_RETAINED_BYTES: usize = 64 * 1024;
 const TOP_LEVEL_ERROR_MAX_BYTES: usize = 8 * 1024;
 const TOP_LEVEL_ERROR_MAX_CHARS: usize = 4 * 1024;
 const TRUNCATION_NOTICE: &str = " [output truncated]";
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+// The backend answers before building its runtime, so this covers interpreter
+// start-up and imports. A first launch after install compiles bytecode and can take
+// several seconds on a slow or busy machine. A backend that exits fails at once
+// with `HandshakeEof`, so only a silent, live backend waits this long.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_COMMAND_ID: &str = "rust-tui-shutdown";
@@ -181,7 +185,10 @@ pub enum Error {
     IncompleteFrame,
     #[error("RPC stream ended before the handshake response")]
     HandshakeEof,
-    #[error("RPC backend did not complete the handshake within 5 seconds")]
+    #[error(
+        "RPC backend did not complete the handshake within {} seconds",
+        HANDSHAKE_TIMEOUT.as_secs()
+    )]
     HandshakeTimeout,
     #[error("invalid RPC protocol value: {0}")]
     Protocol(#[from] ProtocolDecodeError),
