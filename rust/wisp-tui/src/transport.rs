@@ -12,9 +12,7 @@ use wisp_protocol::{
     events::WispCurrentLiveEventOutput, handshake_response::RpcHandshakeResponse,
 };
 
-use crate::{
-    Error, HANDSHAKE_TIMEOUT, SHUTDOWN_COMMAND_ID, framing::FrameReader, reducer::BackendEvent,
-};
+use crate::{Error, SHUTDOWN_COMMAND_ID, framing::FrameReader, reducer::BackendEvent};
 
 pub(crate) const TRANSPORT_STALL_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -97,7 +95,7 @@ pub(crate) async fn send_payload_confirmed(
         return Err(Error::FrameTooLarge { limit });
     }
     let (ack_tx, ack_rx) = oneshot::channel();
-    timeout(HANDSHAKE_TIMEOUT, async {
+    timeout(TRANSPORT_STALL_TIMEOUT, async {
         writer
             .send(WriterMessage::Frame {
                 payload,
