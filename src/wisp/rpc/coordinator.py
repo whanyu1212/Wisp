@@ -150,7 +150,7 @@ class RpcCoordinator:
         session_state: _RpcSessionState,
         *,
         input_closed_handlers: tuple[Callable[[], None], ...] = (),
-        session_grants_reset: Callable[[], None] | None = None,
+        session_changed: Callable[[], Awaitable[None]] | None = None,
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
         max_queued_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
         input_closed_type: type[object] = _RpcInputClosed,
@@ -172,7 +172,9 @@ class RpcCoordinator:
         self.pending_prompt_queue_commands: deque[ParsedRpcCommand] = deque()
         self.input_closed = False
         self._input_closed_handlers = input_closed_handlers
-        self._session_grants_reset = session_grants_reset
+        # Called after the active session changes to another one or to a new session,
+        # before the new session is applied; nothing from the old one carries over.
+        self._session_changed = session_changed
         self._max_queued_commands = max_queued_commands
         self._max_queued_bytes = max_queued_bytes
         self._queued_command_bytes = 0
@@ -376,9 +378,9 @@ class RpcCoordinator:
                             previous_session is None
                             or previous_session.session_id != selected_session.session_id
                         )
-                        and self._session_grants_reset is not None
+                        and self._session_changed is not None
                     ):
-                        self._session_grants_reset()
+                        await self._session_changed()
                     self.session_state.session = selected_session
                 post_apply_events = getattr(completed, "post_apply_events", ())
                 if post_apply_events and self._completion_event_renderer is not None:
@@ -511,8 +513,8 @@ class RpcCoordinator:
         if result.running_command is not previous_running:
             self._prompt_queue_ready = False
         if result.reset_session:
-            if self._session_grants_reset is not None:
-                self._session_grants_reset()
+            if self._session_changed is not None:
+                await self._session_changed()
             self._reset_session_state()
         elif result.selected_session is not None:
             self.session_state.session = result.selected_session

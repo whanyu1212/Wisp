@@ -730,9 +730,15 @@ class RpcHost:
             assert host is not None
             await host._render_event_batch(events)
 
+        async def end_session_scope() -> None:
+            # Tool grants and background processes belong to the session that was
+            # left: an approval or a dev server is not inherited by another one.
+            approval_policy.reset_session_grants()
+            await runtime.process_supervisor.cancel_all()
+
         coordinator = RpcCoordinator(
             session_state,
-            session_grants_reset=approval_policy.reset_session_grants,
+            session_changed=end_session_scope,
             input_closed_handlers=(
                 approval_policy.deny_pending_on_input_closed,
                 trust_gate.deny_pending_on_input_closed,

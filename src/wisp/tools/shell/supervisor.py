@@ -580,6 +580,21 @@ class ProcessSupervisor:
                 await self._await_task_before_propagating_cancellation(cleanup_task)
             return self._snapshot(managed)
 
+    async def cancel_all(self) -> None:
+        """Terminate every running managed process; the supervisor stays open.
+
+        The processes keep their final state, so a later poll reports each as
+        cancelled rather than unknown.
+        """
+
+        async with self._lock:
+            running = [
+                process_id
+                for process_id, managed in self._managed.items()
+                if managed.state == "running"
+            ]
+        await asyncio.gather(*(self.cancel(process_id) for process_id in running))
+
     async def aclose(self) -> None:
         """Terminate all owned process trees. Safe to call repeatedly or concurrently."""
 

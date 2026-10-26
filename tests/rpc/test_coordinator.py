@@ -80,9 +80,11 @@ def test_coordinator_applies_new_session_reset_atomically(tmp_path: Path) -> Non
             name="Previous",
         )
         resets: list[object] = []
-        coordinator = RpcCoordinator(
-            state, session_grants_reset=lambda: resets.append(state.session)
-        )
+
+        async def session_changed() -> None:
+            resets.append(state.session)
+
+        coordinator = RpcCoordinator(state, session_changed=session_changed)
         receiver = Receiver(
             [
                 input_command({"id": "new-1", "type": "new_session"}),
