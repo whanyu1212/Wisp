@@ -569,11 +569,48 @@ def _release_unstarted_posix_tracking(
         _remove_posix_jobs_file(jobs_file)
 
 
+async def _wait_for_exit(process: asyncio.subprocess.Process) -> int:
+    """Wait for the shell to exit, without waiting for its pipes to close.
+
+    ``Process.wait()`` called before the exit is observed returns only once every
+    pipe has closed, so a process that escaped cleanup while holding stdout would
+    block the caller until that process exits.
+
+    Args:
+        process (asyncio.subprocess.Process): A started shell.
+
+    Returns:
+        int: The shell's exit status.
+    """
+
+    waiter = asyncio.ensure_future(process.wait())
+    try:
+        while not waiter.done() and process.returncode is None:
+            await asyncio.wait((waiter,), timeout=_EXIT_POLL_INTERVAL_SECONDS)
+    finally:
+        if not waiter.done():
+            waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+    returncode = process.returncode
+    return waiter.result() if returncode is None else returncode
+
+
+def _close_process_pipes(process: asyncio.subprocess.Process) -> None:
+    """Close Wisp's ends of the pipes a process that escaped cleanup still holds.
+
+    Closing the transport after the shell has exited does not signal any process.
+    """
+
+    transport = getattr(process, "_transport", None)
+    if isinstance(transport, asyncio.SubprocessTransport):
+        transport.close()
+
+
 async def _kill_process_tree_and_wait(process: asyncio.subprocess.Process) -> bool:
     terminated = await _terminate_process_tree(process)
     if not terminated:
         return False
-    await process.wait()
+    await _wait_for_exit(process)
     await _drain_process_stream(process.stdout)
     await _drain_process_stream(process.stderr)
     await asyncio.sleep(0)

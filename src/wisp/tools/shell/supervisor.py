@@ -18,10 +18,12 @@ import anyio
 from wisp.tools.result import ToolError
 from wisp.tools.shell.process import (
     ProcessResult,
+    _close_process_pipes,
     _collect_limited_output,
     _create_shell_process,
     _kill_process_tree_and_wait,
     _terminate_process_tree,
+    _wait_for_exit,
 )
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
@@ -815,7 +817,9 @@ class ProcessSupervisor:
             return None
 
         async def wait_for_process_and_streams() -> BaseException | None:
-            await managed.process.wait()
+            # The stream tasks still wait for end of file. Once termination cancels
+            # them, a pipe an escaped process holds must not keep this waiting.
+            await _wait_for_exit(managed.process)
             results = await asyncio.gather(*stream_tasks, return_exceptions=True)
             return first_reader_failure(results)
 
@@ -889,7 +893,7 @@ class ProcessSupervisor:
     async def _finish_terminated_io(self, managed: _ManagedProcess) -> None:
         """Bound pipe draining after the owned process tree has been terminated."""
 
-        await managed.process.wait()
+        await _wait_for_exit(managed.process)
         stream_tasks = tuple(
             task for task in (managed.stdout_task, managed.stderr_task) if task is not None
         )
@@ -902,6 +906,8 @@ class ProcessSupervisor:
         for task in pending:
             task.cancel()
         await asyncio.gather(*stream_tasks, return_exceptions=True)
+        if pending:
+            _close_process_pipes(managed.process)
 
     async def _finish_one_shot_capture(
         self,
@@ -910,7 +916,7 @@ class ProcessSupervisor:
     ) -> None:
         """Bound one-shot pipe draining after the owned process tree has been terminated."""
 
-        await process.wait()
+        await _wait_for_exit(process)
         if not capture_task.done():
             _, pending = await asyncio.wait(
                 (capture_task,),
@@ -918,6 +924,8 @@ class ProcessSupervisor:
             )
             for task in pending:
                 task.cancel()
+            if pending:
+                _close_process_pipes(process)
         await asyncio.gather(capture_task, return_exceptions=True)
 
     async def _terminate_managed(self, managed: _ManagedProcess) -> None:
