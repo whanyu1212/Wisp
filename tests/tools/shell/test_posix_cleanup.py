@@ -16,6 +16,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.tools.shell import process as process_tools_module
+from wisp.tools.shell.watchdog import WatchedCommand
 
 
 def test_kill_process_tree_and_wait_returns_failure_without_waiting(
@@ -538,10 +539,12 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     tmp_path: Path,
 ) -> None:
     class DummyProcess:
+        pid = 123
         returncode = 0
 
     creation_calls: list[dict[str, object]] = []
     closed_fds: list[int] = []
+    watched: list[WatchedCommand] = []
     process = DummyProcess()
 
     async def fake_create_subprocess_shell(
@@ -557,6 +560,7 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     monkeypatch.setattr(process_tools_module, "_open_posix_jobs_fd", lambda _path: 123)
     monkeypatch.setattr(process_tools_module, "_open_posix_exit_pipe", lambda: (7, 124))
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
+    monkeypatch.setattr(process_tools_module, "watch_command", watched.append)
     monkeypatch.setattr(
         process_tools_module.asyncio, "create_subprocess_shell", fake_create_subprocess_shell
     )
@@ -570,6 +574,8 @@ def test_posix_shell_uses_hidden_high_jobs_fd(
     assert creation_calls[0]["pass_fds"] == (123, 124)
     assert creation_calls[0]["start_new_session"] is True
     assert closed_fds == [123, 124]
+    jobs_file = getattr(process, process_tools_module._POSIX_JOBS_FILE_ATTR)  # noqa: SLF001
+    assert [(command.pid, command.jobs_file) for command in watched] == [(123, str(jobs_file))]
     exit_pipe = getattr(process, process_tools_module._POSIX_EXIT_PIPE_ATTR)  # noqa: SLF001
     assert exit_pipe.read_fd == 7
     assert exit_pipe.close.alive
@@ -583,7 +589,7 @@ def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
     tmp_path: Path,
 ) -> None:
     class DummyProcess:
-        pass
+        pid = 123
 
     process = DummyProcess()
     exec_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
@@ -603,6 +609,7 @@ def test_linux_posix_shell_startup_uses_exec_helper_instead_of_preexec(
     monkeypatch.setattr(process_tools_module, "_close_posix_fd", lambda fd: closed_fds.append(fd))
     monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_exec", create_exec)
     monkeypatch.setattr(process_tools_module.asyncio, "create_subprocess_shell", fail_shell)
+    monkeypatch.setattr(process_tools_module, "watch_command", lambda _command: None)
 
     async def run() -> DummyProcess:
         return await process_tools_module._create_shell_process("echo hi", cwd=tmp_path)  # type: ignore[return-value]  # noqa: SLF001

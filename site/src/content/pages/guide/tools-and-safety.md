@@ -60,8 +60,10 @@ user, and, on macOS, a protected system program such as those in `/bin` and `/us
 environment macOS keeps private.
 
 Processes started with `operation=start` stop when Wisp shuts down, including when you close the
-terminal (SIGHUP) or a supervisor sends SIGTERM. If Wisp is killed outright (SIGKILL) or crashes,
-they keep running: their lifetime limit is enforced by Wisp itself.
+terminal (SIGHUP) or a supervisor sends SIGTERM. On macOS and Linux they also stop if Wisp is
+killed outright (SIGKILL) or crashes: a small watchdog process, started with Wisp's first command,
+notices that Wisp has gone and stops every command still running, including detached processes it
+can recognise by their `WISP_COMMAND_TOKEN`. On Windows, a crash still leaves them running.
 
 ## Protected paths
 
