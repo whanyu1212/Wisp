@@ -10,6 +10,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
+from typing import TextIO
 from uuid import uuid4
 
 import anyio
@@ -37,6 +38,8 @@ from wisp.tools.truncation import truncate_text
 # drop the snapshot and let the write fall back to its plain summary. Matched to the
 # renderer's per-hunk character ceiling so the two bounds agree.
 _WRITE_SNAPSHOT_MAX_CHARS = 1_000_000
+# edit holds the whole file, its replacement and their encodings in memory at once.
+_MAX_EDIT_BYTES = 16 * 1024 * 1024
 # Room a read continuation notice needs within the output budget, besides the path it
 # quotes. Budgets too small for that get a compact notice without the bash example.
 _READ_NOTICE_RESERVED_BYTES = 256
@@ -319,7 +322,16 @@ def _open_metadata_descriptor(parent: OpenParent, expected: os.stat_result) -> i
     return descriptor
 
 
-def _read_descriptor(descriptor: int) -> str:
+def _read_descriptor(descriptor: int, path: SecureToolPath) -> str:
+    """Read a whole file for ``edit``, refusing one too large to rewrite in memory."""
+
+    size = os.fstat(descriptor).st_size
+    if size > _MAX_EDIT_BYTES:
+        raise ToolError(
+            f"{path.display} is {size} bytes, more than the {_MAX_EDIT_BYTES} bytes edit "
+            "can change at once",
+            recovery_hint="Change it with a bash command instead, for example sed -i.",
+        )
     with os.fdopen(os.dup(descriptor), "r", encoding="utf-8", newline="") as file:
         return file.read()
 
@@ -740,7 +752,7 @@ def _atomic_edit(
             link_count = opened.st_nlink
             metadata = _snapshot_replacement_metadata(descriptor, opened)
             try:
-                original = _read_descriptor(descriptor)
+                original = _read_descriptor(descriptor, path)
             except UnicodeDecodeError as exc:
                 raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
         finally:
@@ -924,7 +936,7 @@ def _atomic_edit_windows(
             if seen_files is not None:
                 seen_files.require_current(path.path, version, display=path.display)
             try:
-                original = _read_descriptor(descriptor)
+                original = _read_descriptor(descriptor, path)
             except UnicodeDecodeError as exc:
                 raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
         replacement = _apply_edits(original, edits)
@@ -1252,8 +1264,14 @@ def _read_line_slice(
         if isinstance(descriptor, int)
         else descriptor.open("r", encoding="utf-8", newline="")
     )
+    # Lines are read at most one character past the budget, so a huge line is never
+    # held whole; cut that short, it still exceeds the budget as the whole line would.
+    line_limit = max(0, max_bytes) + 1
     with file_source as file:
-        for line in file:
+        readline = file.readline
+        while line := readline(line_limit):
+            if not line.endswith("\n") and not (line.endswith("\r") and len(line) < line_limit):
+                _read_past_line(file, line, line_limit)
             scanned_count += 1
             if scanned_count < offset:
                 continue
@@ -1277,6 +1295,23 @@ def _read_line_slice(
             selected_parts.append(line)
             selected_bytes += len(encoded_line)
     return _ReadSlice("".join(selected_parts), scanned_count, len(selected_parts), False)
+
+
+def _read_past_line(file: TextIO, piece: str, limit: int) -> None:
+    """Consume the rest of a line after ``readline(limit)`` returned ``piece``.
+
+    ``piece`` lacks a line ending when the line is longer than ``limit``, and a CR that
+    ends it at exactly ``limit`` characters may be the first half of a CRLF.
+    """
+
+    while not piece.endswith(("\n", "\r")):
+        piece = file.readline(limit)
+        if not piece:
+            return
+    if piece.endswith("\r") and len(piece) == limit:
+        position = file.tell()
+        if file.read(1) != "\n":
+            file.seek(position)
 
 
 def _partial_line_slice(line: str, line_number: int, max_bytes: int) -> _ReadSlice:
