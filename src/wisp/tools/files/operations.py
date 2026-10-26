@@ -222,7 +222,8 @@ class WriteTool:
         outcome = await anyio.to_thread.run_sync(
             lambda: _atomic_write(path, content, overwrite=overwrite, context=context)
         )
-        _record_written_version(path, context.seen_files)
+        if context.seen_files is not None and outcome.version is not None:
+            context.seen_files.record(path.path, outcome.version)
         if (
             outcome.file_id is not None
             and constraint is not None
@@ -248,6 +249,8 @@ class _WriteOutcome:
     created: bool
     before_text: str | None
     file_id: tuple[int, int] | None
+    version: FileVersion | None
+    """The published file's version, or None when it could not be verified as this write's."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +329,9 @@ def _write_existing_in_place(
     content: str,
     *,
     expected: tuple[int, int, int, int, int],
-) -> None:
+) -> FileVersion:
+    """Rewrite the open file in place and return the version this write produced."""
+
     encoded = memoryview(content.encode("utf-8"))
     flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -344,6 +349,7 @@ def _write_existing_in_place(
                 raise OSError("write made no progress")
             encoded = encoded[written:]
         os.fsync(descriptor)
+        produced = file_version(os.fstat(descriptor))
         current = stat_leaf(parent)
         if current is None or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise ToolError(f"File changed while writing: {parent.path.selected}")
@@ -351,6 +357,7 @@ def _write_existing_in_place(
         raise ToolError(f"Could not write file {parent.path.selected}: {exc}") from exc
     finally:
         os.close(descriptor)
+    return produced
 
 
 def _write_path_existing_in_place(
@@ -359,7 +366,9 @@ def _write_path_existing_in_place(
     *,
     expected: tuple[int, int, int, int, int],
     operation: str,
-) -> None:
+) -> FileVersion:
+    """Rewrite the file at ``path`` in place and return the version this write produced."""
+
     encoded = memoryview(content.encode("utf-8"))
     try:
         if os.name == "nt":
@@ -386,6 +395,7 @@ def _write_path_existing_in_place(
                 raise OSError("write made no progress")
             encoded = encoded[written:]
         os.fsync(descriptor)
+        produced = file_version(os.fstat(descriptor))
         current = _windows_leaf_info(path)
         if current is None or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino):
             raise ToolError(f"File changed while {operation}: {path.selected}")
@@ -393,6 +403,7 @@ def _write_path_existing_in_place(
         raise ToolError(f"Could not update file {path.selected}: {exc}") from exc
     finally:
         os.close(descriptor)
+    return produced
 
 
 def _snapshot_descriptor(descriptor: int) -> str | None:
@@ -477,7 +488,7 @@ def _write_temporary(
     content: str,
     *,
     metadata: _ReplacementMetadata | None,
-) -> tuple[str, tuple[int, int]]:
+) -> tuple[str, os.stat_result]:
     descriptor, name = _allocate_temporary(parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as file:
@@ -487,9 +498,8 @@ def _write_temporary(
             if metadata is not None:
                 _apply_replacement_metadata(file.fileno(), metadata)
             os.fsync(file.fileno())
-            info = os.fstat(file.fileno())
-            file_id = (info.st_dev, info.st_ino)
-        return name, file_id
+            written = os.fstat(file.fileno())
+        return name, written
     except BaseException as exc:
         if descriptor >= 0:
             os.close(descriptor)
@@ -591,19 +601,19 @@ def _atomic_write(
         if initial_version is not None and context.seen_files is not None:
             context.seen_files.require_current(path.path, initial_version, display=path.display)
         if overwrite and initial_version is not None and (link_count > 1 or requires_in_place):
-            _write_existing_in_place(parent, content, expected=initial_version)
-            return _WriteOutcome(False, before_text, None)
+            version = _write_existing_in_place(parent, content, expected=initial_version)
+            return _WriteOutcome(False, before_text, None, version)
 
         try:
-            temporary, file_id = _write_temporary(parent, content, metadata=metadata)
+            temporary, written = _write_temporary(parent, content, metadata=metadata)
         except ToolError as exc:
             if (
                 overwrite
                 and initial_version is not None
                 and isinstance(exc.__cause__, PermissionError)
             ):
-                _write_existing_in_place(parent, content, expected=initial_version)
-                return _WriteOutcome(False, before_text, None)
+                version = _write_existing_in_place(parent, content, expected=initial_version)
+                return _WriteOutcome(False, before_text, None, version)
             raise
         published = False
         try:
@@ -636,15 +646,22 @@ def _atomic_write(
             raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_temporary(parent, temporary, published=published)
-        return _WriteOutcome(initial is None, before_text, file_id if not overwrite else None)
+        file_id = (written.st_dev, written.st_ino)
+        return _WriteOutcome(
+            initial is None,
+            before_text,
+            file_id if not overwrite else None,
+            _published_version(stat_leaf(parent), written),
+        )
 
 
 def _atomic_edit(
     path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
-) -> None:
+) -> FileVersion | None:
+    """Apply ``edits`` and return the version they produced, if it could be verified."""
+
     if os.name == "nt":
-        _atomic_edit_windows(path, edits, seen_files)
-        return
+        return _atomic_edit_windows(path, edits, seen_files)
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
         if initial is None:
@@ -671,14 +688,12 @@ def _atomic_edit(
 
         replacement = _apply_edits(original, edits)
         if link_count > 1:
-            _write_existing_in_place(parent, replacement, expected=version)
-            return
+            return _write_existing_in_place(parent, replacement, expected=version)
         try:
-            temporary, _file_id = _write_temporary(parent, replacement, metadata=metadata)
+            temporary, written = _write_temporary(parent, replacement, metadata=metadata)
         except ToolError as exc:
             if isinstance(exc.__cause__, PermissionError):
-                _write_existing_in_place(parent, replacement, expected=version)
-                return
+                return _write_existing_in_place(parent, replacement, expected=version)
             raise
         published = False
         try:
@@ -698,6 +713,7 @@ def _atomic_edit(
             raise ToolError(f"Could not edit file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_temporary(parent, temporary, published=published)
+        return _published_version(stat_leaf(parent), written)
 
 
 def _windows_leaf_info(path: SecureToolPath) -> os.stat_result | None:
@@ -714,7 +730,7 @@ def _windows_leaf_info(path: SecureToolPath) -> os.stat_result | None:
 
 def _write_windows_temporary(
     path: SecureToolPath, content: str, *, mode: int | None
-) -> tuple[Path, tuple[int, int]]:
+) -> tuple[Path, os.stat_result]:
     for _attempt in range(10):
         temporary = path.path.parent / f".wisp-write-{uuid4().hex}"
         try:
@@ -734,8 +750,8 @@ def _write_windows_temporary(
             file.write(content)
             file.flush()
             os.fsync(file.fileno())
-            info = os.fstat(file.fileno())
-        return temporary, (info.st_dev, info.st_ino)
+            written = os.fstat(file.fileno())
+        return temporary, written
     except BaseException as exc:
         if descriptor >= 0:
             os.close(descriptor)
@@ -789,14 +805,14 @@ def _atomic_write_windows(
         if initial_version is not None and seen_files is not None:
             seen_files.require_current(path.path, initial_version, display=path.display)
         if overwrite and initial_version is not None:
-            _write_path_existing_in_place(
+            version = _write_path_existing_in_place(
                 path,
                 content,
                 expected=initial_version,
                 operation="writing",
             )
-            return _WriteOutcome(False, before_text, None)
-        temporary, file_id = _write_windows_temporary(path, content, mode=mode)
+            return _WriteOutcome(False, before_text, None, version)
+        temporary, written = _write_windows_temporary(path, content, mode=mode)
         published = False
         try:
             current = _windows_leaf_info(path)
@@ -817,12 +833,18 @@ def _atomic_write_windows(
             raise ToolError(f"Could not create file: {path.selected}: {exc}") from exc
         finally:
             _cleanup_windows_temporary(temporary, destination=path.path, published=published)
-        return _WriteOutcome(initial is None, before_text, file_id if not overwrite else None)
+        file_id = (written.st_dev, written.st_ino)
+        return _WriteOutcome(
+            initial is None,
+            before_text,
+            file_id if not overwrite else None,
+            _published_version(_windows_leaf_info(path), written),
+        )
 
 
 def _atomic_edit_windows(
     path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
-) -> None:
+) -> FileVersion:
     with open_windows_parent(path):
         initial = _windows_leaf_info(path)
         if initial is None:
@@ -845,7 +867,7 @@ def _atomic_edit_windows(
             except UnicodeDecodeError as exc:
                 raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
         replacement = _apply_edits(original, edits)
-        _write_path_existing_in_place(
+        return _write_path_existing_in_place(
             path,
             replacement,
             expected=version,
@@ -1065,26 +1087,33 @@ class EditTool:
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = secure_tool_path(_required_string(arguments, "path"), context, write=True)
         edits = _parse_edits(arguments)
-        await anyio.to_thread.run_sync(lambda: _atomic_edit(path, edits, context.seen_files))
-        _record_written_version(path, context.seen_files)
+        version = await anyio.to_thread.run_sync(
+            lambda: _atomic_edit(path, edits, context.seen_files)
+        )
+        if context.seen_files is not None and version is not None:
+            context.seen_files.record(path.path, version)
         return ToolResult(
             text=f"Applied {len(edits)} edit(s) to {path.display}",
             data={"path": path.display, "edits": len(edits)},
         )
 
 
-def _record_written_version(path: SecureToolPath, seen_files: SeenFiles | None) -> None:
-    """Record the file's version after a successful write or edit as seen."""
+def _published_version(
+    current: os.stat_result | None, written: os.stat_result
+) -> FileVersion | None:
+    """Return the published file's version if it is still the file this write produced.
 
-    if seen_files is None:
-        return
-    try:
-        info = os.stat(path.path, follow_symlinks=False)
-    except FileNotFoundError:
-        # Something removed the file right after the write; the next change will
-        # ask for a read, which is the safe direction.
-        return
-    seen_files.record(path.path, file_version(info))
+    Publishing by rename or link changes only the change time. Any other difference
+    means another process replaced or rewrote the file after it was published; its
+    content is then unseen, so no version is returned and the file stays stale.
+    """
+
+    if current is None:
+        return None
+    published = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+    if published != (written.st_dev, written.st_ino, written.st_size, written.st_mtime_ns):
+        return None
+    return file_version(current)
 
 
 def _secure_read_line_slice(
@@ -1097,6 +1126,7 @@ def _secure_read_line_slice(
     notice_bytes: int,
 ) -> _ReadSlice:
     with open_file(path) as descriptor:
+        before = file_version(os.fstat(descriptor))
         result = _read_line_slice(
             descriptor,
             offset=offset,
@@ -1105,7 +1135,10 @@ def _secure_read_line_slice(
             max_lines=max_lines,
             notice_bytes=notice_bytes,
         )
-        return replace(result, version=file_version(os.fstat(descriptor)))
+        # A file rewritten while it was being read may return text from neither
+        # version, so only a version that held for the whole read counts as seen.
+        after = file_version(os.fstat(descriptor))
+        return replace(result, version=before if before == after else None)
 
 
 @dataclass(frozen=True, slots=True)

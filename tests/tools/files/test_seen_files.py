@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
+from pytest import MonkeyPatch
 
 from tests.tools.support import run_tool
 from wisp.tools.base import Tool
 from wisp.tools.builtin import EditTool, ReadTool, WriteTool
 from wisp.tools.context import ToolContext
+from wisp.tools.files import operations as operations_module
 from wisp.tools.result import ToolError
 from wisp.tools.seen_files import SeenFiles
 
@@ -101,3 +104,53 @@ def test_failed_read_does_not_count(tmp_path: Path) -> None:
 
     with pytest.raises(ToolError, match="Read a.txt before changing it"):
         run_tool(WriteTool(), {"path": "a.txt", "content": "new\n"}, context)
+
+
+def _rewrite_in_place(path: Path) -> None:
+    with path.open("r+", encoding="utf-8") as file:
+        file.seek(0, os.SEEK_END)
+        file.write("user line\n")
+
+
+def test_read_during_rewrite_does_not_count(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("old\n", encoding="utf-8")
+    original = operations_module._read_line_slice  # noqa: SLF001
+
+    def read_then_rewrite(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        _rewrite_in_place(target)
+        return result
+
+    monkeypatch.setattr(operations_module, "_read_line_slice", read_then_rewrite)
+    context = _context(tmp_path)
+    run_tool(ReadTool(), {"path": "a.txt"}, context)
+
+    with pytest.raises(ToolError, match="Read a.txt before changing it"):
+        run_tool(WriteTool(), {"path": "a.txt", "content": "new\n"}, context)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX publish by rename")
+@pytest.mark.parametrize(("tool", "arguments"), _CHANGES)
+def test_change_after_publish_is_not_ours(
+    tmp_path: Path, monkeypatch: MonkeyPatch, tool: Tool, arguments: dict[str, object]
+) -> None:
+    target = tmp_path / "a.txt"
+    target.write_text("old\n", encoding="utf-8")
+    context = _context(tmp_path)
+    run_tool(ReadTool(), {"path": "a.txt"}, context)
+    cleanup = operations_module._cleanup_temporary  # noqa: SLF001
+
+    def cleanup_then_rewrite(*args: Any, **kwargs: Any) -> None:
+        cleanup(*args, **kwargs)
+        # Another process changes the file right after it was published.
+        _rewrite_in_place(target)
+
+    monkeypatch.setattr(operations_module, "_cleanup_temporary", cleanup_then_rewrite)
+    run_tool(tool, arguments, context)
+    monkeypatch.setattr(operations_module, "_cleanup_temporary", cleanup)
+
+    # The record still holds the version the model read, not the rewritten file.
+    with pytest.raises(ToolError, match="a.txt changed since it was last read"):
+        run_tool(WriteTool(), {"path": "a.txt", "content": "newer\n"}, context)
+    assert target.read_text(encoding="utf-8").endswith("user line\n")
