@@ -18,7 +18,7 @@ from pathlib import Path
 
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
-from wisp.tools.result import ToolError
+from wisp.tools.result import ToolArgumentError, ToolError
 
 _DIRECTORY_FLAGS = (
     os.O_RDONLY
@@ -89,11 +89,14 @@ def secure_tool_path(
         SecureToolPath: The path to open, with the caller's text for messages.
 
     Raises:
+        ToolArgumentError: When the path contains a NUL character.
         ToolError: When the path or its resolved target is outside the working
             directory or protected, or a write goes through a symbolic link.
     """
 
     raw = selected if selected is not None else default
+    if "\0" in raw:
+        raise ToolArgumentError(f"Path contains a NUL character: {raw!r}")
     cwd = context.cwd.resolve(strict=False)
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
