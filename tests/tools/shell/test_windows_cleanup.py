@@ -317,6 +317,7 @@ def test_bash_tool_assigns_windows_job_before_resuming_shell(
     assert creation_calls == [
         {
             "cwd": str(tmp_path),
+            "env": None,
             "start_new_session": False,
             "stdin": process_tools_module.asyncio.subprocess.DEVNULL,
             "stdout": process_tools_module.asyncio.subprocess.PIPE,

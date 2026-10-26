@@ -31,6 +31,13 @@ It also accepts `operation=start|poll|cancel` for commands needing a retained pr
 return a `process_id`, process state, incremental output, and per-stream truncation metadata under
 the same safety category and approval policy.
 
+Commands inherit Wisp's environment except the variables Wisp reads provider API keys from:
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`,
+`XAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, and the key variable of a configured OpenAI-compatible
+endpoint, such as `OPENROUTER_API_KEY`. A command's output reaches the model and the transcript, so
+`env` would otherwise publish them. Other variables, including tokens your own tools need, pass
+through unchanged.
+
 ## Protected paths
 
 The file tools never open files that commonly hold secrets: `.env` and its variants, keys and

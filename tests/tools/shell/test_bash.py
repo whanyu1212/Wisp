@@ -6,6 +6,7 @@ import shlex
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import anyio
@@ -69,6 +70,63 @@ def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
     assert result.data["stdout"] == "out\n"
     assert result.data["stderr"] == "err\n"
     assert result.text == "Command exited with code 3: out\nerr"
+
+
+def _print_environment(*names: str) -> str:
+    code = f"import os; print(*(os.environ.get(n, 'unset') for n in {names!r}))"
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("tool", "operation"),
+    [
+        pytest.param(lambda: BashTool(None), "run", id="direct"),
+        pytest.param(BashTool, "run", id="supervised"),
+        pytest.param(BashTool, "start", id="managed"),
+    ],
+)
+def test_bash_withholds_provider_keys(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    tool: Callable[[], BashTool],
+    operation: str,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("WISP_TEST_KEPT", "kept")
+    command = _print_environment("ANTHROPIC_API_KEY", "WISP_TEST_KEPT")
+    bash = tool()
+
+    async def run() -> ToolResult:
+        try:
+            arguments = {"operation": operation, "command": command, "yield_seconds": 10}
+            return await bash.run(arguments, ToolContext(cwd=tmp_path))
+        finally:
+            await bash.aclose()
+
+    result = anyio.run(run)
+
+    assert result.data["stdout"] == "unset kept\n"
+
+
+@pytest.mark.process
+def test_bash_withholds_endpoint_key(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    from wisp.config.runtime import WispConfig
+    from wisp.openai_compatible import OpenAICompatibleSettings
+
+    monkeypatch.setenv("ACME_API_KEY", "sk-acme-test")
+    endpoint = OpenAICompatibleSettings(
+        provider_name="acme", base_url="https://llm.example.com/v1", default_model="m"
+    )
+    config = WispConfig().model_copy(update={"openai_compatible": endpoint})
+
+    result = run_tool(
+        BashTool(),
+        {"command": _print_environment("ACME_API_KEY")},
+        ToolContext.from_config(config, cwd=tmp_path),
+    )
+
+    assert result.data["stdout"] == "unset\n"
 
 
 @pytest.mark.process
@@ -889,7 +947,7 @@ def test_direct_bash_cancellation_surfaces_cleanup_failure(
 
     process = DummyProcess()
 
-    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+    async def create_process(_command: str, *, cwd: Path, env: object) -> DummyProcess:
         assert cwd == tmp_path
         return process
 
@@ -993,7 +1051,7 @@ def test_direct_bash_cleans_process_after_capture_failure(
     process = DummyProcess()
     cleanup_calls = 0
 
-    async def create_process(_command: str, *, cwd: Path) -> DummyProcess:
+    async def create_process(_command: str, *, cwd: Path, env: object) -> DummyProcess:
         assert cwd == tmp_path
         return process
 

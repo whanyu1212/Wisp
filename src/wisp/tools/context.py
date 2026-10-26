@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wisp.auth.connections import provider_credential_environment
 from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 from wisp.mcp.credentials import mcp_auth_path
 from wisp.trust.permissions import permissions_directory
@@ -49,6 +50,9 @@ class ToolContext:
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a
     # caller explicitly passes ``protected_paths=()`` to opt out.
     protected_paths: tuple[str, ...] = field(default_factory=lambda: DEFAULT_PROTECTED_PATHS)
+    # Environment variables commands do not inherit. Like ``protected_paths``, a bare
+    # context withholds Wisp's own provider API keys; pass ``frozenset()`` to opt out.
+    withheld_environment: frozenset[str] = field(default_factory=provider_credential_environment)
 
     @classmethod
     def default(cls) -> ToolContext:
@@ -89,7 +93,15 @@ class ToolContext:
         if missing:
             protected_paths = (*protected_paths, *missing)
 
+        endpoint = config.openai_compatible
         return cls(
             cwd=cwd if cwd is not None else Path.cwd(),
             protected_paths=protected_paths,
+            withheld_environment=(
+                provider_credential_environment()
+                if endpoint is None
+                else provider_credential_environment(
+                    openai_compatible_provider=endpoint.provider_name
+                )
+            ),
         )
