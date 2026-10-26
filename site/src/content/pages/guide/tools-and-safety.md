@@ -47,6 +47,10 @@ value. Some processes cannot be found this way: one that clears its environment 
 user, and, on macOS, a protected system program such as those in `/bin` and `/usr/bin`, whose
 environment macOS keeps private.
 
+Processes started with `operation=start` stop when Wisp shuts down, including when you close the
+terminal (SIGHUP) or a supervisor sends SIGTERM. If Wisp is killed outright (SIGKILL) or crashes,
+they keep running: their lifetime limit is enforced by Wisp itself.
+
 ## Protected paths
 
 The file tools never open files that commonly hold secrets: `.env` and its variants, keys and
