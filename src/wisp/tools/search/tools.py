@@ -1278,9 +1278,16 @@ def _native_walk_directory(
     if cancelled or not in_cwd:
         walk.close()
         return
+    already_skipped = 0 if report is None else report.deep_directories_skipped
     with closing(walk):
         try:
             for directory_descriptor, relative, files in walk:
+                # Kept current per batch: a caller that stops early, at max_results,
+                # builds its result before this generator is closed.
+                if report is not None:
+                    report.deep_directories_skipped = (
+                        already_skipped + walk.deep_directories_skipped
+                    )
                 directory = root / relative
                 real_directory = real_root / relative
                 for leaf, device, inode, hidden_or_ignored in files:
@@ -1304,9 +1311,9 @@ def _native_walk_directory(
         except native.NativeWalkError as exc:
             raise _native_walk_error(root, exc) from None
         finally:
-            # Read before closing: a closed walk no longer reports the count.
+            # Directories skipped after the last batch; a closed walk reports none.
             if report is not None:
-                report.deep_directories_skipped += walk.deep_directories_skipped
+                report.deep_directories_skipped = already_skipped + walk.deep_directories_skipped
 
 
 def _native_walk_error(root: Path, error: Exception) -> Exception:

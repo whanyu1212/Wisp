@@ -115,3 +115,17 @@ def test_fails_when_out_of_descriptors(tmp_path: Path) -> None:
     # Before, the native walk returned no files here and the Python walk failed.
     assert completed.stdout.startswith("error: Could not "), completed.stdout
     assert "Too many open files" in completed.stdout
+
+
+def test_early_stop_still_reports_depth(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    for relative in ("a/b/c/deep.txt", "x1.txt", "x2.txt"):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text("needle\n", encoding="utf-8")
+    monkeypatch.setattr(search_module, "_MAX_WALK_DEPTH", 2)
+
+    result = run_tool(
+        GrepTool(), {"pattern": "needle", "max_results": 1}, ToolContext(cwd=tmp_path)
+    )
+
+    # The match limit stops the walk early; the skipped directory still decides the marker.
+    assert result.text.splitlines()[-1].startswith("[truncated] Skipped 1 directory")
