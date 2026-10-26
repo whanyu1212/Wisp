@@ -65,6 +65,31 @@ def _double_fork_daemon(pid_path: Path) -> str:
     return f"{_python(source)} >/dev/null 2>&1; {_wait_for_pid_file(pid_path)}"
 
 
+def _fully_detached_daemon(pid_path: Path) -> str:
+    """A daemon that defeats every tree-based discovery path at once.
+
+    It double-forks out of the session, points stdio at /dev/null, and closes every
+    other descriptor, so neither the process group, the job recorder, the jobs-file
+    holder scan, nor the output pipes can find it. Only the command token can.
+    """
+
+    source = (
+        "import os, pathlib, time\n"
+        "if os.fork():\n"
+        "    os._exit(0)\n"
+        "os.setsid()\n"
+        "if os.fork():\n"
+        "    os._exit(0)\n"
+        "null = os.open(os.devnull, os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(null, fd)\n"
+        "os.closerange(3, 4096)\n"
+        f"{_write_own_pid(pid_path)}"
+        "time.sleep(30)\n"
+    )
+    return f"{_python(source)}; {_wait_for_pid_file(pid_path)}"
+
+
 def _process_group_escape(pid_path: Path) -> str:
     """A background job that moves into its own process group within the session."""
 
@@ -126,6 +151,7 @@ def _assert_process_gone(pid: int) -> None:
         _nohup_job,
         _sigterm_ignoring_job,
         _orphaned_group_member_without_tracking_fds,
+        _fully_detached_daemon,
     ],
     ids=lambda build_command: build_command.__name__.lstrip("_"),
 )

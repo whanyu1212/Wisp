@@ -849,3 +849,37 @@ def test_failed_scan_still_kills_group(monkeypatch: MonkeyPatch) -> None:
     assert killed is False
     assert signals == [signal.SIGKILL]
     assert released == []
+
+
+@pytest.mark.process
+@pytest.mark.skipif(
+    not (sys.platform.startswith("linux") or sys.platform == "darwin"),
+    reason="reads other processes' environments",
+)
+def test_token_check_ignores_unrelated_process(tmp_path: Path) -> None:
+    # A recorded pid can be reused by another process; only the command's token
+    # proves a pid still belongs to the command.
+    # macOS hides the environment of protected system programs such as /bin/sleep.
+    sleeper = [sys.executable, "-c", "import time; print(flush=True); time.sleep(30)"]
+    token = "a" * 32
+    variable = process_tools_module.COMMAND_TOKEN_VARIABLE
+    owned, unrelated = (
+        subprocess.Popen(sleeper, env={**os.environ, variable: value}, stdout=subprocess.PIPE)
+        for value in (token, "b" * 32)
+    )
+    try:
+        for child in (owned, unrelated):
+            # The environment is in place once the child has run its first line.
+            assert child.stdout is not None
+            child.stdout.readline()
+        matched = process_tools_module._posix_pids_with_token(  # noqa: SLF001
+            {owned.pid, unrelated.pid}, token
+        )
+    finally:
+        for child in (owned, unrelated):
+            child.kill()
+            child.wait()
+            if child.stdout is not None:
+                child.stdout.close()
+
+    assert matched == (owned.pid,)

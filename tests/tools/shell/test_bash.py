@@ -861,13 +861,46 @@ def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
 
     assert result.text == (
         "Command exited with code 0: started\n"
-        "[Background processes still holding the output were stopped when the command "
-        "exited. Use operation=start to keep a process running.]"
+        "[Processes the command left running were stopped when it exited. "
+        "To keep a process running, use operation=start and run it in the foreground.]"
     )
     # Returning before the child's 3 s sleep ends proves the call did not wait for it.
     assert elapsed < 2.5
 
     assert not marker.exists()
+
+
+@pytest.mark.process
+@pytest.mark.skipif(os.name != "posix", reason="POSIX daemonization")
+def test_stopped_daemon_gets_notice(tmp_path: Path) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    daemon = (
+        "import os, pathlib, sys, time\n"
+        "if os.fork():\n"
+        "    os._exit(0)\n"
+        "os.setsid()\n"
+        "if os.fork():\n"
+        "    os._exit(0)\n"
+        "null = os.open(os.devnull, os.O_RDWR)\n"
+        "for fd in (0, 1, 2):\n"
+        "    os.dup2(null, fd)\n"
+        "os.closerange(3, 4096)\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n"
+    )
+    quoted_pid = shlex.quote(str(pid_path))
+    command = (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(daemon)} {quoted_pid}; "
+        f"while [ ! -s {quoted_pid} ]; do sleep 0.01; done; echo started"
+    )
+
+    result = run_tool(BashTool(), {"command": command, "timeout": 30}, ToolContext(cwd=tmp_path))
+
+    assert result.text == (
+        "Command exited with code 0: started\n"
+        "[Processes the command left running were stopped when it exited. "
+        "To keep a process running, use operation=start and run it in the foreground.]"
+    )
 
 
 @pytest.mark.process

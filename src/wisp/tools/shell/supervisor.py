@@ -24,6 +24,7 @@ from wisp.tools.shell.process import (
     _kill_process_tree_and_wait,
     _terminate_process_tree,
     _wait_for_exit,
+    stopped_detached_processes,
 )
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
@@ -490,7 +491,9 @@ class ProcessSupervisor:
                 stderr_retained_bytes=len(stderr_result.output),
                 stdout_source_byte_lengths=stdout_source_byte_lengths,
                 stderr_source_byte_lengths=stderr_source_byte_lengths,
-                background_stopped=captured.pipes_held_after_exit,
+                background_stopped=(
+                    captured.pipes_held_after_exit or stopped_detached_processes(process)
+                ),
             )
             release_ownership = True
             return result

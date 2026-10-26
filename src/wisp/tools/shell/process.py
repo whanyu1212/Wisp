@@ -7,12 +7,14 @@ import ctypes
 import errno
 import functools
 import os
+import secrets
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from ctypes import wintypes
@@ -30,6 +32,14 @@ from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
 _POSIX_EXIT_PIPE_ATTR = "_wisp_posix_exit_pipe"
+# Every POSIX command's environment carries a random token. A daemon that leaves the
+# process group, closes its descriptors, and is adopted by init is otherwise out of
+# reach, but it keeps its environment, so the token both finds it and proves that a
+# pid still belongs to this command rather than to a process that reused it.
+COMMAND_TOKEN_VARIABLE = "WISP_COMMAND_TOKEN"
+_POSIX_COMMAND_TOKEN_ATTR = "_wisp_command_token"
+_POSIX_STARTED_AT_ATTR = "_wisp_started_at"
+_POSIX_DETACHED_STOPPED_ATTR = "_wisp_detached_stopped"
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
 _WINDOWS_INVALID_HANDLE_VALUE = cast(int, ctypes.c_void_p(-1).value)
 _WINDOWS_RESUME_FAILED = 0xFFFFFFFF
@@ -127,7 +137,7 @@ class ProcessResult:
     stdout_source_byte_lengths: tuple[int, ...] | None = None
     stderr_source_byte_lengths: tuple[int, ...] | None = None
     background_stopped: bool = False
-    """Whether processes still holding the output were stopped after the shell exited."""
+    """Whether processes still holding the output, or detached from the command, were stopped."""
 
 
 @dataclass(frozen=True)
@@ -259,7 +269,7 @@ async def _run_shell(
         stderr_retained_bytes=len(stderr_result.output),
         stdout_source_byte_lengths=stdout_source_byte_lengths,
         stderr_source_byte_lengths=stderr_source_byte_lengths,
-        background_stopped=captured.pipes_held_after_exit,
+        background_stopped=captured.pipes_held_after_exit or stopped_detached_processes(process),
     )
 
 
@@ -269,7 +279,11 @@ async def _create_shell_process(
     posix_jobs_file: Path | None = None
     posix_inherited_fds: tuple[int, ...] = ()
     posix_exit_pipe_read_fd: int | None = None
+    command_token: str | None = None
+    started_at = time.time()
     if os.name == "posix":
+        command_token = secrets.token_hex(16)
+        env = {**(os.environ if env is None else env), COMMAND_TOKEN_VARIABLE: command_token}
         with tempfile.NamedTemporaryFile(prefix="wisp-jobs-", delete=False) as jobs_file:
             posix_jobs_file = Path(jobs_file.name)
         try:
@@ -346,6 +360,9 @@ async def _create_shell_process(
 
     if posix_jobs_file is not None:
         setattr(process, _POSIX_JOBS_FILE_ATTR, posix_jobs_file)
+    if command_token is not None:
+        setattr(process, _POSIX_COMMAND_TOKEN_ATTR, command_token)
+        setattr(process, _POSIX_STARTED_AT_ATTR, started_at)
     if posix_exit_pipe_read_fd is not None:
         exit_pipe = _PosixExitPipe(
             read_fd=posix_exit_pipe_read_fd,
@@ -667,6 +684,8 @@ def _kill_posix_process_tree(process: asyncio.subprocess.Process) -> bool:
     """
 
     descendants_recorded = _record_posix_descendant_pids(process)
+    if _signal_posix_detached_processes(process, signal.SIGKILL):
+        setattr(process, _POSIX_DETACHED_STOPPED_ATTR, True)
     group_kill = _signal_posix_process_group(process, signal.SIGKILL)
     recorded_kill_succeeded = _signal_posix_recorded_jobs(process, signal.SIGKILL)
     if not descendants_recorded or group_kill is _PosixGroupSignal.FAILED:
@@ -806,6 +825,191 @@ def _signal_posix_recorded_jobs(
         for pidfd in pidfds.values():
             _close_posix_fd(pidfd)
     return succeeded
+
+
+def stopped_detached_processes(process: asyncio.subprocess.Process) -> bool:
+    """Return whether cleanup stopped a process that had left the command's tree."""
+
+    return getattr(process, _POSIX_DETACHED_STOPPED_ATTR, False) is True
+
+
+def _signal_posix_detached_processes(
+    process: asyncio.subprocess.Process,
+    selected_signal: signal.Signals,
+) -> bool:
+    """Signal processes that carry the command's token but left its process group.
+
+    Candidates are the recorded jobs (on Linux the subreaper records a daemon it
+    adopted) and, on macOS, init's children started since the command began. The
+    token in a candidate's environment is checked just before it is signalled, so a
+    pid that was reused by another process is left alone. Members of the command's
+    own group are left to the group signal that follows, so a background job that
+    stayed in the group is not counted as detached.
+
+    Args:
+        process (asyncio.subprocess.Process): The command's shell leader.
+        selected_signal (signal.Signals): Signal to send.
+
+    Returns:
+        bool: Whether any such process was signalled.
+    """
+
+    token = getattr(process, _POSIX_COMMAND_TOKEN_ATTR, None)
+    if not isinstance(token, str):
+        return False
+    started_at = getattr(process, _POSIX_STARTED_AT_ATTR, 0.0)
+    candidates = {*_posix_recorded_job_pids(process), *_posix_adopted_pids_since(started_at)}
+    candidates.discard(process.pid)
+    signalled = False
+    for pid in _posix_pids_with_token(candidates, token):
+        try:
+            if os.getpgid(pid) == process.pid:
+                continue
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            # Some systems hide the group of a process in another session, which a
+            # process that called setsid is.
+            pass
+        try:
+            os.kill(pid, selected_signal)
+        except (ProcessLookupError, PermissionError):
+            continue
+        signalled = True
+    return signalled
+
+
+def _posix_pids_with_token(pids: set[int], token: str) -> tuple[int, ...]:
+    """Return the processes among ``pids`` whose environment holds the command token."""
+
+    if not pids:
+        return ()
+    entry = f"{COMMAND_TOKEN_VARIABLE}={token}"
+    if sys.platform.startswith("linux"):
+        return tuple(pid for pid in sorted(pids) if _linux_environment_has(pid, entry))
+    if sys.platform == "darwin":
+        return _macos_pids_with_environment_entry(pids, entry)
+    return ()
+
+
+def _linux_environment_has(pid: int, entry: str) -> bool:
+    try:
+        environment = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    return entry.encode() in environment.split(b"\0")
+
+
+def _macos_pids_with_environment_entry(pids: set[int], entry: str) -> tuple[int, ...]:
+    # ps -E appends each process's environment to its command line, and shows it only
+    # for the user's own processes. Nothing it prints is kept or logged.
+    try:
+        completed = subprocess.run(
+            ["ps", "-E", "-ww", "-o", "pid=,command=", "-p", ",".join(map(str, sorted(pids)))],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            errors="replace",
+            timeout=_PROCESS_SCAN_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ()
+    matched: list[int] = []
+    for line in completed.stdout.splitlines():
+        pid_text, _, rest = line.strip().partition(" ")
+        if f" {entry} " in f" {rest} ":
+            try:
+                matched.append(int(pid_text))
+            except ValueError:
+                continue
+    return tuple(matched)
+
+
+def _posix_adopted_pids_since(started_at: float) -> tuple[int, ...]:
+    """Return the user's processes that init adopted and that started after ``started_at``.
+
+    On Linux the command's shell is a child subreaper, so its orphans are recorded as
+    jobs instead. Elsewhere only macOS exposes a cheap child listing.
+    """
+
+    if sys.platform != "darwin":
+        return ()
+    libproc = _macos_libproc()
+    if libproc is None:
+        return ()
+    capacity = libproc.proc_listchildpids(1, None, 0)
+    if capacity <= 0:
+        return ()
+    # Room for children init adopts between the two calls.
+    buffer = (ctypes.c_int * (capacity + 64))()
+    count = libproc.proc_listchildpids(1, buffer, ctypes.sizeof(buffer))
+    if count <= 0:
+        return ()
+    uid = os.getuid()
+    adopted: list[int] = []
+    info = _MacosProcBsdInfo()
+    for pid in buffer[: min(count, len(buffer))]:
+        filled = libproc.proc_pidinfo(
+            pid, _MACOS_PROC_PIDTBSDINFO, 0, ctypes.byref(info), ctypes.sizeof(info)
+        )
+        if filled != ctypes.sizeof(info) or info.pbi_uid != uid:
+            continue
+        # Start times are whole seconds here; allow the second the command began in.
+        if info.pbi_start_tvsec + 1 >= started_at:
+            adopted.append(pid)
+    return tuple(adopted)
+
+
+_MACOS_PROC_PIDTBSDINFO = 3
+
+
+class _MacosProcBsdInfo(ctypes.Structure):
+    """``struct proc_bsdinfo`` from ``<sys/proc_info.h>``."""
+
+    _fields_ = (
+        ("pbi_flags", ctypes.c_uint32),
+        ("pbi_status", ctypes.c_uint32),
+        ("pbi_xstatus", ctypes.c_uint32),
+        ("pbi_pid", ctypes.c_uint32),
+        ("pbi_ppid", ctypes.c_uint32),
+        ("pbi_uid", ctypes.c_uint32),
+        ("pbi_gid", ctypes.c_uint32),
+        ("pbi_ruid", ctypes.c_uint32),
+        ("pbi_rgid", ctypes.c_uint32),
+        ("pbi_svuid", ctypes.c_uint32),
+        ("pbi_svgid", ctypes.c_uint32),
+        ("rfu_1", ctypes.c_uint32),
+        ("pbi_comm", ctypes.c_char * 16),
+        ("pbi_name", ctypes.c_char * 32),
+        ("pbi_nfiles", ctypes.c_uint32),
+        ("pbi_pgid", ctypes.c_uint32),
+        ("pbi_pjobc", ctypes.c_uint32),
+        ("e_tdev", ctypes.c_uint32),
+        ("e_tpgid", ctypes.c_uint32),
+        ("pbi_nice", ctypes.c_int32),
+        ("pbi_start_tvsec", ctypes.c_uint64),
+        ("pbi_start_tvusec", ctypes.c_uint64),
+    )
+
+
+@functools.cache
+def _macos_libproc() -> Any | None:
+    try:
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    except OSError:
+        return None
+    libproc.proc_listchildpids.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+    libproc.proc_listchildpids.restype = ctypes.c_int
+    libproc.proc_pidinfo.argtypes = (
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_uint64,
+        ctypes.c_void_p,
+        ctypes.c_int,
+    )
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    return libproc
 
 
 def _signal_verified_posix_pid(

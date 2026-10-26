@@ -24,8 +24,8 @@ _DEFAULT_MANAGED_LIFETIME_SECONDS = 300.0
 _DEFAULT_MANAGED_YIELD_SECONDS = 1.0
 _DEFAULT_MANAGED_WAIT_SECONDS = 0.0
 _BACKGROUND_STOPPED_NOTICE = (
-    "[Background processes still holding the output were stopped when the command exited. "
-    "Use operation=start to keep a process running.]"
+    "[Processes the command left running were stopped when it exited. "
+    "To keep a process running, use operation=start and run it in the foreground.]"
 )
 
 BashOperation = Literal["run", "start", "poll", "cancel"]
