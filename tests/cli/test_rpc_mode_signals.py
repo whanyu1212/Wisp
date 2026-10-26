@@ -11,10 +11,11 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [
-    pytest.mark.process,
-    pytest.mark.skipif(os.name != "posix", reason="POSIX shutdown signals"),
-]
+# Skip before the parameters below name SIGHUP, which Windows does not define.
+if os.name != "posix":
+    pytest.skip("POSIX shutdown signals", allow_module_level=True)
+
+pytestmark = pytest.mark.process
 
 # Runs the real backend entry point with a runtime that has already started one
 # managed process, standing in for one the model started with operation=start.
