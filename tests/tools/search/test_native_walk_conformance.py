@@ -208,6 +208,19 @@ def test_ancestor_ignore_files_apply(tmp_path: Path, monkeypatch: MonkeyPatch) -
     assert [relative for relative, _ in walked] == ["sub/deep/keep.log", "sub/deep/x.txt"]
 
 
+def test_subfolder_cwd_inherits_repository(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("build/\npkg/*.log\n!pkg/keep.log\n", "utf-8")
+    package = tmp_path / "pkg"
+    (package / "build").mkdir(parents=True)
+    for name in ("build/out.txt", "drop.log", "keep.log", "x.txt"):
+        (package / name).write_text("", encoding="utf-8")
+
+    walked = _assert_backends_agree(package, ".", monkeypatch)
+
+    assert [relative for relative, _ in walked] == ["keep.log", "x.txt"]
+
+
 def test_ignored_directory_pruning_matches(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     # A negation re-includes files below an ignored directory only after "dir/**".
     (tmp_path / ".ignore").write_text("build/\n!build/keep.log\nout/**\n!out/keep.log\n", "utf-8")
