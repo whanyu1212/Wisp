@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 from collections.abc import Sequence
 from typing import Final, Literal, cast, overload
 
@@ -136,6 +137,7 @@ class BashTool:
                 cwd=context.cwd,
                 timeout=float(timeout),
                 max_output_bytes=context.max_output_bytes,
+                env=_command_environment(context),
             )
         else:
             result = await self._process_supervisor.run_to_completion(
@@ -143,6 +145,7 @@ class BashTool:
                 cwd=context.cwd,
                 timeout=float(timeout),
                 max_output_bytes=context.max_output_bytes,
+                env=_command_environment(context),
             )
         stdout = truncate_text_tail(
             result.stdout,
@@ -220,6 +223,7 @@ class BashTool:
             timeout=lifetime_seconds,
             max_retained_bytes=context.max_output_bytes,
             max_retained_lines=context.max_output_lines,
+            env=_command_environment(context),
         )
         try:
             update = await supervisor.poll(process_id, wait_seconds=yield_seconds)
@@ -252,6 +256,16 @@ class BashTool:
         if self._process_supervisor is None:
             raise ToolError(f"bash.operation={operation} requires a process supervisor")
         return self._process_supervisor
+
+
+def _command_environment(context: ToolContext) -> dict[str, str]:
+    # A command's output goes to the provider and the transcript, so one `env`
+    # would publish the keys Wisp itself authenticates with.
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name not in context.withheld_environment
+    }
 
 
 def _bash_operation(arguments: ToolArguments) -> BashOperation:

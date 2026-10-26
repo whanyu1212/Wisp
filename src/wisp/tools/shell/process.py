@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import weakref
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum
@@ -204,8 +204,9 @@ async def _run_shell(
     cwd: Path,
     timeout: float,
     max_output_bytes: int,
+    env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
-    process = await _create_shell_process(command, cwd=cwd)
+    process = await _create_shell_process(command, cwd=cwd, env=env)
 
     try:
         captured = await asyncio.wait_for(
@@ -262,7 +263,9 @@ async def _run_shell(
     )
 
 
-async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subprocess.Process:
+async def _create_shell_process(
+    command: str, *, cwd: Path, env: Mapping[str, str] | None = None
+) -> asyncio.subprocess.Process:
     posix_jobs_file: Path | None = None
     posix_inherited_fds: tuple[int, ...] = ()
     posix_exit_pipe_read_fd: int | None = None
@@ -285,6 +288,7 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
             process = await asyncio.create_subprocess_shell(
                 command,
                 cwd=str(cwd),
+                env=env,
                 start_new_session=False,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
@@ -306,6 +310,7 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                     _POSIX_SUBREAPER_HELPER,
                     command,
                     cwd=str(cwd),
+                    env=env,
                     start_new_session=True,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
@@ -316,6 +321,7 @@ async def _create_shell_process(command: str, *, cwd: Path) -> asyncio.subproces
                 process = await asyncio.create_subprocess_shell(
                     command,
                     cwd=str(cwd),
+                    env=env,
                     start_new_session=os.name == "posix",
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,

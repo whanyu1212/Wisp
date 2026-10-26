@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from importlib import import_module
@@ -394,6 +394,7 @@ class ProcessSupervisor:
         cwd: Path,
         timeout: float,
         max_output_bytes: int,
+        env: Mapping[str, str] | None = None,
     ) -> ProcessResult:
         """Run one compatibility command while tracking it for shutdown."""
 
@@ -404,7 +405,7 @@ class ProcessSupervisor:
                 raise ToolError(
                     f"Cannot start command: managed process limit ({self._max_processes}) reached"
                 )
-            process = await self._spawn(command, cwd=cwd)
+            process = await self._spawn(command, cwd=cwd, env=env)
             self._one_shot_locks[process] = asyncio.Lock()
             capture_task = asyncio.create_task(_collect_limited_output(process, max_output_bytes))
             self._one_shot[process] = capture_task
@@ -504,6 +505,7 @@ class ProcessSupervisor:
         timeout: float,
         max_retained_bytes: int = DEFAULT_MAX_RETAINED_BYTES,
         max_retained_lines: int = DEFAULT_MAX_RETAINED_LINES,
+        env: Mapping[str, str] | None = None,
     ) -> str:
         """Start one resumable process and return an opaque runtime-local handle."""
 
@@ -521,7 +523,7 @@ class ProcessSupervisor:
                 )
             stdout = self._pending_text_class(max_retained_bytes, max_retained_lines)
             stderr = self._pending_text_class(max_retained_bytes, max_retained_lines)
-            process = await self._spawn(command, cwd=cwd)
+            process = await self._spawn(command, cwd=cwd, env=env)
             process_id = uuid4().hex
             managed = _ManagedProcess(
                 process_id=process_id,
@@ -744,10 +746,12 @@ class ProcessSupervisor:
             await self._terminate_managed(managed)
             return managed.error != PROCESS_TREE_CLEANUP_ERROR
 
-    async def _spawn(self, command: str, *, cwd: Path) -> asyncio.subprocess.Process:
+    async def _spawn(
+        self, command: str, *, cwd: Path, env: Mapping[str, str] | None
+    ) -> asyncio.subprocess.Process:
         """Spawn while the caller holds the supervisor lock."""
 
-        return await _create_shell_process(command, cwd=cwd)
+        return await _create_shell_process(command, cwd=cwd, env=env)
 
     async def _get(self, process_id: str) -> _ManagedProcess:
         async with self._lock:

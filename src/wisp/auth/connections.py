@@ -172,6 +172,27 @@ def api_key_environment(
     return API_KEY_ENVIRONMENT_VARIABLES.get(provider, ())
 
 
+def provider_credential_environment(
+    *, openai_compatible_provider: str = "openai-compatible"
+) -> frozenset[str]:
+    """Return every environment variable Wisp reads a provider API key from.
+
+    Args:
+        openai_compatible_provider (str, optional): Name of the configured
+            OpenAI-compatible endpoint, whose key variable is derived from it.
+            Defaults to "openai-compatible".
+
+    Returns:
+        frozenset[str]: Built-in provider key variables and the endpoint's.
+    """
+
+    built_in = (name for names in API_KEY_ENVIRONMENT_VARIABLES.values() for name in names)
+    endpoint = api_key_environment(
+        openai_compatible_provider, openai_compatible_provider=openai_compatible_provider
+    )
+    return frozenset((*built_in, *endpoint))
+
+
 def configured_environment_variables(
     provider: str,
     *,
@@ -265,5 +286,6 @@ __all__ = [
     "configured_environment_variables",
     "connection_catalog",
     "connection_method",
+    "provider_credential_environment",
     "supports_api_key",
 ]

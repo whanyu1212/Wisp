@@ -47,6 +47,8 @@ past a boundary Wisp promises to enforce. For example:
   home folder or a broader folder;
 - leaking stored credentials or OAuth tokens, or creating auth, session or trust files that other
   users can read;
+- a `bash` command receiving one of the provider API key variables Wisp reads, such as
+  `ANTHROPIC_API_KEY`;
 - processes that keep running after cancellation or shutdown;
 - the RPC transport or the TUI accepting malformed or mismatched input in a way that bypasses the
   checks above;
@@ -58,6 +60,8 @@ Out of scope:
 - actions you approved, or anything done in YOLO mode, that do what you asked;
 - an approved `bash` command, or an MCP or extension tool, reading or changing a protected path.
   Protected paths apply to Wisp's file tools only;
+- an approved `bash` command reading other environment variables, including tokens you export for
+  your own tools or forward to MCP servers;
 - a model choosing a harmful action that still requires your approval;
 - vulnerabilities in model providers, third-party MCP servers, or tools Wisp runs on your behalf;
 - issues that need an attacker who already controls your user account.
