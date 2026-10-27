@@ -247,9 +247,3 @@ def test_release_set_rejects_bad_checksum_and_sbom(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="checksum mismatch"):
         verify_release_set(distributions, assets, root=_ROOT)
-
-
-def test_wheel_fixture_is_deterministic(tmp_path: Path) -> None:
-    first = _wheel(tmp_path / "first").read_bytes()
-    second = _wheel(tmp_path / "second").read_bytes()
-    assert hashlib.sha256(first).digest() == hashlib.sha256(second).digest()

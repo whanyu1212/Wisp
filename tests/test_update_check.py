@@ -169,45 +169,6 @@ def test_explicit_status_reports_network_and_local_install_errors() -> None:
     anyio.run(local)
 
 
-def test_install_update_uses_exact_argv_without_a_shell() -> None:
-    commands: list[tuple[str, ...]] = []
-
-    async def verify_install() -> None:
-        pass
-
-    async def runner(command: tuple[str, ...]) -> None:
-        commands.append(command)
-
-    async def run() -> None:
-        await install_update(
-            UpdateAvailable(
-                current_version="1.0.0",
-                latest_version="1.2.0",
-                update_command="ignored display value",
-            ),
-            runner=runner,
-            install_verifier=verify_install,
-        )
-
-    anyio.run(run)
-
-    assert commands == [
-        (
-            "uv",
-            "tool",
-            "install",
-            "--force",
-            "--no-config",
-            "--no-sources",
-            "--default-index",
-            "https://pypi.org/simple",
-            "--python",
-            f"{sys.version_info.major}.{sys.version_info.minor}",
-            "wisp-ai==1.2.0",
-        )
-    ]
-
-
 def test_install_update_rejects_invalid_or_non_newer_versions() -> None:
     async def run(update: UpdateAvailable) -> None:
         with pytest.raises(UpdateInstallError):

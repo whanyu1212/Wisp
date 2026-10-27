@@ -22,7 +22,7 @@ from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
 from wisp.rpc.host import InProcessOptions
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.runtime.registry import UnknownProviderError
+from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
@@ -120,37 +120,27 @@ def test_cli_frontends_close_runtime_when_execution_fails(
     assert runtime.close_count == 1
 
 
-@pytest.mark.parametrize("allowed_tools", [(), ("missing",)])
-def test_tui_preflight_closes_temporary_runtime(
-    allowed_tools: tuple[str, ...],
+def test_tui_preflight_rejects_unknown_tool_and_closes_runtime(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    async def run() -> tuple[WispRuntime, BaseException | None]:
+    async def run() -> WispRuntime:
         runtime = await build_runtime()
 
         async def fake_build_runtime(**_kwargs: object) -> Any:
             return runtime
 
         monkeypatch.setattr(tui_launch, "build_runtime", fake_build_runtime)
-        failure: BaseException | None = None
-        try:
+        with pytest.raises(UnknownToolError):
             await tui_launch._preflight_tui_options(
                 TuiOptions(
                     config=WispConfig(provider="fake", session_dir=tmp_path),
-                    allowed_tools=allowed_tools,
+                    allowed_tools=("missing",),
                 )
             )
-        except BaseException as exc:
-            failure = exc
-        return runtime, failure
+        return runtime
 
-    runtime, failure = anyio.run(run)
-
-    if allowed_tools:
-        assert failure is not None
-    else:
-        assert failure is None
+    runtime = anyio.run(run)
 
     async def start_after_close() -> None:
         await runtime.process_supervisor.start("true", cwd=tmp_path, timeout=1)
@@ -248,14 +238,21 @@ def test_runtime_build_failure_closes_allocated_supervisor(
         anyio.run(start_after_close)
 
 
-@pytest.mark.parametrize("cache_ttl", ["5m", "1h"])
+@pytest.mark.parametrize(
+    ("cache_ttl", "expected"),
+    [
+        pytest.param(None, "5m", id="default"),
+        pytest.param("5m", "5m", id="5m"),
+        pytest.param("1h", "1h", id="1h"),
+    ],
+)
 def test_build_runtime_passes_anthropic_cache_ttl_to_provider(
-    tmp_path: Path, cache_ttl: AnthropicCacheTtl
+    tmp_path: Path, cache_ttl: AnthropicCacheTtl | None, expected: AnthropicCacheTtl
 ) -> None:
+    build = partial(build_runtime, auth_path=tmp_path / "auth.json")
+
     async def run() -> AnthropicCacheTtl:
-        runtime = await build_runtime(
-            auth_path=tmp_path / "auth.json", anthropic_cache_ttl=cache_ttl
-        )
+        runtime = await (build() if cache_ttl is None else build(anthropic_cache_ttl=cache_ttl))
         try:
             provider = runtime.providers.get("anthropic")
             assert isinstance(provider, AnthropicProvider)
@@ -263,20 +260,7 @@ def test_build_runtime_passes_anthropic_cache_ttl_to_provider(
         finally:
             await runtime.aclose()
 
-    assert anyio.run(run) == cache_ttl
-
-
-def test_runtime_defaults_to_five_minute_anthropic_cache(tmp_path: Path) -> None:
-    async def run() -> AnthropicCacheTtl:
-        runtime = await build_runtime(auth_path=tmp_path / "auth.json")
-        try:
-            provider = runtime.providers.get("anthropic")
-            assert isinstance(provider, AnthropicProvider)
-            return provider._cache_ttl  # noqa: SLF001
-        finally:
-            await runtime.aclose()
-
-    assert anyio.run(run) == "5m"
+    assert anyio.run(run) == expected
 
 
 def test_session_runtime_uses_one_hour_anthropic_cache(

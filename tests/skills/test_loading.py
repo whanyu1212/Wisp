@@ -344,27 +344,22 @@ def test_path_fallback_closes_resource_when_handle_resolution_fails(
         loading_module.os.fstat(opened[0])
 
 
-def test_rejects_invalid_utf8(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("content", "limits"),
+    [
+        pytest.param(b"valid\n\xffbad", {}, id="unbounded"),
+        pytest.param(b"valid\xffmore", {"max_output_bytes": 6}, id="at-byte-boundary"),
+    ],
+)
+def test_rejects_invalid_utf8(tmp_path: Path, content: bytes, limits: dict[str, int]) -> None:
     entry = _entry(tmp_path)
-    (entry.root / "binary.dat").write_bytes(b"valid\n\xffbad")
-
-    with pytest.raises(ToolError, match="UTF-8"):
-        load_skill_resource(
-            entry,
-            "binary.dat",
-            context=ToolContext(cwd=tmp_path),
-        )
-
-
-def test_rejects_invalid_utf8_at_byte_boundary(tmp_path: Path) -> None:
-    entry = _entry(tmp_path)
-    (entry.root / "invalid.dat").write_bytes(b"valid\xffmore")
+    (entry.root / "invalid.dat").write_bytes(content)
 
     with pytest.raises(ToolError, match="UTF-8"):
         load_skill_resource(
             entry,
             "invalid.dat",
-            context=ToolContext(cwd=tmp_path, max_output_bytes=6),
+            context=ToolContext(cwd=tmp_path, **limits),
         )
 
 

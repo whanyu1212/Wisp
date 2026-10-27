@@ -6,6 +6,7 @@ import re
 import tomllib
 from typing import get_args
 
+import pytest
 import yaml
 
 from tests.support.paths import DOCS_SRC_DIR, REPO_ROOT
@@ -59,36 +60,34 @@ def test_rpc_message_snapshot_history_distinguishes_calls_and_results() -> None:
     assert "`tool_calls`" in schema_v17
 
 
-def test_same_version_wire_additions_are_recorded() -> None:
-    schema_v24 = _CHANGELOG.split("## Schema v24", maxsplit=1)[1].split(
-        "## Schema v23", maxsplit=1
-    )[0]
-    schema_v5 = _CHANGELOG.split("## Schema v5", maxsplit=1)[1].split("## Schema v4", maxsplit=1)[0]
-    schema_v4 = _CHANGELOG.split("## Schema v4", maxsplit=1)[1].split("## Schema v3", maxsplit=1)[0]
-
-    assert "`output_has_exit_status`" in schema_v24
-    assert "optional `effort`" in schema_v5
-    assert "`project.config.applied`" in schema_v5
-    for field in ("exit_code", "before_text", "created", "summary", "truncated"):
-        assert f"`{field}`" in schema_v4
-
-
-def test_schema_v32_records_message_context_observations() -> None:
-    schema_v32 = _CHANGELOG.split("## Schema v32", maxsplit=1)[1].split(
-        "## Schema v31", maxsplit=1
-    )[0]
-
-    assert "`context_observation`" in schema_v32
-    assert "`message.completed`" in schema_v32
-
-
-def test_schema_v31_records_the_unicode_context_estimator() -> None:
-    schema_v31 = _CHANGELOG.split("## Schema v31", maxsplit=1)[1].split(
-        "## Schema v30", maxsplit=1
+@pytest.mark.parametrize(
+    ("version", "entries"),
+    [
+        pytest.param(24, ("`output_has_exit_status`",), id="v24-wire-addition"),
+        pytest.param(5, ("optional `effort`", "`project.config.applied`"), id="v5-wire-additions"),
+        pytest.param(
+            4,
+            tuple(
+                f"`{field}`"
+                for field in ("exit_code", "before_text", "created", "summary", "truncated")
+            ),
+            id="v4-wire-additions",
+        ),
+        pytest.param(
+            32, ("`context_observation`", "`message.completed`"), id="v32-context-observations"
+        ),
+        pytest.param(
+            31, ("`utf8_bytes_div_4_v2`", "`ContextEstimate.method`"), id="v31-unicode-estimator"
+        ),
+    ],
+)
+def test_changelog_schema_sections_record_changes(version: int, entries: tuple[str, ...]) -> None:
+    section = _CHANGELOG.split(f"## Schema v{version}", maxsplit=1)[1].split(
+        f"## Schema v{version - 1}", maxsplit=1
     )[0]
 
-    assert "`utf8_bytes_div_4_v2`" in schema_v31
-    assert "`ContextEstimate.method`" in schema_v31
+    for entry in entries:
+        assert entry in section
 
 
 def test_changelog_records_the_documented_public_deprecation() -> None:

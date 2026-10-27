@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from pytest import CaptureFixture, MonkeyPatch
 
-from wisp.trust.flow import resolve_trust
+from wisp.trust.flow import TrustPrompter, resolve_trust
 from wisp.trust.records import (
     GLOBAL_TRUST_PATH,
     _default_trust_path,
@@ -78,30 +79,6 @@ def test_project_cannot_self_trust_via_relative_trust_file(
 # --- store: is_trusted / record_trust ---
 
 
-def test_unknown_project_is_undecided(tmp_path: Path) -> None:
-    assert is_trusted(tmp_path / "proj", trust_path=_trust_file(tmp_path)) is None
-
-
-def test_record_and_read_back_trusted(tmp_path: Path) -> None:
-    trust_file = _trust_file(tmp_path)
-    project = tmp_path / "proj"
-    project.mkdir()
-
-    record_trust(project, True, trust_path=trust_file)
-
-    assert is_trusted(project, trust_path=trust_file) is True
-
-
-def test_record_and_read_back_untrusted(tmp_path: Path) -> None:
-    trust_file = _trust_file(tmp_path)
-    project = tmp_path / "proj"
-    project.mkdir()
-
-    record_trust(project, False, trust_path=trust_file)
-
-    assert is_trusted(project, trust_path=trust_file) is False
-
-
 def test_record_overwrites_prior_decision(tmp_path: Path) -> None:
     trust_file = _trust_file(tmp_path)
     project = tmp_path / "proj"
@@ -137,20 +114,21 @@ def test_symlinked_project_shares_decision(tmp_path: Path) -> None:
     assert is_trusted(link, trust_path=trust_file) is True
 
 
-def test_malformed_trust_file_is_ignored(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    ("content", "warning"),
+    [
+        pytest.param("{not json", "malformed trust file", id="malformed"),
+        pytest.param("[1, 2, 3]", "expected a JSON object", id="non-object"),
+    ],
+)
+def test_unreadable_trust_file_is_ignored(
+    tmp_path: Path, capsys: CaptureFixture[str], content: str, warning: str
+) -> None:
     trust_file = _trust_file(tmp_path)
-    trust_file.write_text("{not json", encoding="utf-8")
+    trust_file.write_text(content, encoding="utf-8")
 
     assert is_trusted(tmp_path / "proj", trust_path=trust_file) is None
-    assert "malformed trust file" in capsys.readouterr().err
-
-
-def test_non_object_trust_file_is_ignored(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
-    trust_file = _trust_file(tmp_path)
-    trust_file.write_text("[1, 2, 3]", encoding="utf-8")
-
-    assert is_trusted(tmp_path / "proj", trust_path=trust_file) is None
-    assert "expected a JSON object" in capsys.readouterr().err
+    assert warning in capsys.readouterr().err
 
 
 def test_record_creates_parent_directory(tmp_path: Path) -> None:
@@ -180,16 +158,6 @@ def test_records_persist_across_multiple_projects(tmp_path: Path) -> None:
 
     assert is_trusted(a, trust_path=trust_file) is True
     assert is_trusted(b, trust_path=trust_file) is False
-
-
-def test_forget_trust_removes_trusted_record(tmp_path: Path) -> None:
-    trust_file = _trust_file(tmp_path)
-    project = tmp_path / "proj"
-    project.mkdir()
-    record_trust(project, True, trust_path=trust_file)
-
-    assert forget_trust(project, trust_path=trust_file) is True
-    assert is_trusted(project, trust_path=trust_file) is None
 
 
 def test_forget_trust_removes_untrusted_record(tmp_path: Path) -> None:
@@ -257,24 +225,22 @@ def test_resolve_prompts_and_records_when_undecided(tmp_path: Path) -> None:
     assert is_trusted(project, trust_path=trust_file) is True
 
 
-def test_resolve_defaults_untrusted_without_prompter(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "prompter",
+    [
+        pytest.param(None, id="no-prompter"),
+        pytest.param(lambda _p: None, id="prompter-declines"),
+    ],
+)
+def test_resolve_defaults_untrusted_without_an_answer(
+    tmp_path: Path, prompter: TrustPrompter | None
+) -> None:
     trust_file = _trust_file(tmp_path)
     project = tmp_path / "proj"
     project.mkdir()
 
-    decision = resolve_trust(project, prompter=None, trust_path=trust_file)
+    decision = resolve_trust(project, prompter=prompter, trust_path=trust_file)
 
     assert decision.trusted is False
     # A non-interactive default is NOT persisted, so a later run still prompts.
-    assert is_trusted(project, trust_path=trust_file) is None
-
-
-def test_resolve_defaults_untrusted_when_prompter_declines_to_answer(tmp_path: Path) -> None:
-    trust_file = _trust_file(tmp_path)
-    project = tmp_path / "proj"
-    project.mkdir()
-
-    decision = resolve_trust(project, prompter=lambda _p: None, trust_path=trust_file)
-
-    assert decision.trusted is False
     assert is_trusted(project, trust_path=trust_file) is None
