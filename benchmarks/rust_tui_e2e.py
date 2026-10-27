@@ -23,7 +23,8 @@ import sys
 import tempfile
 import termios
 import time
-from collections.abc import Sequence
+import unicodedata
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -42,6 +43,11 @@ _SOURCE_ROOT = _REPOSITORY_ROOT / "src"
 _CSI = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 _DCS = re.compile(rb"\x1bP.*?\x1b\\", re.DOTALL)
+# The TUI wraps every frame in a synchronized update; output up to the last end
+# marker holds only complete frames, so no escape or character is cut in half.
+_FRAME_END = b"\x1b[?2026l"
+_CSI_COMMAND = re.compile(rb"\x1b\[([0-?]*)[ -/]*([@-~])")
+_OTHER_ESCAPE = re.compile(rb"\x1b[ -/]*[0-~]")
 # A fake reply can finish before "working" is painted. The idle footer then never changes, so a
 # repaint of only changed cells never writes "idle" again; one resize repaints the whole frame.
 # That only confirms the run settled. The wait and the redraw distort the sample's settle time,
@@ -355,15 +361,14 @@ def _run_sample(
 
         os.close(start_reader)
         output = bytearray()
+        screen = _PaintedScreen()
         phase_output = bytearray()
         terminal_output_bytes = 0
         context_redrawn = False
         ready_ns: int | None = None
         submitted_ns: int | None = None
         prompt_echo_ns: int | None = None
-        first_response_ns: int | None = None
-        final_response_ns: int | None = None
-        settled_ns: int | None = None
+        reply = _ReplyProgress()
         idle_repaint_requested = False
         quit_sent = False
         wait_result: _WaitResult | None = None
@@ -382,12 +387,17 @@ def _run_sample(
             start_writer_open = False
             while time.monotonic() < deadline:
                 chunk = _read_available(terminal_fd)
+                now_ns = time.perf_counter_ns()
                 if chunk:
                     terminal_output_bytes += len(chunk)
                     output.extend(chunk)
                     if submitted_ns is not None:
                         phase_output.extend(chunk)
-                now_ns = time.perf_counter_ns()
+                    # A later frame in the same read can scroll the reply's first row
+                    # away, so observe the reply after every frame.
+                    for _frame in screen.replay(chunk):
+                        if submitted_ns is not None:
+                            reply.observe(screen.rows(), now_ns)
                 startup_plain = _plain_text(output) if ready_ns is None else ""
                 context_visible = "~" in startup_plain and any(
                     marker in startup_plain for marker in ("ctx", "context", "offline")
@@ -410,32 +420,19 @@ def _run_sample(
                     plain = _plain_text(phase_output)
                     if prompt_echo_ns is None and START_TOKEN in plain:
                         prompt_echo_ns = now_ns
-                    response_tail = _response_tail(plain)
-                    if first_response_ns is None and response_tail is not None:
-                        first_response_ns = now_ns
                     if (
-                        final_response_ns is None
-                        and response_tail is not None
-                        and FINAL_TOKEN in response_tail
+                        reply.final_ns is not None
+                        and reply.settled_ns is None
+                        and not idle_repaint_requested
+                        and now_ns - reply.final_ns > _IDLE_REPAINT_AFTER_NS
                     ):
-                        final_response_ns = now_ns
-                    if final_response_ns is not None and settled_ns is None:
-                        final_index = plain.rfind(FINAL_TOKEN)
-                        if final_index >= 0 and _settled_after_final(
-                            plain[final_index + len(FINAL_TOKEN) :], renderer
-                        ):
-                            settled_ns = now_ns
-                        elif (
-                            not idle_repaint_requested
-                            and now_ns - final_response_ns > _IDLE_REPAINT_AFTER_NS
-                        ):
-                            fcntl.ioctl(
-                                terminal_fd,
-                                termios.TIOCSWINSZ,
-                                struct.pack("HHHH", config.height, config.width - 1, 0, 0),
-                            )
-                            idle_repaint_requested = True
-                    if settled_ns is not None and not quit_sent:
+                        fcntl.ioctl(
+                            terminal_fd,
+                            termios.TIOCSWINSZ,
+                            struct.pack("HHHH", config.height, config.width - 1, 0, 0),
+                        )
+                        idle_repaint_requested = True
+                    if reply.settled_ns is not None and not quit_sent:
                         os.write(terminal_fd, b"/quit\r")
                         quit_sent = True
 
@@ -458,9 +455,9 @@ def _run_sample(
                 phase = _phase_name(
                     ready_ns,
                     prompt_echo_ns,
-                    first_response_ns,
-                    final_response_ns,
-                    settled_ns,
+                    reply.first_ns,
+                    reply.final_ns,
+                    reply.settled_ns,
                 )
                 raise RuntimeError(
                     f"{renderer} TUI timed out during {phase}; "
@@ -494,9 +491,9 @@ def _run_sample(
             ready_ns,
             submitted_ns,
             prompt_echo_ns,
-            first_response_ns,
-            final_response_ns,
-            settled_ns,
+            reply.first_ns,
+            reply.final_ns,
+            reply.settled_ns,
         )
         if any(value is None for value in milestones):
             raise RuntimeError(f"{renderer} TUI exited before every exact marker became visible")
@@ -641,30 +638,176 @@ def _ready(plain: str, renderer: Renderer) -> bool:
     )
 
 
-def _response_tail(plain: str) -> str | None:
-    """Return the painted text after the fake response's start marker.
-
-    Incremental repaints write only changed cells, so blank cells between words
-    may never appear in the PTY stream. Composer borders can also be painted
-    between wrapped response rows. Ignore whitespace and those vertical borders
-    when matching the fixed ASCII markers.
+def _response_started(rows: Sequence[str]) -> bool:
+    """Return whether the fake reply's first row is on screen.
 
     Args:
-        plain: Printable PTY text since the prompt was submitted.
+        rows: Replayed screen rows.
 
     Returns:
-        Text without whitespace or vertical borders after the start marker, or
-        ``None`` before it paints.
+        Whether a row shows the reply prefix followed by the start marker. The
+        prompt echo carries the marker without the prefix.
     """
 
-    compact = "".join(plain.replace("│", "").split())
-    marker = "".join(f"{_FAKE_RESPONSE_PREFIX}{START_TOKEN}".split())
-    index = compact.find(marker)
-    return None if index < 0 else compact[index + len(marker) :]
+    marker = f"{_FAKE_RESPONSE_PREFIX}{START_TOKEN}"
+    return any(marker in row for row in rows)
 
 
-def _settled_after_final(tail: str, renderer: Renderer) -> bool:
-    return "idle" in tail
+def _response_final_row(rows: Sequence[str]) -> int | None:
+    """Return the index of the reply row that shows the final marker.
+
+    Args:
+        rows: Replayed screen rows.
+
+    Returns:
+        The first row with the final marker that is not part of the prompt echo,
+        or ``None``. Every prompt row carries the user bar ``▎``.
+    """
+
+    return next(
+        (index for index, row in enumerate(rows) if FINAL_TOKEN in row and "▎" not in row),
+        None,
+    )
+
+
+def _settled_after_final(rows: Sequence[str]) -> bool:
+    final_row = _response_final_row(rows)
+    return final_row is not None and any("idle" in row for row in rows[final_row + 1 :])
+
+
+@dataclass
+class _ReplyProgress:
+    """When the fake reply first showed, showed its final marker, and settled."""
+
+    first_ns: int | None = None
+    final_ns: int | None = None
+    settled_ns: int | None = None
+
+    def observe(self, rows: Sequence[str], now_ns: int) -> None:
+        """Record each milestone the replayed screen shows for the first time.
+
+        Args:
+            rows: Replayed screen rows after one frame.
+            now_ns: When the frame was read.
+        """
+
+        if self.first_ns is None and _response_started(rows):
+            self.first_ns = now_ns
+        if self.first_ns is None:
+            return
+        if self.final_ns is None and _response_final_row(rows) is not None:
+            self.final_ns = now_ns
+        if self.final_ns is not None and self.settled_ns is None and _settled_after_final(rows):
+            self.settled_ns = now_ns
+
+
+class _PaintedScreen:
+    """Screen cells replayed from the complete frames the TUI has written.
+
+    Incremental frames repaint only changed cells, so a word revealed across two
+    frames reaches the PTY with other cells (spinner, borders, status) painted
+    between its halves. Placing text at its cursor position joins the halves, which
+    matching the printable byte stream cannot do. Only the sequences the TUI paints
+    with are interpreted: cursor position, clearing the screen or the rest of a
+    line, and text.
+    """
+
+    def __init__(self) -> None:
+        self._cells: dict[tuple[int, int], str] = {}
+        self._row = 1
+        self._column = 1
+        self._unframed = bytearray()
+        self._rows: list[str] | None = []
+
+    def feed(self, chunk: bytes) -> None:
+        """Replay each frame that ``chunk`` completes and keep a partial frame for later.
+
+        Args:
+            chunk: PTY output in the order it was read.
+        """
+
+        for _frame in self.replay(chunk):
+            pass
+
+    def replay(self, chunk: bytes) -> Iterator[None]:
+        """Replay each frame that ``chunk`` completes, pausing after each one.
+
+        One read can hold several frames, and a later frame may scroll away what an
+        earlier one showed, so a caller can inspect ``rows()`` at every pause.
+
+        Args:
+            chunk: PTY output in the order it was read.
+
+        Yields:
+            None: After each complete frame is applied.
+        """
+
+        self._unframed.extend(chunk)
+        while (end := self._unframed.find(_FRAME_END)) >= 0:
+            end += len(_FRAME_END)
+            frame = _OSC.sub(b"", _DCS.sub(b"", bytes(self._unframed[:end])))
+            del self._unframed[:end]
+            self._apply_frame(frame)
+            yield
+
+    def _apply_frame(self, frames: bytes) -> None:
+        self._rows = None
+        position = 0
+        while position < len(frames):
+            command = _CSI_COMMAND.match(frames, position)
+            if command is not None:
+                self._apply(command.group(1), command.group(2))
+                position = command.end()
+                continue
+            escape = _OTHER_ESCAPE.match(frames, position)
+            if escape is not None:
+                position = escape.end()
+                continue
+            text_end = frames.find(b"\x1b", position)
+            text_end = len(frames) if text_end < 0 else text_end
+            self._paint(frames[position:text_end].decode("utf-8", "replace"))
+            position = text_end
+
+    def shows(self, text: str) -> bool:
+        """Return whether one screen row contains ``text``."""
+
+        return any(text in row for row in self.rows())
+
+    def rows(self) -> list[str]:
+        """Return the replayed screen rows from the top."""
+
+        if self._rows is None:
+            self._rows = self._render_rows()
+        return self._rows
+
+    def _apply(self, params: bytes, final: bytes) -> None:
+        if final == b"H":
+            values = [int(value or 1) for value in params.split(b";")] if params else [1]
+            self._row, self._column = values[0], values[1] if len(values) > 1 else 1
+        elif final == b"J" and params == b"2":
+            self._cells.clear()
+        elif final == b"K" and params in (b"", b"0"):
+            erased = [
+                cell for cell in self._cells if cell[0] == self._row and cell[1] >= self._column
+            ]
+            for cell in erased:
+                del self._cells[cell]
+
+    def _paint(self, text: str) -> None:
+        for character in text:
+            if not character.isprintable():
+                continue
+            self._cells[(self._row, self._column)] = character
+            self._column += 2 if unicodedata.east_asian_width(character) in "WF" else 1
+
+    def _render_rows(self) -> list[str]:
+        columns_by_row: dict[int, dict[int, str]] = {}
+        for (row, column), character in self._cells.items():
+            columns_by_row.setdefault(row, {})[column] = character
+        return [
+            "".join(columns.get(column, " ") for column in range(1, max(columns) + 1))
+            for _row, columns in sorted(columns_by_row.items())
+        ]
 
 
 def _phase_name(

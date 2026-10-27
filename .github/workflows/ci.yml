@@ -125,8 +125,8 @@ jobs:
         run: cargo test --workspace --all-features
 
   # The PTY handoff tests run beside lint and unit tests rather than after them.
-  # macOS runs them only on main: they flake on GitHub's macOS runners (HY-29) and
-  # never gate there, so pull requests skip that wait.
+  # macOS runs them only on main and manual runs, so pull requests skip its slower
+  # runners; a macOS failure there still fails the run.
   tui-handoff:
     needs: changes
     if: needs.changes.outputs.handoff == 'true'
@@ -167,8 +167,6 @@ jobs:
         run: cargo build -p wisp-tui
 
       - name: Test Python/Rust TUI handoff
-        # Report macOS failures without failing the job; Linux still gates on them.
-        continue-on-error: ${{ runner.os == 'macOS' }}
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
           # Linux runs the end-to-end tests across workers; each spawns its own PTY
@@ -187,7 +185,6 @@ jobs:
         # The benchmark harnesses' PTY runs (skipped without the binary) keep
         # working against the current CLI. They measure timing, so they run on
         # one worker.
-        continue-on-error: ${{ runner.os == 'macOS' }}
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
         run: >-

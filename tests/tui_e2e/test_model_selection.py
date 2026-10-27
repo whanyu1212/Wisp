@@ -14,7 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import reap, rendered_without_spacing, screen_shows, welcome_ready
+from tests.tui_e2e.support import (
+    complete_frames,
+    reap,
+    screen_rows,
+    screen_shows,
+    welcome_ready,
+)
 
 
 @pytest.mark.process
@@ -54,16 +60,21 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
         initial_terminal = termios.tcgetattr(terminal_fd)
         output = bytearray()
         status: int | None = None
-        submitted = restart
-        picker_phase = "startup" if picker_only else "done"
-        picker_width = 121
-        next_picker_frame = 0.0
-        quit_sent = False
-        quit_frame_requested = False
-        context_redrawn = False
-        selection_redrawn = False
-        restored_label_redrawn = False
+        phase = "startup"
+        # A key sent while a frame is pending, or while the catalog is still
+        # arriving, may be ignored by design. Resend only keys whose effect has not
+        # appeared, and only where a repeat is harmless.
+        resend_at = 0.0
         deadline = time.monotonic() + 25
+
+        def shows(text: str) -> bool:
+            return screen_shows(output, text)
+
+        def send(value: bytes, *, retry_after: float = 0.5) -> None:
+            nonlocal resend_at
+            os.write(terminal_fd, value)
+            resend_at = time.monotonic() + retry_after
+
         try:
             while time.monotonic() < deadline:
                 readable, _, _ = select.select([terminal_fd], [], [], 0.05)
@@ -73,119 +84,56 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     except OSError as exc:
                         if exc.errno != errno.EIO:
                             raise
-                if not context_redrawn and b"ctx" in output and b"~" in output:
-                    # Context readiness replaces a loading hint. Request one full frame;
-                    # differential writes can omit letters shared by the two hints.
-                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 121, 0, 0))
-                    context_redrawn = True
-                # Wait for welcome copy after hydration; the composer appears earlier.
-                ready = context_redrawn and welcome_ready(output)
-                if picker_phase == "startup" and ready and screen_shows(output, "fake fake"):
-                    os.write(terminal_fd, b"/model\r")
-                    picker_phase = "loading"
-                    output.clear()
-                elif picker_phase == "loading" and b"Current:" in output:
-                    # The fake provider is hidden; inspect the first real catalog model
-                    # before staging effort. Configuration makes no provider request.
-                    picker_phase = "effort"
-                    output.clear()
-                elif (
-                    picker_phase == "effort"
-                    and b"Effort:" in output
-                    and b"Default" in output
-                    and b"apply" in output
-                ):
-                    os.write(terminal_fd, b"\x1b[C")
-                    # Do not race navigation with a resize. If an intervening redraw
-                    # rejects the key, the next unchanged frame retries it.
-                    next_picker_frame = time.monotonic() + 0.1
-                    output.clear()
-                elif (
-                    picker_phase == "effort"
-                    and b"Effort:" in output
-                    and b"Default" not in output
-                    and b"apply" in output
-                ):
-                    os.write(terminal_fd, b"\r")
-                    picker_phase = "applying"
-                    submitted = True
-                    output.clear()
-                elif picker_phase == "applying" and b"Model selection applied." in output:
-                    saved = json.loads(settings_path.read_text())
-                    assert saved["provider"] != "fake" and saved["model"]
-                    assert saved["effort"]
-                    picker_phase = "done"
-                elif (
-                    not submitted
-                    and not picker_only
-                    and ready
-                    and screen_shows(output, "fake fake")
-                ):
-                    os.write(terminal_fd, b"/model fake::custom-model effort\r")
-                    submitted = True
-                    output.clear()
-                if (
-                    not restart
-                    and not picker_only
-                    and not selection_redrawn
-                    and b"Model selection applied." in output
-                ):
-                    # The footer update can reuse letters from the previous effort.
-                    # Request a full frame so the raw PTY stream contains the label.
-                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
-                    selection_redrawn = True
-                if (
-                    restart
-                    and ready
-                    and not restored_label_redrawn
-                    and b"custom-modelfake" in rendered_without_spacing(output)
-                ):
-                    # The restored identity line can arrive in a differential frame that
-                    # skips letters shared with the previous frame. Request a full frame
-                    # so the raw PTY stream contains the whole label.
-                    output.clear()
-                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 122, 0, 0))
-                    restored_label_redrawn = True
-                applied = (
-                    ready and screen_shows(output, "custom-model fake · effort")
-                    if restart
-                    else (
-                        b"Model selection applied." in output
-                        and (picker_only or (b"custom-model" in output and b"effort" in output))
-                    )
-                )
-                if submitted and applied and not quit_frame_requested:
-                    # Observe a fresh ready frame after applying the model before
-                    # sending Ctrl-C. Do not send it alongside the resize above.
-                    output.clear()
-                    fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 124, 0, 0))
-                    quit_frame_requested = True
-                elif (
-                    quit_frame_requested
-                    and welcome_ready(output)
-                    and (picker_only or (b"custom-model" in output and b"effort" in output))
-                    and not quit_sent
-                ):
-                    os.write(terminal_fd, b"\x03")
-                    quit_sent = True
-                if picker_phase == "effort" and time.monotonic() >= next_picker_frame:
-                    # Observe the staged effort in a full frame before activating it.
-                    picker_width = 123 if picker_width == 122 else 122
-                    fcntl.ioctl(
-                        terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, picker_width, 0, 0)
-                    )
-                    next_picker_frame = time.monotonic() + 0.1
-                    output.clear()
                 waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
                 if waited_pid == child_pid:
                     status = waited_status
                     break
-            assert status is not None, (
-                f"Rust model selection timed out in {picker_phase!r}: {bytes(output)!r}"
+                now = time.monotonic()
+                # Wait for welcome copy after hydration; the composer appears earlier.
+                ready = welcome_ready(output)
+                if phase == "startup" and ready:
+                    if restart:
+                        phase = "restored"
+                    elif shows("fake fake"):
+                        command = (
+                            b"/model\r" if picker_only else b"/model fake::custom-model effort\r"
+                        )
+                        send(command, retry_after=1)
+                        phase = "picker" if picker_only else "applying"
+                elif phase == "restored" and shows("custom-model fake · effort"):
+                    phase = "quitting"
+                elif phase == "picker":
+                    if shows("Effort: Default  ←/→ change"):
+                        # Effort is clamped, so a repeated Right cannot wrap back.
+                        if now >= resend_at:
+                            send(b"\x1b[C")
+                    elif shows("←/→ change") and shows("Enter apply"):
+                        send(b"\r")
+                        phase = "applying"
+                    elif shows("› /model") and now >= resend_at:
+                        # The submit was ignored; the draft is still in the composer.
+                        send(b"\r", retry_after=1)
+                elif phase == "applying":
+                    if picker_only and shows("Model selection applied."):
+                        saved = json.loads(settings_path.read_text())
+                        assert saved["provider"] != "fake" and saved["model"]
+                        assert saved["effort"]
+                        phase = "quitting"
+                    elif not picker_only and shows("custom-model fake · effort"):
+                        phase = "quitting"
+                    elif now >= resend_at and (
+                        (picker_only and shows("←/→ change") and shows("Enter apply"))
+                        or (not picker_only and shows("› /model fake::custom-model effort"))
+                    ):
+                        # Applying replaces the picker hint and clears the composer.
+                        send(b"\r", retry_after=1)
+                if phase == "quitting" and shows("idle"):
+                    os.write(terminal_fd, b"\x03")
+                    phase = "exiting"
+            assert status is not None, f"Rust model selection timed out in {phase!r}: " + "\n".join(
+                screen_rows(complete_frames(output))
             )
-            assert submitted and quit_sent, bytes(output)
-            if not picker_only:
-                assert b"custom-model" in output and b"effort" in output, bytes(output)
+            assert phase == "exiting", f"Rust TUI exited in {phase!r}"
             assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
             assert termios.tcgetattr(terminal_fd) == initial_terminal
         finally:

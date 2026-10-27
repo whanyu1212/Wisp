@@ -105,33 +105,47 @@ def test_validate_config_rejects_invalid_dimensions_and_missing_binary() -> None
         validate_config(BenchmarkConfig(rust_binary=Path("wisp-tui")))
 
 
-def test_response_markers_survive_blank_cells_skipped_by_incremental_repaint() -> None:
-    # Only changed cells are written, so a response painted over blank rows can
-    # reach the PTY as words separated by cursor moves instead of spaces.
-    echo = b"you\x1b[3;14HWISP_E2E_START_7F3A payload WISP_E2E_FINAL_9C2D"
-    response = (
-        b"\x1b[6;14Hfake\x1b[6;19Hresponse\x1b[6;28Hto:"
-        b"\x1b[6;32HWISP_E2E_START_7F3A\x1b[6;52Hpayload\x1b[7;14HWISP_E2E_FINAL_9C2D"
+def _frame(body: bytes) -> bytes:
+    return b"\x1b[?2026h" + body + b"\x1b[?2026l"
+
+
+def test_reply_markers_read_from_replayed_screen() -> None:
+    # Prompt rows carry the user bar; the reply's first row was painted in two
+    # halves with the elapsed time between them in the byte stream.
+    frames = [
+        _frame(
+            "\x1b[3;3H▎WISP_E2E_START_7F3A payload\x1b[4;3H▎payload WISP_E2E_FINAL_9C2D"
+            "\x1b[24;40Hworking".encode()
+        ),
+        _frame(b"\x1b[6;3Hfake response to:\x1b[22;10H0.1s\x1b[6;21HWISP_E2E_START_7F3A payload"),
+        _frame(b"\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D"),
+        _frame(b"\x1b[24;40Hidle   "),
+    ]
+    screen = rust_tui_e2e._PaintedScreen()
+    reply = rust_tui_e2e._ReplyProgress()
+    progress = []
+
+    for read, frame in enumerate(frames):
+        screen.feed(frame)
+        reply.observe(screen.rows(), read)
+        progress.append((reply.first_ns, reply.final_ns, reply.settled_ns))
+
+    assert progress == [(None, None, None), (1, None, None), (1, 2, None), (1, 2, 3)]
+
+
+def test_reply_start_counts_before_a_later_frame_scrolls_it() -> None:
+    # A long reply on a short terminal: one read holds the frame showing the
+    # reply's first row and the frame that scrolls it away.
+    read = _frame(b"\x1b[6;3Hfake response to: WISP_E2E_START_7F3A payload") + _frame(
+        b"\x1b[6;3H\x1b[Kpayload payload\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D\x1b[24;40Hidle"
     )
+    screen = rust_tui_e2e._PaintedScreen()
+    reply = rust_tui_e2e._ReplyProgress()
 
-    assert rust_tui_e2e._response_tail(rust_tui_e2e._plain_text(echo)) is None
-    assert rust_tui_e2e._response_tail(rust_tui_e2e._plain_text(echo + response)) == (
-        "payloadWISP_E2E_FINAL_9C2D"
-    )
+    for _frame_applied in screen.replay(read):
+        reply.observe(screen.rows(), 1)
 
-
-def test_response_markers_survive_interleaved_frame_borders() -> None:
-    # Linux CI painted composer borders between wrapped response rows. Stripping
-    # cursor escapes leaves these decorations in the response's start marker.
-    echo = f"you{rust_tui_e2e.START_TOKEN}payload{rust_tui_e2e.FINAL_TOKEN}"
-    prefix = "◓│wisp│working…turn 1 0 tools · <0.1s7fake responseto:││"
-    response = f"{prefix}{rust_tui_e2e.START_TOKEN}payload│payload{rust_tui_e2e.FINAL_TOKEN}"
-
-    assert rust_tui_e2e._response_tail(echo) is None
-    assert rust_tui_e2e._response_tail(echo + prefix) is None
-    assert rust_tui_e2e._response_tail(echo + response) == (
-        f"payloadpayload{rust_tui_e2e.FINAL_TOKEN}"
-    )
+    assert (reply.first_ns, reply.final_ns, reply.settled_ns) == (1, 1, 1)
 
 
 def test_ready_ignores_cursor_gaps() -> None:
