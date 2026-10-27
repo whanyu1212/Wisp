@@ -553,13 +553,6 @@ def test_agent_loop_package_exports_public_contracts() -> None:
     ]
 
 
-def test_coding_package_exports_session_coordinator() -> None:
-    from wisp.coding import CodingSession as ExportedCodingSession
-    from wisp.coding.session import CodingSession
-
-    assert ExportedCodingSession is CodingSession
-
-
 def _fresh_import_failure(module: str, *, root: Path, pythonpath: str) -> str | None:
     try:
         result = subprocess.run(

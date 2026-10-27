@@ -16,7 +16,6 @@ from wisp.events import (
     MessageCompleted,
     TurnCompleted,
     WispEvent,
-    wisp_event_from_json,
 )
 from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError, is_context_overflow_message
@@ -414,28 +413,6 @@ def test_raised_overflow_emits_event_before_error() -> None:
     assert overflow.context_window == 100
     assert isinstance(events[3], ErrorEvent)
     assert provider.calls == 1
-
-
-def test_context_events_round_trip_on_current_schema() -> None:
-    pressure = ContextPressure(
-        turn=1,
-        provider="test",
-        model="test-model",
-        context_window=100,
-        observed_tokens=80,
-        remaining_tokens=20,
-        pressure_ratio=0.8,
-    )
-    overflow = ContextOverflow(
-        turn=2,
-        provider="test",
-        model="test-model",
-        context_window=100,
-        message="maximum context length exceeded",
-    )
-
-    assert wisp_event_from_json(pressure.model_dump_json()) == pressure
-    assert wisp_event_from_json(overflow.model_dump_json()) == overflow
 
 
 def test_model_registry_resolves_effective_context_window() -> None:

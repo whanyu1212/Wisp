@@ -89,48 +89,24 @@ def test_compact_command_serializes_as_jsonl_and_parses(
     assert rpc_command_from_json(line) == command
 
 
-def test_get_session_stats_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetSessionStatsCommand(id="stats-1")
+@pytest.mark.parametrize(
+    ("command", "command_type"),
+    [
+        (GetSessionStatsCommand(id="query-1"), "get_session_stats"),
+        (GetStateCommand(id="query-1"), "get_state"),
+        (GetCommandsCommand(id="query-1"), "get_commands"),
+        (GetModelCatalogCommand(id="query-1"), "get_model_catalog"),
+        (GetConnectionCatalogCommand(id="query-1"), "get_connection_catalog"),
+        (GetSkillsCommand(id="query-1"), "get_skills"),
+        (GetMcpStatusCommand(id="query-1"), "get_mcp_status"),
+    ],
+    ids=lambda value: value if isinstance(value, str) else type(value).__name__,
+)
+def test_id_only_commands_serialize_canonically(command: RpcCommand, command_type: str) -> None:
+    line = command.to_json_line()
 
-    assert json.loads(command.to_json_line()) == {
-        "id": "stats-1",
-        "type": "get_session_stats",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_state_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetStateCommand(id="state-1")
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "state-1",
-        "type": "get_state",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_commands_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetCommandsCommand(id="commands-1")
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "commands-1",
-        "type": "get_commands",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_model_catalog_command_serializes_as_canonical_jsonl() -> None:
-    command = GetModelCatalogCommand(id="models-1")
-
-    assert command.to_json_line() == '{"id":"models-1","type":"get_model_catalog"}\n'
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_connection_catalog_command_serializes_as_canonical_jsonl() -> None:
-    command = GetConnectionCatalogCommand(id="connections-1")
-
-    assert command.to_json_line() == '{"id":"connections-1","type":"get_connection_catalog"}\n'
-    assert rpc_command_from_json(command.to_json_line()) == command
+    assert line == f'{{"id":"query-1","type":"{command_type}"}}\n'
+    assert rpc_command_from_json(line) == command
 
 
 def test_store_api_key_command_serializes_but_redacts_repr() -> None:
@@ -181,26 +157,6 @@ def test_disconnect_and_device_code_commands_serialize() -> None:
         "type": "begin_device_code",
         "provider": "openai-codex",
     }
-
-
-def test_get_skills_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetSkillsCommand(id="skills-1")
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "skills-1",
-        "type": "get_skills",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_mcp_status_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetMcpStatusCommand(id="mcp-1")
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "mcp-1",
-        "type": "get_mcp_status",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
 
 
 def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:

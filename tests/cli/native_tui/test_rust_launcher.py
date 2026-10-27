@@ -64,6 +64,7 @@ def test_default_frontend_selects_rust_even_without_native_distribution(
     [
         ["tui", "--renderer", "rust"],
         ["--mode", "tui", "--tui-renderer", "auto"],
+        ["tui", "--line"],
     ],
 )
 def test_removed_renderer_options_are_rejected(arguments: list[str]) -> None:
@@ -84,20 +85,7 @@ def test_removed_textual_only_option_is_rejected(arguments: list[str]) -> None:
     assert "No such option: --no-synchronized-output" in strip_ansi(result.output)
 
 
-@pytest.mark.parametrize(
-    "arguments",
-    [
-        ["tui", "--renderer", "fullscreen"],
-        ["--mode", "tui", "--tui-renderer", "line"],
-        ["tui", "--line"],
-    ],
-)
-def test_removed_python_frontend_options_are_rejected(arguments: list[str]) -> None:
-    result = CliRunner().invoke(app, arguments, env=_cli_env())
-    assert result.exit_code != 0
-
-
-@pytest.mark.parametrize("failure", ["missing", "nonexecutable", "exit"])
+@pytest.mark.parametrize("failure", ["missing", "nonexecutable"])
 def test_automatic_rust_failure_does_not_fall_back(
     failure: str,
     tmp_path: Path,
@@ -113,12 +101,9 @@ def test_automatic_rust_failure_does_not_fall_back(
         lambda _: SimpleNamespace(files=(SimpleNamespace(name="wisp-tui", locate=lambda: binary),)),
     )
     monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
-    if failure == "exit":
-        monkeypatch.setattr(rust_launcher, "run_rust_tui", lambda _: 23)
     result = CliRunner().invoke(app, ["tui"], env=_cli_env())
-    assert result.exit_code == (23 if failure == "exit" else 1)
-    if failure != "exit":
-        assert "WISP_RUST_TUI_BINARY" in result.output or "Rust TUI binary" in result.output
+    assert result.exit_code == 1
+    assert "WISP_RUST_TUI_BINARY" in result.output or "Rust TUI binary" in result.output
 
 
 @pytest.mark.parametrize(

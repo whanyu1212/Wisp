@@ -254,6 +254,49 @@ def test_shift_enter_inserts_newline(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
+def test_ctrl_r_restores_prompt_without_submitting(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    tui, session_dir = _launch(tmp_path, home=home)
+    try:
+        tui.wait_ready()
+        offset = len(tui.output)
+        tui.send(b"recall me\r")
+        tui.wait_until(
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
+            failure="first prompt did not complete",
+        )
+
+        offset = len(tui.output)
+        tui.send(b"\x12")
+        tui.wait_for(
+            b"Prompt history", b"Enter restore", since=offset, failure="history did not open"
+        )
+        tui.send(b"\r")
+        # The transcript shows the same words, so wait for the popup to close with the
+        # draft behind the composer's prompt mark.
+        tui.wait_until(
+            lambda output: (
+                screen_shows(output, "› recall me") and not screen_shows(output, "Enter restore")
+            ),
+            failure="history did not restore the prompt into the composer",
+        )
+        offset = len(tui.output)
+        tui.send(b"\r")
+        tui.wait_until(
+            lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
+            failure="restored prompt did not complete",
+        )
+        tui.quit()
+    finally:
+        tui.close()
+
+    # Exactly two runs: restoring the prompt must not have submitted it.
+    exchange = [("user", "recall me"), ("assistant", "fake response to: recall me")]
+    assert _conversation_messages(session_dir) == exchange * 2
+
+
+@pytest.mark.process
 def test_composer_selection_and_word_deletion_submit_exact_unicode_text(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_user_settings(home, provider="fake")
