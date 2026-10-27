@@ -10,7 +10,79 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.4.0 — Unreleased
+## 0.5.0 — Unreleased
+
+0.5.0 is a minor release that hardens the built-in tools: it closes two ways credentials or
+protected files could reach the model, stops commands Wisp starts from outliving it, and bounds
+searches and file operations on very large trees and files. It changes no command, event,
+handshake model, or session format, so 0.4.x and 0.5.0 read each other's sessions; the backend and
+frontend must still come from the same release. It is a minor release because tool behavior
+changes in ways callers can observe; the most visible are listed under Tools.
+
+### Security
+
+- Protected-path matching follows case-insensitive filesystems, which fold more than lowercasing
+  does: on APFS `credentialſ.json` opens `credentials.json`, and `read` no longer reaches it.
+  Composed and decomposed accents count as the same name, and `ls` now hides protected names as
+  `grep` and `find` already did. (#849)
+- `bash` commands no longer inherit the environment variables Wisp reads provider API keys from,
+  including a configured OpenAI-compatible endpoint's variable, so a command cannot print them
+  into the transcript. Your other exported variables still reach commands. (#850)
+
+### Tools
+
+- `write` and `edit` refuse an existing file the model has not read in this conversation, or one
+  that changed since it did, so a hand edit or a regenerated file is no longer silently
+  overwritten. The model is told to read the file first; new files need no read. (#856)
+- Leaving a session (a new session, or selecting, cloning, or forking another one) stops the
+  background processes started with `bash operation=start`. (#864)
+- `grep`, `find`, and `ls` stop after 30 seconds and return what they found, marked incomplete.
+  Searches enter at most 100 directory levels and say how many deeper directories they skipped.
+  (#858, #863)
+- `bash` bounds its waits: a one-shot `timeout` of at most an hour, `lifetime_seconds` of at most a
+  day, and `yield_seconds` and `wait_seconds` of at most 10 minutes. When every process slot is
+  taken, the error lists the processes holding them so the model can poll or cancel them. (#857)
+- `edit` refuses files over 16 MiB and suggests `bash` instead. `read` no longer loads a whole long
+  line before applying its output limit, so reading a huge single-line file stays small in memory.
+  (#863)
+- `write` refuses a target that is not a regular file, such as a FIFO, instead of blocking or
+  replacing it. A replacement for an existing file is created private (`0600`) until it takes the
+  file's mode, and the directory is synced after the rename so the write survives a crash. A path
+  containing a NUL byte is an argument error in every file and search tool. (#859)
+- `grep` skips files it cannot read, such as iCloud placeholders or files without read permission,
+  and files with a line over 1,000,000 characters, listing them in a notice instead of failing the
+  whole search. Searching such a file directly names it in the error. (#852, #860)
+- `grep` and `find` started in a subfolder of a repository apply the repository's ignore files
+  from its root down, as Git does. A repository at the home folder or above is never used. (#851)
+
+### Processes
+
+- A command that daemonizes (double-forks, calls `setsid`, and redirects its output) is stopped
+  when the command ends, as other background processes already were, and no longer keeps `cancel`,
+  lifetime expiry, or shutdown waiting on its open pipes. (#853, #854)
+- The backend stops its background processes when it receives SIGHUP or SIGTERM, such as when the
+  terminal closes. If it is killed outright or crashes, a watchdog process stops the commands it
+  was running. (#855, #862)
+
+### Terminal UI
+
+- The terminal UI and the SDK wait up to 30 seconds, instead of 5, for the backend to answer the
+  handshake, so a slow first start no longer fails. (#848)
+- A key pressed on a prompt-history choice is no longer ignored when the background reads that
+  follow a prompt finish just before it. (#869)
+
+### Python API
+
+- `ToolContext` gains `withheld_environment`, the variables `bash` leaves out of a command's
+  environment, and `seen_files`, the record that guards `write` and `edit`. A bare
+  `ToolContext(cwd=...)` withholds the provider key variables but leaves `seen_files` unset, so
+  tools an embedding calls directly keep their earlier write behavior;
+  `ToolContext.from_config` enables both. (#850, #856)
+
+<!-- Keeps links to the pre-release "0.4.0 — Unreleased" heading working. -->
+<a id="040--unreleased"></a>
+
+## 0.4.0 — 2026-10-25
 
 0.4.0 is a minor release focused on the built-in tools: faster `grep` and `find`, file tools that
 cope better with real files, and a more dependable `bash`. It changes no command, event, handshake

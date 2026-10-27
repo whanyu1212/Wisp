@@ -3,7 +3,7 @@ title: Wisp 0.2.0rc12 release decision and checklist
 description: Release decision, prepublication checklist, and verification record for Wisp 0.2.0rc12.
 route: maintainers/releases/rc12-release.html
 section: maintainers
-order: 9
+order: 10
 layout: archive
 listed: false
 searchable: false

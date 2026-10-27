@@ -23,7 +23,7 @@ uv tool install --python 3.12 wisp-ai
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell. To install
-an exact version, pin it, for example `"wisp-ai==0.3.1"`.
+an exact version, pin it, for example `"wisp-ai==0.4.0"`.
 
 To run Wisp without installing it:
 
