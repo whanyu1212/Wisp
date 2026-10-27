@@ -127,10 +127,12 @@ characters per chord.
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+B` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `F8` | Focus the side panel for keyboard navigation |
+| `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
+| `Ctrl+Up` / `Ctrl+Down` | Scroll the transcript by one line |
 | `Ctrl+Home` / `Ctrl+End` | Traverse to the session beginning / return to the latest output |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Cancel the active workflow or quit when idle |
