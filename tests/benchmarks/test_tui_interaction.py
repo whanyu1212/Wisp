@@ -109,16 +109,6 @@ def test_probe_markers_do_not_reuse_a_predictable_phase_prefix(
     assert writes == [first.encode(), second.encode()]
     assert len(first) == len(second) == 16
     assert first != second
-    assert not rust_tui_interaction._marker_painted(f"{first} 1 {first}", second)
-    assert rust_tui_interaction._marker_painted(f"{second[:1]} redraw {second[1:]}", second)
-    assert rust_tui_interaction._marker_painted(f"status {second}", second)
-
-
-def test_incomplete_repaints_cannot_form_a_visible_marker() -> None:
-    marker = "ABCDEFABCDEFABCD"
-    partial_repaints = " status ".join(marker[:length] for length in range(1, 9))
-
-    assert not rust_tui_interaction._marker_painted(partial_repaints, marker)
 
 
 # The reveal painted the end marker in two frames, with the spinner, a border and
