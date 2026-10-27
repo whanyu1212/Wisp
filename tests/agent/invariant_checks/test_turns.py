@@ -92,40 +92,31 @@ def test_rejects_invalid_outcome() -> None:
         assert_turn_invariants(events)
 
 
-def test_rejects_cancelled_with_wrong_reason() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="cancelled", finish_reason="stop"),
-    )
-    with pytest.raises(AssertionError, match="finish_reason 'cancelled'"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_completed_with_cancelled_reason() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="cancelled"),
-    )
-    with pytest.raises(AssertionError, match="must not have finish_reason 'cancelled'"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_completed_with_error_reason() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="error"),
-    )
-    with pytest.raises(AssertionError, match="must not have finish_reason 'error'"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_failed_with_non_error_reason() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="failed", finish_reason="stop"),
-    )
-    with pytest.raises(AssertionError, match="Failed turn must have finish_reason 'error'"):
-        assert_turn_invariants(events)
+@pytest.mark.parametrize(
+    ("completed", "match"),
+    [
+        (
+            TurnCompleted(turn=1, outcome="cancelled", finish_reason="stop"),
+            "finish_reason 'cancelled'",
+        ),
+        (
+            TurnCompleted(turn=1, outcome="completed", finish_reason="cancelled"),
+            "must not have finish_reason 'cancelled'",
+        ),
+        (
+            TurnCompleted(turn=1, outcome="completed", finish_reason="error"),
+            "must not have finish_reason 'error'",
+        ),
+        (
+            TurnCompleted(turn=1, outcome="failed", finish_reason="stop"),
+            "Failed turn must have finish_reason 'error'",
+        ),
+    ],
+    ids=["cancelled-stop", "completed-cancelled", "completed-error", "failed-stop"],
+)
+def test_rejects_mismatched_finish_reason(completed: TurnCompleted, match: str) -> None:
+    with pytest.raises(AssertionError, match=match):
+        assert_turn_invariants((TurnStarted(turn=1), completed))
 
 
 def test_rejects_activity_after_cancellation() -> None:
@@ -139,64 +130,40 @@ def test_rejects_activity_after_cancellation() -> None:
         assert_turn_invariants(events)
 
 
-def test_rejects_late_tool_result() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
+@pytest.mark.parametrize(
+    "late",
+    [
         tool_ended("call-1"),
-    )
-    with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_late_tool_call() -> None:
-    events = (
-        TurnStarted(turn=1),
-        TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
         ToolCallRequested(call_id="call-1", name="lookup", arguments={}),
-    )
-    with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_late_message_event() -> None:
+        MessageCompleted(turn=1, content="late", finish_reason="stop"),
+    ],
+    ids=["tool-result", "tool-call", "message"],
+)
+def test_rejects_event_after_final_turn(late: object) -> None:
     events = (
         TurnStarted(turn=1),
         TurnCompleted(turn=1, outcome="completed", finish_reason="stop"),
-        MessageCompleted(turn=1, content="late", finish_reason="stop"),
+        late,
     )
     with pytest.raises(AssertionError, match="appeared after final TurnCompleted"):
         assert_turn_invariants(events)
 
 
-def test_rejects_pre_turn_tool_event() -> None:
-    events = (
-        tool_ended("call-1"),
-        tool_ready("call-1"),
-        *completed_turn(),
-    )
-    with pytest.raises(AssertionError, match="appeared outside an active turn"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_tool_event_between_turns() -> None:
-    events = (
-        *completed_turn(1),
-        tool_ended("call-1"),
-        tool_ready("call-1"),
-        *completed_turn(2),
-    )
-    with pytest.raises(AssertionError, match="appeared outside an active turn"):
-        assert_turn_invariants(events)
-
-
-def test_rejects_message_event_between_turns() -> None:
-    events = (
-        *completed_turn(1),
-        MessageStarted(turn=2),
-        MessageDelta(turn=2, delta="late"),
-        *completed_turn(2),
-    )
+@pytest.mark.parametrize(
+    "events",
+    [
+        (tool_ended("call-1"), tool_ready("call-1"), *completed_turn()),
+        (*completed_turn(1), tool_ended("call-1"), tool_ready("call-1"), *completed_turn(2)),
+        (
+            *completed_turn(1),
+            MessageStarted(turn=2),
+            MessageDelta(turn=2, delta="late"),
+            *completed_turn(2),
+        ),
+    ],
+    ids=["tool-before-turns", "tool-between-turns", "message-between-turns"],
+)
+def test_rejects_event_outside_turn(events: tuple[object, ...]) -> None:
     with pytest.raises(AssertionError, match="appeared outside an active turn"):
         assert_turn_invariants(events)
 

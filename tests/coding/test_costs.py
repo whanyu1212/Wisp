@@ -618,7 +618,7 @@ def test_stats_mark_old_successful_messages_unpriced() -> None:
     assert stats.cost.unpriced_record_count == 1
 
 
-def test_cost_events_require_schema_v12_and_round_trip() -> None:
+def test_cost_round_trips_on_events() -> None:
     cost = CostEstimator(_models())(
         "openai",
         "model",

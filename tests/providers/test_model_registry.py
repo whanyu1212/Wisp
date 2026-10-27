@@ -180,20 +180,22 @@ def test_providers_returns_every_catalog_entry() -> None:
     assert {entry.name for entry in registry.providers()} == {"acme", "beta"}
 
 
-def test_supports_effort_true_for_a_listed_tier() -> None:
-    registry = ModelRegistry(
-        _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["low", "high"]}))
-    )
+@pytest.mark.parametrize(
+    ("effort_levels", "provider_name", "tier", "expected"),
+    [
+        ({"acme-1": ["low", "high"]}, "acme", "high", True),
+        ({"acme-1": ["low", "high"]}, "acme", "medium", False),
+        (None, "acme", "high", False),
+        ({"acme-1": ["high"]}, "nonexistent", "high", False),
+    ],
+    ids=["listed-tier", "unlisted-tier", "no-effort-levels", "unknown-provider"],
+)
+def test_supports_effort(
+    effort_levels: dict[str, list[str]] | None, provider_name: str, tier: str, expected: bool
+) -> None:
+    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"], effort_levels=effort_levels)))
 
-    assert registry.supports_effort("acme", "acme-1", "high") is True
-
-
-def test_supports_effort_false_for_an_unlisted_tier() -> None:
-    registry = ModelRegistry(
-        _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["low", "high"]}))
-    )
-
-    assert registry.supports_effort("acme", "acme-1", "medium") is False
+    assert registry.supports_effort(provider_name, "acme-1", tier) is expected
 
 
 def test_supports_effort_false_when_provider_uses_different_vocabulary() -> None:
@@ -212,36 +214,15 @@ def test_supports_effort_false_when_provider_uses_different_vocabulary() -> None
     assert registry.supports_effort("google", "gemini-x", "high") is False
 
 
-def test_supports_effort_false_for_a_model_with_no_effort_levels_entry() -> None:
+@pytest.mark.parametrize(
+    ("provider_name", "model", "expected"),
+    [("acme", "acme-1", True), ("acme", "acme-2", False), ("nonexistent", "acme-1", False)],
+    ids=["listed-model", "unlisted-model", "unknown-provider"],
+)
+def test_knows_model(provider_name: str, model: str, expected: bool) -> None:
     registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
 
-    assert registry.supports_effort("acme", "acme-1", "high") is False
-
-
-def test_supports_effort_false_for_an_unknown_provider() -> None:
-    registry = ModelRegistry(
-        _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["high"]}))
-    )
-
-    assert registry.supports_effort("nonexistent", "acme-1", "high") is False
-
-
-def test_knows_model_true_for_a_listed_model() -> None:
-    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
-
-    assert registry.knows_model("acme", "acme-1") is True
-
-
-def test_knows_model_false_for_an_unlisted_model() -> None:
-    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
-
-    assert registry.knows_model("acme", "acme-2") is False
-
-
-def test_knows_model_false_for_an_unknown_provider() -> None:
-    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
-
-    assert registry.knows_model("nonexistent", "acme-1") is False
+    assert registry.knows_model(provider_name, model) is expected
 
 
 def test_startup_effort_none_passes_through_as_none() -> None:
@@ -297,8 +278,15 @@ def test_startup_effort_drops_a_tier_from_a_different_providers_vocabulary() -> 
     assert result is None
 
 
-def test_startup_effort_drops_a_tier_the_model_does_not_support_at_all() -> None:
-    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"])))
+@pytest.mark.parametrize(
+    "effort_levels",
+    [None, {"acme-1": ["low"]}],
+    ids=["no-effort-levels", "tier-not-listed"],
+)
+def test_startup_effort_drops_an_unsupported_tier(
+    effort_levels: dict[str, list[str]] | None,
+) -> None:
+    registry = ModelRegistry(_catalog(_provider("acme", ["acme-1"], effort_levels=effort_levels)))
 
     result = startup_effort(
         registry, provider_name="acme", model="acme-1", default_model="acme-1", effort="high"
@@ -324,15 +312,3 @@ def test_startup_effort_keeps_a_tier_for_an_unresolvable_model() -> None:
     )
 
     assert result == "high"
-
-
-def test_startup_effort_drops_a_tier_for_a_known_model_that_does_not_support_it() -> None:
-    registry = ModelRegistry(
-        _catalog(_provider("acme", ["acme-1"], effort_levels={"acme-1": ["low"]}))
-    )
-
-    result = startup_effort(
-        registry, provider_name="acme", model="acme-1", default_model="acme-1", effort="high"
-    )
-
-    assert result is None
