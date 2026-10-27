@@ -17,6 +17,7 @@ from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
     reap,
+    screen_shows,
     welcome_ready,
 )
 from wisp import __version__
@@ -116,8 +117,11 @@ for line in sys.stdin:
     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     initial_terminal = termios.tcgetattr(terminal_fd)
     output = bytearray()
+    # Phases clear `output`; the screen is replayed from everything painted.
+    painted = bytearray()
     status: int | None = None
     phase = "startup"
+    resubmit_at = 0.0
     recovered = False
     next_input = 0.0
     redraw_width = 103
@@ -127,7 +131,9 @@ for line in sys.stdin:
             readable, _, _ = select.select([terminal_fd], [], [], 0.05)
             if readable:
                 try:
-                    output.extend(os.read(terminal_fd, 65536))
+                    chunk = os.read(terminal_fd, 65536)
+                    output.extend(chunk)
+                    painted.extend(chunk)
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
@@ -139,8 +145,18 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"long history\r")
                 output.clear()
                 phase = "streaming"
+                resubmit_at = time.monotonic() + 1
             elif phase == "streaming":
                 commands = complete_logged_commands(command_log)
+                # A prompt submitted while the startup context refresh is still
+                # running is refused and stays in the composer; send it again.
+                if (
+                    not any(item["type"] == "prompt" for item in commands)
+                    and time.monotonic() >= resubmit_at
+                    and screen_shows(painted, "› long history")
+                ):
+                    os.write(terminal_fd, b"\r")
+                    resubmit_at = time.monotonic() + 1
                 prompt_index = next(
                     (index for index, item in enumerate(commands) if item["type"] == "prompt"),
                     len(commands),
