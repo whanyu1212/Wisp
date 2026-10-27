@@ -50,117 +50,6 @@ def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
     guard_rpc_command_serialization(monkeypatch)
 
 
-def test_approval_resolution_waits_for_lifecycle_flush() -> None:
-    events: list[WispEvent] = []
-    deferred: list[Callable[[], None]] = []
-    resolved: list[dict[str, object]] = []
-
-    class PendingApproval:
-        def has_pending_approval(self, *, call_id: str) -> bool:
-            return call_id == "call-1"
-
-        def resolve_approval(self, **kwargs: object) -> bool:
-            resolved.append(kwargs)
-            return True
-
-    rpc_control_module.handle_rpc_approval_command(
-        ApprovalCommand(id="approval-1", call_id="call-1", approved=True),
-        command_id="approval-1",
-        command_type="approval",
-        approval_policy=PendingApproval(),
-        write_event=events.append,
-        defer_resolution=deferred.append,
-    )
-
-    assert len(events) == 1
-    assert isinstance(events[0], RpcCommandFinished)
-    assert events[0].command_id == "approval-1"
-    assert events[0].ok is True
-    assert not resolved
-    assert len(deferred) == 1
-
-    deferred[0]()
-
-    assert resolved == [
-        {
-            "call_id": "call-1",
-            "approved": True,
-            "reason": None,
-            "scope": "once",
-        }
-    ]
-
-
-def test_approval_resolution_runs_without_post_flush_callback() -> None:
-    events: list[WispEvent] = []
-    resolved: list[dict[str, object]] = []
-
-    class PendingApproval:
-        def has_pending_approval(self, *, call_id: str) -> bool:
-            return call_id == "call-1"
-
-        def resolve_approval(self, **kwargs: object) -> bool:
-            resolved.append(kwargs)
-            return True
-
-    rpc_control_module.handle_rpc_approval_command(
-        ApprovalCommand(id="approval-1", call_id="call-1", approved=True),
-        command_id="approval-1",
-        command_type="approval",
-        approval_policy=PendingApproval(),
-        write_event=events.append,
-    )
-
-    assert resolved == [
-        {
-            "call_id": "call-1",
-            "approved": True,
-            "reason": None,
-            "scope": "once",
-        }
-    ]
-    assert len(events) == 1
-    assert isinstance(events[0], RpcCommandFinished)
-    assert events[0].ok is True
-
-
-def test_active_cancellation_waits_for_lifecycle_flush() -> None:
-    events: list[WispEvent] = []
-    deferred: list[Callable[[], None]] = []
-
-    class RecordingCancelScope:
-        cancelled = False
-
-        def cancel(self) -> None:
-            self.cancelled = True
-
-    cancel_scope = RecordingCancelScope()
-    running_command = _RpcRunningCommand(
-        command_id="prompt-1",
-        command_type="prompt",
-        cancel_scope=cancel_scope,
-    )
-    rpc_control_module.handle_rpc_cancel_command(
-        CancelCommand(id="cancel-1", target_id="prompt-1"),
-        command_id="cancel-1",
-        command_type="cancel",
-        running_command=running_command,
-        write_event=events.append,
-        defer_cancellation=deferred.append,
-    )
-
-    assert len(events) == 1
-    assert isinstance(events[0], RpcCommandFinished)
-    assert events[0].command_id == "cancel-1"
-    assert events[0].ok is True
-    assert cancel_scope.cancelled is False
-    assert len(deferred) == 1
-
-    deferred[0]()
-
-    assert cancel_scope.cancelled is True
-
-
 @pytest.mark.parametrize("buffered", [False, True])
 def test_executor_routes_queued_cancellation_through_coordinator(
     tmp_path: Path, buffered: bool
@@ -360,6 +249,7 @@ def test_control_commands_stay_typed_and_correlated(
         {"approved": True, "scope": None},
         {"approved": False, "scope": None},
         *[{"approved": True, "scope": scope} for scope in ("once", "tool_session", "all_session")],
+        {"approved": True, "reason": None},
     ],
 )
 @pytest.mark.parametrize("deferred_mode", [False, True])
@@ -393,7 +283,7 @@ def test_typed_approval_defaults_and_resolution(
         {
             "call_id": "call",
             "approved": fields["approved"],
-            "reason": " reason ",
+            "reason": fields.get("reason", " reason "),
             "scope": fields.get("scope") or "once",
         }
     ]

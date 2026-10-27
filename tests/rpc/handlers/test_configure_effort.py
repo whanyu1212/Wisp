@@ -126,24 +126,16 @@ def test_configure_explicit_null_effort_resets_with_another_mutation(tmp_path: P
     assert agent.auto_compaction_enabled is False
 
 
-def test_configure_effort_alone_is_accepted_without_model_or_provider(tmp_path: Path) -> None:
-    # Regression guard: effort-only configure must not hit the "requires
-    # provider or model" rejection path that predates this field.
-    provider = CapturingProvider()
-    runtime = _runtime_with_capturing_provider(provider)
-    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path))
-
-    _configure_rpc(
-        {"effort": "medium"},
-        command_id="configure-1",
-        agent=agent,
-        runtime=runtime,
-    )
-
-    assert agent.effort == "medium"
-
-
-def test_configure_model_change_without_effort_resets_agent_effort(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("payload", "expected_effort"),
+    [
+        pytest.param({"model": "some-model"}, None, id="without-effort"),
+        pytest.param({"model": "some-model", "effort": "high"}, "high", id="explicit-effort"),
+    ],
+)
+def test_configure_model_change_resets_unless_effort_given(
+    tmp_path: Path, payload: dict[str, object], expected_effort: str | None
+) -> None:
     # Regression test: effort support is per-model, not just per-provider
     # (catalog.toml deliberately omits some models, e.g. claude-haiku-4-5,
     # from effort_levels entirely) -- a model change that stays on the same
@@ -154,39 +146,26 @@ def test_configure_model_change_without_effort_resets_agent_effort(tmp_path: Pat
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
 
     _configure_rpc(
-        {"model": "some-model"},
+        payload,
         command_id="configure-1",
         agent=agent,
         runtime=runtime,
     )
 
-    assert agent.effort is None
+    assert agent.effort == expected_effort
 
 
 def test_configure_effort_only_command_leaves_it_alone_when_touched(tmp_path: Path) -> None:
     # A configure command that touches neither `provider` nor `model` must
     # not accidentally reset effort as a side effect of some other field.
+    # Regression guard: effort-only configure must not hit the "requires
+    # provider or model" rejection path that predates this field.
     provider = CapturingProvider()
     runtime = _runtime_with_capturing_provider(provider)
     agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
 
     _configure_rpc(
         {"effort": "high"},
-        command_id="configure-1",
-        agent=agent,
-        runtime=runtime,
-    )
-
-    assert agent.effort == "high"
-
-
-def test_configure_model_change_with_explicit_effort_keeps_the_new_value(tmp_path: Path) -> None:
-    provider = CapturingProvider()
-    runtime = _runtime_with_capturing_provider(provider)
-    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="low")
-
-    _configure_rpc(
-        {"model": "some-model", "effort": "high"},
         command_id="configure-1",
         agent=agent,
         runtime=runtime,
@@ -341,23 +320,6 @@ def test_configure_clear_effort_resets_agent_effort_to_none(tmp_path: Path) -> N
     assert agent.effort is None
 
 
-def test_configure_clear_effort_alone_is_accepted_without_model_or_provider(
-    tmp_path: Path,
-) -> None:
-    provider = CapturingProvider()
-    runtime = _runtime_with_capturing_provider(provider)
-    agent = CodingSession(provider=provider, sessions=JsonlSessionStore(tmp_path), effort="high")
-
-    _configure_rpc(
-        {"clear_effort": True},
-        command_id="configure-1",
-        agent=agent,
-        runtime=runtime,
-    )
-
-    assert agent.effort is None
-
-
 def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
 
     provider = CapturingProvider()
@@ -378,7 +340,18 @@ def test_configure_overrides_records_clear_effort(tmp_path: Path) -> None:
     assert overrides.effective_effort("default") is None
 
 
-def test_configure_switching_provider_resets_stale_effort(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("payload", "expected_effort"),
+    [
+        pytest.param({"provider": "capturing-2"}, None, id="without-effort"),
+        pytest.param(
+            {"provider": "capturing-2", "effort": "medium"}, "medium", id="explicit-effort"
+        ),
+    ],
+)
+def test_configure_provider_switch_resets_unless_effort_given(
+    tmp_path: Path, payload: dict[str, object], expected_effort: str | None
+) -> None:
     # Regression test: effort tiers are provider-native, non-normalized
     # strings (e.g. Google's "MEDIUM" vs OpenAI's lowercase "medium") -- a
     # tier chosen for the old provider must not survive a provider switch
@@ -402,44 +375,14 @@ def test_configure_switching_provider_resets_stale_effort(tmp_path: Path) -> Non
     )
 
     _configure_rpc(
-        {"provider": "capturing-2"},
+        payload,
         command_id="configure-1",
         agent=agent,
         runtime=runtime,
     )
 
     assert agent.provider is second_provider
-    assert agent.effort is None
-
-
-def test_configure_switching_provider_with_explicit_effort_keeps_the_new_value(
-    tmp_path: Path,
-) -> None:
-    first_provider = CapturingProvider()
-    second_provider = _SecondCapturingProvider()
-    providers = ProviderRegistry()
-    providers.register(first_provider)
-    providers.register(second_provider)
-    runtime = WispRuntime(
-        providers=providers,
-        tools=ToolRegistry(),
-        events=EventBus(),
-        api=ExtensionAPI(providers=providers, tools=ToolRegistry(), events=EventBus()),
-        models=_test_model_registry(),
-    )
-    agent = CodingSession(
-        provider=first_provider, sessions=JsonlSessionStore(tmp_path), effort="MEDIUM"
-    )
-
-    _configure_rpc(
-        {"provider": "capturing-2", "effort": "medium"},
-        command_id="configure-1",
-        agent=agent,
-        runtime=runtime,
-    )
-
-    assert agent.provider is second_provider
-    assert agent.effort == "medium"
+    assert agent.effort == expected_effort
 
 
 class _FakeNamedProvider(CapturingProvider):

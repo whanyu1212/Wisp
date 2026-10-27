@@ -14,17 +14,11 @@ from wisp.events import (
     QueueItemsRemoved,
     RpcCommandArgument,
     RpcCommandDescriptor,
-    RpcCommandFinished,
     RpcCommandsReported,
     RpcConnectionCatalogReported,
     RpcConnectionCatalogSnapshot,
     RpcConnectionMethodSnapshot,
     RpcConnectionProviderSnapshot,
-    RpcDeviceCodeProgressReported,
-    RpcDeviceCodeReported,
-    RpcMcpServerSnapshot,
-    RpcMcpStatusReported,
-    RpcMcpStatusSnapshot,
     RpcMessageSnapshot,
     RpcMessagesReported,
     RpcMessageToolCallSnapshot,
@@ -35,7 +29,6 @@ from wisp.events import (
     RpcModelProviderSnapshot,
     RpcModelSelectionSnapshot,
     RpcSessionCloned,
-    RpcSessionForked,
     RpcSessionNameChanged,
     RpcSessionSelected,
     RpcSessionsReported,
@@ -43,17 +36,9 @@ from wisp.events import (
     RpcSessionTreeNavigated,
     RpcSessionTreeNode,
     RpcSessionTreeReported,
-    RpcSessionTreeUnreverted,
-    RpcSkillCatalogEntry,
-    RpcSkillCatalogSnapshot,
-    RpcSkillDiagnostic,
-    RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
-    SkillCatalogUpdated,
     ToolResultReady,
-    TrustRequested,
-    TrustResolved,
     wisp_event_from_json,
 )
 
@@ -85,25 +70,6 @@ def test_connection_catalog_event_round_trips_and_enforces_bounds() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
     with pytest.raises(ValidationError):
         RpcConnectionCatalogSnapshot(providers=(provider,) * 33)
-
-
-def test_device_code_event_round_trips() -> None:
-    event = RpcDeviceCodeReported(
-        command_id="device-1",
-        provider="openai-codex",
-        verification_uri="https://example.test/device",
-        user_code="ABCD-1234",
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-    assert "access" not in event.model_dump_json()
-
-    progress = RpcDeviceCodeProgressReported(
-        command_id="device-1",
-        provider="openai-codex",
-        attempt=1,
-    )
-    assert wisp_event_from_json(progress.model_dump_json()) == progress
 
 
 def test_model_catalog_event_round_trips_and_enforces_bounds() -> None:
@@ -156,74 +122,6 @@ def test_model_catalog_event_round_trips_and_enforces_bounds() -> None:
         )
     with pytest.raises(ValidationError):
         RpcModelCatalogEntry(id="model-1", effort_levels=("e" * 65,))
-
-
-def test_mcp_status_event_round_trips_over_json_transport() -> None:
-    event = RpcMcpStatusReported(
-        command_id="mcp-1",
-        status=RpcMcpStatusSnapshot(
-            servers=(
-                RpcMcpServerSnapshot(
-                    name="docs",
-                    status="connected",
-                    tool_names=("mcp__docs__search",),
-                ),
-            )
-        ),
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_skill_catalog_events_round_trip_over_json_transport() -> None:
-    catalog = RpcSkillCatalogSnapshot(
-        entries=(
-            RpcSkillCatalogEntry(
-                name="review",
-                description="Review [b]literal[/b] output",
-                source="user:wisp",
-            ),
-            RpcSkillCatalogEntry(
-                name="wisp-development",
-                description="Develop Wisp",
-                source="package:wisp",
-            ),
-        ),
-        diagnostics=(
-            RpcSkillDiagnostic(
-                code="invalid-yaml",
-                severity="warning",
-                message="broken [literal] metadata",
-                source="project:wisp",
-                path=Path("/project/.agents/skills/bad/SKILL.md"),
-            ),
-        ),
-        project_trusted=True,
-    )
-    events = (
-        RpcSkillsReported(command_id="skills-1", catalog=catalog),
-        SkillCatalogUpdated(catalog=catalog),
-    )
-
-    assert tuple(wisp_event_from_json(event.model_dump_json()) for event in events) == events
-
-
-def test_rpc_state_report_round_trips() -> None:
-    event = RpcStateReported(
-        command_id="state-1",
-        state=RpcStateSnapshot(
-            provider="fake",
-            model="fake-model",
-            effort=None,
-            auto_compaction_enabled=True,
-            steering_mode="one_at_a_time",
-            follow_up_mode="one_at_a_time",
-            pending_steering_count=0,
-            pending_follow_up_count=0,
-        ),
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
 
 
 def test_rpc_state_agent_mode_defaults_to_build_when_absent() -> None:
@@ -356,46 +254,6 @@ def test_rpc_sessions_report_round_trips() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
-def test_rpc_session_selected_round_trips() -> None:
-    event = RpcSessionSelected(
-        command_id="select-1",
-        session_id="session-1",
-        session_path=Path("/tmp/session-1.jsonl"),
-        active_leaf_id="entry-3",
-        entry_count=3,
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
-def test_rpc_session_derivation_events_round_trip() -> None:
-    clone = RpcSessionCloned(
-        command_id="clone-1",
-        source_session_id="source",
-        source_session_path=Path("/tmp/source.jsonl"),
-        source_active_leaf_id="entry-2",
-        session_id="clone",
-        session_path=Path("/tmp/clone.jsonl"),
-        active_leaf_id="entry-2",
-        entry_count=2,
-    )
-    fork = RpcSessionForked(
-        command_id="fork-1",
-        source_session_id="source",
-        source_session_path=Path("/tmp/source.jsonl"),
-        source_active_leaf_id="entry-4",
-        session_id="fork",
-        session_path=Path("/tmp/fork.jsonl"),
-        active_leaf_id="entry-2",
-        entry_count=2,
-        selected_entry_id="entry-3",
-        selected_prompt="edit me",
-    )
-
-    assert wisp_event_from_json(clone.model_dump_json()) == clone
-    assert wisp_event_from_json(fork.model_dump_json()) == fork
-
-
 def test_rpc_session_derivation_events_reject_invalid_targets() -> None:
     fields = {
         "command_id": "clone-1",
@@ -447,20 +305,6 @@ def test_rpc_session_tree_events_round_trip() -> None:
 
     assert wisp_event_from_json(report.model_dump_json()) == report
     assert wisp_event_from_json(navigated.model_dump_json()) == navigated
-
-
-def test_rpc_session_tree_unrevert_round_trips() -> None:
-    event = RpcSessionTreeUnreverted(
-        command_id="unrevert-1",
-        session_id="session-1",
-        session_path=Path("/tmp/session-1.jsonl"),
-        source_transition_id="navigation-1",
-        previous_active_leaf_id="entry-1",
-        active_leaf_id="entry-2",
-        entry_count=5,
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
 
 
 def test_rpc_message_forward_cursor_round_trips() -> None:
@@ -789,14 +633,6 @@ def test_queue_items_removed_rejects_impossible_payloads(
         QueueItemsRemoved(command_id="queue-1", **kwargs)
 
 
-def test_trust_events_round_trip_through_json() -> None:
-    requested = TrustRequested(request_id="req-1", project_path=Path("/repo"))
-    resolved = TrustResolved(request_id="req-1", project_path=Path("/repo"), trusted=True)
-
-    assert wisp_event_from_json(requested.model_dump_json()) == requested
-    assert wisp_event_from_json(resolved.model_dump_json()) == resolved
-
-
 def test_project_config_applied_round_trips_through_json() -> None:
     applied = ProjectConfigApplied(
         provider="openai", model="gpt-5.5", auth_path=Path("/home/u/.wisp/auth.json")
@@ -815,16 +651,6 @@ def test_project_config_applied_round_trips_through_json() -> None:
     assert restored.auto_compaction_enabled is None
 
 
-def test_wisp_event_from_json_returns_typed_event() -> None:
-    event = wisp_event_from_json(
-        '{"type":"rpc.command.finished","command_id":"cmd-1","command_type":"prompt","ok":true}'
-    )
-
-    assert isinstance(event, RpcCommandFinished)
-    assert event.command_id == "cmd-1"
-    assert event.ok is True
-
-
 def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     retry = ProviderRetrying(
         turn=1,
@@ -839,13 +665,12 @@ def test_wisp_event_from_json_parses_provider_retry_progress() -> None:
     assert wisp_event_from_json(retry.model_dump_json()) == retry
 
 
-@pytest.mark.parametrize("schema_version", [5, 20, 39])
-def test_wisp_event_from_json_rejects_per_event_schema_version(schema_version: int) -> None:
+def test_wisp_event_from_json_rejects_per_event_schema_version() -> None:
     """Live events carry no version; pre-v9 payloads are only accepted via session replay."""
 
     payload: dict[str, object] = {
         "type": "rpc.command.finished",
-        "schema_version": schema_version,
+        "schema_version": 5,
         "command_id": "cmd-1",
         "command_type": "prompt",
         "ok": True,

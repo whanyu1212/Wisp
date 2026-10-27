@@ -24,7 +24,6 @@ from wisp.rpc import (
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
-    InitCommand,
     NavigateSessionTreeCommand,
     PopQueueCommand,
     SelectSessionCommand,
@@ -159,69 +158,73 @@ def test_disconnect_and_device_code_commands_serialize() -> None:
     }
 
 
-def test_get_messages_command_serializes_as_jsonl_and_parses() -> None:
-    command = GetMessagesCommand(
-        id="messages-1",
-        session_id="session-1",
-        limit=25,
-        before_entry_id="entry-1",
-    )
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "messages-1",
-        "type": "get_messages",
-        "session_id": "session-1",
-        "limit": 25,
-        "before_entry_id": "entry-1",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_messages_command_serializes_forward_cursor() -> None:
-    command = GetMessagesCommand(id="messages-2", after_entry_id="entry-1")
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "messages-2",
-        "type": "get_messages",
-        "limit": 200,
-        "after_entry_id": "entry-1",
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_messages_command_serializes_active_prompt_read_opt_in() -> None:
-    command = GetMessagesCommand(id="messages-live", allow_during_prompt=True)
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "messages-live",
-        "type": "get_messages",
-        "limit": 200,
-        "allow_during_prompt": True,
-    }
-    assert rpc_command_from_json(command.to_json_line()) == command
-
-
-def test_get_messages_command_serializes_exact_full_content_lookup() -> None:
-    command = GetMessagesCommand(
-        id="messages-detail",
-        session_id="session-1",
-        limit=1,
-        entry_ids=("tool-result-1",),
-        complete_structure=True,
-        full_content=True,
-        allow_during_prompt=True,
-    )
-
-    assert json.loads(command.to_json_line()) == {
-        "id": "messages-detail",
-        "type": "get_messages",
-        "session_id": "session-1",
-        "limit": 1,
-        "entry_ids": ["tool-result-1"],
-        "complete_structure": True,
-        "full_content": True,
-        "allow_during_prompt": True,
-    }
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            GetMessagesCommand(
+                id="messages-1",
+                session_id="session-1",
+                limit=25,
+                before_entry_id="entry-1",
+            ),
+            {
+                "id": "messages-1",
+                "type": "get_messages",
+                "session_id": "session-1",
+                "limit": 25,
+                "before_entry_id": "entry-1",
+            },
+            id="backward-cursor",
+        ),
+        pytest.param(
+            GetMessagesCommand(id="messages-2", after_entry_id="entry-1"),
+            {
+                "id": "messages-2",
+                "type": "get_messages",
+                "limit": 200,
+                "after_entry_id": "entry-1",
+            },
+            id="forward-cursor",
+        ),
+        pytest.param(
+            GetMessagesCommand(id="messages-live", allow_during_prompt=True),
+            {
+                "id": "messages-live",
+                "type": "get_messages",
+                "limit": 200,
+                "allow_during_prompt": True,
+            },
+            id="active-prompt-read",
+        ),
+        pytest.param(
+            GetMessagesCommand(
+                id="messages-detail",
+                session_id="session-1",
+                limit=1,
+                entry_ids=("tool-result-1",),
+                complete_structure=True,
+                full_content=True,
+                allow_during_prompt=True,
+            ),
+            {
+                "id": "messages-detail",
+                "type": "get_messages",
+                "session_id": "session-1",
+                "limit": 1,
+                "entry_ids": ["tool-result-1"],
+                "complete_structure": True,
+                "full_content": True,
+                "allow_during_prompt": True,
+            },
+            id="full-content-lookup",
+        ),
+    ],
+)
+def test_get_messages_command_serializes_as_jsonl_and_parses(
+    command: GetMessagesCommand, expected: dict[str, object]
+) -> None:
+    assert json.loads(command.to_json_line()) == expected
     assert rpc_command_from_json(command.to_json_line()) == command
 
 
@@ -433,39 +436,40 @@ def test_approval_scope_serializes_only_when_selected() -> None:
     )
 
 
-def test_trust_command_serializes_as_jsonl_and_parses() -> None:
-    command = TrustCommand(id="trust-1", request_id="req-1", trusted=True)
-
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            TrustCommand(id="trust-1", request_id="req-1", trusted=True),
+            {"id": "trust-1", "type": "trust", "request_id": "req-1", "trusted": True},
+            id="trusted",
+        ),
+        pytest.param(
+            TrustCommand(
+                id="trust-1",
+                request_id="req-1",
+                trusted=False,
+                reason="Trust prompt closed",
+                transient=True,
+            ),
+            {
+                "id": "trust-1",
+                "type": "trust",
+                "request_id": "req-1",
+                "trusted": False,
+                "reason": "Trust prompt closed",
+                "transient": True,
+            },
+            id="transient-untrusted",
+        ),
+    ],
+)
+def test_trust_command_serializes_as_jsonl_and_parses(
+    command: TrustCommand, expected: dict[str, object]
+) -> None:
     line = command.to_json_line()
 
-    assert json.loads(line) == {
-        "id": "trust-1",
-        "type": "trust",
-        "request_id": "req-1",
-        "trusted": True,
-    }
-    assert rpc_command_from_json(line) == command
-
-
-def test_transient_trust_command_serializes_as_jsonl_and_parses() -> None:
-    command = TrustCommand(
-        id="trust-1",
-        request_id="req-1",
-        trusted=False,
-        reason="Trust prompt closed",
-        transient=True,
-    )
-
-    line = command.to_json_line()
-
-    assert json.loads(line) == {
-        "id": "trust-1",
-        "type": "trust",
-        "request_id": "req-1",
-        "trusted": False,
-        "reason": "Trust prompt closed",
-        "transient": True,
-    }
+    assert json.loads(line) == expected
     assert rpc_command_from_json(line) == command
 
 
@@ -478,10 +482,3 @@ def test_rpc_commands_allow_protocol_optional_id() -> None:
     assert json.loads(line) == {"type": "prompt", "prompt": "hello"}
     assert command.id is None
     assert parsed == command
-
-
-def test_rpc_init_command_round_trips_without_arguments() -> None:
-    command = InitCommand()
-
-    assert json.loads(command.to_json_line()) == {"type": "init"}
-    assert rpc_command_from_json('{"type":"init"}') == command

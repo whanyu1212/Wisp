@@ -121,49 +121,6 @@ def test_coordinator_drains_buffered_cancel_before_queued_shutdown() -> None:
     anyio.run(scenario)
 
 
-def test_coordinator_drains_buffered_cancel_before_queued_shutdown_async() -> None:
-    async def scenario() -> None:
-        receiver = Receiver(
-            [
-                input_command({"prompt": "", "id": "prompt", "type": "prompt"}),
-                input_command({"id": "shutdown", "type": "shutdown"}),
-                _RpcCommandCompleted("prompt", "prompt", True, (), 1),
-                input_command({"id": "cancel", "type": "cancel", "target_id": "shutdown"}),
-                _RpcInputClosed(),
-            ]
-        )
-        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
-        dispatched: list[str] = []
-
-        async def dispatch(
-            command: ParsedRpcCommand,
-            running: _RpcRunningCommand | None,
-        ) -> _RpcDispatchResult:
-            command_id = str(command.command_id)
-            dispatched.append(command_id)
-            if command.command_type == "prompt":
-                return _RpcDispatchResult(
-                    _RpcRunningCommand(command_id, "prompt", anyio.CancelScope())
-                )
-            if command.command_type == "cancel":
-                assert coordinator.cancel("shutdown").outcome == "queued"
-            return _RpcDispatchResult(running)
-
-        async def reject(_command: ParsedRpcCommand, _message: str) -> None:
-            return None
-
-        assert (
-            await coordinator.run(
-                receiver,
-                dispatch=dispatch,
-                reject=reject,
-            )
-        ) is False
-        assert dispatched == ["prompt", "cancel"]
-
-    anyio.run(scenario)
-
-
 def test_coordinator_drains_buffered_control_before_idle_shutdown_async() -> None:
     async def scenario() -> None:
         receiver = Receiver(

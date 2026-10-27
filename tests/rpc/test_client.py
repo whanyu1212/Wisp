@@ -223,7 +223,21 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
     anyio.run(run)
 
 
-def test_rpc_controller_configure_sends_effort() -> None:
+@pytest.mark.parametrize(
+    "settings",
+    [
+        pytest.param({"effort": "high"}, id="effort"),
+        pytest.param({"mode": "plan"}, id="mode"),
+        pytest.param({"auto_compaction_enabled": False}, id="auto-compaction"),
+        # Regression case: effort=None is indistinguishable on the wire from
+        # never having set effort at all (exclude_none drops it), so a client
+        # that previously set an effort tier has no way to reset it back to the
+        # provider's own default without a distinct, always-serialized signal.
+        pytest.param({"clear_effort": True}, id="clear-effort"),
+        pytest.param({"web_search": False}, id="web-search-off"),
+    ],
+)
+def test_rpc_controller_configure_sends_settings(settings: dict[str, object]) -> None:
     async def run() -> None:
         transport = RecordingTransport()
         controller = RpcController(
@@ -231,45 +245,11 @@ def test_rpc_controller_configure_sends_effort() -> None:
             command_id_factory=lambda prefix: f"{prefix}-id",
         )
 
-        await controller.configure(effort="high")
+        await controller.configure(**settings)
 
-        assert transport.commands == [
-            ConfigureCommand(id="configure-id", effort="high"),
-        ]
-
-    anyio.run(run)
-
-
-def test_rpc_controller_configure_sends_agent_mode() -> None:
-    async def run() -> None:
-        transport = RecordingTransport()
-        controller = RpcController(
-            transport,
-            command_id_factory=lambda _prefix: "configure-id",
-        )
-
-        await controller.configure(mode="plan")
-
-        assert transport.commands == [
-            ConfigureCommand(id="configure-id", mode="plan"),
-        ]
-
-    anyio.run(run)
-
-
-def test_rpc_controller_configure_sends_auto_compaction_setting() -> None:
-    async def run() -> None:
-        transport = RecordingTransport()
-        controller = RpcController(
-            transport,
-            command_id_factory=lambda prefix: f"{prefix}-id",
-        )
-
-        await controller.configure(auto_compaction_enabled=False)
-
-        assert transport.commands == [
-            ConfigureCommand(id="configure-id", auto_compaction_enabled=False),
-        ]
+        assert transport.commands == [ConfigureCommand(id="configure-id", **settings)]
+        payload = json.loads(transport.commands[0].to_json_line())
+        assert {field: payload[field] for field in settings} == settings
 
     anyio.run(run)
 
@@ -290,52 +270,12 @@ def test_configure_command_serializes_effort_and_omits_when_unset() -> None:
 
     without_effort = ConfigureCommand(id="configure-2", model="gpt-5.5")
 
-    assert "effort" not in json.loads(without_effort.to_json_line())
-
-
-def test_rpc_controller_configure_clear_effort() -> None:
-    # Regression test: effort=None is indistinguishable on the wire from
-    # never having set effort at all (exclude_none drops it), so a client
-    # that previously set an effort tier has no way to reset it back to the
-    # provider's own default without a distinct, always-serialized signal.
-    async def run() -> None:
-        transport = RecordingTransport()
-        controller = RpcController(
-            transport,
-            command_id_factory=lambda prefix: f"{prefix}-id",
-        )
-
-        await controller.configure(clear_effort=True)
-
-        assert transport.commands == [
-            ConfigureCommand(id="configure-id", clear_effort=True),
-        ]
-
-    anyio.run(run)
-
-
-def test_configure_command_always_serializes_clear_effort() -> None:
     # clear_effort's default (False) must never be silently dropped the way
     # effort=None is -- it is the only signal the server has to distinguish
     # "leave effort untouched" from "explicitly reset effort."
-    command = ConfigureCommand(id="configure-1", model="gpt-5.5")
-
-    assert json.loads(command.to_json_line())["clear_effort"] is False
-
-
-def test_rpc_controller_exposes_transport_events() -> None:
-    async def run() -> None:
-        expected_events = [
-            RpcCommandStarted(command_id="cmd-1", command_type="prompt"),
-            RpcCommandFinished(command_id="cmd-1", command_type="prompt", ok=True),
-        ]
-        controller = RpcController(RecordingTransport(events=expected_events))
-
-        events = [event async for event in controller.events()]
-
-        assert events == expected_events
-
-    anyio.run(run)
+    without_effort_payload = json.loads(without_effort.to_json_line())
+    assert "effort" not in without_effort_payload
+    assert without_effort_payload["clear_effort"] is False
 
 
 def _fake_backend(script: str, *, backend_version: str = __version__) -> str:
@@ -639,16 +579,5 @@ print(json.dumps({
         assert isinstance(events[0], RpcCommandFinished)
         assert events[0].command_id == "shutdown-1"
         assert events[0].ok is True
-
-    anyio.run(run)
-
-
-def test_search_toggle_serializes_false() -> None:
-    async def run() -> None:
-        transport = RecordingTransport()
-        controller = RpcController(transport, command_id_factory=lambda prefix: f"{prefix}-id")
-        await controller.configure(web_search=False)
-        assert transport.commands == [ConfigureCommand(id="configure-id", web_search=False)]
-        assert json.loads(transport.commands[0].to_json_line())["web_search"] is False
 
     anyio.run(run)

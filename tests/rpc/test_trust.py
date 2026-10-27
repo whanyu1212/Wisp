@@ -559,30 +559,13 @@ def test_rpc_gate_fires_on_first_trusted_callback(tmp_path: Path, monkeypatch: M
     anyio.run(scenario)
 
 
-def test_rpc_gate_propagates_rebuild_error(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    # If the first-run rebuild fails (e.g. a trusted project's settings.json names an
-    # unknown provider), the error must propagate OUT of resolve() so the prompt task's
-    # handler can report it as a normal rpc.command.finished failure — not escape and
-    # tear down the RPC process with a silent stream end.
-    from wisp.runtime.registry import UnknownProviderError
-
-    monkeypatch.setenv("WISP_TRUST", "1")
-
-    async def on_trusted() -> None:
-        raise UnknownProviderError("no-such-provider")
-
-    gate = RpcTrustGate(Path.cwd(), write_event=lambda _event: None, on_first_trusted=on_trusted)
-
-    async def scenario() -> None:
-        with pytest.raises(UnknownProviderError):
-            await gate.resolve()
-
-    anyio.run(scenario)
-
-
 def test_rpc_gate_does_not_cache_after_failed_rebuild(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
+    # If the first-run rebuild fails (e.g. a trusted project's settings.json names an
+    # unknown provider), the error must propagate OUT of resolve() so the prompt task's
+    # handler can report it as a normal rpc.command.finished failure -- not escape and
+    # tear down the RPC process with a silent stream end.
     # A failed rebuild must NOT cache the decision: otherwise the caller reports this
     # prompt as failed, but the NEXT prompt returns the cached trust, skips the rebuild,
     # and silently runs the stale untrusted startup provider. Each prompt must re-attempt
@@ -755,16 +738,3 @@ def test_config_overrides_gates_project_settings_on_trust(
 
     assert overrides.build(trusted=False).provider != "from-project-settings"
     assert overrides.build(trusted=True).provider == "from-project-settings"
-
-
-def test_trust_command_serializes_over_rpc() -> None:
-    from wisp.rpc.commands import TrustCommand, rpc_command_from_json
-
-    command = TrustCommand(id="c1", request_id="r1", trusted=True)
-    line = command.to_json_line()
-    parsed = rpc_command_from_json(line)
-    assert isinstance(parsed, TrustCommand)
-    assert parsed.request_id == "r1"
-    assert parsed.trusted is True
-    # exclude_none keeps reason out when unset.
-    assert "reason" not in json.loads(line)

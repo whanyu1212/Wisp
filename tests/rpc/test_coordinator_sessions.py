@@ -85,31 +85,6 @@ def test_coordinator_emits_post_apply_events_after_selecting_session(tmp_path: P
     anyio.run(scenario)
 
 
-def test_coordinator_ignores_selected_session_on_failed_completion(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        store = JsonlSessionStore(tmp_path)
-        previous = store.create()
-        attempted = store.create()
-        state = _RpcSessionState(session=previous, history=(), entry_count=0)
-        coordinator = RpcCoordinator(state)
-        coordinator.running_command = _RpcRunningCommand(
-            "select",
-            "select_session",
-            anyio.CancelScope(),
-        )
-
-        await coordinator.handle_event(
-            _RpcCommandCompleted("select", "select_session", False, (), 0, attempted),
-            dispatch=lambda _command, running: _RpcDispatchResult(running),
-            reject=ignore_reject,
-        )
-
-        assert coordinator.running_command is None
-        assert state.session is previous
-
-    anyio.run(scenario)
-
-
 @pytest.mark.parametrize("command_type", ["select_session", "clone_session", "fork_session"])
 @pytest.mark.parametrize("outcome", ["changed", "same", "failed"])
 def test_session_changed_only_after_successful_change(
@@ -134,6 +109,7 @@ def test_session_changed_only_after_successful_change(
             dispatch=lambda _command, running: _RpcDispatchResult(running),
             reject=ignore_reject,
         )
+        assert coordinator.running_command is None
         assert resets == ([previous] if outcome == "changed" else [])
         assert state.session is (previous if outcome == "failed" else selected)
 
