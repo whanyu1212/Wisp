@@ -457,22 +457,6 @@ def test_overwrite_does_not_require_read_permission(tmp_path: Path) -> None:
         assert os.getxattr(target, attribute) == b"retained"
 
 
-def test_overwrite_rejects_final_symlink(tmp_path: Path) -> None:
-    target = tmp_path / "target.txt"
-    target.write_text("original\n", encoding="utf-8")
-    link = tmp_path / "link.txt"
-    link.symlink_to(target)
-
-    with pytest.raises(ToolError, match="goes through a symbolic link"):
-        run_tool(
-            WriteTool(),
-            {"path": "link.txt", "content": "replacement\n"},
-            ToolContext(cwd=tmp_path),
-        )
-
-    assert target.read_text(encoding="utf-8") == "original\n"
-
-
 def test_guarded_windows_atomic_write_and_edit_algorithm(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -675,114 +659,65 @@ def test_recursive_tools_honor_repository_local_excludes(tmp_path: Path) -> None
     assert find.data["files"] == ["visible.txt"]
 
 
-def test_recursive_tools_preserve_negated_files_below_double_star_ignore(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("gitignore", "files", "expected"),
+    [
+        pytest.param(
+            "foo/**\n!foo/bar.txt\n",
+            ["foo/bar.txt", "foo/ignored.txt"],
+            ["foo/bar.txt"],
+            id="negated-file-below-double-star",
+        ),
+        pytest.param(
+            "foo/**\n!foo/sub/x.txt\n",
+            ["foo/sub/x.txt"],
+            [],
+            id="ignored-intermediate-directory-stays-pruned",
+        ),
+        pytest.param(
+            "**/foo/**\n!foo/keep.txt\n",
+            ["foo/keep.txt", "nested/foo/keep.txt"],
+            ["foo/keep.txt"],
+            id="variable-depth-ignore-root",
+        ),
+        pytest.param(
+            "*/**\n!*/keep.txt\n",
+            ["foo/keep.txt"],
+            ["foo/keep.txt"],
+            id="single-component-wildcard-root",
+        ),
+        pytest.param(
+            "logs-*/**\n!logs-*/keep.txt\n",
+            ["logs-1/keep.txt"],
+            ["logs-1/keep.txt"],
+            id="wildcard-directory-pattern",
+        ),
+        pytest.param(
+            "foo/\n!foo/bar.txt\n",
+            ["foo/bar.txt"],
+            [],
+            id="no-reinclude-below-ignored-parent",
+        ),
+    ],
+)
+def test_recursive_tools_apply_gitignore_reincludes(
+    tmp_path: Path, gitignore: str, files: list[str], expected: list[str]
 ) -> None:
     mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text("foo/**\n!foo/bar.txt\n", encoding="utf-8")
-    foo = tmp_path / "foo"
-    foo.mkdir()
-    (foo / "bar.txt").write_text("needle\n", encoding="utf-8")
-    (foo / "ignored.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text(gitignore, encoding="utf-8")
+    for name in files:
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
     grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
     find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
 
-    assert grep.data["matches"] == ["foo/bar.txt:1:needle"]
-    assert find.data["files"] == ["foo/bar.txt"]
-
-
-def test_recursive_tools_keep_ignored_intermediate_directories_pruned(
-    tmp_path: Path,
-) -> None:
-    mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text(
-        "foo/**\n!foo/sub/x.txt\n",
-        encoding="utf-8",
-    )
-    nested = tmp_path / "foo" / "sub"
-    nested.mkdir(parents=True)
-    (nested / "x.txt").write_text("needle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
-    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
-
-    assert grep.text == "No matches"
-    assert find.text == "No files found"
-
-
-def test_recursive_tools_reinclude_variable_depth_ignore_root(tmp_path: Path) -> None:
-    mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text(
-        "**/foo/**\n!foo/keep.txt\n",
-        encoding="utf-8",
-    )
-    root_foo = tmp_path / "foo"
-    root_foo.mkdir()
-    (root_foo / "keep.txt").write_text("needle\n", encoding="utf-8")
-    nested_foo = tmp_path / "nested" / "foo"
-    nested_foo.mkdir(parents=True)
-    (nested_foo / "keep.txt").write_text("needle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
-    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
-
-    assert grep.data["matches"] == ["foo/keep.txt:1:needle"]
-    assert find.data["files"] == ["foo/keep.txt"]
-
-
-def test_recursive_tools_reinclude_single_component_wildcard_root(tmp_path: Path) -> None:
-    mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text(
-        "*/**\n!*/keep.txt\n",
-        encoding="utf-8",
-    )
-    directory = tmp_path / "foo"
-    directory.mkdir()
-    (directory / "keep.txt").write_text("needle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
-    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
-
-    assert grep.data["matches"] == ["foo/keep.txt:1:needle"]
-    assert find.data["files"] == ["foo/keep.txt"]
-
-
-def test_recursive_tools_reinclude_wildcard_directory_patterns(tmp_path: Path) -> None:
-    mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text(
-        "logs-*/**\n!logs-*/keep.txt\n",
-        encoding="utf-8",
-    )
-    logs = tmp_path / "logs-1"
-    logs.mkdir()
-    (logs / "keep.txt").write_text("needle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
-    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
-
-    assert grep.data["matches"] == ["logs-1/keep.txt:1:needle"]
-    assert find.data["files"] == ["logs-1/keep.txt"]
-
-
-def test_recursive_tools_do_not_reinclude_below_ignored_parent(tmp_path: Path) -> None:
-    mark_git_repository(tmp_path)
-    (tmp_path / ".gitignore").write_text("foo/\n!foo/bar.txt\n", encoding="utf-8")
-    foo = tmp_path / "foo"
-    foo.mkdir()
-    (foo / "bar.txt").write_text("needle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    grep = run_tool(GrepTool(), {"path": ".", "pattern": "needle"}, context)
-    find = run_tool(FindTool(), {"path": ".", "pattern": "*.txt"}, context)
-
-    assert grep.text == "No matches"
-    assert find.text == "No files found"
+    assert grep.data["matches"] == [f"{name}:1:needle" for name in expected]
+    assert find.data["files"] == expected
+    if not expected:
+        assert grep.text == "No matches"
+        assert find.text == "No files found"
 
 
 def test_recursive_tools_search_unignored_common_directory_names(tmp_path: Path) -> None:

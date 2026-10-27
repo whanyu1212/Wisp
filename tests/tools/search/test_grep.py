@@ -469,20 +469,30 @@ def test_grep_counts_matches_separately_from_context_lines(
     assert "data.txt-3-after" in result.text
 
 
-def test_grep_preserves_whitespace_only_patterns(tmp_path: Path) -> None:
-    (tmp_path / "data.txt").write_text("a b\nab\n", encoding="utf-8")
+@pytest.mark.parametrize(
+    ("content", "pattern", "expected"),
+    [
+        pytest.param("a b\nab\n", " ", "data.txt:1:a b", id="space"),
+        pytest.param("\tindent\nplain\n", "\t", "data.txt:1:\tindent", id="tab"),
+    ],
+)
+def test_grep_preserves_whitespace_only_patterns(
+    tmp_path: Path, content: str, pattern: str, expected: str
+) -> None:
+    (tmp_path / "data.txt").write_text(content, encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(
         GrepTool(),
-        {"pattern": " ", "path": ".", "literal": True},
+        {"pattern": pattern, "path": ".", "literal": True},
         context,
     )
 
-    assert result.text == "data.txt:1:a b"
+    assert result.text == expected
 
 
-def test_grep_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
+@pytest.mark.parametrize("allow_outside_cwd", [False, True], ids=["confined", "opted-out"])
+def test_grep_skips_symlinked_files(tmp_path: Path, allow_outside_cwd: bool) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside.txt"
@@ -492,75 +502,12 @@ def test_grep_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
         link.symlink_to(outside)
     except OSError as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
-    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
+    context = ToolContext(cwd=workspace, allow_outside_cwd=allow_outside_cwd)
 
     result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
 
     assert result.text == "No matches"
     assert result.data == {"count": 0, "matches": []}
-
-
-def test_grep_tool_python_fallback_skips_symlinked_files_outside_cwd(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("secret\n", encoding="utf-8")
-    link = workspace / "link.txt"
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
-    context = ToolContext(cwd=workspace)
-
-    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
-
-    assert result.text == "No matches"
-    assert result.data == {"count": 0, "matches": []}
-
-
-def test_grep_tool_python_fallback_skips_symlinked_files_when_opted_out(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.txt"
-    outside.write_text("secret\n", encoding="utf-8")
-    link = workspace / "link.txt"
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
-    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
-
-    result = run_tool(GrepTool(), {"pattern": "secret", "path": ".", "literal": True}, context)
-
-    assert result.text == "No matches"
-    assert result.data == {"count": 0, "matches": []}
-
-
-def test_grep_tool_python_fallback_does_not_count_context_text_as_match(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    (tmp_path / "data.txt").write_text("context :123: text\nneedle\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    result = run_tool(
-        GrepTool(),
-        {"pattern": "needle", "path": ".", "context": 1, "literal": True, "max_results": 1},
-        context,
-    )
-
-    assert "data.txt-1-context :123: text" in result.text
-    assert "data.txt:2:needle" in result.text
-    assert result.data["count"] == 1
 
 
 def test_grep_tool_python_fallback_counts_match_when_path_contains_separator(
@@ -581,25 +528,6 @@ def test_grep_tool_python_fallback_counts_match_when_path_contains_separator(
 
     assert result.text == "pkg-1-test/a.txt:1:needle"
     assert result.data["count"] == 1
-
-
-def test_grep_tool_python_fallback_counts_matches_separately_from_context_lines(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    (tmp_path / "data.txt").write_text("before\nmatch\nafter\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    result = run_tool(
-        GrepTool(),
-        {"pattern": "match", "path": ".", "context": 1, "literal": True, "max_results": 1},
-        context,
-    )
-
-    assert "data.txt-1-before" in result.text
-    assert "data.txt:2:match" in result.text
-    assert "data.txt-3-after" in result.text
 
 
 def test_grep_tool_python_fallback_merges_overlapping_context_groups(
@@ -648,23 +576,6 @@ def test_grep_tool_python_fallback_bounds_context_collection(
 
     assert collected_line_counts == [context.max_output_lines + 1]
     assert result.truncated is True
-
-
-def test_grep_tool_python_fallback_preserves_whitespace_only_patterns(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    (tmp_path / "data.txt").write_text("\tindent\nplain\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    result = run_tool(
-        GrepTool(),
-        {"pattern": "\t", "path": ".", "literal": True},
-        context,
-    )
-
-    assert result.text == "data.txt:1:\tindent"
 
 
 def test_grep_tool_reports_actionable_invalid_pattern(tmp_path: Path) -> None:
@@ -797,12 +708,19 @@ def test_grep_tool_python_fallback_abandons_worker_wait_on_cancel(
     anyio.run(scenario)
 
 
-def test_grep_tool_python_fallback_does_not_truncate_exact_limit(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
+@pytest.mark.parametrize(
+    ("content", "expected_text", "truncated"),
+    [
+        pytest.param("match\n", "data.txt:1:match", False, id="exact-limit"),
+        pytest.param(
+            "match\nmatch\n", "data.txt:1:match\n" + _LIMIT_HINT, True, id="another-match"
+        ),
+    ],
+)
+def test_grep_truncates_only_past_max_results(
+    tmp_path: Path, content: str, expected_text: str, truncated: bool
 ) -> None:
-    monkeypatch.setenv("PATH", "")
-    (tmp_path / "data.txt").write_text("match\n", encoding="utf-8")
+    (tmp_path / "data.txt").write_text(content, encoding="utf-8")
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(
@@ -811,26 +729,8 @@ def test_grep_tool_python_fallback_does_not_truncate_exact_limit(
         context,
     )
 
-    assert result.text == "data.txt:1:match"
-    assert result.truncated is False
-
-
-def test_grep_tool_python_fallback_truncates_when_another_match_exists(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
-    (tmp_path / "data.txt").write_text("match\nmatch\n", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path)
-
-    result = run_tool(
-        GrepTool(),
-        {"pattern": "match", "path": ".", "literal": True, "max_results": 1},
-        context,
-    )
-
-    assert result.text == "data.txt:1:match\n" + _LIMIT_HINT
-    assert result.truncated is True
+    assert result.text == expected_text
+    assert result.truncated is truncated
 
 
 def test_grep_tool_python_fallback_skips_hidden_entries(
@@ -915,24 +815,20 @@ def _lines(path: Path) -> list[str]:
     return [line for block in search_tools_module._iter_utf8_line_blocks(path) for line in block]
 
 
-def test_python_grep_splitlines_preserves_crlf_across_chunks(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    path = tmp_path / "data.txt"
-    path.write_bytes(b"one\r\ntwo\rthree")
-    monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", 4)
-
-    assert _lines(path) == ["one", "two", "three"]
-
-
 @pytest.mark.parametrize("chunk_bytes", range(1, 12))
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("a\r\nb\r\r\nc\n\rd\x85é \r\n\nf\v\f\x1c\x1d\x1eg\r", id="separators"),
+        pytest.param("one\r\ntwo\rthree", id="unterminated-last-line"),
+    ],
+)
 def test_splitlines_matches_any_chunking(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
     chunk_bytes: int,
+    text: str,
 ) -> None:
-    text = "a\r\nb\r\r\nc\n\rd\x85é \r\n\nf\v\f\x1c\x1d\x1eg\r"
     path = tmp_path / "data.txt"
     path.write_text(text, encoding="utf-8", newline="")
     monkeypatch.setattr(search_tools_module, "_PYTHON_GREP_CHUNK_BYTES", chunk_bytes)

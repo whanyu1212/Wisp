@@ -179,78 +179,31 @@ def test_completion_kills_descendant_with_redirected_output(tmp_path: Path) -> N
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
-def test_completion_kills_detached_background_job(tmp_path: Path) -> None:
-    child_pid_path = tmp_path / "detached.pid"
-
-    async def run() -> tuple[ProcessUpdate, int]:
-        supervisor = ProcessSupervisor()
-        try:
-            process_id = await supervisor.start(
-                _detached_python_background_command(
-                    child_pid_path,
-                    keep_shell_alive=False,
-                    redirect_output=True,
-                ),
-                cwd=tmp_path,
-                timeout=2,
-            )
-            child_pid = await wait_for_pid_file(child_pid_path)
-            terminal = (await poll_until_terminal(supervisor, process_id))[-1]
-            return terminal, child_pid
-        finally:
-            await supervisor.aclose()
-
-    update, child_pid = anyio.run(run)
-
-    assert update.state == "completed"
-    assert update.exit_code == 0
-    _assert_process_gone(child_pid)
-
-
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group assertion")
-def test_exit_command_records_and_kills_detached_background_job(tmp_path: Path) -> None:
-    child_pid_path = tmp_path / "detached-before-exit.pid"
-    command = (
-        _detached_python_background_command(
-            child_pid_path,
-            keep_shell_alive=False,
-            redirect_output=True,
-        )
-        + "; exit 0"
-    )
-
-    async def run() -> tuple[ProcessUpdate, int]:
-        supervisor = ProcessSupervisor()
-        try:
-            process_id = await supervisor.start(command, cwd=tmp_path, timeout=2)
-            child_pid = await wait_for_pid_file(child_pid_path)
-            terminal = (await poll_until_terminal(supervisor, process_id))[-1]
-            return terminal, child_pid
-        finally:
-            await supervisor.aclose()
-
-    update, child_pid = anyio.run(run)
-
-    assert update.state == "completed"
-    assert update.exit_code == 0
-    _assert_process_gone(child_pid)
-
-
-@pytest.mark.skipif(
-    not sys.platform.startswith("linux"),
-    reason="Linux child-subreaper assertion",
+@pytest.mark.parametrize(
+    "command_suffix",
+    [
+        pytest.param("", id="plain"),
+        pytest.param("; exit 0", id="exit"),
+        # exec replaces the shell, so it must not bypass recording the detached job.
+        pytest.param(
+            "; exec true",
+            marks=pytest.mark.skipif(
+                not sys.platform.startswith("linux"),
+                reason="Linux child-subreaper assertion",
+            ),
+            id="exec",
+        ),
+    ],
 )
-def test_exec_command_does_not_bypass_detached_background_job_recording(
-    tmp_path: Path,
-) -> None:
-    child_pid_path = tmp_path / "detached-before-exec.pid"
+def test_completion_kills_detached_background_job(tmp_path: Path, command_suffix: str) -> None:
+    child_pid_path = tmp_path / "detached.pid"
     command = (
         _detached_python_background_command(
             child_pid_path,
             keep_shell_alive=False,
             redirect_output=True,
         )
-        + "; exec true"
+        + command_suffix
     )
 
     async def run() -> tuple[ProcessUpdate, int]:

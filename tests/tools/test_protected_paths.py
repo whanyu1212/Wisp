@@ -124,10 +124,23 @@ def test_secure_tool_path_allows_ordinary_file(tmp_path: Path) -> None:
 # --- end-to-end tool behavior ---
 
 
-def test_read_tool_denies_protected_file(tmp_path: Path) -> None:
+# Pointing read, find or grep AT a protected file is denied, as well as walking
+# past it. The path argument resolves through secure_tool_path first, so
+# the guard fires before the "candidates = [path]" direct-file branch runs.
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        pytest.param(ReadTool(), {"path": ".env"}, id="read"),
+        pytest.param(FindTool(), {"pattern": "*", "path": ".env"}, id="find"),
+        pytest.param(GrepTool(), {"pattern": "sk-secret", "path": ".env"}, id="grep"),
+    ],
+)
+def test_tool_pointed_at_protected_file_is_denied(
+    tmp_path: Path, tool: object, arguments: dict[str, object]
+) -> None:
     (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret\n", encoding="utf-8")
     with pytest.raises(ToolError, match="protected path"):
-        run_tool(ReadTool(), {"path": ".env"}, _context(tmp_path))
+        run_tool(tool, arguments, _context(tmp_path))
 
 
 def test_read_tool_allows_ordinary_file(tmp_path: Path) -> None:
@@ -177,21 +190,6 @@ def test_ls_hides_protected_names(
     result = run_tool(LsTool(), {"path": directory}, _context(tmp_path))
 
     assert result.text.split() == ["main.py"]
-
-
-def test_find_pointed_directly_at_protected_file_is_denied(tmp_path: Path) -> None:
-    # Pointing find/grep AT a protected file (not just walking past it) must be
-    # denied too. The path argument resolves through secure_tool_path first, so
-    # the guard fires before the "candidates = [path]" direct-file branch runs.
-    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
-    with pytest.raises(ToolError, match="protected path"):
-        run_tool(FindTool(), {"pattern": "*", "path": ".env"}, _context(tmp_path))
-
-
-def test_grep_pointed_directly_at_protected_file_is_denied(tmp_path: Path) -> None:
-    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-secret\n", encoding="utf-8")
-    with pytest.raises(ToolError, match="protected path"):
-        run_tool(GrepTool(), {"pattern": "sk-secret", "path": ".env"}, _context(tmp_path))
 
 
 # --- Regression tests for Codex review findings (commit review of #50 PR 1) ---

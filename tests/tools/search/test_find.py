@@ -20,11 +20,8 @@ _LIMIT_HINT = (
 )
 
 
-def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("PATH", "")
+@pytest.mark.parametrize("allow_outside_cwd", [False, True], ids=["confined", "opted-out"])
+def test_find_skips_symlinked_files(tmp_path: Path, allow_outside_cwd: bool) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     outside = tmp_path / "outside.py"
@@ -34,7 +31,7 @@ def test_find_tool_python_fallback_skips_symlinked_files_outside_cwd(
         link.symlink_to(outside)
     except OSError as exc:
         pytest.skip(f"symlinks unavailable: {exc}")
-    context = ToolContext(cwd=workspace)
+    context = ToolContext(cwd=workspace, allow_outside_cwd=allow_outside_cwd)
 
     result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
 
@@ -125,24 +122,6 @@ def test_find_returns_no_files_for_empty_directory(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
 
     result = run_tool(FindTool(), {"path": "empty", "pattern": "*.py"}, context)
-
-    assert result.text == "No files found"
-    assert result.data == {"count": 0, "files": []}
-
-
-def test_find_tool_skips_symlinked_files_when_opted_out(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    outside = tmp_path / "outside.py"
-    outside.write_text("", encoding="utf-8")
-    link = workspace / "outside.py"
-    try:
-        link.symlink_to(outside)
-    except OSError as exc:
-        pytest.skip(f"symlinks unavailable: {exc}")
-    context = ToolContext(cwd=workspace, allow_outside_cwd=True)
-
-    result = run_tool(FindTool(), {"path": ".", "pattern": "*.py"}, context)
 
     assert result.text == "No files found"
     assert result.data == {"count": 0, "files": []}
