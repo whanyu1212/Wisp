@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -17,7 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing, run_settled, screen_shows
+from tests.tui_e2e.support import (
+    complete_frames,
+    full_repaint_after,
+    rendered_without_spacing,
+    run_settled,
+    screen_rows,
+    screen_shows,
+)
 
 
 def _rust_binary() -> Path:
@@ -115,8 +123,15 @@ class _TuiProcess:
                 os.kill(self.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            os.waitpid(self.pid, 0)
+        # A killed TUI can stall mid-exit on macOS until the other end of its
+        # terminal closes, so close it before waiting.
         os.close(self.fd)
+        if self.status is None:
+            deadline = time.monotonic() + 10
+            while os.waitpid(self.pid, os.WNOHANG)[0] == 0:
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"Rust TUI {self.pid} did not exit after SIGKILL")
+                time.sleep(0.05)
 
 
 def _launch(tmp_path: Path, *, home: Path, cwd: Path | None = None) -> tuple[_TuiProcess, Path]:
@@ -170,6 +185,16 @@ def _conversation_messages(session_dir: Path) -> list[tuple[str, str]]:
         if entry.get("kind") == "message"
         and (message := entry["message"])["role"] in {"user", "assistant"}
     ]
+
+
+_CONTEXT_FIGURE = re.compile(r"ctx \S+ (~\d+%)")
+
+
+def _context_figure(output: bytes) -> str | None:
+    for row in reversed(screen_rows(complete_frames(output))):
+        if match := _CONTEXT_FIGURE.search(row):
+            return match.group(1)
+    return None
 
 
 def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
@@ -260,17 +285,28 @@ def test_ctrl_r_restores_prompt_without_submitting(tmp_path: Path) -> None:
     tui, session_dir = _launch(tmp_path, home=home)
     try:
         tui.wait_ready()
+        context_before = _context_figure(tui.output)
         offset = len(tui.output)
         tui.send(b"recall me\r")
         tui.wait_until(
             lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="first prompt did not complete",
         )
+        # Statistics refresh after the run settles, and applying them makes the open
+        # popup unready, so an Enter in that gap is dropped. Wait for them first.
+        tui.wait_until(
+            lambda output: _context_figure(output) not in (None, context_before),
+            failure="context statistics did not refresh after the first prompt",
+        )
 
-        offset = len(tui.output)
         tui.send(b"\x12")
-        tui.wait_for(
-            b"Prompt history", b"Enter restore", since=offset, failure="history did not open"
+        tui.wait_for(b"Enter restore", failure="history did not open")
+        # Enter acts only on a choice that has been painted; a full repaint proves it.
+        offset = len(tui.output)
+        tui.resize(width=102)
+        tui.wait_until(
+            lambda output: b"Enter restore" in (full_repaint_after(output, offset) or b""),
+            failure="history did not repaint",
         )
         tui.send(b"\r")
         # The transcript shows the same words, so wait for the popup to close with the
