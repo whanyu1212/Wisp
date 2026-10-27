@@ -335,7 +335,7 @@ def test_rpc_mode_processes_queued_shutdown_after_running_prompt_finishes(
     ]
 
 
-def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
+def test_cancelled_prompt_is_skipped_and_unpersisted(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -365,6 +365,11 @@ def test_rpc_mode_queues_prompts_while_canceling_running_prompt(
         ("cmd-1", False),
         ("cmd-2", True),
     ]
+    session = JsonlSessionStore(tmp_path).latest()
+    persisted_user_messages = [
+        message.content for message in session.read_messages() if message.role == "user"
+    ]
+    assert persisted_user_messages == ["second"]
 
 
 @pytest.fixture(autouse=True)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from threading import Event
 
@@ -212,91 +213,27 @@ def test_in_process_sdk_shutdown_cancels_compact_final_state_refresh(
     anyio.run(scenario)
 
 
-def test_in_process_sdk_shutdown_cancels_clone_precommit_read(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    read_started = Event()
-    release_read = Event()
-    original_read_active_leaf_id = JsonlSession.read_active_leaf_id
-
-    def blocked_read_active_leaf_id(session: JsonlSession) -> str | None:
-        read_started.set()
-        release_read.wait(timeout=5)
-        return original_read_active_leaf_id(session)
-
-    monkeypatch.setattr(JsonlSession, "read_active_leaf_id", blocked_read_active_leaf_id)
-    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
-
-    async def scenario() -> None:
-        controller = await InProcessWisp.start(
-            WispConfig(provider="fake", session_dir=tmp_path),
-            options=InProcessOptions(startup_trusted=True),
-        )
-        prompt_id = await controller.prompt("seed", command_id="prompt-1")
-        try:
-            async for event in controller.events():
-                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
-                    await controller.clone_session(command_id="clone-1")
-                    break
-            with anyio.fail_after(1):
-                while not read_started.is_set():
-                    await anyio.sleep(0.01)
-            with anyio.fail_after(0.5):
-                await controller.aclose()
-        finally:
-            release_read.set()
-
-    anyio.run(scenario)
-
-
-def test_in_process_sdk_shutdown_cancels_fork_precommit_read(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    read_started = Event()
-    release_read = Event()
-    original_read_active_leaf_id = JsonlSession.read_active_leaf_id
-
-    def blocked_read_active_leaf_id(session: JsonlSession) -> str | None:
-        read_started.set()
-        release_read.wait(timeout=5)
-        return original_read_active_leaf_id(session)
-
-    monkeypatch.setattr(JsonlSession, "read_active_leaf_id", blocked_read_active_leaf_id)
-    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
-
-    async def scenario() -> None:
-        controller = await InProcessWisp.start(
-            WispConfig(provider="fake", session_dir=tmp_path),
-            options=InProcessOptions(startup_trusted=True),
-        )
-        prompt_id = await controller.prompt("seed", command_id="prompt-1")
-        try:
-            async for event in controller.events():
-                if isinstance(event, RpcCommandFinished) and event.command_id == prompt_id:
-                    session_state = controller._in_process_transport._host.coordinator.session_state
-                    source = session_state.session
-                    assert source is not None
-                    entry = next(
-                        entry
-                        for entry in source.read_entries()
-                        if isinstance(entry, MessageSessionEntry) and entry.message.role == "user"
-                    )
-                    await controller.fork_session(entry.id, command_id="fork-1")
-                    break
-            with anyio.fail_after(1):
-                while not read_started.is_set():
-                    await anyio.sleep(0.01)
-            with anyio.fail_after(0.5):
-                await controller.aclose()
-        finally:
-            release_read.set()
-
-    anyio.run(scenario)
-
-
-def test_in_process_sdk_shutdown_cancels_navigation_precommit_read(
+@pytest.mark.parametrize(
+    "start_command",
+    [
+        pytest.param(
+            lambda controller, _entry_id: controller.clone_session(command_id="clone-1"),
+            id="clone",
+        ),
+        pytest.param(
+            lambda controller, entry_id: controller.fork_session(entry_id, command_id="fork-1"),
+            id="fork",
+        ),
+        pytest.param(
+            lambda controller, entry_id: controller.navigate_session_tree(
+                entry_id, command_id="navigate-1"
+            ),
+            id="navigate",
+        ),
+    ],
+)
+def test_in_process_sdk_shutdown_cancels_precommit_read(
+    start_command: Callable[[InProcessWisp, str], Awaitable[str]],
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -329,7 +266,7 @@ def test_in_process_sdk_shutdown_cancels_navigation_precommit_read(
                         for entry in source.read_entries()
                         if isinstance(entry, MessageSessionEntry) and entry.message.role == "user"
                     )
-                    await controller.navigate_session_tree(entry.id, command_id="navigate-1")
+                    await start_command(controller, entry.id)
                     break
             with anyio.fail_after(1):
                 while not read_started.is_set():

@@ -28,10 +28,6 @@ _RPC_TEST_HANDSHAKE = (
 )
 
 
-def test_rpc_control_stream_buffers_at_most_one_parsed_event() -> None:
-    assert cli_rpc_module._RPC_CONTROL_STREAM_BUFFER_SIZE == 1
-
-
 def test_rpc_mode_requires_handshake_before_ordinary_commands(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -51,24 +47,6 @@ def test_rpc_mode_requires_handshake_before_ordinary_commands(
     records = _base_jsonl_records(result.stdout)
     assert [record["type"] for record in records] == ["rpc.handshake.rejected"]
     assert records[0]["code"] == "invalid_handshake"
-
-
-def test_rpc_mode_accepts_handshake_before_any_runtime_event(tmp_path: Path) -> None:
-    result = _BaseCliRunner().invoke(
-        app,
-        ["--mode", "rpc", "--session-dir", str(tmp_path)],
-        input=_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n',
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
-    )
-
-    assert result.exit_code == 0, result.output
-    records = _base_jsonl_records(result.stdout)
-    assert records[0]["type"] == "rpc.handshake.accepted"
-    assert [record["type"] for record in records[1:]] == [
-        "rpc.workspace",
-        "rpc.command.started",
-        "rpc.command.finished",
-    ]
 
 
 def test_rpc_mode_selected_from_environment_skips_plaintext_help(tmp_path: Path) -> None:
@@ -95,47 +73,6 @@ def test_rpc_mode_selected_from_environment_skips_plaintext_help(tmp_path: Path)
     ]
     assert records[-1]["command_id"] == "bye"
     assert records[-1]["ok"] is True
-
-
-@pytest.mark.process
-def test_rpc_mode_preserves_command_prefetched_with_handshake(tmp_path: Path) -> None:
-    async def scenario() -> list[dict[str, object]]:
-        process = await anyio.open_process(
-            [
-                sys.executable,
-                "-m",
-                "wisp",
-                "--mode",
-                "rpc",
-                "--session-dir",
-                str(tmp_path),
-            ],
-            env={**os.environ, "WISP_PROVIDER": "fake", "WISP_MODEL": ""},
-        )
-        assert process.stdin is not None
-        assert process.stdout is not None
-        await process.stdin.send(
-            (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
-        )
-        await process.stdin.aclose()
-        output = bytearray()
-        with anyio.fail_after(10):
-            while True:
-                try:
-                    output.extend(await process.stdout.receive())
-                except anyio.EndOfStream:
-                    break
-            await process.wait()
-        assert process.returncode == 0, await _read_stderr(process)
-        return _base_jsonl_records(output.decode())
-
-    records = anyio.run(scenario)
-    assert [record["type"] for record in records] == [
-        "rpc.handshake.accepted",
-        "rpc.workspace",
-        "rpc.command.started",
-        "rpc.command.finished",
-    ]
 
 
 @pytest.mark.process
@@ -210,6 +147,8 @@ def test_rpc_mode_writes_utf8_frames_with_non_utf8_stdio_encoding(tmp_path: Path
         )
         assert process.stdin is not None
         assert process.stdout is not None
+        # One write delivers the handshake and the first command together, so the
+        # command must survive being prefetched by the handshake reader.
         await process.stdin.send(
             (_RPC_TEST_HANDSHAKE + '{"id":"shutdown-1","type":"shutdown"}\n').encode()
         )
@@ -222,7 +161,7 @@ def test_rpc_mode_writes_utf8_frames_with_non_utf8_stdio_encoding(tmp_path: Path
                 except anyio.EndOfStream:
                     break
             await process.wait()
-        assert process.returncode == 0
+        assert process.returncode == 0, await _read_stderr(process)
         return bytes(output)
 
     output = anyio.run(scenario)

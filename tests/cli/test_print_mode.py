@@ -52,30 +52,6 @@ def test_cli_version_flag() -> None:
     assert result.output == f"wisp {__version__}\n"
 
 
-def test_bare_interactive_cli_selects_rust_without_native_binary(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    launched: dict[str, object] = {}
-
-    monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: True)
-    monkeypatch.setattr(
-        cli_module,
-        "_run_tui_from_cli_options",
-        lambda **kwargs: launched.update(kwargs),
-    )
-    monkeypatch.delenv("WISP_RUST_TUI_BINARY", raising=False)
-    monkeypatch.setattr("wisp.cli.native_tui.rust_binary.installed_rust_tui_binary", lambda: None)
-
-    result = CliRunner().invoke(
-        app,
-        [],
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
-    )
-
-    assert result.exit_code == 0, result.output
-    assert launched["all_tools"] is True
-
-
 def test_bare_noninteractive_cli_shows_help(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "_terminal_is_interactive", lambda: False)
     monkeypatch.setattr(

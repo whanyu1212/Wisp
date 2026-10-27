@@ -369,37 +369,6 @@ def test_rpc_mode_preserves_failed_prompt_in_next_prompt_history(
     ]
 
 
-def test_rpc_mode_excludes_cancelled_prompt_from_next_prompt_history(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    runner = CliRunner()
-    monkeypatch.setattr(rpc_host_module, "build_runtime", build_cancellable_runtime)
-
-    result = runner.invoke(
-        app,
-        ["--mode", "rpc", "--session-dir", str(tmp_path)],
-        input=(
-            '{"id":"cmd-1","type":"prompt","prompt":"slow"}\n'
-            '{"id":"cmd-2","type":"prompt","prompt":"second"}\n'
-            '{"id":"cancel-1","type":"cancel","target_id":"cmd-1"}\n'
-        ),
-        env={"WISP_PROVIDER": "cancellable-test", "WISP_MODEL": ""},
-    )
-
-    assert result.exit_code == 0, result.output
-    records = _jsonl_records(result.stdout)
-    assistant_messages = [
-        record["content"] for record in records if record["type"] == "message.completed"
-    ]
-    assert assistant_messages == ["done second"]
-    session = JsonlSessionStore(tmp_path).latest()
-    persisted_user_messages = [
-        message.content for message in session.read_messages() if message.role == "user"
-    ]
-    assert persisted_user_messages == ["second"]
-
-
 @pytest.fixture(autouse=True)
 def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
     guard_rpc_command_serialization(monkeypatch)

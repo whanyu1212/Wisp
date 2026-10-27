@@ -17,25 +17,25 @@ from wisp.cli.trust import (
 from wisp.trust.records import is_trusted, record_trust
 
 
-def test_env_override_trusted(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("WISP_TRUST", "1")
-    assert trust_override_from_env() is True
-    monkeypatch.setenv("WISP_TRUST", "yes")
-    assert trust_override_from_env() is True
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("1", True),
+        ("yes", True),
+        ("0", False),
+        ("off", False),
+        (None, None),
+        ("maybe", None),
+    ],
+    ids=["1", "yes", "0", "off", "absent", "unrecognized"],
+)
+def test_env_override(value: str | None, expected: bool | None, monkeypatch: MonkeyPatch) -> None:
+    if value is None:
+        monkeypatch.delenv("WISP_TRUST", raising=False)
+    else:
+        monkeypatch.setenv("WISP_TRUST", value)
 
-
-def test_env_override_untrusted(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("WISP_TRUST", "0")
-    assert trust_override_from_env() is False
-    monkeypatch.setenv("WISP_TRUST", "off")
-    assert trust_override_from_env() is False
-
-
-def test_env_override_absent_or_unrecognized(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.delenv("WISP_TRUST", raising=False)
-    assert trust_override_from_env() is None
-    monkeypatch.setenv("WISP_TRUST", "maybe")
-    assert trust_override_from_env() is None
+    assert trust_override_from_env() is expected
 
 
 def test_cli_trust_honors_env_override_over_prompt(

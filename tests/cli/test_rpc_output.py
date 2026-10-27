@@ -65,17 +65,23 @@ def test_rpc_writer_keeps_distinct_message_streams_separate() -> None:
     ]
 
 
-def test_rpc_writer_bounds_each_batch_by_source_parts() -> None:
+@pytest.mark.parametrize(
+    ("limits", "deltas", "expected"),
+    [
+        pytest.param({"max_parts": 2}, ["a", "b", "c", "d", "e"], ["ab", "cd", "e"], id="parts"),
+        pytest.param({"max_bytes": 3}, ["é", "é"], ["é", "é"], id="utf8-bytes"),
+    ],
+)
+def test_rpc_writer_bounds_each_batch(
+    limits: dict[str, int],
+    deltas: list[str],
+    expected: list[str],
+) -> None:
     async def scenario() -> list[WispEvent]:
         written: list[WispEvent] = []
         async with anyio.create_task_group() as task_group:
-            writer = RpcEventWriter(
-                written.append,
-                task_group,
-                flush_seconds=60,
-                max_parts=2,
-            )
-            for delta in ("a", "b", "c", "d", "e"):
+            writer = RpcEventWriter(written.append, task_group, flush_seconds=60, **limits)
+            for delta in deltas:
                 writer(MessageDelta(turn=1, delta=delta))
             writer.close()
             task_group.cancel_scope.cancel()
@@ -83,32 +89,7 @@ def test_rpc_writer_bounds_each_batch_by_source_parts() -> None:
 
     written = anyio.run(scenario)
 
-    assert [event.delta for event in written if isinstance(event, MessageDelta)] == [
-        "ab",
-        "cd",
-        "e",
-    ]
-
-
-def test_rpc_writer_bounds_each_batch_by_utf8_bytes() -> None:
-    async def scenario() -> list[WispEvent]:
-        written: list[WispEvent] = []
-        async with anyio.create_task_group() as task_group:
-            writer = RpcEventWriter(
-                written.append,
-                task_group,
-                flush_seconds=60,
-                max_bytes=3,
-            )
-            writer(MessageDelta(turn=1, delta="é"))
-            writer(MessageDelta(turn=1, delta="é"))
-            writer.close()
-            task_group.cancel_scope.cancel()
-        return written
-
-    written = anyio.run(scenario)
-
-    assert [event.delta for event in written if isinstance(event, MessageDelta)] == ["é", "é"]
+    assert [event.delta for event in written if isinstance(event, MessageDelta)] == expected
 
 
 def test_rpc_writer_flushes_a_partial_batch_after_deadline() -> None:
