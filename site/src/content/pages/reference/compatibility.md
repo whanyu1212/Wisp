@@ -116,6 +116,19 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.5 compatibility
+
+0.5.0 changes no command, event, handshake, session, settings, credential, or trust format, so
+0.4.x and 0.5.0 read each other's sessions. The backend and every frontend must still be the same
+release, and external RPC clients keep using the schema bundle of the installed release.
+
+The supported Python API only gains fields: `ToolContext` adds `withheld_environment` and
+`seen_files`. Tool behavior changes are listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md); the most visible are that
+`bash` commands no longer inherit the provider API key variables, that `write` and `edit` refuse
+an existing file the model has not read or that changed since it did, and that leaving a session
+stops its background processes.
+
 ## Deprecation and removal
 
 Except for an explicit exception documented below, a public API may be removed only when all of

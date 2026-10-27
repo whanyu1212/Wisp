@@ -3,7 +3,7 @@ title: Wisp 0.2.0rc9 release decision and checklist
 description: Release decision, prepublication checklist, and verification record for Wisp 0.2.0rc9.
 route: maintainers/releases/rc9-release.html
 section: maintainers
-order: 12
+order: 13
 layout: archive
 listed: false
 searchable: false

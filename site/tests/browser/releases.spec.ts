@@ -42,6 +42,7 @@ test("homepage release notes open the root changelog with working upgrade links"
 for (const [id, heading] of [
   ["030--unreleased", "0.3.0 — 2026-10-22"],
   ["031--unreleased", "0.3.1 — 2026-10-23"],
+  ["040--unreleased", "0.4.0 — 2026-10-25"],
 ]) {
   test(`dated changelog heading keeps its old anchor ${id}`, async ({
     page,
