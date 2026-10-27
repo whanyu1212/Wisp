@@ -793,6 +793,14 @@ impl UiState {
         self.connection_operation.is_some()
     }
 
+    /// Whether `command_id` is the history read that refreshes session metadata after a prompt.
+    pub(crate) fn is_post_prompt_sync(&self, command_id: &str) -> bool {
+        self.history_request.as_ref().is_some_and(|request| {
+            request.command_id == command_id
+                && matches!(request.kind, HistoryRequestKind::PostPromptSync)
+        })
+    }
+
     fn with_provider(
         provider: Option<String>,
         model: Option<String>,

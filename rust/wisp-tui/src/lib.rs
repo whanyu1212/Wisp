@@ -1221,7 +1221,7 @@ impl LiveUi {
         }
         // Preserve the identity of input captured before buffered workflow updates.
         // Streaming text and telemetry cannot replace a selected workflow target.
-        if event_loop::changes_activation_target(&action) {
+        if event_loop::changes_activation_target(&action, &self.state) {
             self.activation_revision = self.activation_revision.wrapping_add(1);
         }
         let automatic_decision_response = self.automatic_decision_label(&action).is_some();
