@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.5.0 — Unreleased
+<!-- Keeps links to the pre-release "0.5.0 — Unreleased" heading working. -->
+<a id="050--unreleased"></a>
+
+## 0.5.0 — 2026-10-27
 
 0.5.0 is a minor release that hardens the built-in tools: it closes two ways credentials or
 protected files could reach the model, stops commands Wisp starts from outliving it, and bounds
