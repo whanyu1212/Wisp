@@ -133,14 +133,29 @@ def test_openai_codex_provider_requires_login(tmp_path: Path) -> None:
         anyio.run(run)
 
 
-def test_openai_codex_provider_does_not_start_before_http_success(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(httpx.Response(401, text="invalid credentials"), id="unauthorized"),
+        pytest.param(
+            httpx.Response(429, json={"error": {"code": "insufficient_quota"}}),
+            id="terminal-quota",
+        ),
+    ],
+)
+def test_openai_codex_provider_fails_terminal_http_error_without_retry(
+    tmp_path: Path, response: httpx.Response
+) -> None:
     store = store_with_oauth(tmp_path)
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return response
 
     async def run() -> list[object]:
-        transport = httpx.MockTransport(
-            lambda _request: httpx.Response(401, text="invalid credentials")
-        )
-        async with httpx.AsyncClient(transport=transport) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             provider = OpenAICodexProvider(
                 auth_resolver=StoredProviderAuthResolver(store),
                 client=client,
@@ -150,7 +165,8 @@ def test_openai_codex_provider_does_not_start_before_http_success(tmp_path: Path
     events = anyio.run(run)
     assert len(events) == 1
     assert isinstance(events[0], ProviderResponseFailed)
-    assert "OpenAI Codex API error (401)" in events[0].message
+    assert f"OpenAI Codex API error ({response.status_code})" in events[0].message
+    assert attempts == 1
 
 
 def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: Path) -> None:
@@ -359,30 +375,6 @@ def test_openai_codex_opening_failure_keeps_diagnostics_after_retries(
     assert attempts == max_retries + 1
     assert len(events) == max_retries + 1
     assert all(isinstance(event, ProviderRetrying) for event in events[:-1])
-
-
-def test_openai_codex_provider_does_not_retry_terminal_quota_error(tmp_path: Path) -> None:
-    store = store_with_oauth(tmp_path)
-    attempts = 0
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal attempts
-        attempts += 1
-        return httpx.Response(429, json={"error": {"code": "insufficient_quota"}})
-
-    async def run() -> list[object]:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            provider = OpenAICodexProvider(
-                auth_resolver=StoredProviderAuthResolver(store),
-                client=client,
-            )
-            return [event async for event in provider.stream([Message(role="user", content="hi")])]
-
-    events = anyio.run(run)
-    assert len(events) == 1
-    assert isinstance(events[0], ProviderResponseFailed)
-    assert "OpenAI Codex API error (429)" in events[0].message
-    assert attempts == 1
 
 
 def test_openai_codex_provider_raises_after_exhausting_opening_retries(tmp_path: Path) -> None:

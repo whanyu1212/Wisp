@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import cast
 
 import anyio
@@ -311,39 +311,34 @@ def test_openai_provider_does_not_expose_tool_calls_before_native_completion() -
     ]
 
 
-def test_openai_provider_emits_failed_terminal_on_stream_error_event() -> None:
-    provider = StubOpenAIProvider([_error_event("boom")])
+# The event helpers are defined below the tests, so each row builds its event lazily.
+@pytest.mark.parametrize(
+    ("native_event", "message"),
+    [
+        pytest.param(lambda: _error_event("boom"), "OpenAI API error: boom", id="error"),
+        pytest.param(
+            lambda: _failed_event("server exploded"),
+            "OpenAI response failed: server exploded",
+            id="failed",
+        ),
+        pytest.param(
+            lambda: _incomplete_event("max_output_tokens"),
+            "OpenAI response incomplete: max_output_tokens",
+            id="incomplete",
+        ),
+    ],
+)
+def test_openai_provider_emits_one_native_failed_terminal(
+    native_event: Callable[[], ResponseStreamEvent], message: str
+) -> None:
+    provider = StubOpenAIProvider([native_event()])
 
     async def run() -> list[object]:
         return [event async for event in provider.stream([Message(role="user", content="hello")])]
 
     assert anyio.run(run) == [
         ProviderResponseStarted(model="default-test-model"),
-        ProviderResponseFailed(message="OpenAI API error: boom"),
-    ]
-
-
-def test_openai_provider_emits_failed_terminal_on_failed_response_event() -> None:
-    provider = StubOpenAIProvider([_failed_event("server exploded")])
-
-    async def run() -> list[object]:
-        return [event async for event in provider.stream([Message(role="user", content="hello")])]
-
-    assert anyio.run(run) == [
-        ProviderResponseStarted(model="default-test-model"),
-        ProviderResponseFailed(message="OpenAI response failed: server exploded"),
-    ]
-
-
-def test_openai_provider_emits_failed_terminal_on_incomplete_response_event() -> None:
-    provider = StubOpenAIProvider([_incomplete_event("max_output_tokens")])
-
-    async def run() -> list[object]:
-        return [event async for event in provider.stream([Message(role="user", content="hello")])]
-
-    assert anyio.run(run) == [
-        ProviderResponseStarted(model="default-test-model"),
-        ProviderResponseFailed(message="OpenAI response incomplete: max_output_tokens"),
+        ProviderResponseFailed(message=message),
     ]
 
 
