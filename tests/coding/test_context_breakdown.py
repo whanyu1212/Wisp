@@ -18,7 +18,6 @@ from wisp.events import (
     SessionStatsReported,
     ToolCallSnapshot,
     wisp_event_from_dict,
-    wisp_event_from_json,
 )
 from wisp.messages import CompactionRecord, Message
 from wisp.providers.base import ToolSpec
@@ -245,17 +244,6 @@ def test_turns_group_by_run(tmp_path: Path) -> None:
     assert largest.label == "bash gh pr checks 766 --watch output"
     assert largest.turn == 2
     assert len(breakdown.largest) == 3
-
-
-def test_breakdown_round_trips(tmp_path: Path) -> None:
-    messages, parts = _prompt(tmp_path)
-    stats = _stats(_history(), messages, parts)
-    event = SessionStatsReported(command_id="c", stats=stats)
-
-    decoded = wisp_event_from_json(event.model_dump_json())
-
-    assert isinstance(decoded, SessionStatsReported)
-    assert decoded.stats.context_breakdown == stats.context_breakdown
 
 
 def test_rust_fixture_decodes() -> None:

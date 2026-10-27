@@ -363,8 +363,15 @@ def test_preflight_steering_can_trigger_compaction(tmp_path: Path) -> None:
     assert events[-1].outcome == "completed"
 
 
-def test_rejects_oversized_fresh_prompt_before_provider(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("prompt", "reserve_tokens"),
+    [
+        pytest.param("x" * 8_000, 100, id="oversized-prompt"),
+        pytest.param("small prompt", 2_000, id="reserve-consumes-window"),
+    ],
+)
+def test_rejects_unfittable_prompt_before_provider(
+    tmp_path: Path, prompt: str, reserve_tokens: int
 ) -> None:
     provider = ScriptedProvider([], default_model="model")
     store = JsonlSessionStore(tmp_path)
@@ -377,37 +384,11 @@ def test_rejects_oversized_fresh_prompt_before_provider(
             auto_compact_token_limit=1_600,
         ),
         prompt_messages=(Message(role="system", content="system"),),
-        context_reserve_tokens=100,
+        context_reserve_tokens=reserve_tokens,
     )
 
     async def run() -> list[WispEvent]:
-        return [event async for event in agent.run("x" * 8_000)]
-
-    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
-        anyio.run(run)
-    assert provider.calls == []
-    assert store.latest().read_context_messages() == ()
-
-
-def test_rejects_provider_reserve_that_consumes_window(
-    tmp_path: Path,
-) -> None:
-    provider = ScriptedProvider([], default_model="model")
-    store = JsonlSessionStore(tmp_path)
-    agent = CodingSession(
-        provider=provider,
-        sessions=store,
-        model="model",
-        models=build_model_registry(
-            context_window=2_000,
-            auto_compact_token_limit=1_600,
-        ),
-        prompt_messages=(Message(role="system", content="system"),),
-        context_reserve_tokens=2_000,
-    )
-
-    async def run() -> list[WispEvent]:
-        return [event async for event in agent.run("small prompt")]
+        return [event async for event in agent.run(prompt)]
 
     with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
         anyio.run(run)
@@ -1008,11 +989,6 @@ def test_recovers_when_active_tool_turn_stays_over_limit(
     """Once history is fully compacted, an active-turn tool result that still exceeds
     the provider's auto-compaction limit must be truncated and the turn allowed to
     continue — not rolled back and raised as a terminal ``ContextOverflowError``.
-
-    This exercises the same "irreducibly large single tool result" shape as
-    ``test_coding_session_stops_when_active_tool_turn_remains_over_provider_limit``
-    above, but asserts the fixed (recoverable) outcome. Currently fails: the session
-    still rolls back and raises.
     """
 
     class HugeReadTool:

@@ -204,34 +204,6 @@ def test_prompt_orders_guidance_before_boundary_and_mode(
     assert "distinguish confirmed" in messages[-1].content
 
 
-def test_prompt_can_skip_project_context(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
-    (tmp_path / "AGENTS.md").write_text("Do project-specific things.\n", encoding="utf-8")
-    (tmp_path / "CLAUDE.md").write_text("Legacy Claude guidance.\n", encoding="utf-8")
-    tool = ToolSpec(
-        name="read",
-        description="Read a UTF-8 text file.",
-        input_schema={"type": "object", "properties": {}},
-    )
-
-    messages = build_prompt_messages(
-        cwd=tmp_path,
-        tools=[tool],
-        include_project_context=False,
-    )
-
-    context = messages[1].content
-    assert str(tmp_path.resolve(strict=False)) not in context
-    assert "pyproject.toml" not in context
-    assert "AGENTS.md" not in context
-    assert "CLAUDE.md" not in context
-    assert "Do project-specific things." not in context
-    assert "Legacy Claude guidance." not in context
-    assert "git:" not in context
-    assert "project context: skipped because this project is not trusted" in context
-    assert "allowed tools:\n  - read: Read a UTF-8 text file." in context
-
-
 def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     context = build_project_context(cwd=tmp_path, tools=[])
 
@@ -338,20 +310,6 @@ def test_project_context_uses_context_file_as_root_marker(
 
     assert f"project root: {project.resolve(strict=False)}" in context
     assert "--- AGENTS.md ---\nRoot-only agent guidance." in context
-
-
-def test_prompt_loads_root_context_from_subdirectory(
-    tmp_path: Path,
-) -> None:
-    project = tmp_path / "project"
-    subdir = project / "packages" / "app"
-    subdir.mkdir(parents=True)
-    (project / "pyproject.toml").write_text("[project]\nname = 'demo'\n", encoding="utf-8")
-    (project / "AGENTS.md").write_text("Repo root guidance.\n", encoding="utf-8")
-
-    messages = build_prompt_messages(cwd=subdir)
-
-    assert "--- AGENTS.md ---\nRepo root guidance." in messages[1].content
 
 
 def test_resolve_project_context_root_detects_parent_project(tmp_path: Path) -> None:

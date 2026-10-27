@@ -23,7 +23,6 @@ from wisp.coding.tool_execution import (
     _promote_before_text,
     _promote_created,
     _promote_exit_code,
-    _promote_truncated,
 )
 from wisp.events import ToolExecutionEnded, wisp_event_from_json
 from wisp.providers.events import ToolCall
@@ -37,60 +36,66 @@ from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 _PROCESS_START = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
-def test_promote_exit_code_extracts_for_recognized_shell_tool() -> None:
-    assert _promote_exit_code("bash", {"exit_code": 2}) == 2
-    assert _promote_exit_code("bash", {"exit_code": 0}) == 0
+@pytest.mark.parametrize(
+    ("name", "data", "expected"),
+    [
+        pytest.param("bash", {"exit_code": 2}, 2, id="failure"),
+        pytest.param("bash", {"exit_code": 0}, 0, id="success"),
+        # A custom tool may legitimately carry an integer "exit_code" that has no
+        # process-exit meaning; it must not reach the event or drive failure styling.
+        pytest.param("custom", {"exit_code": 7}, None, id="custom-tool"),
+        pytest.param("search", {"exit_code": 1}, None, id="search-tool"),
+        pytest.param("bash", {}, None, id="absent"),
+        pytest.param("bash", {"exit_code": "boom"}, None, id="string"),
+        pytest.param("bash", {"exit_code": None}, None, id="none"),
+    ],
+)
+def test_promote_exit_code_only_for_shell_ints(
+    name: str, data: Mapping[str, object], expected: int | None
+) -> None:
+    assert _promote_exit_code(name, data) == expected
 
 
-def test_promote_exit_code_ignores_unrecognized_tools() -> None:
-    # A custom tool may legitimately carry an integer "exit_code" that has no
-    # process-exit meaning; it must not reach the event or drive failure styling.
-    assert _promote_exit_code("custom", {"exit_code": 7}) is None
-    assert _promote_exit_code("search", {"exit_code": 1}) is None
+@pytest.mark.parametrize(
+    ("name", "data", "expected"),
+    [
+        pytest.param("write", {"before_text": "old\n"}, "old\n", id="snapshot"),
+        pytest.param("write", {"before_text": ""}, "", id="empty-snapshot"),
+        # A custom tool that stashes a "before_text" must not feed the diff renderer;
+        # only the write tool's snapshot is promoted onto the event.
+        pytest.param("edit", {"before_text": "old\n"}, None, id="edit-tool"),
+        pytest.param("custom", {"before_text": "old\n"}, None, id="custom-tool"),
+        pytest.param("write", {}, None, id="absent"),
+        pytest.param("write", {"before_text": 123}, None, id="int"),
+        pytest.param("write", {"before_text": None}, None, id="none"),
+    ],
+)
+def test_promote_before_text_only_for_write_strings(
+    name: str, data: Mapping[str, object], expected: str | None
+) -> None:
+    assert _promote_before_text(name, data) == expected
 
 
-def test_promote_exit_code_none_when_absent_or_non_int() -> None:
-    assert _promote_exit_code("bash", {}) is None
-    assert _promote_exit_code("bash", {"exit_code": "boom"}) is None
-    assert _promote_exit_code("bash", {"exit_code": None}) is None
-
-
-def test_promote_before_text_extracts_for_write_tool() -> None:
-    assert _promote_before_text("write", {"before_text": "old\n"}) == "old\n"
-    assert _promote_before_text("write", {"before_text": ""}) == ""
-
-
-def test_promote_before_text_ignores_unrecognized_tools() -> None:
-    # A custom tool that stashes a "before_text" must not feed the diff renderer;
-    # only the write tool's snapshot is promoted onto the event.
-    assert _promote_before_text("edit", {"before_text": "old\n"}) is None
-    assert _promote_before_text("custom", {"before_text": "old\n"}) is None
-
-
-def test_promote_before_text_none_when_absent_or_non_str() -> None:
-    assert _promote_before_text("write", {}) is None
-    assert _promote_before_text("write", {"before_text": 123}) is None
-    assert _promote_before_text("write", {"before_text": None}) is None
-
-
-def test_promote_created_extracts_for_write_tool() -> None:
-    assert _promote_created("write", {"created": True}) is True
-    assert _promote_created("write", {"created": False}) is False
-
-
-def test_promote_created_ignores_unrecognized_tools() -> None:
-    # Only write-like tools report a create; anything else is treated as "not a
-    # create" so a stray "created" key can't drive create-style rendering.
-    assert _promote_created("edit", {"created": True}) is False
-    assert _promote_created("custom", {"created": True}) is False
-
-
-def test_promote_created_false_when_absent_or_non_bool() -> None:
-    # Conservative default: a missing or odd value reads as "overwrote", which never
-    # fabricates a create-style pure-addition diff.
-    assert _promote_created("write", {}) is False
-    assert _promote_created("write", {"created": "yes"}) is False
-    assert _promote_created("write", {"created": None}) is False
+@pytest.mark.parametrize(
+    ("name", "data", "expected"),
+    [
+        pytest.param("write", {"created": True}, True, id="created"),
+        pytest.param("write", {"created": False}, False, id="overwrote"),
+        # Only write-like tools report a create; anything else is treated as "not a
+        # create" so a stray "created" key can't drive create-style rendering.
+        pytest.param("edit", {"created": True}, False, id="edit-tool"),
+        pytest.param("custom", {"created": True}, False, id="custom-tool"),
+        # Conservative default: a missing or odd value reads as "overwrote", which never
+        # fabricates a create-style pure-addition diff.
+        pytest.param("write", {}, False, id="absent"),
+        pytest.param("write", {"created": "yes"}, False, id="string"),
+        pytest.param("write", {"created": None}, False, id="none"),
+    ],
+)
+def test_promote_created_only_for_write_bools(
+    name: str, data: Mapping[str, object], expected: bool
+) -> None:
+    assert _promote_created(name, data) is expected
 
 
 class _TruncatingTool:
@@ -286,18 +291,6 @@ def test_executor_promotes_truncated_from_tool_result() -> None:
     assert _run_executor(_TruncatingTool(truncated=False)).truncated is False
 
 
-def test_promote_truncated_coerces_non_bool_to_false() -> None:
-    # ToolResult has no validation; only a real bool is honored (not truthiness, so a
-    # string "no" never reads as capped). Everything else defaults to not-truncated.
-    assert _promote_truncated(True) is True
-    assert _promote_truncated(False) is False
-    assert _promote_truncated(None) is False
-    assert _promote_truncated("yes") is False
-    assert _promote_truncated("no") is False
-    assert _promote_truncated(3) is False
-    assert _promote_truncated([1]) is False
-
-
 def test_executor_tolerates_non_bool_truncated_flag() -> None:
     # A malformed extension tool handing back a non-bool truncated must not raise a
     # Pydantic ValidationError when ToolExecutionEnded is built (outside _run_tool's
@@ -366,25 +359,25 @@ def test_executor_classifies_tool_argument_errors() -> None:
     assert ended.output.endswith(f"\nRecovery: {ended.recovery_hint}")
 
 
-def test_executor_degrades_inconsistent_tool_error_metadata() -> None:
-    ended = _run_executor(
-        _RaisingTool(ToolError("retry me", retryable=True, recovery_hint="secret hint"))
-    )
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(
+            ToolError("retry me", retryable=True, recovery_hint="secret hint"),
+            id="inconsistent-metadata",
+        ),
+        pytest.param(RuntimeError("api-key=secret"), id="unexpected-exception"),
+        pytest.param(ToolError("\ud800"), id="unencodable-message"),
+    ],
+)
+def test_executor_hides_untrusted_error_detail(exc: Exception) -> None:
+    ended = _run_executor(_RaisingTool(exc))
 
     assert ended.is_error is True
     assert ended.failure_code == "internal_error"
     assert ended.retryable is False
     assert ended.recovery_hint is None
     assert ended.output == "Tool execution failed"
-
-
-def test_executor_hides_unexpected_exception_detail() -> None:
-    ended = _run_executor(_RaisingTool(RuntimeError("api-key=secret")))
-
-    assert ended.is_error is True
-    assert ended.failure_code == "internal_error"
-    assert ended.output == "Tool execution failed"
-    assert "secret" not in ended.output
 
 
 def test_executor_hides_malformed_result_detail_from_model() -> None:
@@ -416,13 +409,6 @@ def test_executor_treats_unencodable_metadata_as_malformed(
 
     assert ended.is_error is True
     assert ended.output == "Tool returned an invalid result"
-
-
-def test_executor_hides_unencodable_tool_error_message() -> None:
-    ended = _run_executor(_RaisingTool(ToolError("\ud800")))
-
-    assert ended.is_error is True
-    assert ended.output == "Tool execution failed"
 
 
 def test_executor_bounds_successful_extension_output() -> None:

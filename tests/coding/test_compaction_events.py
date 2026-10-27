@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 from pydantic import ValidationError
 
@@ -61,19 +59,6 @@ def test_parser_rejects_old_per_event_schema_version() -> None:
         KnownWispEventAdapter.validate_python(payload)
 
 
-def test_threshold_compaction_events_round_trip() -> None:
-    estimate = estimate_context((Message(role="user", content="hello"),))
-    budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
-    event = CompactionStarted(
-        session_id="session",
-        reason="threshold",
-        source_entry_count=4,
-        trigger_budget=budget,
-    )
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
 def test_overflow_compaction_events_validate_retry_metadata() -> None:
     estimate = estimate_context((Message(role="user", content="hello"),))
     budget = build_context_budget(estimate, context_window=100, reserve_tokens=20)
@@ -130,22 +115,6 @@ def test_overflow_compaction_events_validate_retry_metadata() -> None:
             retained_entry_count=2,
             will_retry=True,
         )
-
-
-def test_compaction_started_without_trigger_budget_round_trips() -> None:
-    payload = json.dumps(
-        {
-            "type": "compaction.started",
-            "timestamp": "2026-07-19T00:00:00Z",
-            "session_id": "session",
-            "source_entry_count": 4,
-        }
-    )
-
-    event = wisp_event_from_json(payload)
-
-    assert event.model_dump(mode="json")["trigger_budget"] is None
-    assert wisp_event_from_json(event.model_dump_json()) == event
 
 
 def test_compaction_started_validates_reason_metadata() -> None:

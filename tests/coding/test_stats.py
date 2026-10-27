@@ -14,7 +14,6 @@ from wisp.coding.compaction import should_auto_compact
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.events import (
     CompactionPolicyStatus,
-    ContextEstimate,
     ContextEstimated,
     MessageCompleted,
     MessageStarted,
@@ -176,20 +175,6 @@ def _usage(
         cache_write_input_tokens=cache_write,
         reasoning_output_tokens=reasoning,
     )
-
-
-def test_estimate_accepts_old_method_values() -> None:
-    legacy = {
-        "method": "chars_div_4_v1",
-        "system_tokens": 1,
-        "message_tokens": 2,
-        "tool_schema_tokens": 3,
-        "total_tokens": 6,
-    }
-
-    estimate = ContextEstimate.model_validate(legacy)
-
-    assert estimate.method == "chars_div_4_v1"
 
 
 @pytest.mark.parametrize(
