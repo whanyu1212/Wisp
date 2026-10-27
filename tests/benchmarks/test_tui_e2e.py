@@ -122,25 +122,30 @@ def test_reply_markers_read_from_replayed_screen() -> None:
         _frame(b"\x1b[24;40Hidle   "),
     ]
     screen = rust_tui_e2e._PaintedScreen()
+    reply = rust_tui_e2e._ReplyProgress()
     progress = []
 
-    for frame in frames:
+    for read, frame in enumerate(frames):
         screen.feed(frame)
-        rows = screen.rows()
-        progress.append(
-            (
-                rust_tui_e2e._response_started(rows),
-                rust_tui_e2e._response_final_row(rows) is not None,
-                rust_tui_e2e._settled_after_final(rows),
-            )
-        )
+        reply.observe(screen.rows(), read)
+        progress.append((reply.first_ns, reply.final_ns, reply.settled_ns))
 
-    assert progress == [
-        (False, False, False),
-        (True, False, False),
-        (True, True, False),
-        (True, True, True),
-    ]
+    assert progress == [(None, None, None), (1, None, None), (1, 2, None), (1, 2, 3)]
+
+
+def test_reply_start_counts_before_a_later_frame_scrolls_it() -> None:
+    # A long reply on a short terminal: one read holds the frame showing the
+    # reply's first row and the frame that scrolls it away.
+    read = _frame(b"\x1b[6;3Hfake response to: WISP_E2E_START_7F3A payload") + _frame(
+        b"\x1b[6;3H\x1b[Kpayload payload\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D\x1b[24;40Hidle"
+    )
+    screen = rust_tui_e2e._PaintedScreen()
+    reply = rust_tui_e2e._ReplyProgress()
+
+    for _frame_applied in screen.replay(read):
+        reply.observe(screen.rows(), 1)
+
+    assert (reply.first_ns, reply.final_ns, reply.settled_ns) == (1, 1, 1)
 
 
 def test_ready_ignores_cursor_gaps() -> None:

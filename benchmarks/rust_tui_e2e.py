@@ -24,7 +24,7 @@ import tempfile
 import termios
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -368,9 +368,7 @@ def _run_sample(
         ready_ns: int | None = None
         submitted_ns: int | None = None
         prompt_echo_ns: int | None = None
-        first_response_ns: int | None = None
-        final_response_ns: int | None = None
-        settled_ns: int | None = None
+        reply = _ReplyProgress()
         idle_repaint_requested = False
         quit_sent = False
         wait_result: _WaitResult | None = None
@@ -389,13 +387,17 @@ def _run_sample(
             start_writer_open = False
             while time.monotonic() < deadline:
                 chunk = _read_available(terminal_fd)
+                now_ns = time.perf_counter_ns()
                 if chunk:
                     terminal_output_bytes += len(chunk)
                     output.extend(chunk)
-                    screen.feed(chunk)
                     if submitted_ns is not None:
                         phase_output.extend(chunk)
-                now_ns = time.perf_counter_ns()
+                    # A later frame in the same read can scroll the reply's first row
+                    # away, so observe the reply after every frame.
+                    for _frame in screen.replay(chunk):
+                        if submitted_ns is not None:
+                            reply.observe(screen.rows(), now_ns)
                 startup_plain = _plain_text(output) if ready_ns is None else ""
                 context_visible = "~" in startup_plain and any(
                     marker in startup_plain for marker in ("ctx", "context", "offline")
@@ -418,29 +420,19 @@ def _run_sample(
                     plain = _plain_text(phase_output)
                     if prompt_echo_ns is None and START_TOKEN in plain:
                         prompt_echo_ns = now_ns
-                    rows = screen.rows()
-                    if first_response_ns is None and _response_started(rows):
-                        first_response_ns = now_ns
                     if (
-                        first_response_ns is not None
-                        and final_response_ns is None
-                        and _response_final_row(rows) is not None
+                        reply.final_ns is not None
+                        and reply.settled_ns is None
+                        and not idle_repaint_requested
+                        and now_ns - reply.final_ns > _IDLE_REPAINT_AFTER_NS
                     ):
-                        final_response_ns = now_ns
-                    if final_response_ns is not None and settled_ns is None:
-                        if _settled_after_final(rows):
-                            settled_ns = now_ns
-                        elif (
-                            not idle_repaint_requested
-                            and now_ns - final_response_ns > _IDLE_REPAINT_AFTER_NS
-                        ):
-                            fcntl.ioctl(
-                                terminal_fd,
-                                termios.TIOCSWINSZ,
-                                struct.pack("HHHH", config.height, config.width - 1, 0, 0),
-                            )
-                            idle_repaint_requested = True
-                    if settled_ns is not None and not quit_sent:
+                        fcntl.ioctl(
+                            terminal_fd,
+                            termios.TIOCSWINSZ,
+                            struct.pack("HHHH", config.height, config.width - 1, 0, 0),
+                        )
+                        idle_repaint_requested = True
+                    if reply.settled_ns is not None and not quit_sent:
                         os.write(terminal_fd, b"/quit\r")
                         quit_sent = True
 
@@ -463,9 +455,9 @@ def _run_sample(
                 phase = _phase_name(
                     ready_ns,
                     prompt_echo_ns,
-                    first_response_ns,
-                    final_response_ns,
-                    settled_ns,
+                    reply.first_ns,
+                    reply.final_ns,
+                    reply.settled_ns,
                 )
                 raise RuntimeError(
                     f"{renderer} TUI timed out during {phase}; "
@@ -499,9 +491,9 @@ def _run_sample(
             ready_ns,
             submitted_ns,
             prompt_echo_ns,
-            first_response_ns,
-            final_response_ns,
-            settled_ns,
+            reply.first_ns,
+            reply.final_ns,
+            reply.settled_ns,
         )
         if any(value is None for value in milestones):
             raise RuntimeError(f"{renderer} TUI exited before every exact marker became visible")
@@ -683,6 +675,32 @@ def _settled_after_final(rows: Sequence[str]) -> bool:
     return final_row is not None and any("idle" in row for row in rows[final_row + 1 :])
 
 
+@dataclass
+class _ReplyProgress:
+    """When the fake reply first showed, showed its final marker, and settled."""
+
+    first_ns: int | None = None
+    final_ns: int | None = None
+    settled_ns: int | None = None
+
+    def observe(self, rows: Sequence[str], now_ns: int) -> None:
+        """Record each milestone the replayed screen shows for the first time.
+
+        Args:
+            rows: Replayed screen rows after one frame.
+            now_ns: When the frame was read.
+        """
+
+        if self.first_ns is None and _response_started(rows):
+            self.first_ns = now_ns
+        if self.first_ns is None:
+            return
+        if self.final_ns is None and _response_final_row(rows) is not None:
+            self.final_ns = now_ns
+        if self.final_ns is not None and self.settled_ns is None and _settled_after_final(rows):
+            self.settled_ns = now_ns
+
+
 class _PaintedScreen:
     """Screen cells replayed from the complete frames the TUI has written.
 
@@ -708,13 +726,31 @@ class _PaintedScreen:
             chunk: PTY output in the order it was read.
         """
 
+        for _frame in self.replay(chunk):
+            pass
+
+    def replay(self, chunk: bytes) -> Iterator[None]:
+        """Replay each frame that ``chunk`` completes, pausing after each one.
+
+        One read can hold several frames, and a later frame may scroll away what an
+        earlier one showed, so a caller can inspect ``rows()`` at every pause.
+
+        Args:
+            chunk: PTY output in the order it was read.
+
+        Yields:
+            None: After each complete frame is applied.
+        """
+
         self._unframed.extend(chunk)
-        end = self._unframed.rfind(_FRAME_END)
-        if end < 0:
-            return
-        end += len(_FRAME_END)
-        frames = _OSC.sub(b"", _DCS.sub(b"", bytes(self._unframed[:end])))
-        del self._unframed[:end]
+        while (end := self._unframed.find(_FRAME_END)) >= 0:
+            end += len(_FRAME_END)
+            frame = _OSC.sub(b"", _DCS.sub(b"", bytes(self._unframed[:end])))
+            del self._unframed[:end]
+            self._apply_frame(frame)
+            yield
+
+    def _apply_frame(self, frames: bytes) -> None:
         self._rows = None
         position = 0
         while position < len(frames):
