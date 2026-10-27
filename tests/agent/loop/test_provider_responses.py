@@ -14,6 +14,7 @@ from tests.agent.loop.support import (
     completed_stream,
     tool_call_stream,
 )
+from tests.support.agent_runtime import assert_continuation_invariants
 from wisp.agent.loop import AgentLoopConfig, run_agent_loop
 from wisp.agent.request_boundary import (
     RequestBoundaryDecision,
@@ -451,6 +452,7 @@ def test_truncated_batches_count_as_iterations() -> None:
     results = [event for event in events if isinstance(event, ToolResultReady)]
     assert [event.call_id for event in results] == ["call-1"]
     assert len(provider.calls) == 2
+    assert_continuation_invariants(events)
 
 
 def test_failed_response_skips_streamed_calls() -> None:

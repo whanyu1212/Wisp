@@ -15,6 +15,7 @@ from tests.agent.harness.support import (
     message_with_nested_arguments,
 )
 from tests.agent.loop.support import tool_call_stream
+from tests.support.agent_runtime import assert_cancellation_settled
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig, QueuedMessages
 from wisp.events import (
     QueueKind,
@@ -265,7 +266,8 @@ def test_queue_updated_event_round_trips() -> None:
     assert wisp_event_from_json(event.model_dump_json()) == event
 
 
-def test_drains_follow_ups_one_per_turn() -> None:
+@pytest.mark.parametrize("kind", ["steering", "follow_up"])
+def test_drains_queue_one_per_turn(kind: QueueKind) -> None:
     provider = ScriptedProvider(
         [
             [
@@ -283,8 +285,9 @@ def test_drains_follow_ups_one_per_turn() -> None:
         ]
     )
     harness = build_harness(provider)
-    harness.follow_up("first follow-up")
-    harness.follow_up("second follow-up")
+    enqueue = harness.steer if kind == "steering" else harness.follow_up
+    enqueue("first queued")
+    enqueue("second queued")
 
     async def run() -> list[object]:
         return [event async for event in harness.prompt("initial")]
@@ -294,23 +297,24 @@ def test_drains_follow_ups_one_per_turn() -> None:
     assert [(message.role, message.content) for message in harness.messages] == [
         ("user", "initial"),
         ("assistant", "first answer"),
-        ("user", "first follow-up"),
+        ("user", "first queued"),
         ("assistant", "second answer"),
-        ("user", "second follow-up"),
+        ("user", "second queued"),
         ("assistant", "third answer"),
     ]
     assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "first follow-up",
-        "second follow-up",
+        "first queued",
+        "second queued",
     ]
-    assert [event.follow_up for event in events if isinstance(event, QueueUpdated)] == [
-        ("second follow-up",),
+    updates = [event for event in events if isinstance(event, QueueUpdated)]
+    assert [event.steering if kind == "steering" else event.follow_up for event in updates] == [
+        ("second queued",),
         (),
     ]
     assert [call.messages[-1].content for call in provider.calls] == [
         "initial",
-        "first follow-up",
-        "second follow-up",
+        "first queued",
+        "second queued",
     ]
     assert [event.turn for event in events if event.type == "turn.started"] == [1, 2, 3]
 
@@ -567,12 +571,6 @@ def test_drains_preflight_steering_into_transcript() -> None:
     assert harness.queued_messages.steering == ()
 
 
-def test_queue_message_injected_event_round_trips() -> None:
-    event = QueueMessageInjected(kind="follow_up", content="continue")
-
-    assert wisp_event_from_json(event.model_dump_json()) == event
-
-
 def test_injects_steering_after_tool_batch() -> None:
     tool_call = ToolCall(call_id="call-1", name="lookup", arguments={})
     provider = ScriptedProvider(
@@ -664,38 +662,6 @@ def test_steering_batch_precedes_follow_up() -> None:
     ]
 
 
-def test_drains_steering_one_per_turn() -> None:
-    provider = ScriptedProvider(
-        [
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="first")],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="second")],
-            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="third")],
-        ]
-    )
-    harness = build_harness(provider)
-    harness.steer("steer one")
-    harness.steer("steer two")
-
-    async def run() -> list[object]:
-        return [event async for event in harness.prompt("initial")]
-
-    events = anyio.run(run)
-
-    assert [event.content for event in events if isinstance(event, QueueMessageInjected)] == [
-        "steer one",
-        "steer two",
-    ]
-    assert [event.steering for event in events if isinstance(event, QueueUpdated)] == [
-        ("steer two",),
-        (),
-    ]
-    assert [call.messages[-1].content for call in provider.calls] == [
-        "initial",
-        "steer one",
-        "steer two",
-    ]
-
-
 def test_cancel_at_boundary_keeps_steering() -> None:
     provider = ScriptedProvider(
         [
@@ -721,46 +687,11 @@ def test_cancel_at_boundary_keeps_steering() -> None:
     assert not any(isinstance(event, QueueMessageInjected) for event in events)
     assert [message.content for message in harness.queued_messages.steering] == ["do not inject"]
     assert events[-1].type == "error"
+    assert_cancellation_settled(events)
 
 
-def test_close_mid_batch_keeps_unexposed_steering() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="answer"),
-            ]
-        ]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(
-            provider=provider,
-            tool_executor=RecordingToolExecutor(),
-            steering_mode="all",
-        )
-    )
-    harness.steer("visible")
-    harness.steer("still queued")
-
-    async def run() -> QueueMessageInjected:
-        events = harness.prompt("initial")
-        async for event in events:
-            if isinstance(event, QueueMessageInjected):
-                await events.aclose()
-                return event
-        raise AssertionError("missing steering injection")
-
-    injected = anyio.run(run)
-
-    assert injected.content == "visible"
-    assert [message.content for message in harness.queued_messages.steering] == ["still queued"]
-    assert [(message.role, message.content) for message in harness.messages[-2:]] == [
-        ("assistant", "answer"),
-        ("user", "visible"),
-    ]
-
-
-def test_close_mid_batch_keeps_unexposed_follow_ups() -> None:
+@pytest.mark.parametrize("kind", ["steering", "follow_up"])
+def test_close_mid_batch_keeps_unexposed_queue(kind: QueueKind) -> None:
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")]]
     )
@@ -768,11 +699,13 @@ def test_close_mid_batch_keeps_unexposed_follow_ups() -> None:
         AgentHarnessConfig(
             provider=provider,
             tool_executor=RecordingToolExecutor(),
-            follow_up_mode="all",
+            steering_mode="all" if kind == "steering" else "one_at_a_time",
+            follow_up_mode="all" if kind == "follow_up" else "one_at_a_time",
         )
     )
-    harness.follow_up("visible")
-    harness.follow_up("still queued")
+    enqueue = harness.steer if kind == "steering" else harness.follow_up
+    enqueue("visible")
+    enqueue("still queued")
 
     async def run() -> QueueMessageInjected:
         events = harness.prompt("initial")
@@ -780,13 +713,15 @@ def test_close_mid_batch_keeps_unexposed_follow_ups() -> None:
             if isinstance(event, QueueMessageInjected):
                 await events.aclose()
                 return event
-        raise AssertionError("missing follow-up injection")
+        raise AssertionError("missing queue injection")
 
     injected = anyio.run(run)
 
-    assert injected.kind == "follow_up"
+    assert injected.kind == kind
     assert injected.content == "visible"
-    assert [message.content for message in harness.queued_messages.follow_up] == ["still queued"]
+    snapshot = harness.queued_messages
+    remaining = snapshot.steering if kind == "steering" else snapshot.follow_up
+    assert [message.content for message in remaining] == ["still queued"]
     assert [(message.role, message.content) for message in harness.messages[-2:]] == [
         ("assistant", "answer"),
         ("user", "visible"),

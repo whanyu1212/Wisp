@@ -515,8 +515,11 @@ def test_invalid_offsets_keep_transcript_for_retry(field: str, value: object) ->
     queued = harness.queued_messages
 
     async def run() -> None:
+        stream = harness.prompt("invalid", **{field: value})  # type: ignore[arg-type]
+        # Creating the stream must not append the prompt before validation runs.
+        assert harness.messages == before
         with pytest.raises(ValueError, match=field):
-            await anext(harness.prompt("invalid", **{field: value}))  # type: ignore[arg-type]
+            await anext(stream)
         assert harness.messages == before
         assert harness.queued_messages == queued
         assert not harness.is_running

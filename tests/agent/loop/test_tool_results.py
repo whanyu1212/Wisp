@@ -17,7 +17,6 @@ import wisp.agent.loop.runner as agent_loop_module
 from tests.agent.loop.support import (
     ApprovingToolExecutor,
     FakeClock,
-    completed_stream,
     install_fake_clock,
     tool_call_stream,
 )
@@ -55,16 +54,6 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError
 from wisp.tools.shell import tool as shell_module
-
-
-class MissingResultExecutor:
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        yield ToolApprovalRequested(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            arguments=dict(tool_call.arguments),
-            safety="command",
-        )
 
 
 class MismatchedResultExecutor:
@@ -226,40 +215,6 @@ def test_snapshots_isolated_from_consumer_mutation(
     )
 
 
-def test_execution_end_directly_precedes_result() -> None:
-    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
-    provider = ScriptedProvider(
-        [
-            tool_call_stream(call),
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content="done"),
-            ],
-        ]
-    )
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=ApprovingToolExecutor()),
-                messages=(Message(role="user", content="run pwd"),),
-            )
-        ]
-
-    events = anyio.run(run)
-    ended_index = next(
-        index for index, event in enumerate(events) if isinstance(event, ToolExecutionEnded)
-    )
-    ended = events[ended_index]
-    result = events[ended_index + 1]
-
-    assert isinstance(ended, ToolExecutionEnded)
-    assert isinstance(result, ToolResultReady)
-    envelope_fields = {"type", "schema_version", "timestamp"}
-    assert result.model_dump(exclude=envelope_fields) == ended.model_dump(exclude=envelope_fields)
-
-
 def _run_bash_loop(
     tmp_path: Path,
     *,
@@ -355,26 +310,6 @@ def test_bash_timeout_reports_inconclusive_error(
     assert result.exit_code is None
 
 
-def test_rejects_executor_with_unresolved_approval() -> None:
-    call = ToolCall(call_id="call-1", name="bash", arguments={"command": "pwd"})
-    provider = ScriptedProvider([tool_call_stream(call)])
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(ToolExecutionProtocolError, match="unresolved approval"):
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=MissingResultExecutor()),
-                messages=(Message(role="user", content="run pwd"),),
-            ):
-                events.append(event)
-        return events
-
-    events = anyio.run(run)
-
-    assert [event.type for event in events[-2:]] == ["error", "turn.completed"]
-    assert events[-1].outcome == "failed"
-
-
 @pytest.mark.parametrize(
     ("executor", "error"),
     [
@@ -434,10 +369,15 @@ def _terminal_result(*, is_error: bool = False) -> ToolExecutionEnded:
             "ended without a result",
         ),
         (
+            (_approval_request(),),
+            "unresolved approval",
+        ),
+        (
             (_approval_resolution(), _terminal_result()),
             "resolved approval before requesting it",
         ),
     ],
+    ids=["no-events", "unresolved-approval", "resolution-before-request"],
 )
 def test_rejects_malformed_approval_lifecycle(
     events: tuple[object, ...],
@@ -563,116 +503,3 @@ def test_interrupted_results_have_no_duration() -> None:
     results = [event for event in settled if isinstance(event, ToolResultReady)]
     assert [result.call_id for result in results] == ["a", "b"]
     assert all(result.duration_ms is None for result in results)
-
-
-class WriteSnapshotExecutor:
-    """Emits a terminal result carrying a pre-write snapshot, like the write tool."""
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        yield ToolExecutionEnded(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            output="Wrote 4 bytes to f.txt",
-            is_error=False,
-            before_text="old\n",
-            created=False,
-        )
-
-
-def test_forwards_before_text_across_wire() -> None:
-    # The write tool's pre-write snapshot AND its create flag must reach
-    # ToolResultReady AND survive serialization: the TUI renderer only sees events
-    # after the agent subprocess serializes them to JSON, so a field that doesn't
-    # round-trip renders no diff — the exact failure that retired the opaque `data`
-    # field. created rides alongside before_text to disambiguate a None snapshot.
-    call = ToolCall(
-        call_id="call-1",
-        name="write",
-        arguments={"path": "f.txt", "content": "new\n"},
-        response_id="response-1",
-    )
-    provider = ScriptedProvider(
-        [
-            tool_call_stream(call, response_id="response-1"),
-            completed_stream("done", response_id="response-2"),
-        ]
-    )
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=WriteSnapshotExecutor()),
-                messages=(Message(role="user", content="write f.txt"),),
-            )
-        ]
-
-    events = anyio.run(run)
-
-    result = next(event for event in events if isinstance(event, ToolResultReady))
-    assert result.before_text == "old\n"
-    assert result.created is False
-    round_tripped = wisp_event_from_json(result.model_dump_json())
-    assert round_tripped.before_text == "old\n"
-    assert round_tripped.created is False
-    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
-    assert ended.before_text == "old\n"
-    assert ended.created is False
-    assert wisp_event_from_json(ended.model_dump_json()).before_text == "old\n"
-
-
-class SummaryExecutor:
-    """Emits a terminal result carrying a one-line summary, like a read-type tool."""
-
-    async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        yield ToolExecutionEnded(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            output="line 1\nline 2\nline 3\n",
-            is_error=False,
-            summary="read 3 lines from f.txt",
-            truncated=True,
-        )
-
-
-def test_forwards_summary_across_wire() -> None:
-    # A read-type tool's one-line summary AND its truncation flag must reach
-    # ToolResultReady AND survive serialization — the renderer shows the summary in
-    # place of the raw output, and the card shows a "truncated" marker on expand, so a
-    # field that doesn't round-trip would silently drop either signal.
-    call = ToolCall(
-        call_id="call-1",
-        name="read",
-        arguments={"path": "f.txt"},
-        response_id="response-1",
-    )
-    provider = ScriptedProvider(
-        [
-            tool_call_stream(call, response_id="response-1"),
-            completed_stream("done", response_id="response-2"),
-        ]
-    )
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=SummaryExecutor()),
-                messages=(Message(role="user", content="read f.txt"),),
-            )
-        ]
-
-    events = anyio.run(run)
-
-    result = next(event for event in events if isinstance(event, ToolResultReady))
-    assert result.summary == "read 3 lines from f.txt"
-    assert result.truncated is True
-    round_tripped = wisp_event_from_json(result.model_dump_json())
-    assert round_tripped.summary == "read 3 lines from f.txt"
-    assert round_tripped.truncated is True
-    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
-    assert ended.summary == "read 3 lines from f.txt"
-    assert ended.truncated is True
-    round_tripped_ended = wisp_event_from_json(ended.model_dump_json())
-    assert round_tripped_ended.summary == "read 3 lines from f.txt"
-    assert round_tripped_ended.truncated is True

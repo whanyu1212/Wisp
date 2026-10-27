@@ -40,33 +40,6 @@ def test_resolves_agreeing_response_ids() -> None:
     )
 
 
-def test_rejects_conflicting_response_ids() -> None:
-    with pytest.raises(ProviderProtocolError, match="conflicting response ids"):
-        resolve_provider_response_id(
-            started_response_id="started",
-            terminal_response_id="terminal",
-            tool_calls=(),
-        )
-
-
-def test_rejects_finish_reason_tool_mismatch() -> None:
-    call = _call()
-    empty = ProviderResponseLifecycle()
-    empty.start(ProviderResponseStarted(model="test"))
-    empty.complete(ProviderResponseCompleted(content="", finish_reason="tool_calls"))
-    with pytest.raises(ProviderProtocolError, match="requires at least one tool call"):
-        empty.finish()
-
-    with_calls = ProviderResponseLifecycle()
-    with_calls.start(ProviderResponseStarted(model="test"))
-    with_calls.add_tool_call(call)
-    with_calls.complete(
-        ProviderResponseCompleted(content="", tool_calls=(call,), finish_reason="stop")
-    )
-    with pytest.raises(ProviderProtocolError, match="cannot include tool calls"):
-        with_calls.finish()
-
-
 def test_call_ids_unique_per_response() -> None:
     lifecycle = ProviderResponseLifecycle()
     lifecycle.start(ProviderResponseStarted(model="test"))

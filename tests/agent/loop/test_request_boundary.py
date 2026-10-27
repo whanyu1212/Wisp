@@ -52,42 +52,34 @@ class OpaqueReplayScriptedProvider(ScriptedProvider):
         return effort is None
 
 
-def test_no_hook_matches_default_behavior() -> None:
-    """No hook configured must produce the exact same events as before hooks existed."""
+@pytest.mark.parametrize(
+    "decision",
+    [
+        pytest.param(RequestBoundaryDecision(stop=True), id="stop"),
+        pytest.param(
+            RequestBoundaryDecision(
+                stop=True, messages=(Message(role="user", content="compacted summary"),)
+            ),
+            id="stop-with-messages",
+        ),
+    ],
+)
+def test_stops_after_tool_round(decision: RequestBoundaryDecision) -> None:
+    """A hook may stop the run at the tool-round boundary, even with message edits.
 
-    provider = ScriptedProvider([completed_stream("hi")])
-    messages = (Message(role="user", content="hi"),)
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=NeverToolExecutor()),
-                messages=messages,
-            )
-        ]
-
-    events = anyio.run(run)
-
-    assert [event.type for event in events] == [
-        "turn.started",
-        "context.estimated",
-        "message.started",
-        "message.delta",
-        "message.completed",
-        "turn.completed",
-    ]
-    assert len(provider.calls) == 1
-
-
-def test_stops_after_tool_round() -> None:
-    """A hook may still stop the run at the tool-round boundary."""
+    Regression for #363 review: the loop previously raised
+    RequestBoundaryUnsupportedError before checking `decision.stop`, even
+    though no provider request is made when stopping -- so the supplied
+    history can't cause the corruption that validation exists to prevent.
+    `stop` must always be honored regardless, per `RequestBoundaryDecision`'s
+    documented contract.
+    """
 
     provider = ScriptedProvider(
         [tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={}))]
     )
     executor = ApprovingToolExecutor()
-    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(stop=True)])
+    hook = RecordingRequestBoundaryHook([decision])
     messages = (Message(role="user", content="hi"),)
 
     async def run() -> list[object]:
@@ -187,46 +179,6 @@ def test_snapshot_edits_do_not_leak() -> None:
 
     assert hook.calls == 2
     assert hook.second_boundary_arguments == {"path": "original"}
-
-
-def test_stop_wins_over_message_edits() -> None:
-    """`stop=True` is honored even when combined with `messages`/`extra_messages`.
-
-    Regression for #363 review: the loop previously raised
-    RequestBoundaryUnsupportedError before checking `decision.stop`, even
-    though no provider request is made when stopping -- so the supplied
-    history can't cause the corruption that validation exists to prevent.
-    `stop` must always be honored regardless, per `RequestBoundaryDecision`'s
-    documented contract.
-    """
-
-    provider = ScriptedProvider(
-        [tool_call_stream(ToolCall(call_id="call-1", name="noop", arguments={}))]
-    )
-    executor = ApprovingToolExecutor()
-    unused_replacement = (Message(role="user", content="compacted summary"),)
-    hook = RecordingRequestBoundaryHook(
-        [RequestBoundaryDecision(stop=True, messages=unused_replacement)]
-    )
-    messages = (Message(role="user", content="hi"),)
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=provider,
-                    tool_executor=executor,
-                    request_boundary_hook=hook,
-                ),
-                messages=messages,
-            )
-        ]
-
-    events = anyio.run(run)
-
-    assert [event.type for event in events].count("turn.completed") == 1
-    assert len(provider.calls) == 1
 
 
 def test_injects_steering_after_tool_round() -> None:
@@ -362,68 +314,61 @@ def test_replacement_keeps_active_tool_exchange() -> None:
     events = anyio.run(run)
 
     assert [event.type for event in events].count("turn.completed") == 2
+    assert provider.calls[0].messages == messages
     assert provider.calls[1].messages == replacement
+    # A full replacement discards accumulated continuation state entirely --
+    # the point of compaction is that the old history stops being resent.
     assert provider.calls[1].tool_results == ()
     assert provider.calls[1].previous_response_id is None
 
 
-def test_rejects_orphaned_tool_replacement() -> None:
-    """A fresh replacement cannot inject a tool result without its call."""
-
-    provider = ScriptedProvider([completed_stream("first")])
-    hook = RecordingRequestBoundaryHook(
-        [
-            RequestBoundaryDecision(
-                messages=(
-                    Message(role="user", content="compacted summary"),
-                    Message(role="tool", content="tool output", tool_call_id="call-1"),
-                )
-            )
-        ]
+def _lookup_call() -> Message:
+    return Message(
+        role="assistant",
+        content="",
+        tool_calls=(ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),),
     )
 
-    async def run() -> None:
-        async for _event in run_agent_loop(
-            AgentLoopConfig(
-                provider=provider,
-                tool_executor=NeverToolExecutor(),
-                request_boundary_hook=hook,
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        pytest.param(
+            (
+                Message(role="user", content="compacted summary"),
+                Message(role="tool", content="tool output", tool_call_id="call-1"),
             ),
-            messages=(Message(role="user", content="hi"),),
-        ):
-            pass
+            id="orphaned-result",
+        ),
+        pytest.param(
+            (
+                _lookup_call(),
+                Message(role="user", content="interleaved"),
+                Message(
+                    role="tool", content="tool output", tool_call_id="call-1", tool_name="other"
+                ),
+            ),
+            id="interleaved-result",
+        ),
+        pytest.param(
+            (
+                _lookup_call(),
+                Message(
+                    role="tool", content="tool output", tool_call_id="call-1", tool_name="other"
+                ),
+            ),
+            id="mismatched-name",
+        ),
+    ],
+)
+def test_rejects_unpaired_tool_replacements(replacement: tuple[Message, ...]) -> None:
+    """A fresh replacement must keep each tool result adjacent to its matching call.
 
-    with pytest.raises(RequestBoundaryUnsupportedError, match="unpaired structured tool exchange"):
-        anyio.run(run)
-    assert len(provider.calls) == 1
-
-
-def test_rejects_interleaved_tool_replacement() -> None:
-    """Structured replacements preserve the native assistant/result adjacency."""
+    The result must follow its call directly and keep the call's provider-visible name.
+    """
 
     provider = ScriptedProvider([completed_stream("first")])
-    hook = RecordingRequestBoundaryHook(
-        [
-            RequestBoundaryDecision(
-                messages=(
-                    Message(
-                        role="assistant",
-                        content="",
-                        tool_calls=(
-                            ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
-                        ),
-                    ),
-                    Message(role="user", content="interleaved"),
-                    Message(
-                        role="tool",
-                        content="tool output",
-                        tool_call_id="call-1",
-                        tool_name="other",
-                    ),
-                )
-            )
-        ]
-    )
+    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(messages=replacement)])
 
     async def run() -> None:
         async for _event in run_agent_loop(
@@ -480,48 +425,6 @@ def test_rejects_opaque_structured_tool_replacement() -> None:
             pass
 
     with pytest.raises(RequestBoundaryUnsupportedError, match="cannot fresh-replay"):
-        anyio.run(run)
-    assert len(provider.calls) == 1
-
-
-def test_rejects_mismatched_replacement_tool_name() -> None:
-    """A tool result must retain the provider-visible name of its matching call."""
-
-    provider = ScriptedProvider([completed_stream("first")])
-    hook = RecordingRequestBoundaryHook(
-        [
-            RequestBoundaryDecision(
-                messages=(
-                    Message(
-                        role="assistant",
-                        content="",
-                        tool_calls=(
-                            ToolCallSnapshot(call_id="call-1", name="lookup", arguments={}),
-                        ),
-                    ),
-                    Message(
-                        role="tool",
-                        content="tool output",
-                        tool_call_id="call-1",
-                        tool_name="other",
-                    ),
-                )
-            )
-        ]
-    )
-
-    async def run() -> None:
-        async for _event in run_agent_loop(
-            AgentLoopConfig(
-                provider=provider,
-                tool_executor=NeverToolExecutor(),
-                request_boundary_hook=hook,
-            ),
-            messages=(Message(role="user", content="hi"),),
-        ):
-            pass
-
-    with pytest.raises(RequestBoundaryUnsupportedError, match="unpaired structured tool exchange"):
         anyio.run(run)
     assert len(provider.calls) == 1
 
@@ -1030,37 +933,6 @@ def test_rejects_injection_for_incapable_provider() -> None:
         anyio.run(run)
 
     assert len(provider.calls) == 1
-
-
-def test_hook_can_replace_base_messages() -> None:
-    """A hook can replace the loop's base history (e.g. after compaction)."""
-
-    provider = ScriptedProvider([completed_stream("first"), completed_stream("second")])
-    replacement = (Message(role="user", content="compacted summary"),)
-    hook = RecordingRequestBoundaryHook([RequestBoundaryDecision(messages=replacement)])
-    messages = (Message(role="user", content="hi"),)
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=provider,
-                    tool_executor=NeverToolExecutor(),
-                    request_boundary_hook=hook,
-                ),
-                messages=messages,
-            )
-        ]
-
-    anyio.run(run)
-
-    assert provider.calls[0].messages == messages
-    assert provider.calls[1].messages == replacement
-    # A full replacement discards accumulated continuation state entirely --
-    # the point of compaction is that the old history stops being resent.
-    assert provider.calls[1].tool_results == ()
-    assert provider.calls[1].previous_response_id is None
 
 
 def test_rebase_keeps_live_native_continuation() -> None:

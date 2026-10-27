@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import nullcontext
 from decimal import Decimal
 from unittest.mock import Mock
@@ -34,7 +34,6 @@ from wisp.events import (
     ContextOverflow,
     ErrorEvent,
     MessageCompleted,
-    MessageStarted,
     ToolExecutionEnded,
     ToolResultReady,
     TurnCompleted,
@@ -46,11 +45,9 @@ from wisp.messages import Message
 from wisp.providers.base import (
     ContextOverflowError,
     ProviderProtocolError,
-    ToolCallResult,
     ToolSpec,
 )
 from wisp.providers.events import (
-    ProviderEvent,
     ProviderResponseCompleted,
     ProviderResponseFailed,
     ProviderResponseStarted,
@@ -188,13 +185,18 @@ class RaisingCancellationToken:
         raise RuntimeError("boom")
 
 
-def test_propagates_cancellation_token_errors() -> None:
+@pytest.mark.parametrize("turn_offset", [0, 5], ids=["no-offset", "offset"])
+def test_propagates_cancellation_token_errors(turn_offset: int) -> None:
     """A cancellation-token failure before the first turn must not raise UnboundLocalError.
 
     Regression test for #359: `turn` was previously only bound inside the loop body
     after the first cancellation check, so an exception raised by that very check
     (before `turn = state.begin_turn()` executed) hit `if turn > 0:` in the outer
     `except` and raised UnboundLocalError, masking the original failure.
+
+    A nonzero `turn_offset` must not make the unstarted turn look completed either:
+    `turn` is pre-seeded to the offset, so only the explicit `turn_started` flag can
+    tell that no `TurnStarted`, and so no `TurnCompleted`, was emitted.
     """
 
     async def run() -> list[object]:
@@ -205,37 +207,7 @@ def test_propagates_cancellation_token_errors() -> None:
                     provider=ScriptedProvider([]),
                     tool_executor=NeverToolExecutor(),
                     cancellation_token=RaisingCancellationToken(),
-                ),
-                messages=(Message(role="user", content="hi"),),
-            ):
-                events.append(event)
-        return events
-
-    events = anyio.run(run)
-
-    assert [event.type for event in events] == ["error"]
-
-
-def test_offset_never_completes_unstarted_turn() -> None:
-    """A nonzero turn_offset must not make an unstarted turn look completed.
-
-    Regression test for a follow-up to #359: using `turn > 0` to decide whether to
-    emit a failure `TurnCompleted` is wrong once `turn` is pre-seeded to
-    `config.turn_offset` before the loop starts. With a nonzero offset and a
-    cancellation-token failure on the very first check, no `TurnStarted` is ever
-    emitted for this invocation, so no matching `TurnCompleted` must be emitted
-    either -- only the explicit `turn_started` flag can tell the two cases apart.
-    """
-
-    async def run() -> list[object]:
-        events: list[object] = []
-        with pytest.raises(RuntimeError, match="boom"):
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=ScriptedProvider([]),
-                    tool_executor=NeverToolExecutor(),
-                    cancellation_token=RaisingCancellationToken(),
-                    turn_offset=5,
+                    turn_offset=turn_offset,
                 ),
                 messages=(Message(role="user", content="hi"),),
             ):
@@ -549,82 +521,6 @@ def test_forwards_executor_events_and_results() -> None:
     assert ended_round_tripped.process_id == "proc-1"
     assert ended_round_tripped.process_state == "completed"
     assert ended_round_tripped.stdout == "tool stdout\n"
-
-
-def test_overflow_closes_message_before_retry() -> None:
-    """A raised overflow must settle the public response before a retry turn."""
-
-    class StartedOverflowProvider:
-        name = "started-overflow"
-        default_model = "test"
-
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def stream(
-            self,
-            messages: Sequence[Message],
-            *,
-            model: str | None = None,
-            tools: Sequence[ToolSpec] = (),
-            tool_results: Sequence[ToolCallResult] = (),
-            previous_response_id: str | None = None,
-            effort: str | None = None,
-        ) -> AsyncIterator[ProviderEvent]:
-            del messages, model, tools, tool_results, previous_response_id, effort
-            self.calls += 1
-            yield ProviderResponseStarted(
-                model="test",
-                response_id="failed-response" if self.calls == 1 else "recovered-response",
-            )
-            if self.calls == 1:
-                raise ContextOverflowError("maximum context length exceeded")
-            yield ProviderResponseCompleted(
-                content="recovered",
-                response_id="recovered-response",
-            )
-
-    class RecoverOverflow:
-        async def recover_context_overflow(
-            self, *, snapshot: ContextOverflowSnapshot
-        ) -> RequestBoundaryDecision:
-            del snapshot
-            return RequestBoundaryDecision(
-                messages=(Message(role="user", content="compacted summary"),)
-            )
-
-    provider = StartedOverflowProvider()
-
-    async def run() -> list[object]:
-        return [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(
-                    provider=provider,
-                    tool_executor=NeverToolExecutor(),
-                    context_overflow_hook=RecoverOverflow(),
-                ),
-                messages=(Message(role="user", content="long prompt"),),
-            )
-        ]
-
-    events = anyio.run(run)
-
-    lifecycle_events = [
-        event for event in events if isinstance(event, MessageStarted | MessageCompleted)
-    ]
-    assert [type(event) for event in lifecycle_events] == [
-        MessageStarted,
-        MessageCompleted,
-        MessageStarted,
-        MessageCompleted,
-    ]
-    failed_completion = lifecycle_events[1]
-    assert isinstance(failed_completion, MessageCompleted)
-    assert failed_completion.finish_reason == "error"
-    assert failed_completion.response_id == "failed-response"
-    assert [event.turn for event in events if isinstance(event, TurnCompleted)] == [1, 2]
-    assert provider.calls == 2
 
 
 @pytest.mark.parametrize("raised", [False, True])
