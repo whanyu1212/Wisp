@@ -5,7 +5,6 @@ import fcntl
 import json
 import os
 import pty
-import re
 import select
 import signal
 import struct
@@ -19,11 +18,9 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
-    complete_frames,
     full_repaint_after,
     rendered_without_spacing,
     run_settled,
-    screen_rows,
     screen_shows,
 )
 
@@ -187,16 +184,6 @@ def _conversation_messages(session_dir: Path) -> list[tuple[str, str]]:
     ]
 
 
-_CONTEXT_FIGURE = re.compile(r"ctx \S+ (~\d+%)")
-
-
-def _context_figure(output: bytes) -> str | None:
-    for row in reversed(screen_rows(complete_frames(output))):
-        if match := _CONTEXT_FIGURE.search(row):
-            return match.group(1)
-    return None
-
-
 def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
     phase_output = output[offset:]
     return all(fragment in phase_output for fragment in fragments)
@@ -285,20 +272,12 @@ def test_ctrl_r_restores_prompt_without_submitting(tmp_path: Path) -> None:
     tui, session_dir = _launch(tmp_path, home=home)
     try:
         tui.wait_ready()
-        context_before = _context_figure(tui.output)
         offset = len(tui.output)
         tui.send(b"recall me\r")
         tui.wait_until(
             lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="first prompt did not complete",
         )
-        # Statistics refresh after the run settles, and applying them makes the open
-        # popup unready, so an Enter in that gap is dropped. Wait for them first.
-        tui.wait_until(
-            lambda output: _context_figure(output) not in (None, context_before),
-            failure="context statistics did not refresh after the first prompt",
-        )
-
         tui.send(b"\x12")
         tui.wait_for(b"Enter restore", failure="history did not open")
         # Enter acts only on a choice that has been painted; a full repaint proves it.

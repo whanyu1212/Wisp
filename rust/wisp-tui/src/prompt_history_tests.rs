@@ -416,3 +416,85 @@ async fn trust_and_other_modals_take_priority_over_history() {
     assert_eq!(ui.editor.text(), "draft");
     assert!(receiver.try_recv().is_err());
 }
+
+async fn enter_after_queued(
+    ui: &mut LiveUi,
+    writer: &mpsc::Sender<WriterMessage>,
+    queued: Vec<BackendEvent>,
+) {
+    ui.handle_input(ctrl('r'), writer, 8192).await.unwrap();
+    draw(ui, 80, 24);
+    let (sender, mut events) = mpsc::channel(16);
+    let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(queued.len()));
+    for event in queued {
+        sender
+            .send(QueuedEvent {
+                event,
+                _wire_bytes: budget.clone().acquire_owned().await.unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+    ui.handle_received_input(key(KeyCode::Enter), &mut events, writer, 8192)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn post_prompt_reads_keep_enter() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.prompt_history.record("oldest".into());
+    ui.prompt_history.record("newest".into());
+    ui.state.current_command = Some(reducer::ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: reducer::ActiveCommandType::Prompt,
+    });
+    ui.dispatch(finished("prompt-1", "prompt", true), &writer, 8192)
+        .await
+        .unwrap();
+    let stats = frame(&mut receiver)["id"].as_str().unwrap().to_owned();
+    enter_after_queued(
+        &mut ui,
+        &writer,
+        vec![BackendEvent::CommandFinished {
+            command_id: stats,
+            command_type: "get_session_stats".into(),
+            ok: true,
+            error: None,
+        }],
+    )
+    .await;
+    assert_eq!(ui.editor.text(), "newest", "statistics read");
+
+    let sync = frame(&mut receiver)["id"].as_str().unwrap().to_owned();
+    ui.editor.clear();
+    enter_after_queued(
+        &mut ui,
+        &writer,
+        vec![
+            BackendEvent::MessagesReported {
+                command_id: sync.clone(),
+                messages: reducer::SessionMessages {
+                    source_messages: Default::default(),
+                    session: None,
+                    active_leaf_id: None,
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: crate::transcript::SharedTranscript::default(),
+                },
+            },
+            BackendEvent::CommandFinished {
+                command_id: sync,
+                command_type: "get_messages".into(),
+                ok: true,
+                error: None,
+            },
+        ],
+    )
+    .await;
+    assert_eq!(ui.editor.text(), "newest", "post-prompt history read");
+}

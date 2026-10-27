@@ -9,13 +9,12 @@ import pty
 import struct
 import sys
 import termios
-import time
 from pathlib import Path
 
 import pytest
 
 from tests.support.paths import FIXTURES_DIR
-from tests.tui_e2e.support import full_repaint_after, rendered_without_spacing
+from tests.tui_e2e.support import complete_frames, rendered_without_spacing, screen_rows
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
@@ -82,38 +81,26 @@ main()
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
     tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
 
-    # `wait_ready` leaves the terminal 101 columns wide.
-    width = 101
-
-    def wait_painted(text: str, failure: str) -> None:
-        """Force full repaints until one shows ``text``.
+    def wait_painted(text: str, failure: str, timeout: float = 20) -> None:
+        """Wait until the replayed screen shows ``text`` on one row.
 
         Incremental frames send only changed cells, so a phrase that replaces
-        similar text is not contiguous in the output. A resize repaints the whole
-        screen inside one synchronized frame.
+        similar text is not contiguous in the output. Forcing full repaints with
+        resizes is no substitute: each resize makes the TUI ignore a choice key
+        until its next frame, so the key sent after the wait could be dropped.
 
         Args:
-            text (str): Text the repaint must contain, compared without spacing.
-            failure (str): Message used if no repaint shows the text in time.
+            text (str): Text a single screen row must contain, compared without spacing.
+            failure (str): Message used if the screen never shows the text.
+            timeout (float): Seconds to wait.
         """
-        nonlocal width
-        marker = "".join(text.split()).encode()
-        deadline = time.monotonic() + 15
-        while True:
-            offset = len(tui.output)
-            width = 101 if width == 100 else 100
-            tui.resize(width=width)
+        marker = "".join(text.split())
 
-            def repainted(output: bytes, start: int = offset) -> bool:
-                return full_repaint_after(output, start) is not None
+        def shown(output: bytes) -> bool:
+            rows = screen_rows(complete_frames(output))
+            return any(marker in "".join(row.split()) for row in rows)
 
-            output = tui.wait_until(repainted, failure="TUI did not repaint after resize")
-            frame = full_repaint_after(output, offset)
-            assert frame is not None
-            if marker in rendered_without_spacing(frame):
-                return
-            if time.monotonic() >= deadline:
-                pytest.fail(f"{failure}; last full repaint={rendered_without_spacing(frame)!r}")
+        tui.wait_until(shown, timeout=timeout, failure=failure)
 
     try:
         tui.wait_ready()
@@ -139,7 +126,8 @@ main()
         wait_painted("forwards: WISP_MCP_TEST_CLOSED_FILE", "forwarding not shown")
 
         tui.send(b"1")
-        wait_painted("fixture connected · 2 tools", "server did not connect")
+        # Starting the server and listing its tools is slow on a loaded machine.
+        wait_painted("fixture connected · 2 tools", "server did not connect", timeout=40)
 
         settings = json.loads((home / ".wisp" / "settings.json").read_text(encoding="utf-8"))
         assert settings["mcp_servers"]["fixture"]["env"] == {"WISP_MCP_TEST_LITERAL": SECRET}

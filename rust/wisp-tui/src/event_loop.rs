@@ -1,10 +1,10 @@
 //! Bounded FIFO turns: transport outcomes, eight events, one input, one due paint.
 
 use crate::{
-    ACTIVITY_INTERVAL, BackendEvent, ConnectionInfo, DIFF_AGE_INTERVAL, Error, FRAME_INTERVAL,
-    Input, LiveUi, LoopControl, OverlayKind, QueuedEvent, ReaderTermination,
-    RenderedDecisionContext, UiAction, WriterMessage, is_ctrl_c, is_escape, mouse, printable_char,
-    receive_reader_outcome, terminal::FrameBackend,
+    ACTIVITY_INTERVAL, BackendEvent, CommandKind, ConnectionInfo, DIFF_AGE_INTERVAL, Error,
+    FRAME_INTERVAL, Input, LiveUi, LoopControl, OverlayKind, QueuedEvent, ReaderTermination,
+    RenderedDecisionContext, UiAction, UiState, WriterMessage, is_ctrl_c, is_escape, mouse,
+    printable_char, receive_reader_outcome, terminal::FrameBackend,
 };
 use ratatui::Terminal;
 use tokio::{
@@ -260,9 +260,24 @@ impl PendingInput {
 
 /// Events that can replace a workflow, its catalog/selection, or draft policy.
 /// Text streaming and telemetry leave those targets intact and must not starve input.
-pub(super) fn changes_activation_target(action: &UiAction) -> bool {
-    match action {
-        UiAction::BackendEvent(event) => !matches!(
+pub(super) fn changes_activation_target(action: &UiAction, state: &UiState) -> bool {
+    let UiAction::BackendEvent(event) = action else {
+        return false;
+    };
+    match event {
+        // A finished statistics read commits its report and may start the
+        // post-prompt history read, which refreshes only session metadata.
+        // Neither replaces a picker, decision or draft.
+        BackendEvent::CommandFinished { command_type, .. }
+            if command_type == CommandKind::GetSessionStats.prefix() =>
+        {
+            false
+        }
+        BackendEvent::MessagesReported { command_id, .. }
+        | BackendEvent::CommandFinished { command_id, .. } => {
+            !state.is_post_prompt_sync(command_id)
+        }
+        _ => !matches!(
             event,
             BackendEvent::MessageStarted { .. }
                 | BackendEvent::MessageDelta { .. }
@@ -274,7 +289,6 @@ pub(super) fn changes_activation_target(action: &UiAction) -> bool {
                 | BackendEvent::WorkspaceReported { .. }
                 | BackendEvent::Other { .. }
         ),
-        _ => false,
     }
 }
 
