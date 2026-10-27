@@ -112,28 +112,38 @@ reconnect.
 ## Slash commands
 
 ```text
-/help                       show help
-/init                       inspect the project and create a root AGENTS.md
-/auth [provider]            show credential status
-/connect [provider]         connect a provider or open the provider panel
-/disconnect [provider]      remove stored credentials (`/logout` alias)
-/provider [provider]        switch provider (resets model to default)
-/model [model] [effort]     switch model and optional reasoning effort
-/new                        start a fresh session and clear the screen
-/resume [session-id]        browse or resume a persisted session
-/compact [instructions]     summarize older context while preserving the JSONL audit
-/context [auto on|off]      show or toggle compaction policy
-/queue                      inspect and manage steering and follow-up queues
-/plan                       switch to read-only planning mode
-/build                      switch to normal build mode
-/history                    search prompts submitted in this TUI run
-/theme [name]               preview or select a curated color theme
-/logo [name]                preview or select a startup logo
-/update [check|install]     check immediately or explicitly install an update
-/skills                     inspect loaded skills and discovery diagnostics
-/mcp                        manage MCP servers: add, remove, enable, disable, reconnect
-/quit, /exit
+/help                                     show contextual help
+/init                                     inspect the project and create a root AGENTS.md
+/connect                                  open the provider connection panel
+/provider [name]                          show or switch provider (resets model to default)
+/model [provider::model] [effort|-]       switch model and optional reasoning effort
+/search [on|off]                          show or toggle provider-native web search
+/new                                      start a fresh session and clear the screen
+/resume [session-id]                      browse or resume a persisted session
+/name <display name> | /name --clear      name the current session or clear its name
+/clone                                    clone the current session
+/tree                                     browse the session tree and switch branches
+/unrevert                                 restore the previous branch after navigation
+/diff                                     review working-tree changes against HEAD
+/compact [instructions]                   summarize older context while preserving the JSONL audit
+/context [auto on|off]                    show or toggle compaction policy
+/queue                                    inspect and manage steering and follow-up queues
+/plan                                     switch to read-only planning mode
+/build                                    switch to normal build mode
+/permissions [ask|yolo]                   inspect or change the project permission default
+/history                                  search prompts submitted in this TUI run
+/theme [name]                             preview or select a curated color theme
+/logo [name]                              preview or select a startup logo
+/update [check|install]                   show instructions for updating outside the TUI
+/skills                                   inspect loaded skills and discovery diagnostics
+/mcp                                      manage MCP servers: add, remove, enable, disable, reconnect
+/quit                                     quit the TUI
 ```
+
+`/exit` and `:q` are aliases for `/quit`. Use `/connect` to inspect provider connections and
+press `d` in that panel to disconnect; `/auth`, `/disconnect`, and `/logout` are not supported
+in the Rust TUI. `/update`, including its `check` and `install` forms, only opens update guidance:
+quit the TUI and use `wisp update --check` or `wisp update` in your shell.
 
 `/init` asks the active model to inspect repository documentation, manifests, CI configuration, and
 source layout before creating project-specific guidance. It only works in build mode, uses the normal
