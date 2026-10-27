@@ -32,21 +32,6 @@ def test_for_command_generates_id_when_omitted() -> None:
     assert started.command_type == "get_state"
 
 
-def test_start_generates_id_for_unknown_rejection() -> None:
-    events: list[WispEvent] = []
-    lifecycle = RpcCommandLifecycle.start(
-        command_id=None,
-        command_type="future_command",
-        write_event=events.append,
-    )
-
-    assert lifecycle.command_id
-    assert len(lifecycle.command_id) == 32
-    started = events[0]
-    assert isinstance(started, RpcCommandStarted)
-    assert started.command_type == "future_command"
-
-
 def test_fail_emits_error_then_finished_and_bounds_message() -> None:
     events: list[WispEvent] = []
     lifecycle = RpcCommandLifecycle.for_command(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from wisp.messages import Message
@@ -58,23 +60,29 @@ async def test_fake_provider_can_append_response_only_benchmark_sentinel(
     assert events[-1].content == "".join(deltas)
 
 
+@pytest.mark.parametrize(
+    ("env_var", "read_setting"),
+    [
+        pytest.param(
+            "WISP_FAKE_STREAM_INTERVAL_MS",
+            fake_module.FakeProvider._stream_interval_seconds,
+            id="stream-interval",
+        ),
+        pytest.param(
+            "WISP_FAKE_RESPONSE_WORDS",
+            fake_module.FakeProvider._extra_response_words,
+            id="response-words",
+        ),
+    ],
+)
 @pytest.mark.parametrize("value", ["-1", "not-a-number"])
-def test_fake_provider_rejects_invalid_pacing(
+def test_fake_provider_rejects_invalid_numeric_settings(
     monkeypatch: pytest.MonkeyPatch,
+    env_var: str,
+    read_setting: Callable[[], object],
     value: str,
 ) -> None:
-    monkeypatch.setenv("WISP_FAKE_STREAM_INTERVAL_MS", value)
+    monkeypatch.setenv(env_var, value)
 
     with pytest.raises(ValueError, match="nonnegative integer"):
-        fake_module.FakeProvider._stream_interval_seconds()
-
-
-@pytest.mark.parametrize("value", ["-1", "not-a-number"])
-def test_fake_provider_rejects_invalid_response_word_count(
-    monkeypatch: pytest.MonkeyPatch,
-    value: str,
-) -> None:
-    monkeypatch.setenv("WISP_FAKE_RESPONSE_WORDS", value)
-
-    with pytest.raises(ValueError, match="nonnegative integer"):
-        fake_module.FakeProvider._extra_response_words()
+        read_setting()

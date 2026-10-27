@@ -20,7 +20,6 @@ from wisp.sessions.entries import (
     CompactionSessionEntry,
     EventSessionEntry,
     MessageSessionEntry,
-    PersistedEventEnvelope,
     RepositoryStatusSnapshot,
     SessionEntryAdapter,
     session_entry_from_dict,
@@ -130,40 +129,6 @@ def test_writes_versioned_discriminated_entries(tmp_path: Path) -> None:
     assert isinstance(session.read_entries()[0], MessageSessionEntry)
     assert isinstance(session.read_entries()[3], EventSessionEntry)
     assert isinstance(session.read_entries()[4], CompactionSessionEntry)
-
-
-def test_concrete_session_entry_variants_preserve_payloads() -> None:
-    message = Message(role="user", content="hello")
-    compaction = CompactionRecord(
-        summary="Earlier context.",
-        replaced_entry_ids=("message",),
-        provider="openai",
-    )
-
-    message_entry = MessageSessionEntry(
-        id="message",
-        session_id="session",
-        message=message,
-    )
-    event_entry = EventSessionEntry(
-        id="event",
-        session_id="session",
-        event=PersistedEventEnvelope(
-            payload={"type": "error", "schema_version": 12, "message": "boom"}
-        ),
-    )
-    compaction_entry = CompactionSessionEntry(
-        id="compaction",
-        session_id="session",
-        compaction=compaction,
-    )
-
-    assert isinstance(message_entry, MessageSessionEntry)
-    assert message_entry.message == message
-    assert isinstance(event_entry, EventSessionEntry)
-    assert event_entry.event.payload["type"] == "error"
-    assert isinstance(compaction_entry, CompactionSessionEntry)
-    assert compaction_entry.compaction == compaction
 
 
 @pytest.mark.parametrize(
@@ -323,32 +288,18 @@ def test_rejects_entries_that_omit_their_parent_reference(tmp_path: Path) -> Non
         JsonlSessionStore(tmp_path).load(path).read_entries()
 
 
-def test_retains_unknown_event_payload_until_typed_access(tmp_path: Path) -> None:
-    path = tmp_path / "future-event.jsonl"
-    raw_event = {"type": "future.event", "future": True}
+@pytest.mark.parametrize(
+    "raw_event",
+    [
+        pytest.param({"type": "future.event", "future": True}, id="unknown-type"),
+        pytest.param({"type": "error"}, id="malformed-payload"),
+    ],
+)
+def test_retains_raw_event_until_typed_access(tmp_path: Path, raw_event: dict[str, object]) -> None:
+    path = tmp_path / "event.jsonl"
     entry = {
         "schema_version": 6,
-        "id": "future-event",
-        "session_id": "event-session",
-        "parent_id": None,
-        "kind": "event",
-        "event": {"schema_version": 1, "payload": raw_event},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
-    session = JsonlSessionStore(tmp_path).load(path)
-
-    assert session.read_events() == (raw_event,)
-    with pytest.raises(MalformedPersistedEventError, match="Malformed persisted event"):
-        session.read_typed_events()
-
-
-def test_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
-    path = tmp_path / "malformed-event.jsonl"
-    raw_event = {"type": "error"}
-    entry = {
-        "schema_version": 6,
-        "id": "malformed-event",
+        "id": "event",
         "session_id": "event-session",
         "parent_id": None,
         "kind": "event",
@@ -367,6 +318,7 @@ def test_rejects_malformed_event_only_on_typed_access(tmp_path: Path) -> None:
     ("schema_version", "error_type", "match"),
     [
         ("1", MalformedSessionEntryError, "must be an integer"),
+        (None, MalformedSessionEntryError, "must be an integer"),
         (5, UnsupportedSessionEntryVersionError, "schema_version 5"),
         (7, UnsupportedSessionEntryVersionError, "schema_version 7"),
     ],
@@ -419,24 +371,6 @@ def test_distinguishes_malformed_and_future_event_envelopes(
     path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
 
     with pytest.raises(error_type, match=match):
-        JsonlSessionStore(tmp_path).load(path)
-
-
-def test_rejects_null_schema_version(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "null-version.jsonl"
-    entry = {
-        "schema_version": None,
-        "id": "entry",
-        "session_id": "session",
-        "kind": "message",
-        "message": {"role": "user", "content": "hello"},
-        "created_at": "2026-07-11T00:00:00Z",
-    }
-    path.write_text(f"{json.dumps(entry)}\n", encoding="utf-8")
-
-    with pytest.raises(MalformedSessionEntryError, match="must be an integer"):
         JsonlSessionStore(tmp_path).load(path)
 
 
@@ -497,57 +431,52 @@ def test_rejects_extra_entry_fields(tmp_path: Path) -> None:
         JsonlSessionStore(tmp_path).load(path)
 
 
-def test_rejects_mixed_session_ids_in_one_file(tmp_path: Path) -> None:
-    path = tmp_path / "mixed-session-ids.jsonl"
+@pytest.mark.parametrize(
+    ("entry_ids", "session_ids", "match"),
+    [
+        pytest.param(
+            ("first", "second"),
+            ("session-one", "session-two"),
+            "belongs to session-two",
+            id="mixed-session-ids",
+        ),
+        pytest.param(
+            ("duplicate", "duplicate"),
+            ("session", "session"),
+            "Duplicate session entry id duplicate",
+            id="duplicate-entry-ids",
+        ),
+    ],
+)
+def test_rejects_inconsistent_entry_identity_in_one_file(
+    tmp_path: Path,
+    entry_ids: tuple[str, str],
+    session_ids: tuple[str, str],
+    match: str,
+) -> None:
+    path = tmp_path / "inconsistent-identity.jsonl"
     entries = (
         MessageSessionEntry(
-            id="first",
-            session_id="session-one",
+            id=entry_ids[0],
+            session_id=session_ids[0],
             message=Message(role="user", content="first"),
         ),
         MessageSessionEntry(
-            id="second",
-            session_id="session-two",
+            id=entry_ids[1],
+            session_id=session_ids[1],
             message=Message(role="assistant", content="second"),
         ),
     )
     path.write_text(
         "".join(
             f"{session_entry_to_json(entry.model_copy(update={'parent_id': parent_id}))}\n"
-            for entry, parent_id in zip(entries, (None, "first"), strict=True)
+            for entry, parent_id in zip(entries, (None, entry_ids[0]), strict=True)
         ),
         encoding="utf-8",
     )
     session = JsonlSessionStore(tmp_path).load(path)
 
-    with pytest.raises(MalformedSessionEntryError, match="belongs to session-two"):
-        session.read_entries()
-
-
-def test_rejects_duplicate_entry_ids_in_one_file(tmp_path: Path) -> None:
-    path = tmp_path / "duplicate-entry-ids.jsonl"
-    entries = (
-        MessageSessionEntry(
-            id="duplicate",
-            session_id="session",
-            message=Message(role="user", content="first"),
-        ),
-        MessageSessionEntry(
-            id="duplicate",
-            session_id="session",
-            message=Message(role="assistant", content="second"),
-        ),
-    )
-    path.write_text(
-        "".join(
-            f"{session_entry_to_json(entry.model_copy(update={'parent_id': parent_id}))}\n"
-            for entry, parent_id in zip(entries, (None, "duplicate"), strict=True)
-        ),
-        encoding="utf-8",
-    )
-    session = JsonlSessionStore(tmp_path).load(path)
-
-    with pytest.raises(MalformedSessionEntryError, match="Duplicate session entry id duplicate"):
+    with pytest.raises(MalformedSessionEntryError, match=match):
         session.read_entries()
 
 

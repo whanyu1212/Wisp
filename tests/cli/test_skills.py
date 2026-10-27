@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 from typer.testing import CliRunner
 
@@ -90,19 +91,25 @@ def test_skills_resolves_explicit_subdirectory_to_project_root(tmp_path: Path) -
     assert "project-skill [project:agents]" in result.stdout
 
 
-def test_skills_isolates_unresolvable_project_and_lists_user_catalog(
+@pytest.mark.parametrize("failure", ["symlink-loop", "unknown-user-expansion"])
+def test_skills_isolates_unresolvable_project(
+    failure: str,
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     home = tmp_path / "home"
     _write_skill(home / ".wisp" / "skills", "user-skill", "User tasks.")
     monkeypatch.setattr(skills_module, "_home_dir", lambda: home)
-    project = tmp_path / "project-loop"
-    project.symlink_to(project, target_is_directory=True)
+    if failure == "symlink-loop":
+        loop = tmp_path / "project-loop"
+        loop.symlink_to(loop, target_is_directory=True)
+        project = str(loop)
+    else:
+        project = "~wisp-user-that-does-not-exist/repo"
 
     result = CliRunner().invoke(
         app,
-        ["skills", str(project)],
+        ["skills", project],
         env=_env(home, trusted="1"),
     )
 
@@ -110,26 +117,6 @@ def test_skills_isolates_unresolvable_project_and_lists_user_catalog(
     assert "user-skill [user:wisp]" in result.stdout
     assert result.stdout.count("root-unreadable [project:") == 2
     assert "Project skills skipped" in result.stdout
-    assert "could not be resolved" in result.stdout
-
-
-def test_skills_isolates_project_user_expansion_failure(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    home = tmp_path / "home"
-    _write_skill(home / ".wisp" / "skills", "user-skill", "User tasks.")
-    monkeypatch.setattr(skills_module, "_home_dir", lambda: home)
-
-    result = CliRunner().invoke(
-        app,
-        ["skills", "~wisp-user-that-does-not-exist/repo"],
-        env=_env(home, trusted="1"),
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "user-skill [user:wisp]" in result.stdout
-    assert result.stdout.count("root-unreadable [project:") == 2
     assert "could not be resolved" in result.stdout
 
 

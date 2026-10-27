@@ -188,6 +188,10 @@ def test_typed_connection_commands_preserve_lifecycle_without_legacy_conversion(
         assert isinstance(finished, RpcCommandFinished)
         assert started.command_id
         assert started.command_type == finished.command_type == command_type
+        if command_type == "begin_device_code":
+            progress = fixture.events[2]
+            assert isinstance(progress, RpcDeviceCodeProgressReported)
+            assert progress.attempt == 1
         assert all(
             event.model_dump()["command_id"] == started.command_id for event in fixture.events
         )
@@ -546,46 +550,6 @@ def test_executor_keeps_disconnect_success_when_catalog_refresh_fails(
         finished = fixture.events[-1]
         assert isinstance(finished, RpcCommandFinished)
         assert finished.ok is True
-
-    anyio.run(scenario)
-
-
-def test_executor_reports_device_code_progress_and_completion(
-    tmp_path: Path,
-    monkeypatch: MonkeyPatch,
-) -> None:
-    async def fake_login(
-        *, on_device_code: Callable[[DeviceCodeInfo], None], on_progress: Callable[[int], None]
-    ) -> OAuthCredential:
-        on_device_code(DeviceCodeInfo("ABCD-1234", "https://example.test/device", 1, 900))
-        on_progress(1)
-        return OAuthCredential(access="access", refresh="refresh", expires=4_102_444_800_000)
-
-    monkeypatch.setattr(rpc_connections_module, "login_openai_codex_device_code", fake_login)
-
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            result = await dispatch_parsed(
-                fixture.executor(task_group=task_group, send=send),
-                {"id": "device-1", "type": "begin_device_code", "provider": "openai-codex"},
-                None,
-            )
-            await receive.receive()
-            task_group.cancel_scope.cancel()
-
-        assert result.running_command is not None
-        assert [type(event) for event in fixture.events] == [
-            RpcCommandStarted,
-            RpcDeviceCodeReported,
-            RpcDeviceCodeProgressReported,
-            RpcConnectionCatalogReported,
-            RpcCommandFinished,
-        ]
-        progress = fixture.events[2]
-        assert isinstance(progress, RpcDeviceCodeProgressReported)
-        assert progress.attempt == 1
 
     anyio.run(scenario)
 

@@ -116,28 +116,25 @@ def test_untrusted_project_settings_file_is_skipped(tmp_path: Path) -> None:
     assert settings.auth_path is None  # project value ignored; user unset
 
 
-def test_malformed_settings_file_is_ignored(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+@pytest.mark.parametrize(
+    ("content", "warning"),
+    [
+        pytest.param("{not valid json", "malformed settings file", id="malformed"),
+        pytest.param("[1, 2, 3]", "expected a JSON object", id="non-object"),
+    ],
+)
+def test_unreadable_settings_file_is_ignored(
+    tmp_path: Path, capsys: CaptureFixture[str], content: str, warning: str
+) -> None:
     project = tmp_path / "proj"
     wisp_dir = project / ".wisp"
     wisp_dir.mkdir(parents=True)
-    (wisp_dir / "settings.json").write_text("{not valid json", encoding="utf-8")
+    (wisp_dir / "settings.json").write_text(content, encoding="utf-8")
 
     settings = resolve_settings(project_dir=project, home_dir=tmp_path / "home", trust_project=True)
 
     assert settings.provider is None  # falls through, no crash
-    assert "malformed settings file" in capsys.readouterr().err
-
-
-def test_non_object_settings_file_is_ignored(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
-    project = tmp_path / "proj"
-    wisp_dir = project / ".wisp"
-    wisp_dir.mkdir(parents=True)
-    (wisp_dir / "settings.json").write_text("[1, 2, 3]", encoding="utf-8")
-
-    settings = resolve_settings(project_dir=project, home_dir=tmp_path / "home", trust_project=True)
-
-    assert settings.provider is None
-    assert "expected a JSON object" in capsys.readouterr().err
+    assert warning in capsys.readouterr().err
 
 
 def test_unknown_keys_are_ignored(tmp_path: Path) -> None:
@@ -169,30 +166,50 @@ def test_user_protected_paths_are_used(tmp_path: Path) -> None:
     assert settings.protected_paths == ("secret.txt",)
 
 
-def test_project_protected_paths_are_ignored(tmp_path: Path) -> None:
-    # Security: a project-controlled settings file must NOT be able to set or
-    # weaken protected_paths (it could otherwise disable the secret guard). Only
-    # the user layer is honored for this key.
+@pytest.mark.parametrize(
+    ("field", "user_value", "project_value", "expected"),
+    [
+        # A project could otherwise disable the secret guard with an empty list.
+        pytest.param(
+            "protected_paths", ["from-user.txt"], [], ("from-user.txt",), id="protected-paths"
+        ),
+        pytest.param(
+            "protected_paths", None, ["project-only.txt"], None, id="protected-paths-unset"
+        ),
+        pytest.param("effort", "high", "xhigh", "high", id="effort"),
+        pytest.param("effort", None, "xhigh", None, id="effort-unset"),
+        pytest.param("context_reserve_tokens", 8192, 1, 8192, id="context-reserve"),
+        pytest.param("auto_compaction_enabled", False, True, False, id="auto-compaction"),
+        # Searches are billed to the user's provider account; a repo must not turn them on.
+        pytest.param("web_search", None, True, None, id="web-search-unset"),
+        pytest.param(
+            "tui_keybindings",
+            {"prompt.submit": ["ctrl+enter"]},
+            {"prompt.submit": ["f12"]},
+            {"prompt.submit": ["ctrl+enter"]},
+            id="tui-keybindings",
+        ),
+    ],
+)
+def test_trusted_project_cannot_set_user_only_fields(
+    tmp_path: Path,
+    field: str,
+    user_value: object,
+    project_value: object,
+    expected: object,
+) -> None:
+    # Security: these keys are user-only policy, so even a trusted project's
+    # settings file can neither override nor introduce them.
     home = tmp_path / "home"
-    project = tmp_path / "proj"
-    _write_settings(home, protected_paths=["from-user.txt"])
-    _write_settings(project, protected_paths=[])  # attempt to disable — ignored
+    project = tmp_path / "project"
+    home.mkdir()
+    if user_value is not None:
+        _write_settings(home, **{field: user_value})
+    _write_settings(project, **{field: project_value})
 
-    # Even a trusted project cannot set/weaken protected_paths (user-only policy).
     settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
 
-    assert settings.protected_paths == ("from-user.txt",)
-
-
-def test_project_cannot_introduce_protected_paths(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "proj"
-    _write_settings(project, protected_paths=["project-only.txt"])
-
-    # Even a trusted project cannot introduce protected_paths (user-only policy).
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.protected_paths is None  # project value ignored; user unset
+    assert getattr(settings, field) == expected
 
 
 def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
@@ -206,62 +223,6 @@ def test_retry_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) 
     assert settings.retry is not None
     assert settings.retry.max_retries == 3
     assert settings.retry.max_delay_seconds is None
-
-
-def test_effort_settings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    _write_settings(home, effort="high")
-    _write_settings(project, effort="xhigh")
-
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.effort == "high"
-
-
-def test_context_reserve_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    _write_settings(home, context_reserve_tokens=8192)
-    _write_settings(project, context_reserve_tokens=1)
-
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.context_reserve_tokens == 8192
-
-
-def test_auto_compaction_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    _write_settings(home, auto_compaction_enabled=False)
-    _write_settings(project, auto_compaction_enabled=True)
-
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.auto_compaction_enabled is False
-
-
-def test_web_search_is_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
-    # Searches are billed to the user's provider account; a repo must not turn them on.
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    home.mkdir()
-    _write_settings(project, web_search=True)
-
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.web_search is None
-
-
-def test_tui_keybindings_are_user_only_even_for_trusted_projects(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    _write_settings(home, tui_keybindings={"prompt.submit": ["ctrl+enter"]})
-    _write_settings(project, tui_keybindings={"prompt.submit": ["f12"]})
-
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.tui_keybindings == {"prompt.submit": ["ctrl+enter"]}
 
 
 def test_missing_tui_keybindings_resolve_to_empty_map(tmp_path: Path) -> None:
@@ -304,17 +265,6 @@ def test_tui_keybindings_reject_serialized_payload_over_64_kib() -> None:
 
     with pytest.raises(ValidationError, match="at most 65536 UTF-8 bytes"):
         WispSettings.model_validate({"tui_keybindings": bindings})
-
-
-def test_project_cannot_introduce_effort(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    project = tmp_path / "project"
-    _write_settings(project, effort="xhigh")
-
-    # Even a trusted project cannot introduce effort (user-only policy).
-    settings = resolve_settings(project_dir=project, home_dir=home, trust_project=True)
-
-    assert settings.effort is None  # project value ignored; user unset
 
 
 def test_invalid_project_user_only_fields_do_not_discard_project_settings(

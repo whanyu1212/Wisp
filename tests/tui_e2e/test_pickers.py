@@ -21,6 +21,7 @@ from tests.tui_e2e.support import (
     frame_cursor,
     reap,
     run_settled,
+    screen_shows,
     welcome_ready,
 )
 
@@ -68,6 +69,8 @@ SKILL_EXPANSION_MARKER
     fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 120, 0, 0))
     initial_terminal = termios.tcgetattr(terminal_fd)
     output = bytearray()
+    # Phases clear `output`; the screen replay needs every byte since startup.
+    painted = bytearray()
     status: int | None = None
     phase = "startup"
     context_redrawn = False
@@ -79,7 +82,9 @@ SKILL_EXPANSION_MARKER
             readable, _, _ = select.select([terminal_fd], [], [], 0.05)
             if readable:
                 try:
-                    output.extend(os.read(terminal_fd, 65536))
+                    chunk = os.read(terminal_fd, 65536)
+                    output.extend(chunk)
+                    painted.extend(chunk)
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
@@ -111,7 +116,12 @@ SKILL_EXPANSION_MARKER
                 os.write(terminal_fd, b"inspect this change\r")
                 phase = "submitted"
                 output.clear()
-            elif phase == "submitted" and b"SKILL_EXPANSION_MARKER" in output:
+            elif phase == "submitted" and (
+                # A frame can reuse the marker's leading cells from the previous frame,
+                # so also look for it on the replayed screen.
+                b"SKILL_EXPANSION_MARKER" in output
+                or screen_shows(painted, "SKILL_EXPANSION_MARKER")
+            ):
                 # FakeProvider echoes its expanded input as assistant output. The reply can
                 # finish before the running footer is painted, leaving the idle footer unchanged and
                 # never redrawn. A resize repaints the whole frame.

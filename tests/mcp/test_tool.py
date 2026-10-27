@@ -317,37 +317,44 @@ def test_empty_remote_error_uses_generic_message() -> None:
         anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
 
 
-def test_structured_only_result_is_rejected() -> None:
-    adapted = adapt_mcp_tool(
-        server=_server(),
-        tool=_definition(),
-        client=ScriptedMcpClient(
-            CallToolResult(content=[], structuredContent={"secret": "structured-result"})
+@pytest.mark.parametrize(
+    ("result", "secret"),
+    [
+        pytest.param(
+            CallToolResult(content=[], structuredContent={"secret": "structured-result"}),
+            "structured-result",
+            id="structured-only",
         ),
-    )
-
-    with pytest.raises(ToolError, match="unsupported non-text content") as captured:
-        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
-
-    assert "structured-result" not in str(captured.value)
-
-
-def test_structured_result_with_empty_compatibility_text_is_rejected() -> None:
-    adapted = adapt_mcp_tool(
-        server=_server(),
-        tool=_definition(),
-        client=ScriptedMcpClient(
+        pytest.param(
             CallToolResult(
                 content=[TextContent(text="")],
                 structuredContent={"secret": "structured-result"},
-            )
+            ),
+            "structured-result",
+            id="structured-with-empty-text",
         ),
+        pytest.param(
+            CallToolResult(
+                content=[TextContent(text="safe"), ImageContent(data="secret-data", mimeType="x")]
+            ),
+            "secret-data",
+            id="image",
+        ),
+    ],
+)
+def test_non_text_result_is_rejected_without_exposing_payload(
+    result: CallToolResult, secret: str
+) -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(result),
     )
 
     with pytest.raises(ToolError, match="unsupported non-text content") as captured:
         anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
 
-    assert "structured-result" not in str(captured.value)
+    assert secret not in str(captured.value)
 
 
 def test_non_utf8_text_result_is_rejected() -> None:
@@ -361,23 +368,6 @@ def test_non_utf8_text_result_is_rejected() -> None:
         anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
 
     assert "\ud800" not in str(captured.value)
-
-
-def test_unsupported_content_does_not_expose_payload() -> None:
-    adapted = adapt_mcp_tool(
-        server=_server(),
-        tool=_definition(),
-        client=ScriptedMcpClient(
-            CallToolResult(
-                content=[TextContent(text="safe"), ImageContent(data="secret-data", mimeType="x")]
-            )
-        ),
-    )
-
-    with pytest.raises(ToolError, match="unsupported non-text content") as captured:
-        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
-
-    assert "secret-data" not in str(captured.value)
 
 
 def test_client_exception_does_not_expose_transport_details() -> None:

@@ -47,14 +47,6 @@ def _write_overlay(home: Path, text: str) -> Path:
     return path
 
 
-def test_builtin_catalog_loads_and_validates() -> None:
-    catalog = builtin_catalog()
-
-    assert catalog.schema_version == 2
-    names = {provider.name for provider in catalog.providers}
-    assert {"openai", "openai-codex", "fake"} <= names
-
-
 def test_minimal_catalog_parses() -> None:
     catalog = ModelCatalog.model_validate(
         {
@@ -90,59 +82,64 @@ def test_unknown_top_level_key_is_rejected() -> None:
         )
 
 
-def test_unknown_provider_key_is_rejected() -> None:
-    with pytest.raises(ValidationError):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "base_url": "https://example.com",
-            }
-        )
+_ACME_ENTRY = {
+    "name": "acme",
+    "display_name": "Acme",
+    "default_model": "acme-1",
+    "docs_url": "https://example.com/docs",
+    "models": ["acme-1"],
+}
 
 
-def test_default_model_must_be_in_models() -> None:
-    with pytest.raises(ValidationError, match="is not present in models"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-missing",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-            }
-        )
-
-
-def test_context_window_must_reference_a_known_model() -> None:
-    with pytest.raises(ValidationError, match="unknown model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "context_windows": {"acme-2": 1000},
-            }
-        )
-
-
-def test_context_window_must_be_positive() -> None:
-    with pytest.raises(ValidationError, match="must be positive"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "context_windows": {"acme-1": 0},
-            }
-        )
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        pytest.param({"base_url": "https://example.com"}, None, id="unknown-key"),
+        pytest.param(
+            {"default_model": "acme-missing"},
+            "is not present in models",
+            id="default-not-in-models",
+        ),
+        pytest.param(
+            {"context_windows": {"acme-2": 1000}}, "unknown model", id="window-unknown-model"
+        ),
+        pytest.param(
+            {"context_windows": {"acme-1": 0}}, "must be positive", id="window-not-positive"
+        ),
+        pytest.param(
+            {"model_aliases": {"acme-latest": "acme-missing"}},
+            "model_aliases.*unknown model",
+            id="alias-unknown-target",
+        ),
+        pytest.param(
+            {"model_aliases": {"acme-1": "acme-1"}},
+            "duplicates a canonical model",
+            id="alias-duplicates-model",
+        ),
+        pytest.param(
+            {"model_lifecycle": {"acme-2": "stable"}},
+            "model_lifecycle references unknown model",
+            id="lifecycle-unknown-model",
+        ),
+        pytest.param(
+            {"effort_levels": {"acme-2": ["low", "high"]}},
+            "unknown model",
+            id="effort-unknown-model",
+        ),
+        pytest.param({"effort_levels": {"acme-1": []}}, "must not be empty", id="effort-empty"),
+        pytest.param(
+            {"effort_levels": {"acme-1": ["low", "low"]}},
+            "duplicate entries",
+            id="effort-duplicate",
+        ),
+        pytest.param({"models": []}, "at least one model", id="no-models"),
+    ],
+)
+def test_rejects_invalid_provider_entries(
+    overrides: dict[str, object], message: str | None
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ModelCatalogProviderEntry.model_validate({**_ACME_ENTRY, **overrides})
 
 
 @pytest.mark.parametrize(
@@ -169,120 +166,6 @@ def test_auto_compact_token_limit_is_validated(
                 "models": ["acme-1"],
                 "context_windows": context_windows,
                 "auto_compact_token_limits": limits,
-            }
-        )
-
-
-def test_model_alias_must_target_a_known_canonical_model() -> None:
-    with pytest.raises(ValidationError, match="model_aliases.*unknown model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "model_aliases": {"acme-latest": "acme-missing"},
-            }
-        )
-
-
-def test_model_alias_cannot_duplicate_a_canonical_model() -> None:
-    with pytest.raises(ValidationError, match="duplicates a canonical model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "model_aliases": {"acme-1": "acme-1"},
-            }
-        )
-
-
-def test_model_lifecycle_must_reference_a_known_model() -> None:
-    with pytest.raises(ValidationError, match="model_lifecycle references unknown model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "model_lifecycle": {"acme-2": "stable"},
-            }
-        )
-
-
-def test_effort_levels_must_reference_a_known_model() -> None:
-    with pytest.raises(ValidationError, match="unknown model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "effort_levels": {"acme-2": ["low", "high"]},
-            }
-        )
-
-
-def test_effort_levels_must_not_be_empty() -> None:
-    with pytest.raises(ValidationError, match="must not be empty"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "effort_levels": {"acme-1": []},
-            }
-        )
-
-
-def test_effort_levels_rejects_duplicate_tiers() -> None:
-    with pytest.raises(ValidationError, match="duplicate entries"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": ["acme-1"],
-                "effort_levels": {"acme-1": ["low", "low"]},
-            }
-        )
-
-
-def test_effort_levels_are_not_normalized_across_providers() -> None:
-    # Deliberately provider-specific vocabulary: Google's "LOW"/"HIGH" and
-    # Anthropic's "low"/"medium"/"high"/"xhigh"/"max" are unrelated strings,
-    # not mapped onto a shared tier scheme.
-    catalog = ModelCatalogProviderEntry.model_validate(
-        {
-            "name": "acme",
-            "display_name": "Acme",
-            "default_model": "acme-1",
-            "docs_url": "https://example.com/docs",
-            "models": ["acme-1"],
-            "effort_levels": {"acme-1": ["LOW", "HIGH"]},
-        }
-    )
-    assert catalog.effort_levels == {"acme-1": ("LOW", "HIGH")}
-
-
-def test_empty_models_list_is_rejected() -> None:
-    with pytest.raises(ValidationError, match="at least one model"):
-        ModelCatalogProviderEntry.model_validate(
-            {
-                "name": "acme",
-                "display_name": "Acme",
-                "default_model": "acme-1",
-                "docs_url": "https://example.com/docs",
-                "models": [],
             }
         )
 
@@ -556,7 +439,12 @@ def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels()
         ("anthropic", "claude-opus-5-5", ("low", "medium", "high", "xhigh", "max")),
         ("anthropic", "claude-sonnet-5-5", ("low", "medium", "high", "xhigh", "max")),
         ("anthropic", "claude-haiku-5-5", ("low", "medium", "high", "xhigh", "max")),
-        ("google", "gemini-4-argon", ("LOW", "MEDIUM", "HIGH")),
+        # Deliberately provider-specific vocabulary: Google's uppercase tiers and
+        # Anthropic's lowercase ones are unrelated strings, not mapped onto a
+        # shared tier scheme.
+        pytest.param(
+            "google", "gemini-4-argon", ("LOW", "MEDIUM", "HIGH"), id="google-uppercase-tiers"
+        ),
         ("xai", "grok-4.7", ("low", "medium", "high", "xhigh")),
     ],
 )

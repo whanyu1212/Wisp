@@ -459,6 +459,7 @@ def test_write_tool_reports_overwrite_of_unsnapshotable_file(tmp_path: Path) -> 
 
     assert "before_text" not in result.data
     assert result.data["created"] is False
+    assert (tmp_path / "f.bin").read_text(encoding="utf-8") == "text\n"
 
 
 def test_write_tool_snapshot_preserves_prior_newline_bytes(tmp_path: Path) -> None:
@@ -470,18 +471,6 @@ def test_write_tool_snapshot_preserves_prior_newline_bytes(tmp_path: Path) -> No
     result = run_tool(WriteTool(), {"path": "f.txt", "content": "x\n"}, context)
 
     assert result.data["before_text"] == "a\r\nb\r\n"
-
-
-def test_write_tool_skips_snapshot_for_non_utf8_prior_file(tmp_path: Path) -> None:
-    # A binary/non-UTF-8 prior file can't be diffed as text: omit the snapshot and
-    # let the write proceed rather than crash or ship garbage.
-    context = ToolContext(cwd=tmp_path)
-    (tmp_path / "f.bin").write_bytes(b"\xff\xfe\x00data")
-
-    result = run_tool(WriteTool(), {"path": "f.bin", "content": "text\n"}, context)
-
-    assert "before_text" not in result.data
-    assert (tmp_path / "f.bin").read_text(encoding="utf-8") == "text\n"
 
 
 def test_write_tool_skips_snapshot_for_oversize_prior_file(tmp_path: Path) -> None:
@@ -496,29 +485,6 @@ def test_write_tool_skips_snapshot_for_oversize_prior_file(tmp_path: Path) -> No
 
     assert "before_text" not in result.data
     assert (tmp_path / "big.txt").read_text(encoding="utf-8") == "small\n"
-
-
-def test_overlapping_edit_arguments_are_actionable(tmp_path: Path) -> None:
-    (tmp_path / "notes.txt").write_text("abc", encoding="utf-8")
-
-    with pytest.raises(ToolError) as caught:
-        run_tool(
-            EditTool(),
-            {
-                "path": "notes.txt",
-                "edits": [
-                    {"oldText": "abc", "newText": "first"},
-                    {"oldText": "bc", "newText": "second"},
-                ],
-            },
-            ToolContext(cwd=tmp_path),
-        )
-
-    assert caught.value.failure_code == "invalid_arguments"
-    assert caught.value.retryable is True
-    assert caught.value.recovery_hint == (
-        "Retry with arguments that match the tool's input schema."
-    )
 
 
 def test_edit_tool_applies_unique_replacements_from_original(tmp_path: Path) -> None:
@@ -617,8 +583,12 @@ def test_edit_missing_names_index(tmp_path: Path) -> None:
 
 
 def test_edit_overlap_names_indexes(tmp_path: Path) -> None:
-    with pytest.raises(ToolError, match=r"edits\[0\] and edits\[2\] overlap"):
+    with pytest.raises(ToolError, match=r"edits\[0\] and edits\[2\] overlap") as raised:
         _edit(tmp_path, b"abcdef\n", ("abc", "1"), ("f", "2"), ("bc", "3"))
+
+    assert raised.value.failure_code == "invalid_arguments"
+    assert raised.value.retryable is True
+    assert raised.value.recovery_hint == "Retry with arguments that match the tool's input schema."
 
 
 def test_edit_ignores_trailing_whitespace(tmp_path: Path) -> None:

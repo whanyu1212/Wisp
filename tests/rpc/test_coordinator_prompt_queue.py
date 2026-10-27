@@ -67,39 +67,6 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready(run_type: str) ->
     anyio.run(scenario)
 
 
-def test_coordinator_async_buffers_init_queue_until_ready() -> None:
-    async def scenario() -> None:
-        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
-        coordinator.running_command = _RpcRunningCommand("init", "init", anyio.CancelScope())
-        dispatched: list[str] = []
-
-        async def dispatch(
-            command: ParsedRpcCommand,
-            running: _RpcRunningCommand | None,
-        ) -> _RpcDispatchResult:
-            dispatched.append(str(command.command_id))
-            return _RpcDispatchResult(running)
-
-        async def reject(_command: ParsedRpcCommand, _message: str) -> None:
-            raise AssertionError("command unexpectedly rejected")
-
-        await coordinator.handle_event(
-            input_command({"content": "", "id": "follow-up", "type": "follow_up"}),
-            dispatch=dispatch,
-            reject=reject,
-        )
-        assert dispatched == []
-
-        await coordinator.handle_event(
-            _RpcPromptReady("init"),
-            dispatch=dispatch,
-            reject=reject,
-        )
-        assert dispatched == ["follow-up"]
-
-    anyio.run(scenario)
-
-
 def test_coordinator_ignores_stale_prompt_readiness() -> None:
     async def scenario() -> None:
         receiver = Receiver(

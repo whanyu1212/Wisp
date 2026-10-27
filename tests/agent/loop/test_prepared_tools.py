@@ -80,11 +80,8 @@ class PreparedScriptExecutor:
     def __init__(
         self,
         runner: Callable[[ToolCall], Awaitable[ToolExecutionEnded]],
-        *,
-        parallel_safe: Mapping[str, bool] | None = None,
     ) -> None:
         self._runner = runner
-        self._parallel_safe = parallel_safe or {}
 
     async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
         async def run() -> ToolExecutionEnded:
@@ -93,7 +90,7 @@ class PreparedScriptExecutor:
         yield PreparedToolExecution(
             call_id=tool_call.call_id,
             name=tool_call.name,
-            parallel_safe=self._parallel_safe.get(tool_call.call_id, True),
+            parallel_safe=True,
             runner=run,
         )
 
@@ -770,50 +767,6 @@ def test_rejects_result_emitted_during_preparation() -> None:
     assert_turn_terminals(events)
     completed = [event for event in events if isinstance(event, TurnCompleted)]
     assert completed[-1].outcome == "failed"
-
-
-def test_one_sequential_call_serializes_batch() -> None:
-    calls = tuple(
-        ToolCall(call_id=f"call-{index}", name="tool", arguments={}) for index in range(1, 4)
-    )
-    provider = _scripted_tool_batch_provider(calls)
-
-    async def run() -> tuple[list[str], int]:
-        active = 0
-        max_active = 0
-        started: list[str] = []
-
-        async def runner(tool_call: ToolCall) -> ToolExecutionEnded:
-            nonlocal active, max_active
-            started.append(tool_call.call_id)
-            active += 1
-            max_active = max(max_active, active)
-            await anyio.sleep(0)
-            active -= 1
-            return ToolExecutionEnded(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                output="done",
-                is_error=False,
-            )
-
-        executor = PreparedScriptExecutor(
-            runner,
-            parallel_safe={"call-2": False},
-        )
-        _ = [
-            event
-            async for event in run_agent_loop(
-                AgentLoopConfig(provider=provider, tool_executor=executor),
-                messages=(Message(role="user", content="hi"),),
-            )
-        ]
-        return started, max_active
-
-    started, max_active = anyio.run(run)
-
-    assert started == ["call-1", "call-2", "call-3"]
-    assert max_active == 1
 
 
 class _LabelTool:

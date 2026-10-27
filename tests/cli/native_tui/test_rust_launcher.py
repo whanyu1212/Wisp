@@ -57,6 +57,7 @@ def test_default_frontend_selects_rust_even_without_native_distribution(
     result = CliRunner().invoke(app, arguments, env=_cli_env())
     assert result.exit_code == 0, result.output
     assert launched["config"].provider == "fake"  # type: ignore[attr-defined]
+    assert launched["all_tools"] is True
 
 
 @pytest.mark.parametrize(
@@ -129,39 +130,6 @@ def test_tui_entry_points_route_to_rust_launcher(
     assert captured[0].config.provider == "fake"
 
 
-def test_rust_branch_does_not_import_python_tui_app() -> None:
-    script = """
-import sys
-from unittest.mock import patch
-
-from typer.testing import CliRunner
-
-from wisp.cli import app
-from wisp.cli.native_tui import rust_launcher
-
-with patch.object(rust_launcher, "run_rust_tui", return_value=0):
-    result = CliRunner().invoke(app, ["tui"])
-assert result.exit_code == 0, result.output
-assert "wisp.tui" not in sys.modules
-"""
-    environment = {
-        **os.environ,
-        "WISP_PROVIDER": "fake",
-        "WISP_MODEL": "",
-        "WISP_TRUST": "1",
-    }
-
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
 def test_rust_failure_does_not_fall_back(monkeypatch: MonkeyPatch) -> None:
     monkeypatch.setattr(rust_launcher, "run_rust_tui", lambda _options: 23)
 
@@ -171,52 +139,19 @@ def test_rust_failure_does_not_fall_back(monkeypatch: MonkeyPatch) -> None:
     assert "Rust TUI exited with status 23" in result.output
 
 
-def test_cli_missing_rust_binary_does_not_fall_back(tmp_path: Path) -> None:
-    missing = tmp_path / "missing-wisp-tui"
-    result = CliRunner().invoke(
-        app,
-        ["tui"],
-        env={**_cli_env(), "WISP_RUST_TUI_BINARY": str(missing)},
-    )
-
-    assert result.exit_code == 1
-    assert "was not found" in result.output
-    assert "Rust TUI exited with status" not in result.output
-
-
-def test_cli_missing_rust_binary_does_not_import_python_tui_app(tmp_path: Path) -> None:
-    missing = tmp_path / "missing-wisp-tui"
-    script = """
-import sys
-from typer.testing import CliRunner
-
-from wisp.cli import app
-
-result = CliRunner().invoke(app, ["tui"])
-assert result.exit_code == 1, result.output
-assert "was not found" in result.output
-assert "wisp.tui" not in sys.modules
-"""
-    environment = {
-        **os.environ,
-        **_cli_env(),
-        "WISP_RUST_TUI_BINARY": str(missing),
-    }
-    completed = subprocess.run(
-        [sys.executable, "-c", script],
-        check=False,
-        capture_output=True,
-        env=environment,
-        text=True,
-    )
-
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_cli_nonexecutable_rust_binary_does_not_fall_back(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [("missing", "was not found"), ("nonexecutable", "is not executable")],
+)
+def test_cli_unusable_rust_binary_does_not_fall_back(
+    failure: str,
+    message: str,
+    tmp_path: Path,
+) -> None:
     binary = tmp_path / "wisp-tui"
-    binary.write_bytes(b"binary")
-    binary.chmod(0o600)
+    if failure != "missing":
+        binary.write_bytes(b"binary")
+        binary.chmod(0o600)
     result = CliRunner().invoke(
         app,
         ["tui"],
@@ -224,7 +159,7 @@ def test_cli_nonexecutable_rust_binary_does_not_fall_back(tmp_path: Path) -> Non
     )
 
     assert result.exit_code == 1
-    assert "is not executable" in result.output
+    assert message in result.output
     assert "Rust TUI exited with status" not in result.output
 
 

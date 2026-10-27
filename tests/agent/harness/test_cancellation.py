@@ -16,7 +16,6 @@ from tests.agent.loop.support import tool_call_stream
 from tests.support.agent_runtime import (
     assert_cancellation_settled,
     assert_settled_tool_calls,
-    assert_tool_result_pairing,
     assert_turn_terminals,
 )
 from wisp.agent.harness import AgentHarness
@@ -179,11 +178,11 @@ def test_cancel_between_events_cancels_turn() -> None:
     assert provider.closed
     assert harness.is_running is False
     assert harness.cancel() is False
-    assert_turn_terminals(events)
-    assert_tool_result_pairing(events)
+    assert_cancellation_settled(events)
 
 
-def test_cancel_interrupts_blocked_provider_stream() -> None:
+@pytest.mark.parametrize("cancel_calls", [1, 2], ids=["single", "repeated"])
+def test_cancel_interrupts_blocked_provider_stream(cancel_calls: int) -> None:
     async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
         provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
         harness = build_harness(provider)
@@ -196,7 +195,8 @@ def test_cancel_interrupts_blocked_provider_stream() -> None:
             async with anyio.create_task_group() as task_group:
                 task_group.start_soon(collect)
                 await provider.waiting.wait()
-                assert harness.cancel()
+                for _ in range(cancel_calls):
+                    assert harness.cancel()
         return harness, provider, events
 
     harness, provider, events = anyio.run(run)
@@ -213,6 +213,8 @@ def test_cancel_interrupts_blocked_provider_stream() -> None:
         ("user", "stop now")
     ]
     assert harness.is_running is False
+    assert harness.cancel() is False
+    assert_cancellation_settled(events)
 
 
 def test_close_after_tool_keeps_output() -> None:
@@ -545,6 +547,7 @@ def test_cancel_after_tool_keeps_output() -> None:
     assert tool_message.tool_call_id == "call-1"
     assert tool_message.tool_name == "lookup"
     assert tool_message.is_error is False
+    assert_cancellation_settled(events)
 
 
 @pytest.mark.parametrize("prepared", [False, True])
@@ -576,38 +579,6 @@ def test_cancel_after_tool_turn_errors_once(prepared: bool) -> None:
     assert len([event for event in events if isinstance(event, TurnCompleted)]) == 1
     assert not harness.is_running
     assert not harness.cancel()
-
-
-def test_repeated_cancel_settles_once() -> None:
-    async def run() -> tuple[AgentHarness, BlockingProvider, list[object]]:
-        provider = BlockingProvider(waiting=anyio.Event(), release=anyio.Event())
-        harness = build_harness(provider)
-        events: list[object] = []
-
-        async def collect() -> None:
-            events.extend([event async for event in harness.prompt("stop now")])
-
-        with anyio.fail_after(1):
-            async with anyio.create_task_group() as task_group:
-                task_group.start_soon(collect)
-                await provider.waiting.wait()
-                assert harness.cancel()
-                assert harness.cancel()
-        return harness, provider, events
-
-    harness, provider, events = anyio.run(run)
-
-    assert [event.type for event in events] == [
-        "turn.started",
-        "context.estimated",
-        "message.started",
-        "error",
-        "turn.completed",
-    ]
-    assert provider.closed
-    assert harness.is_running is False
-    assert harness.cancel() is False
-    assert_cancellation_settled(events)
 
 
 def test_cancel_during_tool_settlement() -> None:

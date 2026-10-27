@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import anyio
+import pytest
 
 from tests.coding.session_support import (
     CapturingProvider,
@@ -183,35 +184,29 @@ def test_custom_prompt_keeps_guidance(tmp_path: Path) -> None:
     ]
 
 
-def test_passes_effort_to_provider(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        pytest.param({"effort": "high"}, "high", id="configured"),
+        pytest.param({}, None, id="default"),
+    ],
+)
+def test_forwards_effort_to_provider(
+    tmp_path: Path, options: dict[str, str], expected: str | None
+) -> None:
     provider = CapturingProvider()
 
     async def run_agent() -> list[object]:
         agent = CodingSession(
             provider=provider,
             sessions=JsonlSessionStore(tmp_path),
-            effort="high",
+            **options,
         )
         return [event async for event in agent.run("hello")]
 
     anyio.run(run_agent)
 
-    assert provider.seen_effort == "high"
-
-
-def test_defaults_effort_to_none(tmp_path: Path) -> None:
-    provider = CapturingProvider()
-
-    async def run_agent() -> list[object]:
-        agent = CodingSession(
-            provider=provider,
-            sessions=JsonlSessionStore(tmp_path),
-        )
-        return [event async for event in agent.run("hello")]
-
-    anyio.run(run_agent)
-
-    assert provider.seen_effort is None
+    assert provider.seen_effort == expected
 
 
 def test_reuses_cache_key_for_session_and_isolates_sessions(
@@ -279,6 +274,7 @@ def test_skips_project_context_when_untrusted(tmp_path: Path) -> None:
     assert "CLAUDE.md" not in context
     assert "Never show untrusted agent rules." not in context
     assert "Never show untrusted Claude rules." not in context
+    assert "git:" not in context
     assert "allowed tools:\n  - lookup: Look something up." in context
 
 

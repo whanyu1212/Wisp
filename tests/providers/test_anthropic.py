@@ -257,6 +257,12 @@ def test_anthropic_provider_surfaces_truncated_tool_call_for_rejection() -> None
         ("refusal", "stop"),
         ("max_tokens", "length"),
         ("pause_turn", "length"),
+        # Regression test: a stop_reason this provider has never seen before
+        # (not in _STOP_REASON_TO_FINISH_REASON at all) must never be silently
+        # reported as a clean completion via the dict .get() fallback.
+        # "we don't recognize this" must default to incomplete ("length"),
+        # not success ("stop").
+        pytest.param("some_future_stop_reason", "length", id="unrecognized-defaults-to-length"),
     ],
 )
 def test_anthropic_provider_maps_stop_reasons_to_finish_reasons(
@@ -369,25 +375,3 @@ def test_anthropic_provider_reports_context_window_exceeded_as_failure() -> None
     )
     assert isinstance(recovered[-1], ProviderResponseCompleted)
     assert recovered[-1].content == "recovered"
-
-
-def test_anthropic_provider_defaults_unrecognized_stop_reason_to_length() -> None:
-    # Regression test: a stop_reason this provider has never seen before
-    # (not in _STOP_REASON_TO_FINISH_REASON at all -- distinct from the
-    # explicitly-mapped-but-beta-only "model_context_window_exceeded" case
-    # above) must never be silently reported as a clean completion via the
-    # dict .get() fallback. "we don't recognize this" must default to
-    # incomplete ("length"), not success ("stop").
-    provider = StubAnthropicProvider(
-        [text_delta_event("partial answer"), message_delta_event("some_future_stop_reason")]
-    )
-
-    async def run() -> list[object]:
-        return [
-            event async for event in provider.stream([WispMessage(role="user", content="hello")])
-        ]
-
-    events = anyio.run(run)
-    completed = events[-1]
-    assert isinstance(completed, ProviderResponseCompleted)
-    assert completed.finish_reason == "length"

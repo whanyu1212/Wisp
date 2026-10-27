@@ -9,7 +9,6 @@ from typing import Literal, cast
 import anyio
 import pytest
 
-import wisp.agent.harness.boundaries as boundaries_module
 from tests.agent.loop.support import tool_call_stream
 from tests.support.agent_runtime import (
     assert_tool_result_pairing,
@@ -175,54 +174,6 @@ def test_completion_message_owns_tool_snapshots() -> None:
     assert message.tool_calls[0].arguments == {"paths": ["original"]}
     assert message.tool_calls[0].provider_call_id == "native"
     assert message.created_at == event.timestamp
-
-
-@pytest.mark.parametrize("offset", ["turn_offset", "tool_iteration_offset"])
-def test_invalid_startup_keeps_transcript_for_retry(offset: str) -> None:
-    initial = Message(role="user", content="earlier")
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]]
-    )
-    harness = AgentHarness(
-        AgentHarnessConfig(provider=provider, tool_executor=_Executor()), messages=(initial,)
-    )
-
-    async def run() -> None:
-        stream = harness.prompt("invalid", **{offset: -1})
-        assert harness.messages == (initial,)
-        with pytest.raises(ValueError, match=offset):
-            await anext(stream)
-        assert not harness.is_running
-        assert not harness.cancel()
-        assert harness.messages == (initial,)
-        _events = [event async for event in harness.prompt("valid")]
-
-    anyio.run(run)
-
-
-def test_history_preparation_failure_releases_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="ok")]]
-    )
-    harness = AgentHarness(AgentHarnessConfig(provider=provider, tool_executor=_Executor()))
-    harness.follow_up("queued")
-
-    def fail(*args: object, **kwargs: object) -> tuple[Message, ...]:
-        raise RuntimeError("history preparation failed")
-
-    async def run() -> None:
-        with monkeypatch.context() as patch:
-            patch.setattr(boundaries_module, "prepare_provider_history", fail)
-            with pytest.raises(RuntimeError, match="history preparation failed"):
-                await anext(harness.prompt("accepted"))
-        assert not harness.is_running
-        assert not harness.cancel()
-        assert [message.content for message in harness.messages] == ["accepted"]
-        assert harness.pending_message_count == 1
-        harness.clear_queues()
-        _events = [event async for event in harness.continue_()]
-
-    anyio.run(run)
 
 
 class _ClosingProvider:

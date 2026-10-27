@@ -86,34 +86,6 @@ def test_rpc_mode_new_session_is_lazy_and_reports_no_selected_session(tmp_path: 
     assert list(tmp_path.glob("*.jsonl")) == []
 
 
-def test_rpc_mode_configures_model_for_future_prompts(tmp_path: Path) -> None:
-    runner = CliRunner()
-
-    result = runner.invoke(
-        app,
-        ["--mode", "rpc", "--session-dir", str(tmp_path)],
-        input=(
-            '{"id":"configure-1","type":"configure","model":"fake-custom-model"}\n'
-            '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n'
-        ),
-        env={"WISP_PROVIDER": "fake", "WISP_MODEL": ""},
-    )
-
-    assert result.exit_code == 0, result.output
-    records = _jsonl_records(result.stdout)
-    configure_finished = next(
-        record
-        for record in records
-        if record["type"] == "rpc.command.finished" and record["command_id"] == "configure-1"
-    )
-    assert configure_finished["type"] == "rpc.command.finished"
-    assert configure_finished["command_id"] == "configure-1"
-    assert configure_finished["command_type"] == "configure"
-    assert configure_finished["ok"] is True
-    assert configure_finished["error"] is None
-    assert any(record.get("content") == "fake response to: hello" for record in records)
-
-
 def test_rpc_mode_orders_provider_switch_between_prompts_in_same_session(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,

@@ -321,23 +321,6 @@ def test_persists_event_entries_without_polluting_messages(tmp_path: Path) -> No
     assert events[1]["message"] == "boom"
 
 
-def test_store_opens_latest_session(tmp_path: Path) -> None:
-    store = JsonlSessionStore(tmp_path)
-    older = store.create()
-    newer = store.create()
-
-    async def write() -> None:
-        await older.append_message(Message(role="user", content="old"))
-        await newer.append_message(Message(role="user", content="new"))
-
-    anyio.run(write)
-    os.utime(older.path, (1, 1))
-    os.utime(newer.path, (2, 2))
-
-    assert store.latest().path == newer.path
-    assert store.latest().read_messages()[0].content == "new"
-
-
 def test_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
     store = JsonlSessionStore(tmp_path)
     older = store.create()
@@ -356,6 +339,7 @@ def test_recovery_preserves_latest_ordering(tmp_path: Path) -> None:
 
     assert [summary.session_id for summary in summaries] == [newer.session_id, older.session_id]
     assert store.latest().path == newer.path
+    assert store.latest().read_messages()[0].content == "new"
     assert older.path.stat().st_mtime_ns == 1_000_000_000
 
 

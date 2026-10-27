@@ -193,9 +193,20 @@ def test_managed_process_surfaces_established_malformed_utf8_before_exit(
 
 
 @pytest.mark.process
+@pytest.mark.parametrize(
+    ("source", "timeout", "poll_timeout"),
+    [
+        pytest.param("print('unread')", 2, 10, id="process-exits"),
+        # The failure must surface while the process is still running, not wait for exit.
+        pytest.param("import time; time.sleep(30)", 60, 2, id="process-still-running"),
+    ],
+)
 def test_managed_process_reports_stream_reader_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    timeout: float,
+    poll_timeout: float,
 ) -> None:
     supervisor = ProcessSupervisor()
 
@@ -207,41 +218,11 @@ def test_managed_process_reports_stream_reader_failures(
     async def run() -> ProcessUpdate:
         try:
             process_id = await supervisor.start(
-                python_command("print('unread')"),
+                python_command(source),
                 cwd=tmp_path,
-                timeout=2,
+                timeout=timeout,
             )
-            return (await poll_until_terminal(supervisor, process_id))[-1]
-        finally:
-            await supervisor.aclose()
-
-    update = anyio.run(run)
-
-    assert update.state == "failed"
-    assert update.exit_code is None
-    assert update.error == "Failed to read process output"
-
-
-@pytest.mark.process
-def test_managed_process_reports_reader_failure_before_process_exit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    supervisor = ProcessSupervisor()
-
-    async def fail_read(*_args: object) -> None:
-        raise OSError("broken transport")
-
-    monkeypatch.setattr(supervisor, "_read_stream", fail_read)
-
-    async def run() -> ProcessUpdate:
-        try:
-            process_id = await supervisor.start(
-                python_command("import time; time.sleep(30)"),
-                cwd=tmp_path,
-                timeout=60,
-            )
-            return (await poll_until_terminal(supervisor, process_id, timeout=2))[-1]
+            return (await poll_until_terminal(supervisor, process_id, timeout=poll_timeout))[-1]
         finally:
             await supervisor.aclose()
 

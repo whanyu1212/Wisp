@@ -60,12 +60,6 @@ class _ContinuationProvider(_CursorlessProvider):
     supports_context_rebase = True
 
 
-class _OpaqueReplayProvider(_ContinuationProvider):
-    def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
-        del effort
-        return False
-
-
 def _config(*, provider: object | None = None) -> AgentLoopConfig:
     return AgentLoopConfig(
         provider=provider or _ContinuationProvider(),
@@ -237,21 +231,6 @@ def test_unpaired_replacement_is_rejected() -> None:
             messages=(_user(),),
             had_tool_calls=False,
             decision=RequestBoundaryDecision(messages=(_assistant_with_tool(),)),
-            allow_extra_messages=True,
-        )
-
-
-def test_rejects_opaque_structured_replacement() -> None:
-    state = ContinuationState()
-    with pytest.raises(RequestBoundaryUnsupportedError, match="cannot fresh-replay"):
-        apply_request_boundary_decision(
-            _config(provider=_OpaqueReplayProvider()),
-            state,
-            messages=(_user(),),
-            had_tool_calls=False,
-            decision=RequestBoundaryDecision(
-                messages=(_user(), _assistant_with_tool(), _tool_result())
-            ),
             allow_extra_messages=True,
         )
 

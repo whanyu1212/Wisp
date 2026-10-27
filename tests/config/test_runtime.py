@@ -60,35 +60,37 @@ def test_config_defaults_session_dir_to_durable_home_path(monkeypatch: MonkeyPat
     assert session_dir.is_absolute()  # ~ expanded, not a literal "~"
 
 
-def test_config_reads_session_dir_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    selected = tmp_path / "sessions"
-    monkeypatch.setenv("WISP_SESSION_DIR", str(selected))
+@pytest.mark.parametrize(
+    ("variable", "file_name", "field"),
+    [
+        pytest.param("WISP_SESSION_DIR", "sessions", "session_dir", id="session-dir"),
+        pytest.param("WISP_AUTH_FILE", "auth.json", "auth_path", id="auth-path"),
+    ],
+)
+def test_config_reads_paths_from_env(
+    tmp_path: Path, monkeypatch: MonkeyPatch, variable: str, file_name: str, field: str
+) -> None:
+    selected = tmp_path / file_name
+    monkeypatch.setenv(variable, str(selected))
 
     config = WispConfig.from_env()
 
-    assert config.session_dir == selected
+    assert getattr(config, field) == selected
 
 
-def test_config_reads_auth_path_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    selected = tmp_path / "auth.json"
-    monkeypatch.setenv("WISP_AUTH_FILE", str(selected))
-
-    config = WispConfig.from_env()
-
-    assert config.auth_path == selected
-
-
-def test_config_reads_provider_and_model_from_env(
+def test_config_reads_provider_model_and_effort_from_env(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("WISP_PROVIDER", "openai")
     monkeypatch.setenv("WISP_MODEL", "gpt-5.5")
+    monkeypatch.setenv("WISP_EFFORT", "medium")
 
     config = WispConfig.from_env(session_dir=tmp_path)
 
     assert config.provider == "openai"
     assert config.model == "gpt-5.5"
+    assert config.effort == "medium"
 
 
 def test_explicit_config_values_override_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -143,14 +145,6 @@ def test_config_reads_openai_compatible_from_structured_env(
     assert config.openai_compatible is not None
     assert config.openai_compatible.base_url == "https://openrouter.ai/api/v1"
     assert config.openai_compatible.default_model == "openai/gpt-5"
-
-
-def test_config_reads_effort_from_env(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setenv("WISP_EFFORT", "medium")
-
-    config = WispConfig.from_env(session_dir=tmp_path)
-
-    assert config.effort == "medium"
 
 
 def test_config_reuses_persisted_tui_model_selection_on_restart(

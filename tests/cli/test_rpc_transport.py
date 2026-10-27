@@ -950,7 +950,17 @@ def test_transport_dispatches_buffered_pipe_lines() -> None:
         stdin.close()
 
 
-def test_thread_transport_uses_configured_bounded_queue() -> None:
+@pytest.mark.parametrize(
+    ("queue_options", "expected_size"),
+    [
+        pytest.param({"thread_queue_size": 7}, 7, id="configured"),
+        pytest.param({}, 16, id="default"),
+    ],
+)
+def test_thread_transport_bounds_chunk_queue(
+    queue_options: dict[str, int],
+    expected_size: int,
+) -> None:
     created_queue_sizes: list[int] = []
 
     class RecordingQueue(Queue[bytes | Exception]):
@@ -968,35 +978,7 @@ def test_thread_transport_uses_configured_bounded_queue() -> None:
             input_closed_factory=_RpcInputClosed,
             queue_factory=RecordingQueue,
             read_fd=lambda _fd, _size: b"",
-            thread_queue_size=7,
-        )
-        send, receive = anyio.create_memory_object_stream(10)
-        async with send, receive:
-            await transport.read_thread(send, stop_reader, 0)
-
-    anyio.run(scenario)
-
-    assert created_queue_sizes == [7]
-
-
-def test_thread_transport_defaults_to_bounded_chunk_queue() -> None:
-    created_queue_sizes: list[int] = []
-
-    class RecordingQueue(Queue[bytes | Exception]):
-        def __init__(self, maxsize: int = 0) -> None:
-            created_queue_sizes.append(maxsize)
-            super().__init__(maxsize=maxsize)
-
-    async def scenario() -> None:
-        stop_reader = anyio.Event()
-        stop_reader.set()
-        transport = RpcStdinTransport(
-            stdin=_Input([""]),
-            write_event=lambda _event: None,
-            input_command_factory=_RpcInputCommand,
-            input_closed_factory=_RpcInputClosed,
-            queue_factory=RecordingQueue,
-            read_fd=lambda _fd, _size: b"",
+            **queue_options,
         )
         send, receive = anyio.create_memory_object_stream(1)
         async with send, receive:
@@ -1004,7 +986,7 @@ def test_thread_transport_defaults_to_bounded_chunk_queue() -> None:
 
     anyio.run(scenario)
 
-    assert created_queue_sizes == [16]
+    assert created_queue_sizes == [expected_size]
 
 
 def test_transport_uses_thread_reader_for_windows_pipe() -> None:

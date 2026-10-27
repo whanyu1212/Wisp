@@ -53,33 +53,6 @@ def test_static_extension_registers_frontend_neutral_capabilities() -> None:
     assert descriptor.title == "Example status"
 
 
-def test_static_extension_tool_executes_through_normal_policy(tmp_path: Path) -> None:
-    api, tools, _commands, _events = _api()
-    activate(api)
-    executor = ConfiguredToolExecutor(
-        registry=tools,
-        context=ToolContext(cwd=tmp_path),
-        policy=ToolPolicy.allow_read_tools(),
-        approval_policy=ToolApprovalPolicy.require_approval(),
-    )
-
-    async def run() -> tuple[object, ...]:
-        call = ToolCall(
-            call_id="greeting-1",
-            name="example_greeting",
-            arguments={"name": "Wisp"},
-        )
-        return tuple([event async for event in executor.execute(call)])
-
-    events = anyio.run(run)
-
-    assert len(events) == 1
-    ended = events[0]
-    assert isinstance(ended, ToolExecutionEnded)
-    assert ended.output == "Hello, Wisp!"
-    assert ended.is_error is False
-
-
 def test_static_extension_tool_is_provider_visible_and_returns_results(tmp_path: Path) -> None:
     api, tools, _commands, _events = _api()
     activate(api)
@@ -130,6 +103,7 @@ def test_static_extension_tool_is_provider_visible_and_returns_results(tmp_path:
 
     assert [spec.name for spec in provider.calls[0].tools] == ["example_greeting"]
     assert provider.calls[1].tool_results[0].output == "Hello, Wisp!"
+    assert provider.calls[1].tool_results[0].is_error is False
 
 
 def test_static_extension_event_handler_observes_typed_events() -> None:

@@ -257,51 +257,67 @@ def test_replay_supports_repeated_compaction_and_new_messages() -> None:
     ]
 
 
-def test_replay_does_not_link_detached_entries() -> None:
-    entries = (
-        _message_entry("user", "user", "question"),
-        _message_entry("assistant", "assistant", "answer"),
-    )
-
-    with pytest.raises(SessionReplayError, match="expected active leaf 'user'"):
+@pytest.mark.parametrize(
+    ("entries", "error"),
+    [
+        pytest.param(
+            (
+                _message_entry("user", "user", "question"),
+                _message_entry("assistant", "assistant", "answer"),
+            ),
+            "expected active leaf 'user'",
+            id="detached",
+        ),
+        pytest.param(
+            (
+                _message_entry("root", "user", "question"),
+                _message_entry("child", "assistant", "answer").model_copy(
+                    update={"parent_id": "root"}
+                ),
+                _message_entry("detached", "user", "next"),
+            ),
+            "expected active leaf 'child'",
+            id="partially-linked",
+        ),
+    ],
+)
+def test_replay_rejects_unlinked_entries(
+    entries: tuple[SessionEntry, ...],
+    error: str,
+) -> None:
+    with pytest.raises(SessionReplayError, match=error):
         replay_session_entries(entries)
-
-
-def test_replay_does_not_normalize_partially_linked_tree() -> None:
-    root = _message_entry("root", "user", "question")
-    child = _message_entry("child", "assistant", "answer").model_copy(update={"parent_id": "root"})
-    detached = _message_entry("detached", "user", "next")
-
-    with pytest.raises(SessionReplayError, match="expected active leaf 'child'"):
-        replay_session_entries((root, child, detached))
 
 
 @pytest.mark.parametrize(
     ("entries", "error"),
     [
-        (
+        pytest.param(
             (
                 _message_entry("first", "user", "one"),
                 _compaction_entry("compact", "first", "first"),
             ),
             "duplicate",
+            id="duplicate",
         ),
-        (
+        pytest.param(
             (
                 _message_entry("first", "user", "one"),
                 _compaction_entry("compact", "missing"),
             ),
             "unknown",
+            id="unknown",
         ),
-        (
+        pytest.param(
             (
                 _message_entry("first", "user", "one"),
                 _message_entry("second", "assistant", "two"),
                 _compaction_entry("compact", "second"),
             ),
             "prefix",
+            id="prefix",
         ),
-        (
+        pytest.param(
             (
                 _message_entry("first", "user", "one"),
                 _message_entry("first-answer", "assistant", "answer one"),
@@ -311,6 +327,54 @@ def test_replay_does_not_normalize_partially_linked_tree() -> None:
                 _compaction_entry("compact-2", "first"),
             ),
             "inactive",
+            id="inactive",
+        ),
+        pytest.param(
+            (
+                _message_entry("user-1", "user", "first"),
+                _message_entry("assistant-1", "assistant", "answer"),
+                _message_entry("user-2", "user", "second"),
+                _message_entry("assistant-2", "assistant", "answer two"),
+                _compaction_entry("compact", "user-1", "assistant-1", "user-2"),
+            ),
+            "splits a conversation turn",
+            id="splits-turn",
+        ),
+        pytest.param(
+            (
+                _message_entry("user-1", "user", "first"),
+                _message_entry("assistant-1", "assistant", "answer", finish_reason="stop"),
+                _message_entry("user-2", "user", "second"),
+                _message_entry("assistant-2", "assistant", "partial", finish_reason="length"),
+                _compaction_entry("compact", "user-1", "assistant-1"),
+            ),
+            "retain a complete user turn",
+            id="retains-truncated-turn",
+        ),
+        pytest.param(
+            (
+                _message_entry("user-1", "user", "first"),
+                _message_entry(
+                    "call",
+                    "assistant",
+                    "",
+                    tool_calls=(ToolCallSnapshot(call_id="call-1", name="read", arguments={}),),
+                    finish_reason="tool_calls",
+                ),
+                _message_entry(
+                    "result",
+                    "tool",
+                    "contents",
+                    tool_call_id="call-1",
+                    tool_name="read",
+                ),
+                _message_entry("assistant-1", "assistant", "done"),
+                _message_entry("user-2", "user", "second"),
+                _message_entry("assistant-2", "assistant", "answer two"),
+                _compaction_entry("compact", "user-1", "call"),
+            ),
+            "splits a conversation turn",
+            id="splits-call-and-result",
         ),
     ],
 )
@@ -594,63 +658,6 @@ def test_replay_keeps_tool_result_order_and_call_entry_ids() -> None:
     assert [message for message in repair.messages if message not in repair.repairs] == list(
         replay.messages
     )
-
-
-def test_replay_rejects_compaction_that_splits_a_turn() -> None:
-    entries = (
-        _message_entry("user-1", "user", "first"),
-        _message_entry("assistant-1", "assistant", "answer"),
-        _message_entry("user-2", "user", "second"),
-        _message_entry("assistant-2", "assistant", "answer two"),
-        _compaction_entry("compact", "user-1", "assistant-1", "user-2"),
-    )
-    entries = linked_entries(entries)
-
-    with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(entries)
-
-
-def test_replay_rejects_compaction_that_retains_a_truncated_turn() -> None:
-    entries = (
-        _message_entry("user-1", "user", "first"),
-        _message_entry("assistant-1", "assistant", "answer", finish_reason="stop"),
-        _message_entry("user-2", "user", "second"),
-        _message_entry("assistant-2", "assistant", "partial", finish_reason="length"),
-        _compaction_entry("compact", "user-1", "assistant-1"),
-    )
-    entries = linked_entries(entries)
-
-    with pytest.raises(SessionReplayError, match="retain a complete user turn"):
-        replay_session_entries(entries)
-
-
-def test_replay_rejects_compaction_splitting_call_and_result() -> None:
-    call = ToolCallSnapshot(call_id="call-1", name="read", arguments={})
-    entries = (
-        _message_entry("user-1", "user", "first"),
-        _message_entry(
-            "call",
-            "assistant",
-            "",
-            tool_calls=(call,),
-            finish_reason="tool_calls",
-        ),
-        _message_entry(
-            "result",
-            "tool",
-            "contents",
-            tool_call_id="call-1",
-            tool_name="read",
-        ),
-        _message_entry("assistant-1", "assistant", "done"),
-        _message_entry("user-2", "user", "second"),
-        _message_entry("assistant-2", "assistant", "answer two"),
-        _compaction_entry("compact", "user-1", "call"),
-    )
-    entries = linked_entries(entries)
-
-    with pytest.raises(SessionReplayError, match="splits a conversation turn"):
-        replay_session_entries(entries)
 
 
 # Timing assertion: run it with the serial benchmarks, not beside parallel workers.

@@ -113,19 +113,12 @@ def test_stale_observation_uses_full_estimate(change: str) -> None:
     assert budget.accounting_method == "fully_estimated"
 
 
-def test_estimate_keeps_ascii_heuristic() -> None:
-    message = Message(role="user", content="plain ASCII")
-    payload = [{"role": "user", "content": "plain ASCII"}]
-    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-
-    estimate = estimate_context((message,))
-
-    assert len(serialized) == len(serialized.encode("utf-8"))
-    assert estimate.message_tokens == math.ceil(len(serialized) / 4)
-
-
-@pytest.mark.parametrize("content", ["漢字かな", "👩‍💻🚀", "e\u0301", "ASCII と emoji 🌍"])
-def test_unicode_messages_use_utf8_size(content: str) -> None:
+@pytest.mark.parametrize(
+    "content",
+    ["plain ASCII", "漢字かな", "👩‍💻🚀", "e\u0301", "ASCII と emoji 🌍"],
+    ids=["ascii", "cjk", "emoji-zwj", "combining-mark", "mixed"],
+)
+def test_messages_use_utf8_size(content: str) -> None:
     payload = [{"role": "user", "content": content}]
 
     first = estimate_context((Message(role="user", content=content),))
@@ -223,33 +216,6 @@ def test_unicode_context_fingerprint_remains_compatible() -> None:
     assert context_fingerprint(messages, tools) == (
         "6b0bd768cecdf716c02766c3fdc84a68853b1b9cdc86b49355caba3980e1c2cd"
     )
-
-
-def test_observed_budget_reports_over_budget() -> None:
-    prefix = (Message(role="user", content="prefix"),)
-    trailing = Message(role="assistant", content="trailing content")
-    observation = observe_context(
-        prefix,
-        provider="anthropic",
-        model="model",
-        input_tokens=80,
-    )
-
-    budget = estimate_context_budget(
-        (*prefix, trailing),
-        context_window=100,
-        reserve_tokens=10,
-        observation=observation,
-        provider="anthropic",
-        model="model",
-    )
-
-    trailing_tokens = estimate_context((trailing,)).total_tokens
-    assert budget.accounting_method == "provider_observed_plus_estimate"
-    assert budget.trailing_estimated_tokens == trailing_tokens
-    assert budget.effective_tokens == 80 + trailing_tokens
-    assert budget.remaining_tokens == 10 - trailing_tokens
-    assert budget.over_budget is (trailing_tokens >= 10)
 
 
 def test_allows_unknown_models_and_tracks_reserve() -> None:

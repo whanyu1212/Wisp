@@ -304,8 +304,15 @@ class _TuiProcess:
                 os.kill(self.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            os.waitpid(self.pid, 0)
+        # A killed TUI can stall mid-exit on macOS until the other end of its
+        # terminal closes, so close it before waiting.
         os.close(self.fd)
+        if self.status is None:
+            deadline = time.monotonic() + 10
+            while os.waitpid(self.pid, os.WNOHANG)[0] == 0:
+                if time.monotonic() >= deadline:
+                    pytest.fail(f"Rust TUI {self.pid} did not exit after SIGKILL")
+                time.sleep(0.05)
 
 
 def _launch(tmp_path: Path, *, mode: str) -> tuple[_TuiProcess, Path, Path, Path]:
@@ -508,7 +515,7 @@ def test_external_sigint_interrupts_a_sustained_finite_burst(tmp_path: Path) -> 
             # A fast renderer can skip the transient notice; a slow renderer
             # backpressures the fixture's burst before it can read the cancel.
             lambda output: (
-                b"Cancelling current prompt" in output[signal_offset:] or cancel_received.exists()
+                screen_shows(output, "Cancelling current prompt") or cancel_received.exists()
             ),
             timeout=5,
             failure="external SIGINT was starved by the burst",

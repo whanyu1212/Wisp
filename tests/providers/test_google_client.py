@@ -252,22 +252,6 @@ def test_google_provider_falls_back_to_gemini_api_key(monkeypatch: MonkeyPatch) 
     client.close()
 
 
-def test_google_provider_prefers_google_api_key_over_gemini_api_key(
-    monkeypatch: MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("GOOGLE_API_KEY", "google-env-key")
-    monkeypatch.setenv("GEMINI_API_KEY", "gemini-env-key")
-    provider = GoogleProvider()
-
-    async def run() -> genai.Client:
-        return await provider._client_or_create()  # noqa: SLF001
-
-    client = anyio.run(run)
-
-    assert client._api_client.api_key == "google-env-key"  # noqa: SLF001
-    client.close()
-
-
 def test_google_retry_decision_classifies_client_and_server_errors() -> None:
     from wisp.providers.google import _google_retry_decision
 

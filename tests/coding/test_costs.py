@@ -114,11 +114,20 @@ def test_estimator_prices_openai_cache_once_and_resolves_alias() -> None:
     assert estimate.estimated_usd == Decimal("0.00555")
 
 
-def test_estimator_rejects_openai_cache_above_input() -> None:
-    estimate = CostEstimator(_models())(
-        "openai",
-        "model",
-        "model",
+@pytest.mark.parametrize(
+    ("models", "provider", "model"),
+    [
+        pytest.param(_models(), "openai", "model", id="openai"),
+        pytest.param(ModelRegistry(builtin_catalog()), "xai", "grok-4.6", id="xai"),
+    ],
+)
+def test_estimator_rejects_cache_above_input(
+    models: ModelRegistry, provider: str, model: str
+) -> None:
+    estimate = CostEstimator(models)(
+        provider,
+        model,
+        model,
         TokenUsage(
             input_tokens=100,
             output_tokens=10,
@@ -193,24 +202,6 @@ def test_estimator_prices_xai_like_openai_responses_usage() -> None:
     assert estimate.billable.cache_read_input_tokens == 400
     assert estimate.billable.cache_write_input_tokens == 0
     assert estimate.estimated_usd == Decimal("0.0044")
-
-
-def test_estimator_rejects_xai_cache_above_input() -> None:
-    estimate = CostEstimator(ModelRegistry(builtin_catalog()))(
-        "xai",
-        "grok-4.6",
-        "grok-4.6",
-        TokenUsage(
-            input_tokens=100,
-            output_tokens=10,
-            total_tokens=110,
-            cache_read_input_tokens=60,
-            cache_write_input_tokens=50,
-        ),
-    )
-
-    assert estimate.estimated_usd is None
-    assert estimate.unavailable_reason == "usage_incomplete"
 
 
 def test_estimator_uses_long_context_band_skips_unknown_models() -> None:
@@ -331,42 +322,26 @@ def test_builtin_openai_prices_at_long_context_boundary(
     assert registry.pricing("openai-codex", model, input_tokens=input_tokens) is None
 
 
-@pytest.mark.parametrize("model", ["gemini-3.7-flash", "gemini-3.8-flash"])
 @pytest.mark.parametrize(
-    ("at", "rates"),
+    ("model", "at", "rates"),
     [
-        (date(2026, 12, 31), ("0.75", "0.075", "3.75")),
-        (date(2027, 1, 1), ("1.5", "0.15", "7.5")),
+        pytest.param(
+            "gemini-3.7-flash", date(2026, 12, 31), ("0.75", "0.075", "3.75"), id="3.7-flash-intro"
+        ),
+        pytest.param("gemini-3.7-flash", date(2027, 1, 1), ("1.5", "0.15", "7.5"), id="3.7-flash"),
+        pytest.param(
+            "gemini-3.8-flash", date(2026, 12, 31), ("0.75", "0.075", "3.75"), id="3.8-flash-intro"
+        ),
+        pytest.param("gemini-3.8-flash", date(2027, 1, 1), ("1.5", "0.15", "7.5"), id="3.8-flash"),
+        pytest.param("gemini-4-argon", date(2026, 11, 30), ("2", "0.1", "10"), id="argon-intro"),
+        pytest.param("gemini-4-argon", date(2026, 12, 1), ("4", "0.2", "20"), id="argon"),
     ],
 )
-def test_builtin_gemini_flash_prices_change_after_introductory_period(
+def test_builtin_gemini_prices_change_after_introductory_period(
     model: str, at: date, rates: tuple[str, str, str]
 ) -> None:
     selected = ModelRegistry(builtin_catalog()).pricing(
         "google", model, input_tokens=500_000, at=at
-    )
-
-    assert selected is not None
-    band = selected[1]
-    assert (
-        band.input_usd_per_million,
-        band.cache_read_usd_per_million,
-        band.output_usd_per_million,
-    ) == tuple(Decimal(rate) for rate in rates)
-
-
-@pytest.mark.parametrize(
-    ("at", "rates"),
-    [
-        (date(2026, 11, 30), ("2", "0.1", "10")),
-        (date(2026, 12, 1), ("4", "0.2", "20")),
-    ],
-)
-def test_builtin_gemini_argon_prices_change_after_introductory_period(
-    at: date, rates: tuple[str, str, str]
-) -> None:
-    selected = ModelRegistry(builtin_catalog()).pricing(
-        "google", "gemini-4-argon", input_tokens=500_000, at=at
     )
 
     assert selected is not None

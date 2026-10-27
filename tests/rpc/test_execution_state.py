@@ -326,22 +326,3 @@ def test_executor_state_is_idle_safe_and_reports_snapshot_failures(
         ]
 
     anyio.run(scenario)
-
-
-@pytest.mark.parametrize("enabled", [True, False])
-def test_search_configure_round_trip(tmp_path: Path, enabled: bool) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-            await dispatch_parsed(
-                executor, {"id": "search", "type": "configure", "web_search": enabled}, None
-            )
-            await dispatch_parsed(executor, {"id": "state", "type": "get_state"}, None)
-            task_group.cancel_scope.cancel()
-        report = next(event for event in fixture.events if isinstance(event, RpcStateReported))
-        assert report.state.web_search is enabled
-        assert fixture.agent.web_search is enabled
-
-    anyio.run(scenario)

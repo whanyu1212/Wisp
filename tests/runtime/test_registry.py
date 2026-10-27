@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event, get_ident
 
@@ -217,35 +218,32 @@ def test_repeated_configuration_refreshes_keep_adopting_new_credentials() -> Non
     anyio.run(scenario)
 
 
-def test_unresolved_extension_factory_override_survives_configuration_refresh() -> None:
-    """An extension-owned factory must survive without being resolved first."""
+def _register_extension_factory(runtime: WispRuntime, provider: _ClosableFakeProvider) -> None:
+    runtime.api.register_provider_factory(provider.name, lambda: provider)
 
+
+def _register_directly(runtime: WispRuntime, provider: _ClosableFakeProvider) -> None:
+    runtime.providers.register(provider)
+
+
+@pytest.mark.parametrize(
+    "register_override",
+    [
+        # An extension-owned factory must survive without being resolved first.
+        pytest.param(_register_extension_factory, id="unresolved-extension-factory"),
+        pytest.param(_register_directly, id="direct-registry"),
+    ],
+)
+def test_live_override_survives_configuration_refresh(
+    register_override: Callable[[WispRuntime, _ClosableFakeProvider], None],
+) -> None:
     async def scenario() -> None:
         from wisp.runtime.extensions import build_runtime
 
         live = await build_runtime()
         candidate = await build_runtime()
         override = _ClosableFakeProvider("openai")
-        live.api.register_provider_factory("openai", lambda: override)
-
-        await live.adopt_provider_configuration(candidate)
-        await candidate.aclose()
-
-        assert live.providers.get("openai") is override
-        await live.aclose()
-        assert override.close_count == 0
-
-    anyio.run(scenario)
-
-
-def test_direct_registry_override_of_deferred_provider_survives_refresh() -> None:
-    async def scenario() -> None:
-        from wisp.runtime.extensions import build_runtime
-
-        live = await build_runtime()
-        candidate = await build_runtime()
-        override = _ClosableFakeProvider("openai")
-        live.providers.register(override)
+        register_override(live, override)
 
         await live.adopt_provider_configuration(candidate)
         await candidate.aclose()
@@ -354,29 +352,6 @@ def test_runtime_closes_late_built_provider_after_extension_replaces_it() -> Non
 
         assert configured.close_count == 1
         assert override.close_count == 0
-
-    anyio.run(scenario)
-
-
-def test_runtime_closes_configured_provider_constructed_after_capture() -> None:
-    async def scenario() -> None:
-        registry = ProviderRegistry()
-        provider = _ClosableFakeProvider("deferred")
-        registry.register_factory("deferred", lambda: provider)
-        tools = ToolRegistry()
-        events = EventBus()
-        runtime = WispRuntime(
-            providers=registry,
-            tools=tools,
-            events=events,
-            api=ExtensionAPI(providers=registry, tools=tools, events=events),
-            models=ModelRegistry(effective_catalog()),
-        )
-
-        assert runtime.providers.get("deferred") is provider
-        await runtime.aclose()
-
-        assert provider.close_count == 1
 
     anyio.run(scenario)
 

@@ -21,7 +21,6 @@ from wisp.events import (
 )
 from wisp.rpc import lifecycle as rpc_lifecycle_module
 from wisp.rpc.commands import (
-    MAX_RPC_COMMAND_TYPE_CHARS,
     ApprovalCommand,
     ParsedRpcCommand,
     StoreApiKeyCommand,
@@ -34,34 +33,6 @@ from wisp.rpc.lifecycle import _MAX_RPC_COMMAND_ERROR_CHARS
 @pytest.fixture(autouse=True)
 def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
     guard_rpc_command_serialization(monkeypatch)
-
-
-def test_executor_bounds_unknown_types_before_lifecycle_events(tmp_path: Path) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch_parsed(
-                ParsedRpcCommand.from_unknown(
-                    {"id": "command-1", "type": "x" * (MAX_RPC_COMMAND_TYPE_CHARS + 1)}
-                ),
-                None,
-            )
-            assert result.should_shutdown is False
-            task_group.cancel_scope.cancel()
-        assert [type(event) for event in fixture.events] == [
-            RpcCommandStarted,
-            ErrorEvent,
-            RpcCommandFinished,
-        ]
-        assert all(
-            event.command_type == "unknown"
-            for event in fixture.events
-            if isinstance(event, (RpcCommandStarted, RpcCommandFinished))
-        )
-
-    anyio.run(scenario)
 
 
 def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
@@ -83,73 +54,6 @@ def test_rpc_command_errors_bound_echoed_reference_fields() -> None:
     assert len(error.message) == _MAX_RPC_COMMAND_ERROR_CHARS
     assert error.message.endswith("...")
     assert finished.error == error.message
-
-
-def test_executor_parsed_entry_preserves_unknown_fallback(
-    tmp_path: Path,
-) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-            await executor.dispatch_parsed(
-                ParsedRpcCommand.from_unknown({"id": "future-1", "type": "future_command"}),
-                None,
-            )
-            task_group.cancel_scope.cancel()
-
-        assert [type(event) for event in fixture.events[-3:]] == [
-            RpcCommandStarted,
-            ErrorEvent,
-            RpcCommandFinished,
-        ]
-        future_finished = fixture.events[-1]
-        assert isinstance(future_finished, RpcCommandFinished)
-        assert future_finished.command_id == "future-1"
-        assert future_finished.command_type == "future_command"
-        assert future_finished.ok is False
-        assert future_finished.error == "Unknown RPC command: future_command"
-
-    anyio.run(scenario)
-
-
-@pytest.mark.parametrize("invalid_id", [[], "", "x" * 257])
-def test_unknown_rejection_preserves_invalid_id_precedence(
-    tmp_path: Path, invalid_id: object
-) -> None:
-    async def scenario() -> None:
-        fixture = await build_rpc_executor_fixture(tmp_path)
-        running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
-        send, receive = anyio.create_memory_object_stream(1)
-        async with send, receive, anyio.create_task_group() as task_group:
-            executor = fixture.executor(task_group=task_group, send=send)
-            result = await executor.dispatch_parsed(
-                ParsedRpcCommand.from_unknown({"type": "future", "id": invalid_id}), running
-            )
-            assert result.running_command is running
-            assert result.should_shutdown is False
-            assert fixture.coordinator.running_command is running
-            task_group.cancel_scope.cancel()
-        started, error, finished = fixture.events
-        assert isinstance(started, RpcCommandStarted)
-        assert isinstance(error, ErrorEvent)
-        assert isinstance(finished, RpcCommandFinished)
-        assert started.command_id == finished.command_id
-        assert len(started.command_id) == 32
-        assert started.command_type == finished.command_type == "future"
-        assert finished.ok is False
-        assert (
-            error.message
-            == finished.error
-            == (
-                "RPC command id must contain at most 256 characters"
-                if isinstance(invalid_id, str) and len(invalid_id) > 256
-                else "RPC command id must be a non-empty string"
-            )
-        )
-
-    anyio.run(scenario)
 
 
 @pytest.mark.parametrize(

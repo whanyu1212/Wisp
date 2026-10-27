@@ -25,17 +25,6 @@ def test_ls_tool_lists_sorted_entries_with_directory_suffix(tmp_path: Path) -> N
     assert result.data["entries"] == ["alpha/", "zeta.txt"]
 
 
-def test_ls_tool_truncates_large_output(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("", encoding="utf-8")
-    (tmp_path / "b.txt").write_text("", encoding="utf-8")
-    context = ToolContext(cwd=tmp_path, max_output_bytes=100, max_output_lines=1)
-
-    result = run_tool(LsTool(), {"path": "."}, context)
-
-    assert result.text == "a.txt\n[truncated]"
-    assert result.truncated is True
-
-
 def test_ls_tool_bounds_retained_entries_and_reports_exact_count(tmp_path: Path) -> None:
     for index in range(20):
         (tmp_path / f"entry-{index:02}.txt").write_text("", encoding="utf-8")

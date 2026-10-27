@@ -321,85 +321,50 @@ def test_summary_recursively_bounds_oversized_aggregate() -> None:
     assert all(len(call[-1].content) <= 4_800 for call in provider.calls)
 
 
+_FORBIDDEN_CALL = ToolCall(call_id="call-1", name="read", arguments={})
+
+
 @pytest.mark.parametrize(
-    ("terminal", "match"),
+    ("events", "match"),
     [
-        (ProviderResponseCompleted(content="   "), "was blank"),
-        (
-            ProviderResponseCompleted(content="partial", finish_reason="length"),
+        pytest.param((ProviderResponseCompleted(content="   "),), "was blank", id="blank"),
+        pytest.param(
+            (ProviderResponseCompleted(content="partial", finish_reason="length"),),
             "finish reason 'length'",
+            id="length",
+        ),
+        pytest.param(
+            (
+                ProviderToolCallCompleted(tool_call=_FORBIDDEN_CALL),
+                ProviderResponseCompleted(
+                    content="calling",
+                    tool_calls=(_FORBIDDEN_CALL,),
+                    finish_reason="tool_calls",
+                ),
+            ),
+            "forbidden tool call",
+            id="tool-call",
+        ),
+        pytest.param(
+            (ProviderResponseCompleted(content="Too short"),),
+            "missing required section",
+            id="missing-sections",
+        ),
+        pytest.param(
+            (ProviderResponseCompleted(content=" ".join(REQUIRED_COMPACTION_HEADINGS)),),
+            "missing required section",
+            id="heading-tokens-only",
         ),
     ],
 )
-def test_summary_rejects_blank_and_length_responses(
-    terminal: ProviderResponseCompleted,
+def test_summary_rejects_invalid_responses(
+    events: tuple[ProviderEvent, ...],
     match: str,
 ) -> None:
-    provider = ScriptedProvider([[ProviderResponseStarted(model="test"), terminal]])
+    provider = ScriptedProvider([[ProviderResponseStarted(model="test"), *events]])
 
     async def run() -> None:
         with pytest.raises(CompactionSummaryError, match=match):
-            await summarize_manual_compaction(
-                plan_manual_compaction(two_turn_replay()),
-                provider=provider,
-            )
-
-    anyio.run(run)
-
-
-def test_summary_rejects_tool_calls() -> None:
-    call = ToolCall(call_id="call-1", name="read", arguments={})
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderToolCallCompleted(tool_call=call),
-                ProviderResponseCompleted(
-                    content="calling",
-                    tool_calls=(call,),
-                    finish_reason="tool_calls",
-                ),
-            ]
-        ]
-    )
-
-    async def run() -> None:
-        with pytest.raises(CompactionSummaryError, match="forbidden tool call"):
-            await summarize_manual_compaction(
-                plan_manual_compaction(two_turn_replay()),
-                provider=provider,
-            )
-
-    anyio.run(run)
-
-
-def test_summary_rejects_missing_checkpoint_sections() -> None:
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="Too short")]]
-    )
-
-    async def run() -> None:
-        with pytest.raises(CompactionSummaryError, match="missing required section"):
-            await summarize_manual_compaction(
-                plan_manual_compaction(two_turn_replay()),
-                provider=provider,
-            )
-
-    anyio.run(run)
-
-
-def test_summary_rejects_heading_tokens_without_real_sections() -> None:
-    provider = ScriptedProvider(
-        [
-            [
-                ProviderResponseStarted(model="test"),
-                ProviderResponseCompleted(content=" ".join(REQUIRED_COMPACTION_HEADINGS)),
-            ]
-        ]
-    )
-
-    async def run() -> None:
-        with pytest.raises(CompactionSummaryError, match="missing required section"):
             await summarize_manual_compaction(
                 plan_manual_compaction(two_turn_replay()),
                 provider=provider,

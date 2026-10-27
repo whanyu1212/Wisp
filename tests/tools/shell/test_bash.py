@@ -57,19 +57,40 @@ def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
 
 
 @pytest.mark.process
-def test_bash_tool_captures_stdout_stderr_and_exit_code(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("code", "exit_code", "stdout", "stderr", "text"),
+    [
+        pytest.param(
+            "import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)",
+            3,
+            "out\n",
+            "err\n",
+            "Command exited with code 3: out\nerr",
+            id="failure-with-both-streams",
+        ),
+        pytest.param(
+            "print('verified')",
+            0,
+            "verified\n",
+            "",
+            "Command exited with code 0: verified",
+            id="success-with-output",
+        ),
+        pytest.param("pass", 0, "", "", "Command exited with code 0", id="success-silent"),
+    ],
+)
+def test_bash_tool_reports_exit_code_and_output(
+    tmp_path: Path, code: str, exit_code: int, stdout: str, stderr: str, text: str
+) -> None:
     context = ToolContext(cwd=tmp_path)
-    python = shlex.quote(sys.executable)
-    command = (
-        f"{python} -c \"import sys; print('out'); print('err', file=sys.stderr); sys.exit(3)\""
-    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    assert result.data["exit_code"] == 3
-    assert result.data["stdout"] == "out\n"
-    assert result.data["stderr"] == "err\n"
-    assert result.text == "Command exited with code 3: out\nerr"
+    assert result.data["exit_code"] == exit_code
+    assert result.data["stdout"] == stdout
+    assert result.data["stderr"] == stderr
+    assert result.text == text
 
 
 def _print_environment(*names: str) -> str:
@@ -127,30 +148,6 @@ def test_bash_withholds_endpoint_key(tmp_path: Path, monkeypatch: MonkeyPatch) -
     )
 
     assert result.data["stdout"] == "unset\n"
-
-
-@pytest.mark.process
-def test_bash_tool_reports_successful_exit_code_with_output(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path)
-    python = shlex.quote(sys.executable)
-    command = f"{python} -c \"print('verified')\""
-
-    result = run_tool(BashTool(), {"command": command}, context)
-
-    assert result.text == "Command exited with code 0: verified"
-    assert result.data["exit_code"] == 0
-
-
-@pytest.mark.process
-def test_bash_tool_reports_successful_exit_code_without_output(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path)
-    python = shlex.quote(sys.executable)
-    command = f'{python} -c "pass"'
-
-    result = run_tool(BashTool(), {"command": command}, context)
-
-    assert result.text == "Command exited with code 0"
-    assert result.data["exit_code"] == 0
 
 
 @pytest.mark.process
@@ -575,22 +572,6 @@ def test_bash_tool_bounds_output_before_buffering(tmp_path: Path) -> None:
     assert result.truncated is True
 
 
-@pytest.mark.process
-def test_bash_tool_reports_one_shot_stream_truncation_metadata(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=1000)
-    python = shlex.quote(sys.executable)
-    code = "import sys; sys.stdout.write('x' * 10000)"
-    command = f"{python} -u -c {shlex.quote(code)}"
-
-    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
-
-    assert result.data["stdout_truncated"] is True
-    assert result.data["stderr_truncated"] is False
-    assert result.data["stdout_dropped_bytes"] > 0
-    assert result.data["stderr_dropped_bytes"] == 0
-    assert result.truncated is True
-
-
 def test_bash_tool_counts_marker_only_output_as_dropped_bytes(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -710,9 +691,12 @@ def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
     assert result.data["exit_code"] == 0
+    assert result.text == "Command exited with code 0: [truncated] " + "x" * 68
     assert result.data["stdout_truncated"] is True
+    assert result.data["stderr_truncated"] is False
     retained_bytes = str(result.data["stdout"]).count("x")
     assert result.data["stdout_dropped_bytes"] == output_bytes - retained_bytes
+    assert result.data["stderr_dropped_bytes"] == 0
     assert result.truncated is True
     assert marker.read_text(encoding="utf-8") == "ok"
 
@@ -748,18 +732,6 @@ def test_stderr_survives_noisy_stdout(tmp_path: Path) -> None:
     assert result.text.endswith("4998\n4999\nfinal failure")
     assert result.data["stderr"] == "final failure\n"
     assert result.truncated is True
-
-
-@pytest.mark.process
-def test_capture_truncation_is_marked(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path, max_output_bytes=80, max_output_lines=100)
-    python = shlex.quote(sys.executable)
-    code = "import sys; sys.stdout.write('x' * 10000)"
-    command = f"{python} -c {shlex.quote(code)}"
-
-    result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
-
-    assert result.text == "Command exited with code 0: [truncated] " + "x" * 68
 
 
 @pytest.mark.process

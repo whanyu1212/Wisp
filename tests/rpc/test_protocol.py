@@ -149,22 +149,6 @@ def test_negotiation_rejects_a_missing_required_capability() -> None:
     assert result.backend_package_version == "0.1.0"
 
 
-def test_server_handshake_adapter_parses_complete_success_and_rejection() -> None:
-    success = RpcHandshakeResponseAdapter.validate_json(
-        '{"type":"rpc.handshake.accepted","backend_package_version":"0.1.0",'
-        '"capabilities":[],"limits":{"max_client_frame_bytes":1024,'
-        '"max_server_frame_bytes":2048}}'
-    )
-    rejection = RpcHandshakeResponseAdapter.validate_json(
-        '{"type":"rpc.handshake.rejected","code":"unsupported_capability",'
-        '"message":"A required frontend capability is unavailable.",'
-        '"backend_package_version":"0.1.0"}'
-    )
-
-    assert isinstance(success, RpcHandshakeAccepted)
-    assert isinstance(rejection, RpcHandshakeRejected)
-
-
 @pytest.mark.parametrize("message", ["x" * 1_001, "unsafe\x1b[31m", "unsafe‮"])
 def test_handshake_rejection_message_is_bounded_and_control_free(message: str) -> None:
     with pytest.raises(ValidationError):

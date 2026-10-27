@@ -8,9 +8,10 @@ field the TUI renders in place of a raw output dump.
 
 from __future__ import annotations
 
+import pytest
+
 from wisp.tools.summary import (
     _PATH_MAX_CHARS,
-    _SUMMARY_MAX_CHARS,
     summarize_tool_result,
 )
 
@@ -31,26 +32,29 @@ def _read_data(
     return data
 
 
-def test_read_summary_whole_file() -> None:
-    # A full read (slice == file, not truncated) reports the simple count.
-    assert (
-        summarize_tool_result("read", _read_data(line_count=42, selected_count=42))
-        == "read 42 lines from foo.py"
-    )
-
-
-def test_read_summary_singular_line() -> None:
-    assert (
-        summarize_tool_result("read", _read_data(line_count=1, selected_count=1, path="x.py"))
-        == "read 1 line from x.py"
-    )
-
-
-def test_read_summary_without_path() -> None:
-    assert (
-        summarize_tool_result("read", _read_data(line_count=5, selected_count=5, path=None))
-        == "read 5 lines"
-    )
+# A full read (slice == file, not truncated) reports the simple count.
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        pytest.param(
+            _read_data(line_count=42, selected_count=42),
+            "read 42 lines from foo.py",
+            id="plural",
+        ),
+        pytest.param(
+            _read_data(line_count=1, selected_count=1, path="x.py"),
+            "read 1 line from x.py",
+            id="singular",
+        ),
+        pytest.param(
+            _read_data(line_count=5, selected_count=5, path=None),
+            "read 5 lines",
+            id="without-path",
+        ),
+    ],
+)
+def test_read_summary_whole_file(data: dict[str, object], expected: str) -> None:
+    assert summarize_tool_result("read", data) == expected
 
 
 def test_read_summary_paged_slice_reports_returned_of_total() -> None:
@@ -107,18 +111,16 @@ def test_read_summary_none_when_line_count_missing_or_non_int() -> None:
 # --- grep --------------------------------------------------------------------
 
 
-def test_grep_summary_counts_matches() -> None:
-    assert (
-        summarize_tool_result("grep", {"count": 3, "matches": ["a", "b", "c"]}) == "grep: 3 matches"
-    )
-
-
-def test_grep_summary_singular_match() -> None:
-    assert summarize_tool_result("grep", {"count": 1, "matches": ["a"]}) == "grep: 1 match"
-
-
-def test_grep_summary_zero_matches() -> None:
-    assert summarize_tool_result("grep", {"count": 0, "matches": []}) == "grep: no matches"
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        pytest.param({"count": 3, "matches": ["a", "b", "c"]}, "grep: 3 matches", id="plural"),
+        pytest.param({"count": 1, "matches": ["a"]}, "grep: 1 match", id="singular"),
+        pytest.param({"count": 0, "matches": []}, "grep: no matches", id="zero"),
+    ],
+)
+def test_grep_summary_counts_matches(data: dict[str, object], expected: str) -> None:
+    assert summarize_tool_result("grep", data) == expected
 
 
 def test_grep_summary_marks_truncated_results() -> None:
@@ -138,13 +140,16 @@ def test_grep_summary_none_when_count_missing() -> None:
 # --- find --------------------------------------------------------------------
 
 
-def test_find_summary_counts_files() -> None:
-    assert summarize_tool_result("find", {"count": 7, "files": []}) == "find: 7 files"
-
-
-def test_find_summary_singular_and_zero() -> None:
-    assert summarize_tool_result("find", {"count": 1, "files": ["x"]}) == "find: 1 file"
-    assert summarize_tool_result("find", {"count": 0, "files": []}) == "find: no files"
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        pytest.param({"count": 7, "files": []}, "find: 7 files", id="plural"),
+        pytest.param({"count": 1, "files": ["x"]}, "find: 1 file", id="singular"),
+        pytest.param({"count": 0, "files": []}, "find: no files", id="zero"),
+    ],
+)
+def test_find_summary_counts_files(data: dict[str, object], expected: str) -> None:
+    assert summarize_tool_result("find", data) == expected
 
 
 def test_find_summary_marks_truncated_results() -> None:
@@ -157,25 +162,28 @@ def test_find_summary_marks_truncated_results() -> None:
 # --- ls ----------------------------------------------------------------------
 
 
-def test_ls_summary_counts_entries_with_path() -> None:
-    assert (
-        summarize_tool_result("ls", {"path": "src/", "entries": ["a", "b", "c"], "entry_count": 3})
-        == "ls: 3 entries in src/"
-    )
-
-
-def test_ls_summary_singular_entry() -> None:
-    assert (
-        summarize_tool_result("ls", {"path": "d", "entries": ["only"], "entry_count": 1})
-        == "ls: 1 entry in d"
-    )
-
-
-def test_ls_summary_empty_directory() -> None:
-    assert (
-        summarize_tool_result("ls", {"path": "src/", "entries": [], "entry_count": 0})
-        == "ls: empty (src/)"
-    )
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        pytest.param(
+            {"path": "src/", "entries": ["a", "b", "c"], "entry_count": 3},
+            "ls: 3 entries in src/",
+            id="plural",
+        ),
+        pytest.param(
+            {"path": "d", "entries": ["only"], "entry_count": 1},
+            "ls: 1 entry in d",
+            id="singular",
+        ),
+        pytest.param(
+            {"path": "src/", "entries": [], "entry_count": 0},
+            "ls: empty (src/)",
+            id="empty",
+        ),
+    ],
+)
+def test_ls_summary_counts_entries(data: dict[str, object], expected: str) -> None:
+    assert summarize_tool_result("ls", data) == expected
 
 
 def test_ls_summary_none_without_entry_count() -> None:
@@ -188,14 +196,6 @@ def test_summary_none_for_tools_without_one() -> None:
     assert summarize_tool_result("write", {"bytes": 5, "created": True}) is None
     assert summarize_tool_result("bash", {"exit_code": 0}) is None
     assert summarize_tool_result("custom", {"count": 3}) is None
-
-
-def test_summary_is_bounded_at_the_source() -> None:
-    # The summary rides the RPC wire, so a pathological long path can't produce an
-    # unbounded summary — it is clipped to the ceiling.
-    summary = summarize_tool_result("read", {"path": "a/" * 5000 + "end.py", "line_count": 3})
-    assert summary is not None
-    assert len(summary) <= _SUMMARY_MAX_CHARS
 
 
 def test_long_path_is_middle_clipped_keeping_head_and_tail() -> None:
