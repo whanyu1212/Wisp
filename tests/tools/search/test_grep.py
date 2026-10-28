@@ -733,6 +733,62 @@ def test_grep_truncates_only_past_max_results(
     assert result.truncated is truncated
 
 
+def test_grep_fills_output_budget_exactly(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("needle\n", encoding="utf-8")
+    record = "a.txt:1:needle"
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "literal": True},
+        ToolContext(cwd=tmp_path, max_output_bytes=len(record)),
+    )
+
+    assert result.text == record
+    assert not result.truncated
+
+
+@pytest.mark.parametrize(
+    ("context_lines", "expected_text"),
+    [(0, "a.txt:1:needle\nb.txt:1:needle"), (1, "a.txt:1:needle\n--\nb.txt:1:needle")],
+    ids=["no-context", "context"],
+)
+def test_grep_separates_files_only_with_context(
+    tmp_path: Path, context_lines: int, expected_text: str
+) -> None:
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(_scanner_backend="python"),
+        {"pattern": "needle", "path": ".", "literal": True, "context": context_lines},
+        ToolContext(cwd=tmp_path, max_output_bytes=len(expected_text)),
+    )
+
+    assert result.text == expected_text
+    assert not result.truncated
+
+
+@pytest.mark.parametrize(
+    ("glob", "found"),
+    [("*.txt", {"ignored.txt", "kept.txt"}), ("!*.md", {"kept.txt"})],
+    ids=["inclusion-glob", "exclusion-glob"],
+)
+def test_only_inclusion_glob_reincludes_ignored_files(
+    tmp_path: Path, glob: str, found: set[str]
+) -> None:
+    (tmp_path / ".ignore").write_text("ignored.txt\n", encoding="utf-8")
+    for name in ("ignored.txt", "kept.txt", "notes.md"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+
+    result = run_tool(
+        GrepTool(),
+        {"pattern": "needle", "path": ".", "glob": glob, "literal": True},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert {record.split(":")[0] for record in result.data["matches"]} == found
+
+
 def test_grep_tool_python_fallback_skips_hidden_entries(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
