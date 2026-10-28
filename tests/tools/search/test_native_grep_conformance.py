@@ -135,6 +135,32 @@ def test_native_literal_grep_matches_output_bounds(tmp_path: Path) -> None:
     assert result.truncated is True
 
 
+def test_native_literal_grep_matches_max_results_across_files(tmp_path: Path) -> None:
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("needle\nneedle\n", encoding="utf-8")
+
+    result = _assert_backends_agree(
+        tmp_path, {"pattern": "needle", "literal": True, "max_results": 3}
+    )
+
+    assert result.data["count"] == 3
+
+
+def test_native_literal_grep_fills_budget_across_files_exactly(tmp_path: Path) -> None:
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("needle\n", encoding="utf-8")
+    expected_text = "a.txt:1:needle\nb.txt:1:needle"
+
+    result = _assert_backends_agree(
+        tmp_path,
+        {"pattern": "needle", "literal": True},
+        max_output_bytes=len(expected_text),
+    )
+
+    assert result.text == expected_text
+    assert not result.truncated
+
+
 @pytest.mark.parametrize("terminator", ["", "\n"])
 def test_native_literal_grep_skips_long_line_file(tmp_path: Path, terminator: str) -> None:
     (tmp_path / "minified.txt").write_text("x" * 1_000_001 + terminator, encoding="utf-8")

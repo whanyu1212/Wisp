@@ -14,7 +14,7 @@ from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from importlib import import_module
 from pathlib import Path
 from threading import Event
@@ -511,6 +511,93 @@ def _native_arguments_supported(pattern: str, *limits: int) -> bool:
     return all(0 <= limit <= sys.maxsize for limit in limits)
 
 
+@dataclass(frozen=True, slots=True)
+class _GrepScanner:
+    """What every file in one grep call is scanned with."""
+
+    pattern: str
+    ignore_case: bool
+    literal: bool
+    # Built up front for Python scanning; None while the native scanner is in use.
+    matcher: CallableMatcher | None
+    block_matcher: BlockMatcher | None
+    context_lines: int
+    native_module: _NativeGrepModule | None
+    native_cancellation: _NativeGrepCancellation | None
+    cancel_event: Event | None
+
+
+@dataclass(slots=True)
+class _FileScan:
+    """One file's records and matches, updated as they are found so a stop keeps them."""
+
+    output: _BoundedGrepFileOutput
+    matches: int = 0
+    had_extra_match: bool = False
+
+
+@dataclass(slots=True)
+class _GrepFindings:
+    """What one grep call has kept so far, across the files it finished."""
+
+    context_lines: int
+    records: list[str] = field(default_factory=list)
+    byte_count: int = 0
+    match_count: int = 0
+    # Minified bundles and source maps are skipped, not fatal, during a directory search,
+    # and so are files that cannot be opened or read, such as iCloud placeholders.
+    oversized_files: list[str] = field(default_factory=list)
+    unreadable_files: list[str] = field(default_factory=list)
+
+    def start_file(self, context: ToolContext) -> _FileScan:
+        """Return an empty scan for the next file, bounded by what earlier files used."""
+
+        return _FileScan(
+            _BoundedGrepFileOutput(
+                prior_lines=len(self.records),
+                prior_bytes=self.byte_count,
+                prefix_separator=bool(self.records and self.context_lines),
+                max_lines=context.max_output_lines,
+                max_bytes=context.max_output_bytes,
+            )
+        )
+
+    def keep(self, scan: _FileScan) -> None:
+        """Add a file's matches and records, separated by ``--`` when context is shown."""
+
+        self.match_count += scan.matches
+        if not scan.output.lines:
+            return
+        if self.context_lines and self.records:
+            self.records.append("--")
+            self.byte_count += 3  # "\n--"
+        self.records.extend(scan.output.lines)
+        self.byte_count += scan.output.byte_count
+
+    def result(
+        self,
+        *,
+        max_results: int,
+        context: ToolContext,
+        truncated: bool,
+        match_limit_reached: bool = False,
+        deadline_reached: bool = False,
+        deep_directories_skipped: int = 0,
+    ) -> ToolResult:
+        return _grep_result(
+            self.records,
+            match_count=self.match_count,
+            max_results=max_results,
+            context=context,
+            truncated=truncated,
+            match_limit_reached=match_limit_reached,
+            deadline_reached=deadline_reached,
+            deep_directories_skipped=deep_directories_skipped,
+            oversized_files=self.oversized_files,
+            unreadable_files=self.unreadable_files,
+        )
+
+
 def _python_grep(
     *,
     pattern: str,
@@ -528,21 +615,24 @@ def _python_grep(
 ) -> ToolResult:
     secure_path = _coerce_secure_path(path, context)
 
-    matcher = (
-        None
-        if native_module is not None
-        else _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
-    )
-    block_matcher = _build_block_matcher(pattern, ignore_case=ignore_case, literal=literal)
     effective_context_lines = _bounded_context_lines(context_lines, context)
+    scanner = _GrepScanner(
+        pattern=pattern,
+        ignore_case=ignore_case,
+        literal=literal,
+        matcher=(
+            None
+            if native_module is not None
+            else _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
+        ),
+        block_matcher=_build_block_matcher(pattern, ignore_case=ignore_case, literal=literal),
+        context_lines=effective_context_lines,
+        native_module=native_module,
+        native_cancellation=native_cancellation,
+        cancel_event=cancel_event,
+    )
     context_truncated = effective_context_lines < context_lines
-    output: list[str] = []
-    output_bytes = 0
-    match_count = 0
-    # Minified bundles and source maps are skipped, not fatal, during a directory search,
-    # and so are files that cannot be opened or read, such as iCloud placeholders.
-    oversized_files: list[str] = []
-    unreadable_files: list[str] = []
+    findings = _GrepFindings(context_lines=effective_context_lines)
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
     walked_display_root = context.cwd.resolve(strict=False)
     cached_file_path: Path | None = None
@@ -555,14 +645,7 @@ def _python_grep(
             cached_display_path = _display_walked_path(file_path, walked_display_root)
         return cached_display_path
 
-    ignore_override_matcher: PathMatcher | None = None
-    if glob_matcher is not None and glob is not None and not _is_exclusion_glob(glob):
-
-        def matches_ignore_override(candidate: Path) -> bool:
-            return glob_matcher(display_path(candidate))
-
-        ignore_override_matcher = matches_ignore_override
-
+    ignore_override_matcher = _glob_ignore_override(glob, glob_matcher, display_path)
     report = _WalkReport()
     files = (
         _iter_walked_files(secure_path, context, cancel_event=cancel_event, report=report)
@@ -582,156 +665,22 @@ def _python_grep(
             if cancel_event is not None and cancel_event.is_set():
                 stopped = True
                 break
-            file_display_path: str | None = None
-            if glob_matcher is not None:
-                file_display_path = display_path(file_path)
-                if not glob_matcher(file_display_path):
-                    continue
-
-            file_match_start = match_count
-            file_had_extra_match = False
-            file_native_module = native_module
-            if file_native_module is not None:
-                if file_display_path is None:
-                    file_display_path = _display_walked_path(file_path, walked_display_root)
-                try:
-                    file_display_path.encode("utf-8")
-                except UnicodeEncodeError:
-                    file_native_module = None
-                    matcher = _build_matcher(pattern, ignore_case=ignore_case, literal=literal)
-            file_buffer = _BoundedGrepFileOutput(
-                prior_lines=len(output),
-                prior_bytes=output_bytes,
-                prefix_separator=bool(output and effective_context_lines),
-                max_lines=context.max_output_lines,
-                max_bytes=context.max_output_bytes,
-            )
-
+            if glob_matcher is not None and not glob_matcher(display_path(file_path)):
+                continue
+            scan = findings.start_file(context)
             try:
-                with walked_file.open(context) as descriptor:
-                    if file_native_module is not None:
-                        if native_cancellation is None:  # pragma: no cover - internal invariant
-                            raise RuntimeError("native grep cancellation was not initialized")
-                        if file_display_path is None:  # pragma: no cover - internal invariant
-                            raise RuntimeError("native grep display path was not initialized")
-                        try:
-                            native_result = file_native_module.scan_literal_fd(
-                                descriptor,
-                                pattern,
-                                file_display_path,
-                                context_lines=effective_context_lines,
-                                remaining_matches=max_results - match_count,
-                                prior_lines=len(output),
-                                prior_bytes=output_bytes,
-                                prefix_separator=bool(output and effective_context_lines),
-                                max_output_lines=context.max_output_lines,
-                                max_output_bytes=context.max_output_bytes,
-                                max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
-                                max_display_chars=_GREP_MAX_DISPLAY_CHARS,
-                                cancellation=native_cancellation,
-                            )
-                        except ValueError as exc:
-                            raise ToolError(str(exc)) from exc
-                        except (OSError, RuntimeError):
-                            # Some Linux sandboxes do not mount /proc, and unsupported
-                            # targets cannot duplicate a descriptor for Rust. Keep the
-                            # optional accelerator transparent in those environments.
-                            file_native_module = None
-                            matcher = _build_matcher(
-                                pattern, ignore_case=ignore_case, literal=literal
-                            )
-                        if file_native_module is not None:
-                            if native_result.status == "binary":
-                                continue
-                            if native_result.status == "line_too_long":
-                                raise _OversizedLineDetected
-                            if native_result.status not in {"complete", "cancelled"}:
-                                raise RuntimeError(
-                                    f"native grep returned unknown status: {native_result.status}"
-                                )
-                            match_count += native_result.match_count
-                            file_had_extra_match = native_result.had_extra_match
-                            file_buffer.lines = list(native_result.lines)
-                            file_buffer.byte_count = native_result.byte_count
-                            file_buffer.exhausted = native_result.exhausted
-                            if native_result.status == "cancelled":
-                                raise _SearchStopped
-                    if file_native_module is None:
-                        if matcher is None:  # pragma: no cover - internal invariant
-                            raise RuntimeError("Python grep matcher was not initialized")
-                        preceding: deque[tuple[int, str]] = deque(maxlen=effective_context_lines)
-                        group_end = 0
-                        last_emitted_line = 0
-                        line_number = 0
-                        for block in _iter_utf8_line_blocks(descriptor):
-                            if cancel_event is not None and cancel_event.is_set():
-                                raise _SearchStopped
-                            if (
-                                block_matcher is not None
-                                and line_number >= group_end
-                                and not block_matcher(block)
-                            ):
-                                # No line here matches and no context is pending, so
-                                # only the line count and the preceding context move.
-                                tail = block[max(0, len(block) - effective_context_lines) :]
-                                first = line_number + len(block) - len(tail) + 1
-                                preceding.extend(enumerate(tail, start=first))
-                                line_number += len(block)
-                                continue
-                            for line in block:
-                                line_number += 1
-                                if cancel_event is not None and cancel_event.is_set():
-                                    raise _SearchStopped
-                                is_match = matcher(line)
-                                if is_match:
-                                    if match_count >= max_results:
-                                        file_had_extra_match = True
-                                    else:
-                                        match_count += 1
-                                        if file_display_path is None:
-                                            file_display_path = display_path(file_path)
-                                        if line_number > group_end:
-                                            for number, text in preceding:
-                                                if number > last_emitted_line:
-                                                    file_buffer.append(
-                                                        _format_grep_record(
-                                                            file_display_path, number, text, False
-                                                        )
-                                                    )
-                                                    last_emitted_line = number
-                                                    if file_buffer.exhausted:
-                                                        break
-                                        file_buffer.append(
-                                            _format_grep_record(
-                                                file_display_path, line_number, line, True
-                                            ),
-                                            preserve_match=True,
-                                        )
-                                        last_emitted_line = line_number
-                                        group_end = max(
-                                            group_end, line_number + effective_context_lines
-                                        )
-                                elif line_number <= group_end:
-                                    if file_display_path is None:
-                                        file_display_path = display_path(file_path)
-                                    file_buffer.append(
-                                        _format_grep_record(
-                                            file_display_path, line_number, line, False
-                                        )
-                                    )
-                                    last_emitted_line = line_number
-                                preceding.append((line_number, line))
-                                if file_buffer.exhausted or file_had_extra_match:
-                                    break
-                            if file_buffer.exhausted or file_had_extra_match:
-                                break
+                _scan_file(
+                    scanner,
+                    walked_file,
+                    scan,
+                    context=context,
+                    remaining_matches=max_results - findings.match_count,
+                    display_path=partial(display_path, file_path),
+                )
             except _SearchStopped:
                 # Matches already found in this file are kept; the rest is unread.
                 stopped = True
-            except _WalkedFileChanged:
-                continue
-            except (_BinaryFileDetected, UnicodeDecodeError):
-                match_count = file_match_start
+            except (_WalkedFileChanged, _BinaryFileDetected, UnicodeDecodeError):
                 continue
             except _OversizedLineDetected:
                 oversized_path = display_path(file_path)
@@ -740,39 +689,56 @@ def _python_grep(
                         f"grep cannot search {oversized_path}: it has a line longer than "
                         f"{_PYTHON_GREP_MAX_LINE_CHARS} characters"
                     ) from None
-                match_count = file_match_start
-                oversized_files.append(oversized_path)
+                findings.oversized_files.append(oversized_path)
                 continue
             except OSError as exc:
                 unreadable_path = display_path(file_path)
                 reason = exc.strerror or str(exc)
                 if file_path == secure_path.path:
                     raise ToolError(f"grep cannot read {unreadable_path}: {reason}") from exc
-                match_count = file_match_start
-                unreadable_files.append(f"{unreadable_path} ({reason})")
+                findings.unreadable_files.append(f"{unreadable_path} ({reason})")
                 continue
 
-            if file_buffer.lines:
-                if effective_context_lines and output:
-                    output.append("--")
-                    output_bytes += 3  # "\n--"
-                output.extend(file_buffer.lines)
-                output_bytes += file_buffer.byte_count
-
+            findings.keep(scan)
             if stopped:
                 break
-            if file_had_extra_match or file_buffer.exhausted:
-                return _grep_result(
-                    output,
-                    match_count=match_count,
+            if scan.had_extra_match or scan.output.exhausted:
+                return findings.result(
                     max_results=max_results,
                     context=context,
                     truncated=True,
-                    match_limit_reached=file_had_extra_match,
+                    match_limit_reached=scan.had_extra_match,
                     deep_directories_skipped=report.deep_directories_skipped,
-                    oversized_files=oversized_files,
-                    unreadable_files=unreadable_files,
                 )
+
+    return _finished_grep_result(
+        findings,
+        stopped=stopped,
+        cancel_event=cancel_event,
+        deadline_expired=deadline_expired,
+        deep_directories_skipped=report.deep_directories_skipped,
+        context_truncated=context_truncated,
+        max_results=max_results,
+        context=context,
+    )
+
+
+def _finished_grep_result(
+    findings: _GrepFindings,
+    *,
+    stopped: bool,
+    cancel_event: Event | None,
+    deadline_expired: Event | None,
+    deep_directories_skipped: int,
+    context_truncated: bool,
+    max_results: int,
+    context: ToolContext,
+) -> ToolResult:
+    """Build the result of a grep whose walk ended, or that was stopped.
+
+    A stop at the deadline returns what was found, marked incomplete; any other stop
+    is a cancellation and returns nothing.
+    """
 
     # The walk also ends early, without saying so, once the search is stopped. A walk that
     # finished just before the deadline is then reported as incomplete, which is harmless.
@@ -780,21 +746,265 @@ def _python_grep(
     deadline_reached = stopped and deadline_expired is not None and deadline_expired.is_set()
     if stopped and not deadline_reached:
         return ToolResult(text="Search cancelled", data={"count": 0, "matches": []})
-    return _grep_result(
-        output,
-        match_count=match_count,
+    return findings.result(
         max_results=max_results,
         context=context,
         truncated=(
             deadline_reached
-            or report.deep_directories_skipped > 0
-            or (context_truncated and bool(output))
+            or deep_directories_skipped > 0
+            or (context_truncated and bool(findings.records))
         ),
         deadline_reached=deadline_reached,
-        deep_directories_skipped=report.deep_directories_skipped,
-        oversized_files=oversized_files,
-        unreadable_files=unreadable_files,
+        deep_directories_skipped=deep_directories_skipped,
     )
+
+
+def _glob_ignore_override(
+    glob: str | None,
+    glob_matcher: GlobMatcher | None,
+    display_path: Callable[[Path], str],
+) -> PathMatcher | None:
+    """Return the matcher that lets an inclusion glob reach ignored files, if any."""
+
+    if glob is None or glob_matcher is None or _is_exclusion_glob(glob):
+        return None
+
+    def matches_ignore_override(candidate: Path) -> bool:
+        return glob_matcher(display_path(candidate))
+
+    return matches_ignore_override
+
+
+def _scan_file(
+    scanner: _GrepScanner,
+    walked_file: _WalkedFile,
+    scan: _FileScan,
+    *,
+    context: ToolContext,
+    remaining_matches: int,
+    display_path: Callable[[], str],
+) -> None:
+    """Scan one walked file into ``scan``, natively where that is exact and possible.
+
+    The native scanner needs the display path up front and as UTF-8; a file whose name
+    cannot be encoded, or whose descriptor the scanner cannot read, is scanned in Python.
+
+    Args:
+        scanner (_GrepScanner): The call's pattern, matchers and backends.
+        walked_file (_WalkedFile): The file, opened through the secure walk.
+        scan (_FileScan): Receives the file's records and matches.
+        context (ToolContext): Opens the file under the call's policy.
+        remaining_matches (int): Matches the call may still report.
+        display_path (Callable[[], str]): The file's name in records.
+
+    Raises:
+        _SearchStopped: The call stopped mid-file; what was found is kept in ``scan``.
+        _WalkedFileChanged: The file changed after the walk found it.
+        _BinaryFileDetected: The file is binary.
+        _OversizedLineDetected: A line is longer than the scan limit.
+        UnicodeDecodeError: The file is not UTF-8.
+        OSError: The file could not be opened or read.
+    """
+
+    native_module = scanner.native_module
+    native_path = ""
+    if native_module is not None:
+        native_path = display_path()
+        try:
+            native_path.encode("utf-8")
+        except UnicodeEncodeError:
+            native_module = None
+    with walked_file.open(context) as descriptor:
+        if native_module is not None:
+            if scanner.native_cancellation is None:  # pragma: no cover - internal invariant
+                raise RuntimeError("native grep cancellation was not initialized")
+            if _scan_file_natively(
+                native_module,
+                descriptor,
+                scan,
+                pattern=scanner.pattern,
+                display_path=native_path,
+                context_lines=scanner.context_lines,
+                remaining_matches=remaining_matches,
+                cancellation=scanner.native_cancellation,
+            ):
+                return
+        _scan_file_lines(
+            descriptor,
+            scan,
+            matcher=scanner.matcher
+            or _build_matcher(
+                scanner.pattern, ignore_case=scanner.ignore_case, literal=scanner.literal
+            ),
+            block_matcher=scanner.block_matcher,
+            context_lines=scanner.context_lines,
+            remaining_matches=remaining_matches,
+            display_path=display_path,
+            cancel_event=scanner.cancel_event,
+        )
+
+
+def _scan_file_natively(
+    module: _NativeGrepModule,
+    descriptor: int,
+    scan: _FileScan,
+    *,
+    pattern: str,
+    display_path: str,
+    context_lines: int,
+    remaining_matches: int,
+    cancellation: _NativeGrepCancellation,
+) -> bool:
+    """Scan one open file with the native literal scanner, into ``scan``.
+
+    Args:
+        module (_NativeGrepModule): The loaded native extension.
+        descriptor (int): The file, opened by the secure walk.
+        scan (_FileScan): Receives the file's records and matches; its output
+            supplies the budget already spent by earlier files.
+        pattern (str): Literal to find.
+        display_path (str): The file's name in records; must encode as UTF-8.
+        context_lines (int): Context lines around each match.
+        remaining_matches (int): Matches the call may still report.
+        cancellation (_NativeGrepCancellation): Stops the scan once the call stops.
+
+    Returns:
+        bool: False when the scanner cannot read this descriptor here, so the caller
+        scans the file in Python instead.
+
+    Raises:
+        ToolError: The scanner rejected its inputs.
+        _BinaryFileDetected: The file is binary.
+        _OversizedLineDetected: A line is longer than the scan limit.
+        _SearchStopped: The scan was cancelled; what it found is kept in ``scan``.
+    """
+
+    output = scan.output
+    try:
+        result = module.scan_literal_fd(
+            descriptor,
+            pattern,
+            display_path,
+            context_lines=context_lines,
+            remaining_matches=remaining_matches,
+            prior_lines=output.prior_lines,
+            prior_bytes=output.prior_bytes,
+            prefix_separator=output.prefix_separator,
+            max_output_lines=output.max_lines,
+            max_output_bytes=output.max_bytes,
+            max_line_chars=_PYTHON_GREP_MAX_LINE_CHARS,
+            max_display_chars=_GREP_MAX_DISPLAY_CHARS,
+            cancellation=cancellation,
+        )
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    except (OSError, RuntimeError):
+        # Some Linux sandboxes do not mount /proc, and unsupported
+        # targets cannot duplicate a descriptor for Rust. Keep the
+        # optional accelerator transparent in those environments.
+        return False
+    if result.status == "binary":
+        raise _BinaryFileDetected
+    if result.status == "line_too_long":
+        raise _OversizedLineDetected
+    if result.status not in {"complete", "cancelled"}:
+        raise RuntimeError(f"native grep returned unknown status: {result.status}")
+    scan.matches = result.match_count
+    scan.had_extra_match = result.had_extra_match
+    output.lines = list(result.lines)
+    output.byte_count = result.byte_count
+    output.exhausted = result.exhausted
+    if result.status == "cancelled":
+        raise _SearchStopped
+    return True
+
+
+def _scan_file_lines(
+    descriptor: int,
+    scan: _FileScan,
+    *,
+    matcher: CallableMatcher,
+    block_matcher: BlockMatcher | None,
+    context_lines: int,
+    remaining_matches: int,
+    display_path: Callable[[], str],
+    cancel_event: Event | None,
+) -> None:
+    """Scan one open file line by line, into ``scan``, with context around matches.
+
+    Overlapping context groups merge, and a line is never emitted twice. Records and
+    matches go into ``scan`` as they are found, so a stop keeps them.
+
+    Args:
+        descriptor (int): The file, opened by the secure walk.
+        scan (_FileScan): Receives the file's records and matches.
+        matcher (CallableMatcher): Whether one line matches.
+        block_matcher (BlockMatcher | None): Whether a block may hold a match, so
+            blocks without one are skipped whole; None when that check is not exact.
+        context_lines (int): Context lines around each match.
+        remaining_matches (int): Matches the call may still report. One more match
+            sets ``scan.had_extra_match`` and ends the scan.
+        display_path (Callable[[], str]): The file's name in records, computed only
+            once a record is emitted.
+        cancel_event (Event | None): Stops the scan between lines.
+
+    Raises:
+        _SearchStopped: ``cancel_event`` was set.
+        _BinaryFileDetected: The file contains NUL.
+        _OversizedLineDetected: A line is longer than the scan limit.
+    """
+
+    output = scan.output
+    file_display_path: str | None = None
+    preceding: deque[tuple[int, str]] = deque(maxlen=context_lines)
+    group_end = 0
+    last_emitted_line = 0
+    line_number = 0
+    for block in _iter_utf8_line_blocks(descriptor):
+        if cancel_event is not None and cancel_event.is_set():
+            raise _SearchStopped
+        if block_matcher is not None and line_number >= group_end and not block_matcher(block):
+            # No line here matches and no context is pending, so
+            # only the line count and the preceding context move.
+            tail = block[max(0, len(block) - context_lines) :]
+            first = line_number + len(block) - len(tail) + 1
+            preceding.extend(enumerate(tail, start=first))
+            line_number += len(block)
+            continue
+        for line in block:
+            line_number += 1
+            if cancel_event is not None and cancel_event.is_set():
+                raise _SearchStopped
+            if matcher(line):
+                if scan.matches >= remaining_matches:
+                    scan.had_extra_match = True
+                    return
+                scan.matches += 1
+                if file_display_path is None:
+                    file_display_path = display_path()
+                if line_number > group_end:
+                    for number, text in preceding:
+                        if number > last_emitted_line:
+                            output.append(
+                                _format_grep_record(file_display_path, number, text, False)
+                            )
+                            last_emitted_line = number
+                            if output.exhausted:
+                                break
+                output.append(
+                    _format_grep_record(file_display_path, line_number, line, True),
+                    preserve_match=True,
+                )
+                last_emitted_line = line_number
+                group_end = max(group_end, line_number + context_lines)
+            elif line_number <= group_end:
+                if file_display_path is None:
+                    file_display_path = display_path()
+                output.append(_format_grep_record(file_display_path, line_number, line, False))
+                last_emitted_line = line_number
+            preceding.append((line_number, line))
+            if output.exhausted:
+                return
 
 
 _PYTHON_GREP_CHUNK_BYTES = 64 * 1024
