@@ -1,7 +1,7 @@
 // Compose the README banner from the synthetic TUI captures, overwriting it in place.
 // Usage: node --import tsx scripts/render-banner.ts /tmp/wisp-docs-captures
 // Run scripts/render-tui-captures.ts on the same directory first.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { chromium } from "@playwright/test";
@@ -53,10 +53,23 @@ const welcomeImage = dataUrl(
   join(repoRoot, "assets/docs/tui-welcome.png"),
   "image/png",
 );
-const showcaseImage = dataUrl(
-  join(repoRoot, "assets/docs/tui-showcase.png"),
+// A real session screenshot. macOS names it with a narrow no-break space before
+// "PM", so it is found by prefix rather than spelled out.
+const screenshotName = readdirSync(join(repoRoot, "assets")).find((name) =>
+  name.startsWith("Screenshot 2026-10-25 at 12.58.53"),
+);
+if (!screenshotName) throw new Error("The session screenshot is missing");
+const screenshotImage = dataUrl(
+  join(repoRoot, "assets", screenshotName),
   "image/png",
 );
+// The terminal's own pixels inside the screenshot, without the macOS chrome,
+// which the banner redraws as its own title bar.
+const screenshot = { width: 2254, height: 1236 };
+const terminal = { x: 12, y: 66, width: 2226, height: 1152 };
+const screenWidth = 412;
+const screenScale = screenWidth / terminal.width;
+const screenHeight = Math.round(terminal.height * screenScale);
 
 // Ember palette from rust/wisp-tui/src/theme_catalog.json.
 const html = `<!doctype html>
@@ -89,26 +102,60 @@ const html = `<!doctype html>
     border: 1px solid #fab28366; border-radius: 8px; background: #1c1b1a;
     font: 17px/1.2 "Banner Mono", monospace; color: #eeeeee;
   }
-  code span { color: #fab283; }
-  .window {
-    position: absolute; left: 780px; top: 34px; width: 640px; height: 300px;
-    border: 1px solid #3a3734; border-radius: 12px; overflow: hidden;
-    background: #100f0f;
-    box-shadow: 0 0 0 1px #00000066, 0 30px 80px -20px #000000cc;
+  code span, p em { color: #fab283; }
+  p em { font-style: normal; }
+  /* The terminal floats in a gentle perspective tilt, as in the promo video. */
+  .stage { position: absolute; left: 758px; top: 0; width: 442px; height: 300px; perspective: 1300px; }
+  .orbit {
+    position: absolute; left: -12px; top: 92px; width: 470px; height: 140px;
+    border: 1px solid #fab28326; border-radius: 50%; transform: rotate(-9deg);
   }
-  .window img { display: block; width: 640px; }
-  .fade {
-    position: absolute; inset: 0;
-    background: linear-gradient(to bottom, transparent 45%, #100f0f 92%);
+  .orbit::after {
+    content: ""; position: absolute; left: 34px; top: 104px; width: 6px; height: 6px;
+    border-radius: 50%; background: #fab283; box-shadow: 0 0 10px 3px #fab28388;
+  }
+  .window {
+    position: absolute; left: 14px; top: 34px; width: ${screenWidth}px;
+    border: 1px solid #4a4440; border-radius: 10px; overflow: hidden;
+    background: #100f0f; transform-origin: 50% 50%;
+    transform: rotateY(-14deg) rotateX(5deg) rotateZ(-1.5deg);
+    box-shadow: 0 0 0 1px #00000088, 0 24px 60px -12px #000000ee,
+      0 0 70px -18px #fab28355;
+  }
+  .bar {
+    display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px;
+    background: #1c1b1a; border-bottom: 1px solid #2c2a28;
+    font: 10px/1 "Banner Mono", monospace; color: #8f8a85;
+  }
+  .bar i { width: 8px; height: 8px; border-radius: 50%; }
+  .bar b { margin-left: 8px; font-weight: 400; }
+  .screen { position: relative; height: ${screenHeight}px; overflow: hidden; }
+  .screen img {
+    position: absolute; width: ${screenshot.width * screenScale}px;
+    left: ${-terminal.x * screenScale}px; top: ${-terminal.y * screenScale}px;
+  }
+  /* A soft sheen across the glass keeps the tilt from reading as flat. */
+  .screen::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(115deg, #ffffff0d, transparent 40%);
   }
 </style>
 <canvas class="mascot"></canvas>
 <div class="copy">
   <h1>Wisp</h1>
-  <p>Redirect it while it works.<br>Approve what it changes.</p>
+  <p>your code, your <em>direction</em>.</p>
   <code><span>$</span> uv tool install --python 3.12 wisp-ai</code>
 </div>
-<div class="window"><img src="${showcaseImage}" alt=""><div class="fade"></div></div>`;
+<div class="stage">
+  <div class="orbit"></div>
+  <div class="window">
+    <div class="bar">
+      <i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i>
+      <b>wisp — ~/Wisp</b>
+    </div>
+    <div class="screen"><img src="${screenshotImage}" alt=""></div>
+  </div>
+</div>`;
 
 const browser = await chromium.launch();
 try {
