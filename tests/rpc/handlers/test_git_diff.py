@@ -2,6 +2,7 @@
 
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from threading import Event
 
@@ -11,6 +12,7 @@ import pytest
 from wisp.events import RpcGitDiffEdit, ToolCallSnapshot
 from wisp.messages import Message
 from wisp.rpc.handlers.git_diff import (
+    _REPORT_BYTES,
     GitReadUnavailable,
     _git,
     collect_git_diff,
@@ -41,7 +43,8 @@ def snapshot(root: Path):
 
 
 def test_cumulative_staged_unstaged_deleted_and_untracked(repo: Path) -> None:
-    assert not snapshot(repo).files
+    clean = snapshot(repo)
+    assert not clean.files and not clean.truncated
     (repo / "file.py").write_text("staged\n")
     git(repo, "add", "file.py")
     (repo / "file.py").write_text("working\n")
@@ -155,7 +158,9 @@ def test_clean_smudged_file_is_omitted_without_running_filter(repo: Path) -> Non
     assert all(f.path != "file.py" for f in report.files)
 
 
-@pytest.mark.parametrize("attributes", ["*.py text eol=crlf", "*.py ident", ""])
+@pytest.mark.parametrize(
+    "attributes", ["*.py text eol=crlf", "*.py text", "*.py eol=crlf", "*.py ident", ""]
+)
 def test_builtin_normalizations_do_not_report_clean_files(repo: Path, attributes: str) -> None:
     (repo / ".gitattributes").write_text(attributes + "\n")
     if not attributes:
@@ -247,6 +252,114 @@ def test_deleted_empty_file_remains_visible(repo: Path) -> None:
     git(repo, "commit", "-m", "empty")
     (repo / "empty").unlink()
     assert [(file.path, file.status) for file in snapshot(repo).files] == [("empty", "deleted")]
+
+
+@pytest.mark.parametrize(
+    ("attributes", "autocrlf"),
+    [("", "false"), ("*.py -text", "true")],
+    ids=["no-attributes", "text-unset"],
+)
+def test_line_ending_change_is_reported_without_normalization(
+    repo: Path, attributes: str, autocrlf: str
+) -> None:
+    (repo / ".gitattributes").write_text(attributes + "\n")
+    git(repo, "config", "core.autocrlf", autocrlf)
+    (repo / "file.py").write_text("first\nsecond\n")
+    git(repo, "add", ".gitattributes", "file.py")
+    git(repo, "commit", "-m", "attributes")
+    (repo / "file.py").write_bytes(b"first\r\nsecond\r\n")
+    entry = next(f for f in snapshot(repo).files if f.path == "file.py")
+    assert entry.after == "first\r\nsecond\r\n"
+
+
+def test_sparse_staged_permission_change_is_reported(repo: Path) -> None:
+    for folder in ("inside", "outside"):
+        (repo / folder).mkdir()
+        (repo / folder / "file.py").write_text("original\n")
+    git(repo, "add", "inside", "outside")
+    git(repo, "commit", "-m", "directories")
+    git(repo, "sparse-checkout", "init", "--cone")
+    git(repo, "sparse-checkout", "set", "inside")
+    git(repo, "update-index", "--chmod=+x", "outside/file.py")
+    entry = next(f for f in snapshot(repo).files if f.path == "outside/file.py")
+    assert "Executable permission changed" in entry.notice
+
+
+@pytest.mark.parametrize(
+    ("size", "outcome"),
+    [
+        (50_000, "shown"),
+        (50_001, "notice"),
+        (2 * 1024 * 1024, "notice"),
+        (2 * 1024 * 1024 + 1, "omitted"),
+    ],
+    ids=["text-limit", "over-text-limit", "read-limit", "over-read-limit"],
+)
+def test_working_file_size_limits(repo: Path, size: int, outcome: str) -> None:
+    (repo / "file.py").write_bytes(b"x" * size)
+    report = snapshot(repo)
+    entry = next((f for f in report.files if f.path == "file.py"), None)
+    seen = "omitted" if entry is None else "shown" if entry.after else "notice"
+    assert seen == outcome
+    assert report.truncated is (outcome == "omitted")
+
+
+def change_protected_file(repo: Path) -> None:
+    (repo / ".env").write_text("SECRET\n")
+    git(repo, "add", ".env")
+    git(repo, "commit", "-m", "secret")
+    (repo / ".env").write_text("NEW SECRET\n")
+
+
+def commit_symlink(repo: Path) -> None:
+    (repo / "link").symlink_to("file.py")
+    git(repo, "add", "link")
+    git(repo, "commit", "-m", "link")
+
+
+@pytest.mark.parametrize(
+    "omit", [change_protected_file, commit_symlink], ids=["protected", "symlink-blob"]
+)
+def test_omitted_file_marks_report_truncated(repo: Path, omit: Callable[[Path], None]) -> None:
+    (repo / "other.py").write_text("visible\n")
+    omit(repo)
+    report = snapshot(repo)
+    assert report.truncated
+    assert [f.path for f in report.files] == ["other.py"]
+
+
+def test_report_stops_at_256_files(repo: Path) -> None:
+    for n in range(257):
+        (repo / f"new{n:03}.txt").write_text("x")
+    report = snapshot(repo)
+    assert report.truncated and len(report.files) == 256
+
+
+def test_report_stops_before_byte_limit(repo: Path) -> None:
+    names = [f"big{n}.py" for n in range(10)]
+    for name in names:
+        (repo / name).write_text("a" * 45_000)
+    git(repo, "add", *names)
+    git(repo, "commit", "-m", "big")
+    for name in names:
+        (repo / name).write_text("b" * 45_000)
+    report = snapshot(repo)
+    assert report.truncated and 0 < len(report.files) < len(names)
+    assert len(report.model_dump_json().encode()) <= _REPORT_BYTES
+
+
+def test_git_read_at_limit_succeeds(repo: Path) -> None:
+    assert _git(repo, ["show", "HEAD:file.py"], Event(), time.monotonic() + 3, 9) == b"original\n"
+
+
+@pytest.mark.parametrize(
+    ("args", "limit"),
+    [(["show", "HEAD:file.py"], 8), (["show", "HEAD:missing.py"], 100)],
+    ids=["over-limit", "git-error"],
+)
+def test_git_read_failures_raise(repo: Path, args: list[str], limit: int) -> None:
+    with pytest.raises(GitReadUnavailable):
+        _git(repo, args, Event(), time.monotonic() + 3, limit)
 
 
 def edit_call(call_id: str, name: str, path: str) -> Message:
@@ -368,6 +481,23 @@ def test_other_project_marks_nothing(repo: Path, tmp_path_factory: pytest.TempPa
     context = ToolContext(cwd=repo)
     report = collect_git_diff(context, Event(), "d", 1, session_edits(entries, context))
     assert [(f.path, f.edits) for f in report.files] == [("file.py", ())]
+
+
+@pytest.mark.parametrize(
+    ("call_id", "marked"),
+    [("", False), ("c", True), ("c" * 256, True), ("c" * 257, False)],
+    ids=["empty", "one", "max", "over-max"],
+)
+def test_call_id_length_bounds(repo: Path, call_id: str, marked: bool) -> None:
+    entries = ran_in(repo, [edit_call(call_id, "edit", "file.py"), tool_result(call_id, "edit")])
+    assert bool(session_edits(entries, ToolContext(cwd=repo))) is marked
+
+
+@pytest.mark.parametrize(("length", "marked"), [(256, True), (257, False)], ids=["max", "over-max"])
+def test_result_entry_id_length_bounds(repo: Path, length: int, marked: bool) -> None:
+    call, result = ran_in(repo, [edit_call("e", "edit", "file.py"), tool_result("e", "edit")])
+    entries = [call, result.model_copy(update={"id": "r" * length})]
+    assert bool(session_edits(entries, ToolContext(cwd=repo))) is marked
 
 
 def test_unrecorded_folder_marks_nothing(repo: Path) -> None:
