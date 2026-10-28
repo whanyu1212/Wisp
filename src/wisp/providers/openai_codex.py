@@ -10,6 +10,7 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import dataclass, field
 from json import JSONDecodeError
 from typing import Literal, cast
 
@@ -141,20 +142,7 @@ class OpenAICodexProvider:
         """
 
         selected_model = model or self.default_model or DEFAULT_OPENAI_CODEX_MODEL
-        auth = await self._auth_resolver.bearer_token(
-            self.name,
-            refresh=lambda credential: refresh_openai_codex_token(credential),
-        )
-        if auth is None:
-            raise ProviderConfigurationError(
-                "openai-codex credentials are required; start Wisp and run `/connect openai-codex`"
-            )
-        account_id = auth.account_id or account_id_from_access_token(auth.token)
-        headers = _codex_headers(
-            token=auth.token,
-            account_id=account_id,
-            session_id=prompt_cache_key,
-        )
+        headers = await self._request_headers(prompt_cache_key)
         continuation_input = (
             *self._get_continuation(previous_response_id),
             *_tool_results_to_codex_input(tool_results),
@@ -172,17 +160,7 @@ class OpenAICodexProvider:
                 message, self._native_outputs, provider=self.name, model=selected_model
             ),
         )
-        response_id: str | None = None
-        pending_tool_calls: dict[str, dict[str, object]] = {}
-        completed_tool_arguments: dict[str, str] = {}
-        emitted_tool_item_ids: set[str] = set()
-        output_items: OrderedDict[str, dict[str, object]] = OrderedDict()
-        anonymous_output_item = 0
-        chunks: list[str] = []
-        tool_calls: list[ToolCall] = []
-        usage: ProviderUsage | None = None
-        failure: ProviderResponseFailed | None = None
-        stream_completed = False
+        response = _CodexResponse(previous_response_id=previous_response_id)
         for retry_number in range(self._retry_policy.max_retries + 1):
             response_started = False
             try:
@@ -191,182 +169,136 @@ class OpenAICodexProvider:
                     yield ProviderResponseStarted(model=selected_model)
 
                     async for event in stream:
-                        event_type = _string_value(event.get("type"))
-                        if event_type in {"response.created", "response.in_progress"}:
-                            event_response = event.get("response")
-                            if isinstance(event_response, dict):
-                                response_id = _string_value(event_response.get("id")) or response_id
-                        elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
-                            delta = _string_value(event.get("delta"))
-                            if delta is not None:
-                                chunks.append(delta)
-                                yield ProviderTextDelta(delta=delta)
-                        elif event_type == "response.function_call_arguments.done":
-                            item_id = _string_value(event.get("item_id"))
-                            arguments = _string_value(event.get("arguments")) or "{}"
-                            if item_id is not None:
-                                completed_tool_arguments[item_id] = arguments
-                                pending = pending_tool_calls.get(item_id)
-                                if pending is not None:
-                                    pending["arguments"] = arguments
-                                    output_items[item_id] = deepcopy(pending)
-                                    tool_call = _tool_call_from_codex(
-                                        pending,
-                                        raw_arguments=arguments,
-                                        response_id=response_id,
-                                    )
-                                    tool_calls.append(tool_call)
-                                    emitted_tool_item_ids.add(item_id)
-                        elif event_type in {
-                            "response.output_item.added",
-                            "response.output_item.done",
-                        }:
-                            item = event.get("item")
-                            if not isinstance(item, dict):
-                                continue
-                            item_id = _string_value(item.get("id"))
-                            item_key = item_id or _string_value(item.get("call_id"))
-                            if item_key is None:
-                                item_key = f"anonymous-{anonymous_output_item}"
-                                anonymous_output_item += 1
-                            output_items[item_key] = deepcopy(item)
-                            if (
-                                item.get("type") == "web_search_call"
-                                and event_type == "response.output_item.done"
-                            ):
-                                yield _web_search_from_codex(item)
-                            if item.get("type") == "function_call":
-                                item_id = _string_value(item.get("id"))
-                                if item_id is not None:
-                                    pending_tool_calls[item_id] = dict(item)
-                                already_emitted = (
-                                    item_id is not None and item_id in emitted_tool_item_ids
-                                )
-                                if (
-                                    event_type == "response.output_item.done"
-                                    and not already_emitted
-                                ):
-                                    raw_arguments = (
-                                        completed_tool_arguments.get(
-                                            item_id, _string_value(item.get("arguments")) or "{}"
-                                        )
-                                        if item_id is not None
-                                        else _string_value(item.get("arguments")) or "{}"
-                                    )
-                                    tool_call = _tool_call_from_codex(
-                                        item,
-                                        raw_arguments=raw_arguments,
-                                        response_id=response_id,
-                                    )
-                                    tool_calls.append(tool_call)
-                                    if item_id is not None:
-                                        emitted_tool_item_ids.add(item_id)
-                        elif event_type == "response.completed":
-                            event_response = event.get("response")
-                            if isinstance(event_response, dict):
-                                response_id = _string_value(event_response.get("id")) or response_id
-                                usage = _usage_from_codex(event_response.get("usage"))
-                                response_output = event_response.get("output")
-                                if isinstance(response_output, list):
-                                    for item in response_output:
-                                        if not isinstance(item, dict):
-                                            continue
-                                        item_id = _string_value(item.get("id"))
-                                        item_key = item_id or _string_value(item.get("call_id"))
-                                        if item_key is None:
-                                            item_key = f"anonymous-{anonymous_output_item}"
-                                            anonymous_output_item += 1
-                                        output_items[item_key] = deepcopy(item)
-                            stream_completed = True
-                            break
-                        elif event_type == "error":
-                            failure = ProviderResponseFailed(
-                                message=_codex_error_message(event),
-                                partial_content="".join(chunks),
-                                response_id=response_id or previous_response_id,
-                            )
-                            break
-                        elif event_type == "response.failed":
-                            failure = ProviderResponseFailed(
-                                message=_codex_failed_message(event),
-                                partial_content="".join(chunks),
-                                response_id=response_id or previous_response_id,
-                            )
-                            break
-                        elif event_type == "response.incomplete":
-                            failure = ProviderResponseFailed(
-                                message=_codex_incomplete_message(event),
-                                partial_content="".join(chunks),
-                                response_id=response_id or previous_response_id,
-                            )
+                        emitted = response.apply(event)
+                        if emitted is not None:
+                            yield emitted
+                        if response.finished:
                             break
             except (ProviderError, httpx.HTTPError) as exc:
                 error_message = _codex_exception_message(
                     exc,
                     timeout=self._client.timeout if self._client is not None else self._timeout,
                     response_started=response_started,
-                    response_id=response_id,
+                    response_id=response.response_id,
                     attempt=retry_number + 1,
                 )
                 if response_started:
-                    failure = failure or ProviderResponseFailed(
-                        message=error_message,
-                        partial_content="".join(chunks),
-                        response_id=response_id or previous_response_id,
-                    )
+                    response.fail(error_message)
                     break
-                decision = _codex_retry_decision(exc)
-                if decision is None or retry_number >= self._retry_policy.max_retries:
-                    yield ProviderResponseFailed(
-                        message=error_message,
-                        failure_kind=(
-                            "context_overflow" if is_context_overflow_message(str(exc)) else "error"
-                        ),
-                    )
-                    return
-                delay = retry_delay_seconds(
-                    self._retry_policy,
-                    retry_number=retry_number + 1,
-                    retry_after_seconds=decision.retry_after_seconds,
+                outcome = self._opening_failure_outcome(
+                    exc, message=error_message, retry_number=retry_number
                 )
-                if delay is None:
-                    yield ProviderResponseFailed(message=error_message)
+                yield outcome
+                if isinstance(outcome, ProviderResponseFailed):
                     return
-                yield ProviderRetrying(
-                    attempt=retry_number + 2,
-                    max_attempts=self._retry_policy.max_retries + 1,
-                    delay_seconds=delay,
-                    reason=decision.reason,
-                    status_code=decision.status_code,
-                )
-                await anyio.sleep(delay)
+                await anyio.sleep(outcome.delay_seconds)
                 continue
             break
 
-        if failure is None and not stream_completed:
-            failure = ProviderResponseFailed(
-                message="OpenAI Codex stream ended before response.completed was received",
-                partial_content="".join(chunks),
-                response_id=response_id or previous_response_id,
-            )
+        if not response.completed:
+            response.fail("OpenAI Codex stream ended before response.completed was received")
 
-        if failure is not None:
+        if response.failure is not None:
             # A context rejection does not advance or invalidate the replay
             # tail. Keep it available for a same-loop compacted retry.
-            if failure.failure_kind != "context_overflow" and not is_context_overflow_message(
-                failure.message
+            if response.failure.failure_kind != "context_overflow" and not (
+                is_context_overflow_message(response.failure.message)
             ):
                 self._continuations.discard(previous_response_id)
-            yield failure
+            yield response.failure
             return
 
-        if tool_calls and response_id is None:
+        if response.tool_calls and response.response_id is None:
             raise ProviderProtocolError("OpenAI Codex tool response did not include a response id")
+        self._remember_completed_response(
+            response, continuation_input=continuation_input, model=selected_model
+        )
+        for content_index, tool_call in enumerate(response.tool_calls):
+            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
+
+        yield ProviderResponseCompleted(
+            content=response.partial_content,
+            tool_calls=tuple(response.tool_calls),
+            response_id=response.response_id,
+            finish_reason="tool_calls" if response.tool_calls else "stop",
+            usage=response.usage,
+        )
+
+    def _opening_failure_outcome(
+        self,
+        exc: ProviderError | httpx.HTTPError,
+        *,
+        message: str,
+        retry_number: int,
+    ) -> ProviderRetrying | ProviderResponseFailed:
+        """Decide whether a request that failed before streaming is retried.
+
+        Args:
+            exc (ProviderError | httpx.HTTPError): The opening failure.
+            message (str): The diagnostic a terminal failure reports.
+            retry_number (int): Retries already made, starting at 0.
+
+        Returns:
+            ProviderRetrying | ProviderResponseFailed: The retry to announce before
+            sleeping its delay, or the terminal failure.
+        """
+
+        decision = _codex_retry_decision(exc)
+        if decision is None or retry_number >= self._retry_policy.max_retries:
+            return ProviderResponseFailed(
+                message=message,
+                failure_kind=(
+                    "context_overflow" if is_context_overflow_message(str(exc)) else "error"
+                ),
+            )
+        delay = retry_delay_seconds(
+            self._retry_policy,
+            retry_number=retry_number + 1,
+            retry_after_seconds=decision.retry_after_seconds,
+        )
+        if delay is None:
+            return ProviderResponseFailed(message=message)
+        return ProviderRetrying(
+            attempt=retry_number + 2,
+            max_attempts=self._retry_policy.max_retries + 1,
+            delay_seconds=delay,
+            reason=decision.reason,
+            status_code=decision.status_code,
+        )
+
+    async def _request_headers(self, prompt_cache_key: str | None) -> dict[str, str]:
+        auth = await self._auth_resolver.bearer_token(
+            self.name,
+            refresh=lambda credential: refresh_openai_codex_token(credential),
+        )
+        if auth is None:
+            raise ProviderConfigurationError(
+                "openai-codex credentials are required; start Wisp and run `/connect openai-codex`"
+            )
+        account_id = auth.account_id or account_id_from_access_token(auth.token)
+        return _codex_headers(
+            token=auth.token,
+            account_id=account_id,
+            session_id=prompt_cache_key,
+        )
+
+    def _remember_completed_response(
+        self,
+        response: _CodexResponse,
+        *,
+        continuation_input: tuple[dict[str, object], ...],
+        model: str,
+    ) -> None:
+        """Record a completed response for continuation and for native replay."""
+
+        previous_response_id = response.previous_response_id
         # Codex uses a local store for store:false continuations. Preserve
         # the upstream response ID in public events; if a clean continuation
         # omits a new ID, advance the existing local replay key instead.
-        continuation_id = response_id or previous_response_id
-        replay_items = _codex_replay_items(output_items.values(), tool_calls=tool_calls)
+        continuation_id = response.response_id or previous_response_id
+        replay_items = _codex_replay_items(
+            response.output_items.values(), tool_calls=response.tool_calls
+        )
         if continuation_id is not None:
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._continuations.consume(previous_response_id)
@@ -380,26 +312,15 @@ class OpenAICodexProvider:
         # reasoning item. The row is found by its response ID, so a completion
         # that omits one keeps its portable form on later prompts; it still
         # continues natively within this run through the continuation store.
-        if response_id is not None and replay_items:
+        if response.response_id is not None and replay_items:
             self._native_outputs.remember(
-                response_id,
+                response.response_id,
                 NativeOutput(
                     provider=self.name,
-                    model=selected_model,
+                    model=model,
                     items=replay_items,
                 ),
             )
-
-        for content_index, tool_call in enumerate(tool_calls):
-            yield ProviderToolCallCompleted(tool_call=tool_call, content_index=content_index)
-
-        yield ProviderResponseCompleted(
-            content="".join(chunks),
-            tool_calls=tuple(tool_calls),
-            response_id=response_id,
-            finish_reason="tool_calls" if tool_calls else "stop",
-            usage=usage,
-        )
 
     def native_output_for(self, response_id: str) -> NativeOutput | None:
         """Return the output items recorded for one of this provider's responses.
@@ -608,6 +529,153 @@ def _codex_request_body(
     if prompt_cache_key is not None:
         body["prompt_cache_key"] = prompt_cache_key
     return body
+
+
+@dataclass(slots=True)
+class _CodexResponse:
+    """What one Codex stream has produced so far, folded from its SSE events.
+
+    Output items are kept by item ID, else call ID, in first-seen order, for the
+    store:false replay. A function call is emitted once, from whichever arrives
+    first: its ``function_call_arguments.done`` event or its finished item.
+    """
+
+    previous_response_id: str | None
+    response_id: str | None = None
+    chunks: list[str] = field(default_factory=list)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: ProviderUsage | None = None
+    failure: ProviderResponseFailed | None = None
+    completed: bool = False
+    output_items: OrderedDict[str, dict[str, object]] = field(default_factory=OrderedDict)
+    pending_tool_calls: dict[str, dict[str, object]] = field(default_factory=dict)
+    completed_tool_arguments: dict[str, str] = field(default_factory=dict)
+    emitted_tool_item_ids: set[str] = field(default_factory=set)
+    anonymous_items: int = 0
+
+    @property
+    def partial_content(self) -> str:
+        return "".join(self.chunks)
+
+    @property
+    def finished(self) -> bool:
+        """Whether the stream reached ``response.completed`` or a failure."""
+
+        return self.completed or self.failure is not None
+
+    def apply(self, event: Mapping[str, object]) -> ProviderEvent | None:
+        """Fold one SSE event into the response.
+
+        Args:
+            event (Mapping[str, object]): A decoded Responses API stream event.
+
+        Returns:
+            ProviderEvent | None: An event to yield now (a text delta or a finished
+            web search), or None.
+        """
+
+        event_type = _string_value(event.get("type"))
+        if event_type in {"response.created", "response.in_progress"}:
+            self._record_response_id(event.get("response"))
+        elif event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            return self._text_delta(event)
+        elif event_type == "response.function_call_arguments.done":
+            self._arguments_done(event)
+        elif event_type in {"response.output_item.added", "response.output_item.done"}:
+            return self._output_item(event, done=event_type == "response.output_item.done")
+        elif event_type == "response.completed":
+            self._complete(event.get("response"))
+        elif event_type == "error":
+            self.fail(_codex_error_message(event))
+        elif event_type == "response.failed":
+            self.fail(_codex_failed_message(event))
+        elif event_type == "response.incomplete":
+            self.fail(_codex_incomplete_message(event))
+        return None
+
+    def fail(self, message: str) -> None:
+        """Record the stream's failure, keeping the first one if it already failed."""
+
+        if self.failure is None:
+            self.failure = ProviderResponseFailed(
+                message=message,
+                partial_content=self.partial_content,
+                response_id=self.response_id or self.previous_response_id,
+            )
+
+    def _record_response_id(self, response: object) -> None:
+        if isinstance(response, dict):
+            self.response_id = _string_value(response.get("id")) or self.response_id
+
+    def _text_delta(self, event: Mapping[str, object]) -> ProviderTextDelta | None:
+        delta = _string_value(event.get("delta"))
+        if delta is None:
+            return None
+        self.chunks.append(delta)
+        return ProviderTextDelta(delta=delta)
+
+    def _arguments_done(self, event: Mapping[str, object]) -> None:
+        item_id = _string_value(event.get("item_id"))
+        if item_id is None:
+            return
+        arguments = _string_value(event.get("arguments")) or "{}"
+        self.completed_tool_arguments[item_id] = arguments
+        pending = self.pending_tool_calls.get(item_id)
+        if pending is None:
+            return
+        pending["arguments"] = arguments
+        self.output_items[item_id] = deepcopy(pending)
+        self.tool_calls.append(
+            _tool_call_from_codex(pending, raw_arguments=arguments, response_id=self.response_id)
+        )
+        self.emitted_tool_item_ids.add(item_id)
+
+    def _output_item(self, event: Mapping[str, object], *, done: bool) -> ProviderEvent | None:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return None
+        self._remember_output_item(item)
+        if item.get("type") == "function_call":
+            self._function_call_item(item, done=done)
+        if item.get("type") == "web_search_call" and done:
+            return _web_search_from_codex(item)
+        return None
+
+    def _function_call_item(self, item: dict[str, object], *, done: bool) -> None:
+        item_id = _string_value(item.get("id"))
+        if item_id is not None:
+            self.pending_tool_calls[item_id] = dict(item)
+        if not done or (item_id is not None and item_id in self.emitted_tool_item_ids):
+            return
+        item_arguments = _string_value(item.get("arguments")) or "{}"
+        raw_arguments = (
+            self.completed_tool_arguments.get(item_id, item_arguments)
+            if item_id is not None
+            else item_arguments
+        )
+        self.tool_calls.append(
+            _tool_call_from_codex(item, raw_arguments=raw_arguments, response_id=self.response_id)
+        )
+        if item_id is not None:
+            self.emitted_tool_item_ids.add(item_id)
+
+    def _complete(self, response: object) -> None:
+        if isinstance(response, dict):
+            self.response_id = _string_value(response.get("id")) or self.response_id
+            self.usage = _usage_from_codex(response.get("usage"))
+            output = response.get("output")
+            if isinstance(output, list):
+                for item in output:
+                    if isinstance(item, dict):
+                        self._remember_output_item(item)
+        self.completed = True
+
+    def _remember_output_item(self, item: dict[str, object]) -> None:
+        key = _string_value(item.get("id")) or _string_value(item.get("call_id"))
+        if key is None:
+            key = f"anonymous-{self.anonymous_items}"
+            self.anonymous_items += 1
+        self.output_items[key] = deepcopy(item)
 
 
 def _web_search_from_codex(item: Mapping[str, object]) -> ProviderWebSearch:
