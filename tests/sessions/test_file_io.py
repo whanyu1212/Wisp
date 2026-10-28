@@ -107,6 +107,44 @@ def test_preserves_committed_malformed_final_record(tmp_path: Path) -> None:
     assert path.read_bytes() == malformed
 
 
+@pytest.mark.parametrize(
+    ("contents", "has_content", "generation"),
+    [(b"\n", True, 0), (b"committed\n{", True, 1), (b"", False, 1)],
+    ids=["single-newline", "partial-tail", "empty"],
+)
+def test_prepare_recovers_and_reports_remaining_content(
+    tmp_path: Path, contents: bytes, has_content: bool, generation: int
+) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(contents)
+    state = file_io.session_file_state(path)
+
+    assert file_io.prepare_session_file(path) is has_content
+    assert path.exists() is has_content
+    assert state.generation == generation
+
+
+def test_read_exact_stops_at_requested_size(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    path = tmp_path / "data"
+    path.write_bytes(b"abcdefghij")
+    real_read = os.read
+    monkeypatch.setattr(os, "read", lambda fd, size: real_read(fd, min(size, 4)))
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        assert file_io.read_exact(fd, 6) == b"abcdef"
+    finally:
+        os.close(fd)
+
+
+def test_cleanup_leaves_a_replaced_file(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_text("replacement\n")
+
+    file_io.unlink_if_same_file(path, (0, 0))
+
+    assert path.exists()
+
+
 def test_append_entry_is_idempotent(tmp_path: Path) -> None:
     session = JsonlSessionStore(tmp_path).create()
     entry = MessageSessionEntry(
@@ -866,6 +904,59 @@ def test_store_rejects_symlink_session_directory(tmp_path: Path) -> None:
         anyio.run(write)
 
 
+def test_file_in_place_of_session_directory_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    root.write_text("")
+
+    with pytest.raises(SessionError, match="not a directory"):
+        file_io.ensure_private_directory(root)
+
+
+@pytest.mark.parametrize(
+    ("directory", "message"),
+    [
+        ("session.jsonl", "Session file is not a regular file"),
+        ("session.jsonl.lock", "Session lock is not a regular file"),
+    ],
+    ids=["session-file", "lock-file"],
+)
+def test_directory_in_place_of_session_files_is_rejected(
+    tmp_path: Path, directory: str, message: str
+) -> None:
+    (tmp_path / directory).mkdir()
+
+    with pytest.raises(SessionError, match=message):
+        file_io.prepare_session_file(tmp_path / "session.jsonl")
+
+
+def test_lock_creates_private_parent_directory(tmp_path: Path) -> None:
+    path = tmp_path / "new" / "session.jsonl"
+
+    with file_io.interprocess_lock(path):
+        pass
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+@pytest.mark.skipif(os.name != "posix", reason="flock and file modes are POSIX-only")
+def test_lock_excludes_other_holders_and_stays_private(tmp_path: Path) -> None:
+    import fcntl
+
+    path = tmp_path / "session.jsonl"
+    lock_path = path.with_suffix(".jsonl.lock")
+    lock_path.touch()
+    lock_path.chmod(0o644)
+
+    with file_io.interprocess_lock(path):
+        assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+        other = os.open(lock_path, os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(other)
+
+
 def test_read_preserves_existing_parent_permissions(tmp_path: Path) -> None:
     if os.name != "posix":
         pytest.skip("POSIX permissions are required")
@@ -883,6 +974,27 @@ def test_read_preserves_existing_parent_permissions(tmp_path: Path) -> None:
     assert JsonlSessionStore(root).load(path).read_entries() == (entry,)
 
     assert stat.S_IMODE(root.stat().st_mode) == 0o755
+
+
+def reject_session_writes(monkeypatch: MonkeyPatch, path: Path) -> None:
+    """Fail opening `path` for writing, or creating its lock, as a read-only directory does."""
+    lock_path = path.with_suffix(f"{path.suffix}.lock")
+    real_open = os.open
+
+    def reject_session_write_open(
+        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        if os.fsdecode(target) == os.fsdecode(path) and flags & os.O_RDWR:
+            raise PermissionError(errno.EACCES, "session is read-only")
+        if os.fsdecode(target) == os.fsdecode(lock_path) and flags & os.O_CREAT:
+            raise PermissionError(errno.EACCES, "session directory is read-only")
+        return real_open(target, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", reject_session_write_open)
 
 
 @pytest.mark.parametrize("existing_lock", [False, True])
@@ -903,28 +1015,36 @@ def test_complete_session_reads_do_not_require_write_access(
     lock_path = path.with_suffix(f"{path.suffix}.lock")
     if existing_lock:
         lock_path.touch()
-    real_open = os.open
-
-    def reject_session_write_open(
-        target: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        flags: int,
-        mode: int = 0o777,
-        *,
-        dir_fd: int | None = None,
-    ) -> int:
-        if os.fsdecode(target) == os.fsdecode(path) and flags & os.O_RDWR:
-            raise PermissionError(errno.EACCES, "session is read-only")
-        if os.fsdecode(target) == os.fsdecode(lock_path) and flags & os.O_CREAT:
-            raise PermissionError(errno.EACCES, "session directory is read-only")
-        return real_open(target, flags, mode, dir_fd=dir_fd)
-
-    monkeypatch.setattr(os, "open", reject_session_write_open)
+    reject_session_writes(monkeypatch, path)
     store = JsonlSessionStore(root)
 
     assert store.load(path).read_entries() == (entry,)
     assert store.latest().read_entries() == (entry,)
     assert store.summaries()[0].session_id == entry.session_id
     assert lock_path.exists() is existing_lock
+
+
+@pytest.mark.parametrize(
+    ("contents", "prepare_parent"),
+    [(None, False), (b"committed\n{", False), (b"committed\n", True)],
+    ids=["missing-session", "incomplete-session", "writing-caller"],
+)
+def test_lock_is_required_unless_reading_a_complete_session(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    contents: bytes | None,
+    prepare_parent: bool,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    if contents is not None:
+        path.write_bytes(contents)
+    reject_session_writes(monkeypatch, path)
+
+    with pytest.raises(PermissionError):
+        with file_io.interprocess_lock(path, prepare_parent=prepare_parent):
+            pass
+
+    assert (path.read_bytes() if path.exists() else None) == contents
 
 
 def test_recovery_rejects_symlink_session_file_without_no_follow(
