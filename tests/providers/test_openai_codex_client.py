@@ -206,6 +206,7 @@ def test_openai_codex_provider_retries_transient_http_opening_failure(tmp_path: 
     assert isinstance(events[0], ProviderRetrying)
     assert events[0].reason == "server_error"
     assert events[0].status_code == 503
+    assert (events[0].attempt, events[0].max_attempts) == (2, 2)
     assert events[1:] == [
         ProviderResponseStarted(model="gpt-5.6-sol"),
         ProviderTextDelta(delta="recovered"),

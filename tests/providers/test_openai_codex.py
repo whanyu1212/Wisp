@@ -12,6 +12,7 @@ from tests.providers.openai_codex_support import (
     fake_codex_token,
     store_with_oauth,
 )
+from wisp.auth.storage import JsonAuthStore, OAuthCredential
 from wisp.messages import Message
 from wisp.providers.auth import StoredProviderAuthResolver
 from wisp.providers.base import ToolCall
@@ -268,3 +269,162 @@ def test_openai_codex_provider_emits_one_native_failed_terminal(
         ProviderResponseStarted(model="gpt-test"),
         ProviderResponseFailed(message=message),
     ]
+
+
+def _stream(
+    provider: OpenAICodexProvider, *, previous_response_id: str | None = None
+) -> list[object]:
+    async def run() -> list[object]:
+        return [
+            event
+            async for event in provider.stream(
+                [Message(role="user", content="hi")], previous_response_id=previous_response_id
+            )
+        ]
+
+    return anyio.run(run)
+
+
+def test_streamed_tool_call_is_emitted_and_replayed_once(tmp_path: Path) -> None:
+    item = {
+        "type": "function_call",
+        "id": "item-id",
+        "call_id": "call-id",
+        "name": "lookup",
+        "arguments": "",
+    }
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {"type": "response.output_item.added", "item": item},
+            {
+                "type": "response.function_call_arguments.done",
+                "item_id": "item-id",
+                "arguments": '{"query":"wisp"}',
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {**item, "arguments": '{"query":"wisp"}'},
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "response-id",
+                    "output": [{**item, "arguments": '{"query":"wisp"}'}],
+                },
+            },
+        ],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+
+    events = _stream(provider)
+
+    completed = [event for event in events if isinstance(event, ProviderToolCallCompleted)]
+    assert [event.tool_call.arguments for event in completed] == [{"query": "wisp"}]
+    native = provider.native_output_for("response-id")
+    assert native is not None
+    assert [replayed["type"] for replayed in native.items] == ["function_call"]
+
+
+def test_tool_call_without_item_id_keeps_its_arguments(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [
+            {"type": "response.created", "response": {"id": "response-id"}},
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call-id",
+                    "name": "lookup",
+                    "arguments": '{"query":"wisp"}',
+                },
+            },
+            completed_event("response-id"),
+        ],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+
+    completed = [e for e in _stream(provider) if isinstance(e, ProviderToolCallCompleted)]
+
+    assert [event.tool_call.arguments for event in completed] == [{"query": "wisp"}]
+
+
+_ANONYMOUS_REASONING = [
+    {"type": "reasoning", "encrypted_content": "first"},
+    {"type": "reasoning", "encrypted_content": "second"},
+]
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [
+            *({"type": "response.output_item.done", "item": item} for item in _ANONYMOUS_REASONING),
+            completed_event("response-id"),
+        ],
+        [
+            {
+                "type": "response.completed",
+                "response": {"id": "response-id", "output": _ANONYMOUS_REASONING},
+            }
+        ],
+    ],
+    ids=["streamed", "completed-output"],
+)
+def test_output_items_without_ids_are_all_replayed(
+    tmp_path: Path, events: list[dict[str, object]]
+) -> None:
+    provider = StubOpenAICodexProvider(
+        events, auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path))
+    )
+
+    _stream(provider)
+
+    native = provider.native_output_for("response-id")
+    assert native is not None
+    assert list(native.items) == _ANONYMOUS_REASONING
+
+
+@pytest.mark.parametrize(
+    "native_event",
+    [
+        {"type": "error", "message": "boom"},
+        {"type": "response.failed", "response": {"error": {"message": "boom"}}},
+        {"type": "response.incomplete", "response": {"incomplete_details": {"reason": "x"}}},
+    ],
+    ids=["error", "failed", "incomplete"],
+)
+def test_failure_names_the_started_response(
+    tmp_path: Path, native_event: dict[str, object]
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [{"type": "response.created", "response": {"id": "response-id"}}, native_event],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+    provider._continuations.remember("previous-response", ())  # noqa: SLF001
+
+    failure = _stream(provider, previous_response_id="previous-response")[-1]
+
+    assert isinstance(failure, ProviderResponseFailed)
+    assert failure.response_id == "response-id"
+
+
+def test_stored_account_id_wins_over_the_token(tmp_path: Path) -> None:
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set(
+        "openai-codex",
+        OAuthCredential(
+            access=fake_codex_token(),
+            refresh="refresh-token",
+            expires=4_102_444_800_000,
+            account_id="stored-account-id",
+        ),
+    )
+    provider = StubOpenAICodexProvider(
+        [completed_event("response-id")], auth_resolver=StoredProviderAuthResolver(store)
+    )
+
+    _stream(provider)
+
+    assert provider.seen_headers is not None
+    assert provider.seen_headers["chatgpt-account-id"] == "stored-account-id"
