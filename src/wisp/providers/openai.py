@@ -43,7 +43,7 @@ from wisp.providers.base import (
     is_context_overflow_message,
     strip_or_none,
 )
-from wisp.providers.continuations import ContinuationStore
+from wisp.providers.continuations import ContinuationStore, replayable_native_items
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -383,7 +383,11 @@ class OpenAIProvider:
                 (*messages, *extra_messages),
                 explicit_prompt_cache=explicit_prompt_cache,
                 native_output=(
-                    (lambda message: self._native_output(message, model=model))
+                    (
+                        lambda message: replayable_native_items(
+                            message, self._native_outputs, provider=self.name, model=model
+                        )
+                    )
                     if self._replays_native_output
                     else None
                 ),
@@ -450,39 +454,6 @@ class OpenAIProvider:
         """
 
         return self._native_outputs.get(response_id)
-
-    def _native_output(
-        self,
-        message: Message,
-        *,
-        model: str,
-    ) -> tuple[dict[str, object], ...] | None:
-        """Return the output items that produced an assistant row, if replayable.
-
-        Items saved on the row win over the in-memory record. Encrypted reasoning
-        belongs to the model that produced it, so items from another provider or
-        model are not replayed, and a record without a message item cannot stand
-        for a row that has text.
-
-        Args:
-            message (Message): Transcript row being rebuilt for a fresh request.
-            model (str): Model the request is sent to.
-
-        Returns:
-            tuple[dict[str, object], ...] | None: The response's items in their
-            original order, or None to render the row in portable form.
-        """
-
-        if message.role != "assistant" or message.response_id is None:
-            return None
-        native = message.native_output or self._native_outputs.get(
-            message.response_id, refresh=True
-        )
-        if native is None or native.provider != self.name or native.model != model:
-            return None
-        if message.content and not any(item.get("type") == "message" for item in native.items):
-            return None
-        return native.items
 
     async def _client_or_create(self) -> AsyncOpenAI:
         if self._client_is_injected:

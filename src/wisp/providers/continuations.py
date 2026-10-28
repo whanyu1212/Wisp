@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+from wisp.messages import Message, NativeOutput
+
 
 class ContinuationStore[T]:
     """Store provider-native continuation payloads by response ID.
@@ -59,3 +61,40 @@ class ContinuationStore[T]:
 
         if response_id is not None:
             self._values.pop(response_id, None)
+
+
+def replayable_native_items(
+    message: Message,
+    recorded: ContinuationStore[NativeOutput],
+    *,
+    provider: str,
+    model: str,
+) -> tuple[dict[str, object], ...] | None:
+    """Return the output items that produced an assistant row, if replayable.
+
+    Items saved on the row win over the in-memory record, so a new process
+    replays the same items. Encrypted reasoning belongs to the model that
+    produced it, so items from another provider or model are not replayed. A
+    record without a message item cannot represent a row that has text, so
+    that row keeps its portable form.
+
+    Args:
+        message (Message): Transcript row being rebuilt for a request.
+        recorded (ContinuationStore[NativeOutput]): The provider's in-memory
+            records by response ID; a hit refreshes the record's recency.
+        provider (str): Name of the provider building the request.
+        model (str): Model the request is sent to.
+
+    Returns:
+        tuple[dict[str, object], ...] | None: The response's items in their
+        original order, or None to render the row in portable form.
+    """
+
+    if message.role != "assistant" or message.response_id is None:
+        return None
+    native = message.native_output or recorded.get(message.response_id, refresh=True)
+    if native is None or native.provider != provider or native.model != model:
+        return None
+    if message.content and not any(item.get("type") == "message" for item in native.items):
+        return None
+    return native.items
