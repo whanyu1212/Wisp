@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import anyio
+import pytest
 
 from tests.rpc.coordinator_support import (
     Receiver,
@@ -279,3 +282,75 @@ def test_coordinator_rejects_held_messages_with_the_run_queue_error() -> None:
         assert coordinator.running_command is prompt
 
     anyio.run(scenario)
+
+
+def _prompt_running(coordinator: RpcCoordinator | None = None) -> RpcCoordinator:
+    coordinator = coordinator or RpcCoordinator(_RpcSessionState(None, (), 0))
+    coordinator.running_command = _RpcRunningCommand("run", "prompt", anyio.CancelScope())
+    return coordinator
+
+
+def _discovery_with_shutdown_queued() -> RpcCoordinator:
+    coordinator = _prompt_running()
+    coordinator.queued_commands.append(parsed_command({"id": "stop", "type": "shutdown"}))
+    return coordinator
+
+
+@pytest.mark.parametrize(
+    ("make_coordinator", "payload", "message"),
+    [
+        (
+            _discovery_with_shutdown_queued,
+            {"id": "files", "type": "get_project_files"},
+            "Project file discovery unavailable during shutdown",
+        ),
+        (
+            lambda: _prompt_running(
+                RpcCoordinator(
+                    _RpcSessionState(None, (), 0), queued_message_rejection=lambda _held: "too many"
+                )
+            ),
+            {"id": "steer", "type": "steer", "content": ""},
+            "too many",
+        ),
+        (
+            lambda: _prompt_running(
+                RpcCoordinator(_RpcSessionState(None, (), 0), max_queued_commands=0)
+            ),
+            {"id": "files", "type": "get_project_files"},
+            "RPC command queue is full while another RPC command is running",
+        ),
+        (
+            lambda: _prompt_running(
+                RpcCoordinator(_RpcSessionState(None, (), 0), max_queued_bytes=0)
+            ),
+            {"id": "files", "type": "get_project_files"},
+            "RPC command queue byte limit exceeded while another RPC command is running",
+        ),
+    ],
+    ids=["discovery-during-shutdown", "held-message-limit", "command-limit", "byte-limit"],
+)
+def test_rejected_command_does_not_stop_the_coordinator(
+    make_coordinator: Callable[[], RpcCoordinator], payload: dict[str, object], message: str
+) -> None:
+    async def scenario() -> None:
+        coordinator = make_coordinator()
+        rejected: list[str] = []
+
+        async def reject(_command: ParsedRpcCommand, reason: str) -> None:
+            rejected.append(reason)
+
+        should_shutdown = await coordinator.handle_event(
+            input_command(payload), dispatch=_unexpected_dispatch, reject=reject
+        )
+
+        assert rejected == [message]
+        assert should_shutdown is False
+
+    anyio.run(scenario)
+
+
+async def _unexpected_dispatch(
+    command: ParsedRpcCommand, _running: _RpcRunningCommand | None
+) -> _RpcDispatchResult:
+    raise AssertionError(f"unexpected dispatch: {command.command_type}")

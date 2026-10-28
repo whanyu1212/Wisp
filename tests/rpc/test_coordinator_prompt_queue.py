@@ -8,6 +8,7 @@ from tests.rpc.coordinator_support import (
     expected_commands,
     ignore_reject,
     input_command,
+    parsed_command,
 )
 from wisp.rpc.commands import ParsedRpcCommand
 from wisp.rpc.coordinator import (
@@ -64,6 +65,14 @@ def test_coordinator_buffers_queue_commands_until_prompt_ready(run_type: str) ->
         assert dispatched == ["run", "steer"]
         assert not coordinator.pending_prompt_queue_commands
 
+        await coordinator.handle_event(
+            input_command({"content": "", "id": "later", "type": "steer"}),
+            dispatch=dispatch,
+            reject=ignore_reject,
+        )
+
+        assert dispatched == ["run", "steer", "later"]
+
     anyio.run(scenario)
 
 
@@ -98,6 +107,28 @@ def test_coordinator_ignores_stale_prompt_readiness() -> None:
         )
 
         assert dispatched == [("prompt", None), ("steer", None)]
+
+    anyio.run(scenario)
+
+
+def test_readiness_counts_only_for_a_running_prompt() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        coordinator.running_command = _RpcRunningCommand("same", "compact", anyio.CancelScope())
+        coordinator.pending_prompt_queue_commands.append(
+            parsed_command({"content": "", "id": "steer", "type": "steer"})
+        )
+
+        async def dispatch(
+            command: ParsedRpcCommand, _running: _RpcRunningCommand | None
+        ) -> _RpcDispatchResult:
+            raise AssertionError(f"unexpected dispatch: {command.command_id}")
+
+        await coordinator.handle_event(
+            _RpcPromptReady("same"), dispatch=dispatch, reject=ignore_reject
+        )
+
+        assert len(coordinator.pending_prompt_queue_commands) == 1
 
     anyio.run(scenario)
 

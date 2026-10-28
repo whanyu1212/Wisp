@@ -377,3 +377,56 @@ def test_discovery_does_not_remove_history_read_session_ordering_barrier() -> No
         assert not coordinator.auxiliary_commands
 
     anyio.run(scenario)
+
+
+def test_only_shutdown_cancels_running_discovery() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        discovery = _RpcRunningCommand("files", "get_project_files", anyio.CancelScope())
+        coordinator.auxiliary_commands["files"] = discovery
+
+        async def dispatch(
+            _command: ParsedRpcCommand, running: _RpcRunningCommand | None
+        ) -> _RpcDispatchResult:
+            return _RpcDispatchResult(running)
+
+        await coordinator.handle_event(
+            input_command({"id": "state", "type": "get_state"}),
+            dispatch=dispatch,
+            reject=ignore_reject,
+        )
+        assert not discovery.cancel_scope.cancel_called
+
+        await coordinator.handle_event(
+            input_command({"id": "stop", "type": "shutdown"}),
+            dispatch=dispatch,
+            reject=ignore_reject,
+        )
+        assert discovery.cancel_scope.cancel_called
+
+    anyio.run(scenario)
+
+
+def test_read_that_finishes_during_dispatch_releases_its_bytes() -> None:
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        prompt = _RpcRunningCommand("run", "prompt", anyio.CancelScope())
+        coordinator.running_command = prompt
+
+        async def dispatch(
+            _command: ParsedRpcCommand, _running: _RpcRunningCommand | None
+        ) -> _RpcDispatchResult:
+            return _RpcDispatchResult(None)
+
+        should_shutdown = await coordinator.handle_event(
+            input_command({"id": "files", "type": "get_project_files"}),
+            dispatch=dispatch,
+            reject=ignore_reject,
+        )
+
+        assert should_shutdown is False
+        assert coordinator.running_command is prompt
+        assert not coordinator.auxiliary_commands
+        assert coordinator._queued_command_bytes == 0  # noqa: SLF001
+
+    anyio.run(scenario)
