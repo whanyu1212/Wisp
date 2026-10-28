@@ -31,7 +31,6 @@ from wisp.providers.base import (
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
-    JsonObject,
     ProviderEvent,
     ProviderResponseCompleted,
     ProviderResponseFailed,
@@ -43,6 +42,7 @@ from wisp.providers.events import (
     ProviderWebSearch,
     ProviderWebSource,
     ToolCall,
+    parse_tool_call,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
@@ -793,25 +793,9 @@ def _tool_call_from_codex(
 ) -> ToolCall:
     call_id = _string_value(item.get("call_id")) or _string_value(item.get("id")) or ""
     name = _string_value(item.get("name")) or ""
-    arguments, parse_error = _parse_tool_arguments(name=name, raw_arguments=raw_arguments)
-    return ToolCall(
-        call_id=call_id,
-        name=name,
-        arguments=arguments,
-        raw_arguments=raw_arguments,
-        response_id=response_id,
-        parse_error=parse_error,
+    return parse_tool_call(
+        call_id=call_id, name=name, raw_arguments=raw_arguments, response_id=response_id
     )
-
-
-def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
-    try:
-        parsed = json.loads(raw_arguments or "{}")
-    except JSONDecodeError as exc:
-        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
-    if not isinstance(parsed, dict):
-        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
-    return cast(JsonObject, parsed), None
 
 
 def _codex_headers(

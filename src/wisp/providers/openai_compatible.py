@@ -33,6 +33,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
@@ -107,7 +108,7 @@ class OpenAICompatibleProvider:
         self._base_url = base_url
         self._requires_api_key = requires_api_key
         self._ca_bundle = os.fspath(ca_bundle) if ca_bundle is not None else None
-        self._api_key = _normalize_optional(api_key)
+        self._api_key = strip_or_none(api_key)
         self._client = client
         self._client_is_injected = client is not None
         self._client_api_key: str | None = None
@@ -397,9 +398,9 @@ class OpenAICompatibleProvider:
 
         provider_api_key_env = self._provider_api_key_environment()
         fallback_api_key_env = self._fallback_api_key_environment()
-        api_key = self._api_key or _normalize_optional(os.environ.get(provider_api_key_env))
+        api_key = self._api_key or strip_or_none(os.environ.get(provider_api_key_env))
         if api_key is None and fallback_api_key_env is not None:
-            api_key = _normalize_optional(os.environ.get(fallback_api_key_env))
+            api_key = strip_or_none(os.environ.get(fallback_api_key_env))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
@@ -587,13 +588,6 @@ def _retry_decision(exc: OpenAIError) -> RetryDecision | None:
             error_body=exc.body,
         )
     return None
-
-
-def _normalize_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    return normalized or None
 
 
 __all__ = [

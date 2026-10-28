@@ -23,6 +23,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
@@ -93,7 +94,7 @@ class GoogleProvider:
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.default_model: str | None = default_model
-        self._api_key = _normalize_optional(api_key)
+        self._api_key = strip_or_none(api_key)
         self._client = client
         self._client_is_injected = client is not None
         self._client_api_key: str | None = None
@@ -317,7 +318,7 @@ class GoogleProvider:
         for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
             self._remember_call_info(
                 tool_call.call_id,
-                _CallInfo(name=tool_call.name, provider_id=_normalize_optional(provider_id)),
+                _CallInfo(name=tool_call.name, provider_id=strip_or_none(provider_id)),
             )
 
         yield ProviderResponseCompleted(
@@ -390,8 +391,8 @@ class GoogleProvider:
         # not be rejected here before the SDK ever gets a chance to use it.
         api_key = (
             self._api_key
-            or _normalize_optional(os.environ.get("GOOGLE_API_KEY"))
-            or _normalize_optional(os.environ.get("GEMINI_API_KEY"))
+            or strip_or_none(os.environ.get("GOOGLE_API_KEY"))
+            or strip_or_none(os.environ.get("GEMINI_API_KEY"))
         )
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
@@ -491,7 +492,7 @@ def _tool_call_from_google(
         arguments=cast(JsonObject, arguments),
         raw_arguments=dumps(arguments),
         response_id=response_id,
-        provider_call_id=_normalize_optional(function_call.id),
+        provider_call_id=strip_or_none(function_call.id),
     )
 
 
@@ -616,13 +617,6 @@ def _usage_from_google(
         ),
         reasoning_output_tokens=reasoning_tokens,
     )
-
-
-def _normalize_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
 
 
 __all__ = ["DEFAULT_GOOGLE_MODEL", "GoogleProvider"]
