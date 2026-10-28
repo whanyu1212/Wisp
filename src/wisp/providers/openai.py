@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from copy import deepcopy
-from json import JSONDecodeError, dumps, loads
+from json import dumps
 from typing import Literal, Protocol, cast, runtime_checkable
 
 import anyio
@@ -41,10 +41,10 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
-    JsonObject,
     ProviderEvent,
     ProviderResponseCompleted,
     ProviderResponseFailed,
@@ -57,6 +57,7 @@ from wisp.providers.events import (
     ProviderWebSearch,
     ProviderWebSource,
     ToolCall,
+    parse_tool_call,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
@@ -110,7 +111,7 @@ class OpenAIProvider:
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self.default_model: str | None = default_model
-        self._api_key = _normalize_optional(api_key)
+        self._api_key = strip_or_none(api_key)
         self._client = client
         self._client_is_injected = client is not None
         self._client_api_key: str | None = None
@@ -234,7 +235,7 @@ class OpenAIProvider:
                     completed_tool_arguments[event.item_id] = event.arguments
                     pending = pending_tool_calls.get(event.item_id)
                     if pending is not None:
-                        tool_call = _tool_call_from_openai(
+                        tool_call = parse_tool_call(
                             call_id=pending.call_id,
                             name=pending.name,
                             raw_arguments=event.arguments,
@@ -258,7 +259,7 @@ class OpenAIProvider:
                                 if item_id is not None
                                 else event.item.arguments
                             )
-                            tool_call = _tool_call_from_openai(
+                            tool_call = parse_tool_call(
                                 call_id=event.item.call_id,
                                 name=event.item.name,
                                 raw_arguments=raw_arguments,
@@ -488,7 +489,7 @@ class OpenAIProvider:
             assert self._client is not None
             return self._client
 
-        api_key = self._api_key or _normalize_optional(os.environ.get(self._api_key_environment))
+        api_key = self._api_key or strip_or_none(os.environ.get(self._api_key_environment))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
@@ -533,34 +534,6 @@ def _openai_retry_decision(exc: OpenAIError) -> RetryDecision | None:
             error_body=exc.body,
         )
     return None
-
-
-def _tool_call_from_openai(
-    *,
-    call_id: str,
-    name: str,
-    raw_arguments: str,
-    response_id: str | None,
-) -> ToolCall:
-    arguments, parse_error = _parse_tool_arguments(name=name, raw_arguments=raw_arguments)
-    return ToolCall(
-        call_id=call_id,
-        name=name,
-        arguments=arguments,
-        raw_arguments=raw_arguments,
-        response_id=response_id,
-        parse_error=parse_error,
-    )
-
-
-def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
-    try:
-        parsed = loads(raw_arguments or "{}")
-    except JSONDecodeError as exc:
-        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
-    if not isinstance(parsed, dict):
-        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
-    return cast(JsonObject, parsed), None
 
 
 def _failed_response_message(response: Response, *, display_name: str = "OpenAI") -> str:
@@ -760,10 +733,3 @@ def _usage_from_openai(response: Response) -> ProviderUsage | None:
 
 def _nonnegative_int(value: object) -> int | None:
     return max(0, value) if type(value) is int else None
-
-
-def _normalize_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None

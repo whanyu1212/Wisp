@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from json import JSONDecodeError, loads
+from typing import Literal, cast
 
 JsonObject = Mapping[str, object]
 ProviderFinishReason = Literal["stop", "tool_calls", "length"]
@@ -26,6 +27,57 @@ class ToolCall:
     # the original provider-issued ID separately for faithful fresh replay.
     provider_call_id: str | None = field(default=None, compare=False)
     parse_error: str | None = None
+
+
+def parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
+    """Parse a tool call's streamed JSON arguments.
+
+    Args:
+        name (str): Tool name, used in the error text.
+        raw_arguments (str): The arguments exactly as the model streamed them;
+            empty means no arguments.
+
+    Returns:
+        tuple[JsonObject, str | None]: The arguments and None, or an empty object
+        and the reason the arguments are unusable.
+    """
+    try:
+        parsed = loads(raw_arguments or "{}")
+    except JSONDecodeError as exc:
+        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
+    if not isinstance(parsed, dict):
+        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
+    return cast(JsonObject, parsed), None
+
+
+def parse_tool_call(
+    *,
+    call_id: str,
+    name: str,
+    raw_arguments: str,
+    response_id: str | None,
+) -> ToolCall:
+    """Build a tool call, keeping unparseable arguments as a parse error.
+
+    Args:
+        call_id (str): Provider-issued call ID.
+        name (str): Tool name.
+        raw_arguments (str): The arguments exactly as the model streamed them.
+        response_id (str | None): Response that produced the call.
+
+    Returns:
+        ToolCall: The call, with `parse_error` set when `raw_arguments` is not a
+        JSON object.
+    """
+    arguments, parse_error = parse_tool_arguments(name=name, raw_arguments=raw_arguments)
+    return ToolCall(
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        raw_arguments=raw_arguments,
+        response_id=response_id,
+        parse_error=parse_error,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,4 +216,6 @@ __all__ = [
     "ProviderWebSource",
     "ToolCall",
     "RetryReason",
+    "parse_tool_arguments",
+    "parse_tool_call",
 ]

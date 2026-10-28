@@ -6,7 +6,6 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from json import JSONDecodeError, loads
 from typing import Literal, cast
 
 import anyio
@@ -45,10 +44,10 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
-    JsonObject,
     ProviderEvent,
     ProviderFinishReason,
     ProviderResponseCompleted,
@@ -62,6 +61,8 @@ from wisp.providers.events import (
     ProviderWebSearch,
     ProviderWebSource,
     ToolCall,
+    parse_tool_arguments,
+    parse_tool_call,
 )
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
@@ -327,7 +328,7 @@ class AnthropicProvider:
             raise ValueError(f"Unsupported Anthropic cache TTL: {cache_ttl!r}")
         self.default_model: str | None = default_model
         self._cache_ttl: AnthropicCacheTtl = cache_ttl
-        self._api_key = _normalize_optional(api_key)
+        self._api_key = strip_or_none(api_key)
         self._client = client
         self._client_is_injected = client is not None
         self._client_api_key: str | None = None
@@ -500,7 +501,7 @@ class AnthropicProvider:
             if accumulator.block_type != "tool_use":
                 continue
             raw_arguments = "".join(accumulator.tool_use_json_chunks)
-            tool_call = _tool_call_from_anthropic(
+            tool_call = parse_tool_call(
                 call_id=accumulator.tool_use_id,
                 name=accumulator.tool_use_name,
                 raw_arguments=raw_arguments,
@@ -701,7 +702,7 @@ class AnthropicProvider:
             assert self._client is not None
             return self._client
 
-        api_key = self._api_key or _normalize_optional(os.environ.get("ANTHROPIC_API_KEY"))
+        api_key = self._api_key or strip_or_none(os.environ.get("ANTHROPIC_API_KEY"))
         if api_key is None and self._auth_resolver is not None:
             api_key = await self._auth_resolver.api_key(self.name)
         if api_key is None:
@@ -799,7 +800,7 @@ def _replay_message_from_stream(
             content.append({"type": "redacted_thinking", "data": accumulator.redacted_data})
         elif accumulator.block_type == "tool_use":
             raw_arguments = "".join(accumulator.tool_use_json_chunks)
-            arguments, _parse_error = _parse_tool_arguments(
+            arguments, _parse_error = parse_tool_arguments(
                 name=accumulator.tool_use_name, raw_arguments=raw_arguments
             )
             content.append(
@@ -841,7 +842,7 @@ def _server_tool_input(accumulator: _ContentBlockAccumulator) -> dict[str, objec
 
     raw_arguments = "".join(accumulator.tool_use_json_chunks)
     if raw_arguments:
-        arguments, _parse_error = _parse_tool_arguments(
+        arguments, _parse_error = parse_tool_arguments(
             name=_WEB_SEARCH_TOOL_NAME, raw_arguments=raw_arguments
         )
         return dict(arguments)
@@ -870,34 +871,6 @@ def _web_search_from_result(
             for result in block.content
         ),
     )
-
-
-def _tool_call_from_anthropic(
-    *,
-    call_id: str,
-    name: str,
-    raw_arguments: str,
-    response_id: str | None,
-) -> ToolCall:
-    arguments, parse_error = _parse_tool_arguments(name=name, raw_arguments=raw_arguments)
-    return ToolCall(
-        call_id=call_id,
-        name=name,
-        arguments=arguments,
-        raw_arguments=raw_arguments,
-        response_id=response_id,
-        parse_error=parse_error,
-    )
-
-
-def _parse_tool_arguments(*, name: str, raw_arguments: str) -> tuple[JsonObject, str | None]:
-    try:
-        parsed = loads(raw_arguments or "{}")
-    except JSONDecodeError as exc:
-        return {}, f"Invalid JSON arguments for tool {name}: {exc.msg}"
-    if not isinstance(parsed, dict):
-        return {}, f"Invalid JSON arguments for tool {name}: expected an object"
-    return cast(JsonObject, parsed), None
 
 
 def _system_from_messages(messages: Sequence[Message]) -> str | None:
@@ -1070,13 +1043,6 @@ def _combined_usage(earlier: ProviderUsage, latest: ProviderUsage) -> ProviderUs
             earlier.reasoning_output_tokens, latest.reasoning_output_tokens
         ),
     )
-
-
-def _normalize_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
 
 
 __all__ = ["DEFAULT_ANTHROPIC_MODEL", "AnthropicCacheTtl", "AnthropicProvider"]

@@ -81,6 +81,15 @@ def is_context_overflow_message(message: str) -> bool:
     )
 
 
+def strip_or_none(value: str | None) -> str | None:
+    """Return `value` without surrounding whitespace, or None when nothing is left."""
+
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 class Provider(Protocol):
     """Minimal streaming provider contract used by the agent core."""
 
