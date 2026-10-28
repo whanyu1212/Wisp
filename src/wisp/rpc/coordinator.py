@@ -319,89 +319,136 @@ class RpcCoordinator:
         dispatch: RpcDispatch,
         reject: RpcReject,
     ) -> bool:
-        """Apply one event while allowing dispatch to await output capacity."""
+        """Apply one event while allowing dispatch to await output capacity.
+
+        Args:
+            event (_RpcControlEvent): Input closure, a command's completion, a prompt
+                run's readiness for queued messages, or a new command.
+            dispatch (RpcDispatch): Starts a command; may await output capacity.
+            reject (RpcReject): Reports a command that will not run.
+
+        Returns:
+            bool: Whether a dispatched command asked the host to shut down.
+        """
 
         if isinstance(event, self._input_closed_type):
-            if not self.input_closed:
-                self.input_closed = True
-                self._cancel_discovery()
-                for handler in self._input_closed_handlers:
-                    handler()
-                if (
-                    self.running_command is not None
-                    and self.running_command.command_type == "begin_device_code"
-                ):
-                    self.running_command.cancel_scope.cancel()
-                for queue in (self.pending_prompt_queue_commands, self.queued_commands):
-                    retained: deque[ParsedRpcCommand] = deque()
-                    while queue:
-                        queued = queue.popleft()
-                        if queued.command_type == "begin_device_code":
-                            self._release_queued_command(queued)
-                            await reject(
-                                queued,
-                                f"RPC command cancelled: {queued.command_id or 'unknown'}",
-                            )
-                        else:
-                            retained.append(queued)
-                    queue.extend(retained)
+            await self._close_input(reject)
             return False
         if isinstance(event, self._command_completed_type):
-            completed = cast(_RpcCommandCompleted, event)
-            running = self.running_command
-            auxiliary = self.auxiliary_commands.get(completed.command_id)
-            if auxiliary is not None and completed.command_type == auxiliary.command_type:
-                del self.auxiliary_commands[completed.command_id]
-                self._release_command_bytes(
-                    self._auxiliary_command_bytes.pop(completed.command_id, 0)
-                )
-                return False
-            if (
-                running is not None
-                and completed.command_id == running.command_id
-                and completed.command_type == running.command_type
-            ):
-                self.running_command = None
-                self._prompt_queue_ready = False
-                self.session_state.entry_count = completed.entry_count
-                if completed.history is not None:
-                    self.session_state.history = completed.history
-                if getattr(completed, "session_name_updated", False):
-                    self.session_state.name = getattr(completed, "session_name", None)
-                selected_session = getattr(completed, "selected_session", None)
-                if completed.ok and selected_session is not None:
-                    previous_session = self.session_state.session
-                    if (
-                        completed.command_type
-                        in {"select_session", "clone_session", "fork_session"}
-                        and (
-                            previous_session is None
-                            or previous_session.session_id != selected_session.session_id
-                        )
-                        and self._session_changed is not None
-                    ):
-                        await self._session_changed()
-                    self.session_state.session = selected_session
-                post_apply_events = getattr(completed, "post_apply_events", ())
-                if post_apply_events and self._completion_event_renderer is not None:
-                    await self._completion_event_renderer(post_apply_events)
-                elif self._completion_event_writer is not None:
-                    for queued_event in post_apply_events:
-                        self._completion_event_writer(queued_event)
+            await self._complete_command(cast(_RpcCommandCompleted, event))
             return False
         if isinstance(event, self._prompt_ready_type):
-            ready = cast(_RpcPromptReady, event)
-            running = self.running_command
-            if (
-                running is not None
-                and running.command_type in _PROMPT_RUN_COMMAND_TYPES
-                and ready.command_id == running.command_id
-            ):
-                self._prompt_queue_ready = True
-                return await self._dispatch_pending_queue_commands(dispatch=dispatch)
-            return False
+            return await self._mark_prompt_ready(cast(_RpcPromptReady, event), dispatch=dispatch)
+        return await self._accept_command(
+            cast(_RpcInputCommand, event).command, dispatch=dispatch, reject=reject
+        )
 
-        command = cast(_RpcInputCommand, event).command
+    async def _close_input(self, reject: RpcReject) -> None:
+        """Stop discovery and device-code logins, which need a live client."""
+
+        if self.input_closed:
+            return
+        self.input_closed = True
+        self._cancel_discovery()
+        for handler in self._input_closed_handlers:
+            handler()
+        if (
+            self.running_command is not None
+            and self.running_command.command_type == "begin_device_code"
+        ):
+            self.running_command.cancel_scope.cancel()
+        for queue in (self.pending_prompt_queue_commands, self.queued_commands):
+            retained: deque[ParsedRpcCommand] = deque()
+            while queue:
+                queued = queue.popleft()
+                if queued.command_type == "begin_device_code":
+                    self._release_queued_command(queued)
+                    await reject(
+                        queued,
+                        f"RPC command cancelled: {queued.command_id or 'unknown'}",
+                    )
+                else:
+                    retained.append(queued)
+            queue.extend(retained)
+
+    async def _complete_command(self, completed: _RpcCommandCompleted) -> None:
+        """Retire a finished auxiliary read, or the running command and apply its result.
+
+        A completion that matches neither, such as one for a command already replaced,
+        is ignored.
+        """
+
+        auxiliary = self.auxiliary_commands.get(completed.command_id)
+        if auxiliary is not None and completed.command_type == auxiliary.command_type:
+            del self.auxiliary_commands[completed.command_id]
+            self._release_command_bytes(self._auxiliary_command_bytes.pop(completed.command_id, 0))
+            return
+        running = self.running_command
+        if (
+            running is None
+            or completed.command_id != running.command_id
+            or completed.command_type != running.command_type
+        ):
+            return
+        self.running_command = None
+        self._prompt_queue_ready = False
+        await self._apply_completion(completed)
+
+    async def _apply_completion(self, completed: _RpcCommandCompleted) -> None:
+        self.session_state.entry_count = completed.entry_count
+        if completed.history is not None:
+            self.session_state.history = completed.history
+        if getattr(completed, "session_name_updated", False):
+            self.session_state.name = getattr(completed, "session_name", None)
+        selected_session = getattr(completed, "selected_session", None)
+        if completed.ok and selected_session is not None:
+            previous_session = self.session_state.session
+            if (
+                completed.command_type in {"select_session", "clone_session", "fork_session"}
+                and (
+                    previous_session is None
+                    or previous_session.session_id != selected_session.session_id
+                )
+                and self._session_changed is not None
+            ):
+                await self._session_changed()
+            self.session_state.session = selected_session
+        post_apply_events = getattr(completed, "post_apply_events", ())
+        if post_apply_events and self._completion_event_renderer is not None:
+            await self._completion_event_renderer(post_apply_events)
+        elif self._completion_event_writer is not None:
+            for queued_event in post_apply_events:
+                self._completion_event_writer(queued_event)
+
+    async def _mark_prompt_ready(self, ready: _RpcPromptReady, *, dispatch: RpcDispatch) -> bool:
+        """Release held steering and follow-ups once the running prompt accepts them."""
+
+        running = self.running_command
+        if (
+            running is None
+            or running.command_type not in _PROMPT_RUN_COMMAND_TYPES
+            or ready.command_id != running.command_id
+        ):
+            return False
+        self._prompt_queue_ready = True
+        return await self._dispatch_pending_queue_commands(dispatch=dispatch)
+
+    async def _accept_command(
+        self,
+        command: ParsedRpcCommand,
+        *,
+        dispatch: RpcDispatch,
+        reject: RpcReject,
+    ) -> bool:
+        """Reject, hold, queue, or dispatch a new command, by the first rule that applies.
+
+        The rules, in order: a duplicate ID is rejected; shutdown cancels discovery;
+        discovery is rejected once shutdown is pending; an idle shutdown is queued so
+        buffered control drains first; steering and follow-ups wait until a running
+        prompt is ready for them; discovery, and reads a prompt allows, run alongside
+        the active command; other work waits behind it unless it may bypass it.
+        """
+
         duplicate_id = self._duplicate_outstanding_id(command)
         if duplicate_id is not None:
             await reject(
@@ -425,81 +472,109 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
-        prompt_queue_not_ready = (
+        if (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and selected_type in QUEUE_RPC_COMMAND_TYPES
             and not self._prompt_queue_ready
-        )
-        if prompt_queue_not_ready:
-            # The run's message limit, not the shared command bound, bounds held
-            # steering and follow-ups, so an overflow gets the run's error however
-            # other outstanding commands add up. The run checks each message again
-            # when it accepts them, including against messages it restored.
-            run_message_limit = (
-                self._queued_message_rejection
-                if selected_type in _QUEUED_MESSAGE_COMMAND_TYPES
-                else None
-            )
-            if run_message_limit is not None:
-                message_rejection = run_message_limit(self._held_message_count())
-                if message_rejection is not None:
-                    await reject(command, message_rejection)
-                    return False
-            await self._enqueue_command(
-                command,
-                queue=self.pending_prompt_queue_commands,
-                reject=reject,
-                apply_command_bound=run_message_limit is None,
-            )
+        ):
+            await self._hold_for_prompt_run(command, reject=reject)
             return False
         if selected_type in {"get_project_files", "get_git_diff"} or (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES
             and command.allows_prompt_read
         ):
-            if self._outstanding_command_count() >= self._max_queued_commands:
-                await reject(
-                    command,
-                    "RPC command queue is full while another RPC command is running",
-                )
-                return False
-            command_bytes = self._command_payload_size(command)
-            if command_bytes > self._max_queued_bytes - self._queued_command_bytes:
-                await reject(
-                    command,
-                    "RPC command queue byte limit exceeded while another RPC command is running",
-                )
-                return False
-            self._queued_command_bytes += command_bytes
-            previous_running = running
-            try:
-                result = await dispatch(command, running)
-            except BaseException:
-                self._release_command_bytes(command_bytes)
-                raise
-            auxiliary = result.running_command
-            self.running_command = previous_running
-            if auxiliary is not None and auxiliary is not previous_running:
-                self.auxiliary_commands[auxiliary.command_id] = auxiliary
-                self._auxiliary_command_bytes[auxiliary.command_id] = command_bytes
-            else:
-                self._release_command_bytes(command_bytes)
-            return result.should_shutdown
+            return await self._dispatch_alongside(command, dispatch=dispatch, reject=reject)
+        if self._waits_behind_active_work(selected_type):
+            await self._enqueue_command(command, queue=self.queued_commands, reject=reject)
+            return False
+        return await self._dispatch(command, dispatch=dispatch)
+
+    def _waits_behind_active_work(self, command_type: str) -> bool:
+        """Whether a command must queue behind the running command or an ordered read.
+
+        Bypassing commands run at once, except that a new session still waits for
+        ordered work other than a prompt run or compaction.
+        """
+
+        running = self.running_command
         auxiliary_read_pending = self._ordered_auxiliary_pending()
-        new_session_waits_for_ordered_operation = selected_type == "new_session" and (
+        if running is None and not auxiliary_read_pending:
+            return False
+        if not _bypasses_active_command(command_type):
+            return True
+        return command_type == "new_session" and (
             auxiliary_read_pending
             or (
                 running is not None
                 and running.command_type not in {*_PROMPT_RUN_COMMAND_TYPES, "compact"}
             )
         )
-        if (running is not None or auxiliary_read_pending) and (
-            not _bypasses_active_command(selected_type) or new_session_waits_for_ordered_operation
-        ):
-            await self._enqueue_command(command, queue=self.queued_commands, reject=reject)
+
+    async def _hold_for_prompt_run(self, command: ParsedRpcCommand, *, reject: RpcReject) -> None:
+        # The run's message limit, not the shared command bound, bounds held
+        # steering and follow-ups, so an overflow gets the run's error however
+        # other outstanding commands add up. The run checks each message again
+        # when it accepts them, including against messages it restored.
+        run_message_limit = (
+            self._queued_message_rejection
+            if command.command_type in _QUEUED_MESSAGE_COMMAND_TYPES
+            else None
+        )
+        if run_message_limit is not None:
+            message_rejection = run_message_limit(self._held_message_count())
+            if message_rejection is not None:
+                await reject(command, message_rejection)
+                return
+        await self._enqueue_command(
+            command,
+            queue=self.pending_prompt_queue_commands,
+            reject=reject,
+            apply_command_bound=run_message_limit is None,
+        )
+
+    async def _dispatch_alongside(
+        self,
+        command: ParsedRpcCommand,
+        *,
+        dispatch: RpcDispatch,
+        reject: RpcReject,
+    ) -> bool:
+        """Run a read beside the active command, within the shared command and byte bounds.
+
+        The active command stays active. A read that is still running afterwards is
+        tracked as auxiliary and keeps its bytes reserved until it completes.
+        """
+
+        if self._outstanding_command_count() >= self._max_queued_commands:
+            await reject(
+                command,
+                "RPC command queue is full while another RPC command is running",
+            )
             return False
-        return await self._dispatch(command, dispatch=dispatch)
+        command_bytes = self._command_payload_size(command)
+        if command_bytes > self._max_queued_bytes - self._queued_command_bytes:
+            await reject(
+                command,
+                "RPC command queue byte limit exceeded while another RPC command is running",
+            )
+            return False
+        self._queued_command_bytes += command_bytes
+        previous_running = self.running_command
+        try:
+            result = await dispatch(command, previous_running)
+        except BaseException:
+            self._release_command_bytes(command_bytes)
+            raise
+        auxiliary = result.running_command
+        self.running_command = previous_running
+        if auxiliary is not None and auxiliary is not previous_running:
+            self.auxiliary_commands[auxiliary.command_id] = auxiliary
+            self._auxiliary_command_bytes[auxiliary.command_id] = command_bytes
+        else:
+            self._release_command_bytes(command_bytes)
+        return result.should_shutdown
 
     async def _dispatch(
         self,
