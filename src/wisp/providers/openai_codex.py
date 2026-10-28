@@ -29,7 +29,7 @@ from wisp.providers.base import (
     ToolSpec,
     is_context_overflow_message,
 )
-from wisp.providers.continuations import ContinuationStore
+from wisp.providers.continuations import ContinuationStore, replayable_native_items
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -168,7 +168,9 @@ class OpenAICodexProvider:
             effort=effort,
             prompt_cache_key=prompt_cache_key,
             web_search=web_search,
-            native_output=lambda message: self._native_output(message, model=selected_model),
+            native_output=lambda message: replayable_native_items(
+                message, self._native_outputs, provider=self.name, model=selected_model
+            ),
         )
         response_id: str | None = None
         pending_tool_calls: dict[str, dict[str, object]] = {}
@@ -411,40 +413,6 @@ class OpenAICodexProvider:
         """
 
         return self._native_outputs.get(response_id)
-
-    def _native_output(
-        self,
-        message: Message,
-        *,
-        model: str,
-    ) -> tuple[dict[str, object], ...] | None:
-        """Return the output items that produced an assistant row, if replayable.
-
-        Items saved on the row win over the in-memory record, so a new process
-        replays the same items. Encrypted reasoning belongs to the model that
-        produced it, so items from another provider or model are not replayed. A
-        record without a message item cannot represent a row that has text, so
-        that row keeps its portable form.
-
-        Args:
-            message (Message): Transcript row being rebuilt for a request.
-            model (str): Model the request is sent to.
-
-        Returns:
-            tuple[dict[str, object], ...] | None: The response's items in their
-            original order, or None to render the row in portable form.
-        """
-
-        if message.role != "assistant" or message.response_id is None:
-            return None
-        native = message.native_output or self._native_outputs.get(
-            message.response_id, refresh=True
-        )
-        if native is None or native.provider != self.name or native.model != model:
-            return None
-        if message.content and not any(item.get("type") == "message" for item in native.items):
-            return None
-        return native.items
 
     def _get_continuation(
         self,
