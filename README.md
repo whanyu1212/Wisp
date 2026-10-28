@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png" alt="Wisp: redirect it while it works, approve what it changes." width="100%">
+  <img src="https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png" alt="Wisp: your code, your direction." width="100%">
 </p>
 
 <h1 align="center">Wisp</h1>
