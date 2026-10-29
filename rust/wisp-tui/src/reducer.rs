@@ -2839,7 +2839,7 @@ fn capture_session_completion(
     command_id: &str,
     command_type: &str,
     completion: &mut Option<SessionCompletion>,
-) -> bool {
+) -> SessionCapture {
     let BackendEvent::CommandFinished {
         command_id: received,
         command_type: received_type,
@@ -2847,10 +2847,10 @@ fn capture_session_completion(
         error,
     } = event
     else {
-        return false;
+        return SessionCapture::Ignored;
     };
     if received != command_id || received_type != command_type {
-        return false;
+        return SessionCapture::Ignored;
     }
     if completion.is_none() {
         *completion = Some(SessionCompletion {
@@ -2860,7 +2860,7 @@ fn capture_session_completion(
                 .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
         });
     }
-    true
+    SessionCapture::Captured
 }
 
 fn commit_session_and_hydrate(
@@ -2949,74 +2949,69 @@ fn handle_session_backend_event(
         return Ok(Some(session_failure(state, operation, Some(error))));
     }
 
-    let handled = match &mut operation {
+    match capture_session_event(state, &mut operation, event) {
+        SessionCapture::Ignored => {
+            state.session_operation = Some(operation);
+            Ok(None)
+        }
+        SessionCapture::Rejected(effects) => Ok(Some(effects)),
+        SessionCapture::Captured => {
+            finish_session_operation(state, operation, event, ids).map(Some)
+        }
+    }
+}
+
+/// What one backend event did to the pending session operation.
+enum SessionCapture {
+    /// The event belongs to no part of the operation.
+    Ignored,
+    /// The operation recorded the event, its report or its command's completion.
+    Captured,
+    /// The report contradicts the operation, which ends with these effects.
+    Rejected(Vec<UiEffect>),
+}
+
+/// Records an event that belongs to the pending operation. A report is kept only
+/// the first time it arrives, after checking that it matches what was requested.
+fn capture_session_event(
+    state: &mut UiState,
+    operation: &mut SessionOperation,
+    event: &BackendEvent,
+) -> SessionCapture {
+    match operation {
         SessionOperation::StartupHydration {
             command_id,
             report,
             completion,
             ..
-        } => match event {
-            BackendEvent::MessagesReported {
-                command_id: received,
-                messages,
-            } if received == command_id => {
-                if report.is_none() {
-                    *report = Some(messages.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "get_messages", completion),
-        },
+        } => capture_startup_hydration(event, command_id, report, completion),
         SessionOperation::LoadingCatalog {
             command_id,
             navigation,
             sessions,
             selected_session_id,
             completion,
-        } => match event {
-            BackendEvent::SessionsReported {
-                command_id: received,
-                sessions: received_sessions,
-                navigation: received_navigation,
-                selected_session,
-            } if received == command_id => {
-                if sessions.is_none() {
-                    *navigation = received_navigation.clone();
-                    *sessions = Some(received_sessions.clone());
-                    *selected_session_id = Some(
-                        selected_session
-                            .as_ref()
-                            .map(|session| session.session_id.clone()),
-                    );
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "get_sessions", completion),
-        },
+        } => capture_catalog(
+            event,
+            command_id,
+            navigation,
+            sessions,
+            selected_session_id,
+            completion,
+        ),
         SessionOperation::SelectingSession {
             command_id,
             requested_session_id,
             selected,
             completion,
-        } => match event {
-            BackendEvent::SessionSelected {
-                command_id: received,
-                session,
-            } if received == command_id => {
-                if session.session_id != *requested_session_id {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session selection",
-                        Some("backend returned another session".into()),
-                    )));
-                }
-                if selected.is_none() {
-                    *selected = Some(session.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "select_session", completion),
-        },
+        } => capture_selection(
+            state,
+            event,
+            command_id,
+            requested_session_id,
+            selected,
+            completion,
+        ),
         SessionOperation::HydratingSelection {
             command_id,
             selected,
@@ -3024,242 +3019,242 @@ fn handle_session_backend_event(
             completion,
             committed_operation,
             ..
-        } => match event {
-            BackendEvent::MessagesReported {
-                command_id: received,
-                messages,
-            } if received == command_id => {
-                if report.is_none() {
-                    if !messages
-                        .session
-                        .as_ref()
-                        .is_some_and(|session| same_session(session, selected))
-                    {
-                        return Ok(Some(committed_hydration_failure(
-                            state,
-                            selected,
-                            committed_operation,
-                            "backend returned another session".into(),
-                        )));
-                    }
-                    *report = Some(messages.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "get_messages", completion),
-        },
+        } => capture_hydration(
+            state,
+            event,
+            command_id,
+            selected,
+            committed_operation,
+            report,
+            completion,
+        ),
         SessionOperation::NamingSession {
             command_id,
             changed,
             completion,
-        } => match event {
-            BackendEvent::SessionNameChanged {
-                command_id: received,
-                changed: received_change,
-            } if received == command_id => {
-                if !state
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|selected| same_session(selected, &received_change.session))
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session naming",
-                        Some("backend returned another session".into()),
-                    )));
-                }
-                if changed.is_none() {
-                    *changed = Some(received_change.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "set_session_name", completion),
-        },
+        } => capture_naming(state, event, command_id, changed, completion),
         SessionOperation::CloningSession {
             command_id,
             derived,
             completion,
-        } => match event {
-            BackendEvent::SessionCloned {
-                command_id: received,
-                derived: received_derivation,
-            } if received == command_id => {
-                if !state
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|selected| same_session(selected, &received_derivation.source))
-                    || received_derivation.source_active_leaf_id != state.history.active_leaf_id
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session clone",
-                        Some("backend returned another source session".into()),
-                    )));
-                }
-                if derived.is_none() {
-                    *derived = Some(received_derivation.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "clone_session", completion),
-        },
+        } => capture_clone(state, event, command_id, derived, completion),
         SessionOperation::ForkingSession {
             command_id,
             requested_entry_id,
             derived,
             completion,
-        } => match event {
-            BackendEvent::SessionForked {
-                command_id: received,
-                derived: received_derivation,
-            } if received == command_id => {
-                if !state
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|selected| same_session(selected, &received_derivation.source))
-                    || received_derivation.source_active_leaf_id != state.history.active_leaf_id
-                    || received_derivation.selected_entry_id.as_ref() != Some(requested_entry_id)
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session fork",
-                        Some("backend returned another session or tree entry".into()),
-                    )));
-                }
-                if derived.is_none() {
-                    *derived = Some(received_derivation.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "fork_session", completion),
-        },
+        } => capture_fork(
+            state,
+            event,
+            command_id,
+            requested_entry_id,
+            derived,
+            completion,
+        ),
         SessionOperation::LoadingTree {
             command_id,
             after_entry_id,
             page,
             completion,
-        } => match event {
-            BackendEvent::SessionTreeReported {
-                command_id: received,
-                page: received_page,
-            } if received == command_id => {
-                let requested_session = state.selected_session.as_ref();
-                let invalid_scope = !matches!(
-                    (requested_session, received_page.session.as_ref()),
-                    (Some(selected), Some(received)) if same_session(selected, received)
-                );
-                let invalid_cursor = after_entry_id.as_ref().is_some_and(|cursor| {
-                    received_page
-                        .nodes
-                        .iter()
-                        .any(|node| &node.entry_id == cursor)
-                        || received_page.next_after_entry_id.as_ref() == Some(cursor)
-                });
-                if invalid_scope
-                    || received_page.active_leaf_id != state.history.active_leaf_id
-                    || invalid_cursor
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session tree",
-                        Some("backend returned a stale or malformed page".into()),
-                    )));
-                }
-                if page.is_none() {
-                    *page = Some(received_page.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "get_session_tree", completion),
-        },
+        } => capture_tree_page(
+            state,
+            event,
+            command_id,
+            after_entry_id.as_deref(),
+            page,
+            completion,
+        ),
         SessionOperation::NavigatingTree {
             command_id,
             requested_entry_id,
             navigation,
             completion,
-        } => match event {
-            BackendEvent::SessionTreeNavigated {
-                command_id: received,
-                navigation: received_navigation,
-            } if received == command_id => {
-                if received_navigation.selected_entry_id != *requested_entry_id
-                    || !state.selected_session.as_ref().is_some_and(|selected| {
-                        same_session(selected, &received_navigation.session)
-                    })
-                    || received_navigation.previous_active_leaf_id != state.history.active_leaf_id
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session tree navigation",
-                        Some("backend returned another session, entry, or active leaf".into()),
-                    )));
-                }
-                if navigation.is_none() {
-                    *navigation = Some(received_navigation.clone());
-                }
-                true
-            }
-            _ => capture_session_completion(event, command_id, "navigate_session_tree", completion),
-        },
+        } => capture_tree_navigation(
+            state,
+            event,
+            command_id,
+            requested_entry_id,
+            navigation,
+            completion,
+        ),
         SessionOperation::UnrevertingTree {
             command_id,
             unreverted,
             completion,
-        } => match event {
-            BackendEvent::SessionTreeUnreverted {
-                command_id: received,
-                unreverted: received_unrevert,
-            } if received == command_id => {
-                if !state
-                    .selected_session
-                    .as_ref()
-                    .is_some_and(|selected| same_session(selected, &received_unrevert.session))
-                    || received_unrevert.previous_active_leaf_id != state.history.active_leaf_id
-                {
-                    return Ok(Some(session_failure(
-                        state,
-                        "session tree unrevert",
-                        Some("backend returned another session or active leaf".into()),
-                    )));
-                }
-                if unreverted.is_none() {
-                    *unreverted = Some(received_unrevert.clone());
-                }
-                true
+        } => capture_unrevert(state, event, command_id, unreverted, completion),
+        SessionOperation::CreatingSession { command_id } => {
+            if matches!(
+                event,
+                BackendEvent::CommandFinished {
+                    command_id: received,
+                    command_type,
+                    ..
+                } if received == command_id && command_type == "new_session"
+            ) {
+                SessionCapture::Captured
+            } else {
+                SessionCapture::Ignored
             }
-            _ => capture_session_completion(event, command_id, "unrevert_session_tree", completion),
-        },
-        SessionOperation::CreatingSession { command_id } => matches!(
-            event,
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ..
-            } if received == command_id && command_type == "new_session"
-        ),
-    };
-    if !handled {
-        state.session_operation = Some(operation);
-        return Ok(None);
+        }
     }
+}
 
-    let effects = match operation {
+/// Ends the operation once its command has completed: as a failure, by committing
+/// its report, or by putting it back until the rest arrives.
+fn finish_session_operation(
+    state: &mut UiState,
+    operation: SessionOperation,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match operation {
         SessionOperation::StartupHydration {
-            report: _,
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "startup history", completion.error),
-        SessionOperation::StartupHydration {
-            report: Some(report),
+            command_id,
+            report,
             loaded,
-            completion: Some(_),
-            ..
-        } => {
+            completion,
+        } => finish_startup_hydration(state, command_id, report, loaded, completion, ids),
+        SessionOperation::LoadingCatalog {
+            command_id,
+            navigation,
+            sessions,
+            selected_session_id,
+            completion,
+        } => Ok(finish_catalog(
+            state,
+            command_id,
+            navigation,
+            sessions,
+            selected_session_id,
+            completion,
+        )),
+        SessionOperation::SelectingSession {
+            command_id,
+            requested_session_id,
+            selected,
+            completion,
+        } => finish_selection(
+            state,
+            command_id,
+            requested_session_id,
+            selected,
+            completion,
+            ids,
+        ),
+        SessionOperation::HydratingSelection {
+            command_id,
+            selected,
+            restore_editor_text,
+            committed_operation,
+            report,
+            loaded,
+            completion,
+        } => finish_hydration(
+            state,
+            command_id,
+            selected,
+            restore_editor_text,
+            committed_operation,
+            report,
+            loaded,
+            completion,
+            ids,
+        ),
+        SessionOperation::NamingSession {
+            command_id,
+            changed,
+            completion,
+        } => Ok(finish_naming(state, command_id, changed, completion)),
+        SessionOperation::CloningSession {
+            command_id,
+            derived,
+            completion,
+        } => finish_clone(state, command_id, derived, completion, ids),
+        SessionOperation::ForkingSession {
+            command_id,
+            requested_entry_id,
+            derived,
+            completion,
+        } => finish_fork(
+            state,
+            command_id,
+            requested_entry_id,
+            derived,
+            completion,
+            ids,
+        ),
+        SessionOperation::LoadingTree {
+            command_id,
+            after_entry_id,
+            page,
+            completion,
+        } => Ok(finish_tree_page(
+            state,
+            command_id,
+            after_entry_id,
+            page,
+            completion,
+        )),
+        SessionOperation::NavigatingTree {
+            command_id,
+            requested_entry_id,
+            navigation,
+            completion,
+        } => finish_tree_navigation(
+            state,
+            command_id,
+            requested_entry_id,
+            navigation,
+            completion,
+            ids,
+        ),
+        SessionOperation::UnrevertingTree {
+            command_id,
+            unreverted,
+            completion,
+        } => finish_unrevert(state, command_id, unreverted, completion, ids),
+        SessionOperation::CreatingSession { command_id } => {
+            finish_new_session(state, command_id, event, ids)
+        }
+    }
+}
+
+fn capture_startup_hydration(
+    event: &BackendEvent,
+    command_id: &str,
+    report: &mut Option<SessionMessages>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::MessagesReported {
+            command_id: received,
+            messages,
+        } if received == command_id => {
+            if report.is_none() {
+                *report = Some(messages.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "get_messages", completion),
+    }
+}
+
+fn finish_startup_hydration(
+    state: &mut UiState,
+    command_id: String,
+    report: Option<SessionMessages>,
+    loaded: Option<HistoryHydration>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (report, completion) {
+        (_, Some(completion)) if !completion.ok => {
+            Ok(session_failure(state, "startup history", completion.error))
+        }
+        (Some(report), Some(_)) => {
             let hydration = match merge_hydration_page(loaded, report) {
                 Ok(report) => report,
-                Err(error) => {
-                    return Ok(Some(session_failure(state, "startup history", Some(error))));
-                }
+                Err(error) => return Ok(session_failure(state, "startup history", Some(error))),
             };
             if let Some(cursor) = &hydration.report.next_before_entry_id {
                 let id = ids.next_id(CommandKind::GetMessages);
@@ -3278,10 +3273,10 @@ fn handle_session_backend_event(
                     loaded: Some(hydration),
                     completion: None,
                 });
-                return Ok(Some(vec![
+                return Ok(vec![
                     UiEffect::SendCommand(command),
                     UiEffect::RequestRender,
-                ]));
+                ]);
             }
             let report = hydration.report;
             state.selected_session = report.session.clone();
@@ -3294,21 +3289,64 @@ fn handle_session_backend_event(
             install_history_snapshot(state, report);
             state.context.invalidate();
             state.input_ready = true;
-            vec![
+            Ok(vec![
                 UiEffect::ReplaceTranscript,
                 queue_state_effect(state, ids)?,
                 UiEffect::RequestRender,
-            ]
+            ])
         }
-        SessionOperation::StartupHydration { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (report, completion) => {
+            state.session_operation = Some(SessionOperation::StartupHydration {
+                command_id,
+                report,
+                loaded,
+                completion,
+            });
+            Ok(Vec::new())
         }
-        SessionOperation::LoadingCatalog {
-            command_id,
-            completion: Some(completion),
-            ..
-        } if !completion.ok => {
+    }
+}
+
+fn capture_catalog(
+    event: &BackendEvent,
+    command_id: &str,
+    navigation: &mut CatalogNavigation,
+    sessions: &mut Option<Vec<SessionSummary>>,
+    selected_session_id: &mut Option<Option<String>>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionsReported {
+            command_id: received,
+            sessions: received_sessions,
+            navigation: received_navigation,
+            selected_session,
+        } if received == command_id => {
+            if sessions.is_none() {
+                *navigation = received_navigation.clone();
+                *sessions = Some(received_sessions.clone());
+                *selected_session_id = Some(
+                    selected_session
+                        .as_ref()
+                        .map(|session| session.session_id.clone()),
+                );
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "get_sessions", completion),
+    }
+}
+
+fn finish_catalog(
+    state: &mut UiState,
+    command_id: String,
+    navigation: CatalogNavigation,
+    sessions: Option<Vec<SessionSummary>>,
+    selected_session_id: Option<Option<String>>,
+    completion: Option<SessionCompletion>,
+) -> Vec<UiEffect> {
+    match (sessions, completion) {
+        (_, Some(completion)) if !completion.ok => {
             state.input_ready = true;
             vec![
                 UiEffect::SessionCatalogFailed {
@@ -3320,13 +3358,7 @@ fn handle_session_backend_event(
                 UiEffect::RequestRender,
             ]
         }
-        SessionOperation::LoadingCatalog {
-            command_id,
-            navigation,
-            sessions: Some(sessions),
-            selected_session_id,
-            completion: Some(_),
-        } => {
+        (Some(sessions), Some(_)) => {
             state.input_ready = true;
             vec![
                 UiEffect::ShowSessionPicker {
@@ -3343,29 +3375,126 @@ fn handle_session_backend_event(
                 UiEffect::RequestRender,
             ]
         }
-        SessionOperation::LoadingCatalog { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (sessions, completion) => {
+            state.session_operation = Some(SessionOperation::LoadingCatalog {
+                command_id,
+                navigation,
+                sessions,
+                selected_session_id,
+                completion,
+            });
+            Vec::new()
         }
-        SessionOperation::SelectingSession {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session selection", completion.error),
-        SessionOperation::SelectingSession {
-            selected: Some(selected),
-            completion: Some(_),
-            ..
-        } => commit_session_and_hydrate(state, selected, None, "Session selection", ids)?,
-        SessionOperation::SelectingSession { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+    }
+}
+
+fn capture_selection(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    requested_session_id: &str,
+    selected: &mut Option<SessionIdentity>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionSelected {
+            command_id: received,
+            session,
+        } if received == command_id => {
+            if session.session_id != requested_session_id {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session selection",
+                    Some("backend returned another session".into()),
+                ));
+            }
+            if selected.is_none() {
+                *selected = Some(session.clone());
+            }
+            SessionCapture::Captured
         }
-        SessionOperation::HydratingSelection {
-            completion: Some(completion),
-            selected,
-            committed_operation,
-            ..
-        } if !completion.ok => session_failure(
+        _ => capture_session_completion(event, command_id, "select_session", completion),
+    }
+}
+
+fn finish_selection(
+    state: &mut UiState,
+    command_id: String,
+    requested_session_id: String,
+    selected: Option<SessionIdentity>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (selected, completion) {
+        (_, Some(completion)) if !completion.ok => Ok(session_failure(
+            state,
+            "session selection",
+            completion.error,
+        )),
+        (Some(selected), Some(_)) => {
+            commit_session_and_hydrate(state, selected, None, "Session selection", ids)
+        }
+        (selected, completion) => {
+            state.session_operation = Some(SessionOperation::SelectingSession {
+                command_id,
+                requested_session_id,
+                selected,
+                completion,
+            });
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn capture_hydration(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    selected: &SessionIdentity,
+    committed_operation: &str,
+    report: &mut Option<SessionMessages>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::MessagesReported {
+            command_id: received,
+            messages,
+        } if received == command_id => {
+            if report.is_none() {
+                if !messages
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| same_session(session, selected))
+                {
+                    return SessionCapture::Rejected(committed_hydration_failure(
+                        state,
+                        selected,
+                        committed_operation,
+                        "backend returned another session".into(),
+                    ));
+                }
+                *report = Some(messages.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "get_messages", completion),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_hydration(
+    state: &mut UiState,
+    command_id: String,
+    selected: SessionIdentity,
+    restore_editor_text: Option<String>,
+    committed_operation: &'static str,
+    report: Option<SessionMessages>,
+    loaded: Option<HistoryHydration>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (report, completion) {
+        (_, Some(completion)) if !completion.ok => Ok(session_failure(
             state,
             "session history hydration",
             Some(format!(
@@ -3376,25 +3505,17 @@ fn handle_session_backend_event(
                     .unwrap_or_else(|| "backend reported failure".into()),
                 selected.session_id,
             )),
-        ),
-        SessionOperation::HydratingSelection {
-            report: Some(report),
-            loaded,
-            completion: Some(_),
-            restore_editor_text,
-            selected,
-            committed_operation,
-            ..
-        } => {
+        )),
+        (Some(report), Some(_)) => {
             let hydration = match merge_hydration_page(loaded, report) {
                 Ok(report) => report,
                 Err(error) => {
-                    return Ok(Some(committed_hydration_failure(
+                    return Ok(committed_hydration_failure(
                         state,
                         &selected,
                         committed_operation,
                         error,
-                    )));
+                    ));
                 }
             };
             if let Some(cursor) = &hydration.report.next_before_entry_id {
@@ -3413,13 +3534,13 @@ fn handle_session_backend_event(
                     loaded: Some(hydration),
                     completion: None,
                 });
-                return Ok(Some(vec![
+                return Ok(vec![
                     UiEffect::SendCommittedHydration {
                         command,
                         session_id: selected.session_id,
                     },
                     UiEffect::RequestRender,
-                ]));
+                ]);
             }
             let mut report = hydration.report;
             if let Some(history_session) = report
@@ -3436,21 +3557,66 @@ fn handle_session_backend_event(
                 effects.push(UiEffect::RestoreSessionDraft(text));
             }
             effects.push(UiEffect::RequestRender);
-            effects
+            Ok(effects)
         }
-        SessionOperation::HydratingSelection { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (report, completion) => {
+            state.session_operation = Some(SessionOperation::HydratingSelection {
+                command_id,
+                selected,
+                restore_editor_text,
+                committed_operation,
+                report,
+                loaded,
+                completion,
+            });
+            Ok(Vec::new())
         }
-        SessionOperation::NamingSession {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session naming", completion.error),
-        SessionOperation::NamingSession {
-            changed: Some(changed),
-            completion: Some(_),
-            ..
-        } => {
+    }
+}
+
+fn capture_naming(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    changed: &mut Option<SessionNameChange>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionNameChanged {
+            command_id: received,
+            changed: received_change,
+        } if received == command_id => {
+            if !state
+                .selected_session
+                .as_ref()
+                .is_some_and(|selected| same_session(selected, &received_change.session))
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session naming",
+                    Some("backend returned another session".into()),
+                ));
+            }
+            if changed.is_none() {
+                *changed = Some(received_change.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "set_session_name", completion),
+    }
+}
+
+fn finish_naming(
+    state: &mut UiState,
+    command_id: String,
+    changed: Option<SessionNameChange>,
+    completion: Option<SessionCompletion>,
+) -> Vec<UiEffect> {
+    match (changed, completion) {
+        (_, Some(completion)) if !completion.ok => {
+            session_failure(state, "session naming", completion.error)
+        }
+        (Some(changed), Some(_)) => {
             if let Some(selected) = state.selected_session.as_mut() {
                 selected.session_name = changed.session.session_name.clone();
             }
@@ -3465,52 +3631,197 @@ fn handle_session_backend_event(
             state.input_ready = true;
             vec![UiEffect::RequestRender]
         }
-        SessionOperation::NamingSession { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (changed, completion) => {
+            state.session_operation = Some(SessionOperation::NamingSession {
+                command_id,
+                changed,
+                completion,
+            });
+            Vec::new()
         }
-        SessionOperation::CloningSession {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session clone", completion.error),
-        SessionOperation::CloningSession {
-            derived: Some(derived),
-            completion: Some(_),
-            ..
-        } => commit_session_and_hydrate(state, derived.session, None, "Session clone", ids)?,
-        SessionOperation::CloningSession { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+    }
+}
+
+fn capture_clone(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    derived: &mut Option<SessionDerivation>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionCloned {
+            command_id: received,
+            derived: received_derivation,
+        } if received == command_id => {
+            if !state
+                .selected_session
+                .as_ref()
+                .is_some_and(|selected| same_session(selected, &received_derivation.source))
+                || received_derivation.source_active_leaf_id != state.history.active_leaf_id
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session clone",
+                    Some("backend returned another source session".into()),
+                ));
+            }
+            if derived.is_none() {
+                *derived = Some(received_derivation.clone());
+            }
+            SessionCapture::Captured
         }
-        SessionOperation::ForkingSession {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session fork", completion.error),
-        SessionOperation::ForkingSession {
-            derived: Some(derived),
-            completion: Some(_),
-            ..
-        } => commit_session_and_hydrate(
+        _ => capture_session_completion(event, command_id, "clone_session", completion),
+    }
+}
+
+fn finish_clone(
+    state: &mut UiState,
+    command_id: String,
+    derived: Option<SessionDerivation>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (derived, completion) {
+        (_, Some(completion)) if !completion.ok => {
+            Ok(session_failure(state, "session clone", completion.error))
+        }
+        (Some(derived), Some(_)) => {
+            commit_session_and_hydrate(state, derived.session, None, "Session clone", ids)
+        }
+        (derived, completion) => {
+            state.session_operation = Some(SessionOperation::CloningSession {
+                command_id,
+                derived,
+                completion,
+            });
+            Ok(Vec::new())
+        }
+    }
+}
+
+fn capture_fork(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    requested_entry_id: &str,
+    derived: &mut Option<SessionDerivation>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionForked {
+            command_id: received,
+            derived: received_derivation,
+        } if received == command_id => {
+            if !state
+                .selected_session
+                .as_ref()
+                .is_some_and(|selected| same_session(selected, &received_derivation.source))
+                || received_derivation.source_active_leaf_id != state.history.active_leaf_id
+                || received_derivation.selected_entry_id.as_deref() != Some(requested_entry_id)
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session fork",
+                    Some("backend returned another session or tree entry".into()),
+                ));
+            }
+            if derived.is_none() {
+                *derived = Some(received_derivation.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "fork_session", completion),
+    }
+}
+
+fn finish_fork(
+    state: &mut UiState,
+    command_id: String,
+    requested_entry_id: String,
+    derived: Option<SessionDerivation>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (derived, completion) {
+        (_, Some(completion)) if !completion.ok => {
+            Ok(session_failure(state, "session fork", completion.error))
+        }
+        (Some(derived), Some(_)) => commit_session_and_hydrate(
             state,
             derived.session,
             derived.selected_prompt,
             "Session fork",
             ids,
-        )?,
-        SessionOperation::ForkingSession { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        ),
+        (derived, completion) => {
+            state.session_operation = Some(SessionOperation::ForkingSession {
+                command_id,
+                requested_entry_id,
+                derived,
+                completion,
+            });
+            Ok(Vec::new())
         }
-        SessionOperation::LoadingTree {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session tree", completion.error),
-        SessionOperation::LoadingTree {
-            after_entry_id,
-            page: Some(page),
-            completion: Some(_),
-            ..
-        } => {
+    }
+}
+
+fn capture_tree_page(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    after_entry_id: Option<&str>,
+    page: &mut Option<SessionTreePage>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionTreeReported {
+            command_id: received,
+            page: received_page,
+        } if received == command_id => {
+            let requested_session = state.selected_session.as_ref();
+            let invalid_scope = !matches!(
+                (requested_session, received_page.session.as_ref()),
+                (Some(selected), Some(received)) if same_session(selected, received)
+            );
+            let invalid_cursor = after_entry_id.is_some_and(|cursor| {
+                received_page
+                    .nodes
+                    .iter()
+                    .any(|node| node.entry_id == cursor)
+                    || received_page.next_after_entry_id.as_deref() == Some(cursor)
+            });
+            if invalid_scope
+                || received_page.active_leaf_id != state.history.active_leaf_id
+                || invalid_cursor
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session tree",
+                    Some("backend returned a stale or malformed page".into()),
+                ));
+            }
+            if page.is_none() {
+                *page = Some(received_page.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "get_session_tree", completion),
+    }
+}
+
+fn finish_tree_page(
+    state: &mut UiState,
+    command_id: String,
+    after_entry_id: Option<String>,
+    page: Option<SessionTreePage>,
+    completion: Option<SessionCompletion>,
+) -> Vec<UiEffect> {
+    match (page, completion) {
+        (_, Some(completion)) if !completion.ok => {
+            session_failure(state, "session tree", completion.error)
+        }
+        (Some(page), Some(_)) => {
             state.input_ready = true;
             vec![
                 UiEffect::ShowSessionTreePage {
@@ -3520,32 +3831,77 @@ fn handle_session_backend_event(
                 UiEffect::RequestRender,
             ]
         }
-        SessionOperation::LoadingTree { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (page, completion) => {
+            state.session_operation = Some(SessionOperation::LoadingTree {
+                command_id,
+                after_entry_id,
+                page,
+                completion,
+            });
+            Vec::new()
         }
-        SessionOperation::NavigatingTree {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session tree navigation", completion.error),
-        SessionOperation::NavigatingTree {
-            navigation: Some(navigation),
-            completion: Some(_),
-            ..
-        } if !navigation.changed => {
+    }
+}
+
+fn capture_tree_navigation(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    requested_entry_id: &str,
+    navigation: &mut Option<SessionTreeNavigation>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionTreeNavigated {
+            command_id: received,
+            navigation: received_navigation,
+        } if received == command_id => {
+            if received_navigation.selected_entry_id != requested_entry_id
+                || !state
+                    .selected_session
+                    .as_ref()
+                    .is_some_and(|selected| same_session(selected, &received_navigation.session))
+                || received_navigation.previous_active_leaf_id != state.history.active_leaf_id
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session tree navigation",
+                    Some("backend returned another session, entry, or active leaf".into()),
+                ));
+            }
+            if navigation.is_none() {
+                *navigation = Some(received_navigation.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "navigate_session_tree", completion),
+    }
+}
+
+fn finish_tree_navigation(
+    state: &mut UiState,
+    command_id: String,
+    requested_entry_id: String,
+    navigation: Option<SessionTreeNavigation>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (navigation, completion) {
+        (_, Some(completion)) if !completion.ok => Ok(session_failure(
+            state,
+            "session tree navigation",
+            completion.error,
+        )),
+        (Some(navigation), Some(_)) if !navigation.changed => {
             state.input_ready = true;
             let mut effects = Vec::new();
             if let Some(text) = navigation.editor_text {
                 effects.push(UiEffect::RestoreSessionDraft(text));
             }
             effects.push(UiEffect::RequestRender);
-            effects
+            Ok(effects)
         }
-        SessionOperation::NavigatingTree {
-            navigation: Some(navigation),
-            completion: Some(_),
-            ..
-        } => {
+        (Some(navigation), Some(_)) => {
             let mut selected = navigation.session;
             selected.session_name = state
                 .selected_session
@@ -3557,65 +3913,122 @@ fn handle_session_backend_event(
                 navigation.editor_text,
                 "Session tree navigation",
                 ids,
-            )?
+            )
         }
-        SessionOperation::NavigatingTree { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (navigation, completion) => {
+            state.session_operation = Some(SessionOperation::NavigatingTree {
+                command_id,
+                requested_entry_id,
+                navigation,
+                completion,
+            });
+            Ok(Vec::new())
         }
-        SessionOperation::UnrevertingTree {
-            completion: Some(completion),
-            ..
-        } if !completion.ok => session_failure(state, "session tree unrevert", completion.error),
-        SessionOperation::UnrevertingTree {
-            unreverted: Some(unreverted),
-            completion: Some(_),
-            ..
-        } => {
+    }
+}
+
+fn capture_unrevert(
+    state: &mut UiState,
+    event: &BackendEvent,
+    command_id: &str,
+    unreverted: &mut Option<SessionTreeUnrevert>,
+    completion: &mut Option<SessionCompletion>,
+) -> SessionCapture {
+    match event {
+        BackendEvent::SessionTreeUnreverted {
+            command_id: received,
+            unreverted: received_unrevert,
+        } if received == command_id => {
+            if !state
+                .selected_session
+                .as_ref()
+                .is_some_and(|selected| same_session(selected, &received_unrevert.session))
+                || received_unrevert.previous_active_leaf_id != state.history.active_leaf_id
+            {
+                return SessionCapture::Rejected(session_failure(
+                    state,
+                    "session tree unrevert",
+                    Some("backend returned another session or active leaf".into()),
+                ));
+            }
+            if unreverted.is_none() {
+                *unreverted = Some(received_unrevert.clone());
+            }
+            SessionCapture::Captured
+        }
+        _ => capture_session_completion(event, command_id, "unrevert_session_tree", completion),
+    }
+}
+
+fn finish_unrevert(
+    state: &mut UiState,
+    command_id: String,
+    unreverted: Option<SessionTreeUnrevert>,
+    completion: Option<SessionCompletion>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match (unreverted, completion) {
+        (_, Some(completion)) if !completion.ok => Ok(session_failure(
+            state,
+            "session tree unrevert",
+            completion.error,
+        )),
+        (Some(unreverted), Some(_)) => {
             let mut selected = unreverted.session;
             selected.session_name = state
                 .selected_session
                 .as_ref()
                 .and_then(|session| session.session_name.clone());
-            commit_session_and_hydrate(state, selected, None, "Session tree unrevert", ids)?
+            commit_session_and_hydrate(state, selected, None, "Session tree unrevert", ids)
         }
-        SessionOperation::UnrevertingTree { .. } => {
-            state.session_operation = Some(operation);
-            return Ok(Some(Vec::new()));
+        (unreverted, completion) => {
+            state.session_operation = Some(SessionOperation::UnrevertingTree {
+                command_id,
+                unreverted,
+                completion,
+            });
+            Ok(Vec::new())
         }
-        SessionOperation::CreatingSession { command_id } => match event {
-            BackendEvent::CommandFinished { ok: true, .. } => {
-                state.context.invalidate();
-                // A failure belongs to the session that produced it.
-                state.last_command_error = None;
-                state.transcript = SharedTranscript::default();
-                state.finished_run_cost = None;
-                state.selected_session = None;
-                state.last_session = None;
-                state.history = HistoryWindow::default();
-                clear_queue_cache(state);
-                state.history_request = None;
-                state.input_ready = true;
-                vec![
-                    UiEffect::ReplaceTranscript,
-                    queue_state_effect(state, ids)?,
-                    UiEffect::RequestRender,
-                ]
-            }
-            BackendEvent::CommandFinished { error, .. } => session_failure(
-                state,
-                "new session",
-                error
-                    .as_deref()
-                    .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
-            ),
-            _ => {
-                state.session_operation = Some(SessionOperation::CreatingSession { command_id });
-                return Ok(Some(Vec::new()));
-            }
-        },
-    };
-    Ok(Some(effects))
+    }
+}
+
+fn finish_new_session(
+    state: &mut UiState,
+    command_id: String,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    match event {
+        BackendEvent::CommandFinished { ok: true, .. } => {
+            state.context.invalidate();
+            // A failure belongs to the session that produced it.
+            state.last_command_error = None;
+            state.transcript = SharedTranscript::default();
+            state.finished_run_cost = None;
+            state.selected_session = None;
+            state.last_session = None;
+            state.history = HistoryWindow::default();
+            clear_queue_cache(state);
+            state.history_request = None;
+            state.input_ready = true;
+            Ok(vec![
+                UiEffect::ReplaceTranscript,
+                queue_state_effect(state, ids)?,
+                UiEffect::RequestRender,
+            ])
+        }
+        BackendEvent::CommandFinished { error, .. } => Ok(session_failure(
+            state,
+            "new session",
+            error
+                .as_deref()
+                .map(|error| bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+        )),
+        _ => {
+            state.session_operation = Some(SessionOperation::CreatingSession { command_id });
+            Ok(Vec::new())
+        }
+    }
 }
 
 fn same_session(left: &SessionIdentity, right: &SessionIdentity) -> bool {
