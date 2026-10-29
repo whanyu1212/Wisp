@@ -76,6 +76,34 @@ def test_accepts_and_persists_steering_from_agent_start(tmp_path: Path) -> None:
     )
 
 
+def test_rejects_steering_after_last_turn(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="answer")]]
+    )
+    store = JsonlSessionStore(tmp_path)
+    event_bus = EventBus()
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+    rejected: list[str] = []
+
+    async def steer_while_saving(event: WispEvent) -> None:
+        # No turn remains to deliver it, so the message must not be accepted
+        # into a queue that only the next run would drain.
+        with pytest.raises(RuntimeError, match="no active agent run") as error:
+            await agent.steer("too late for this run")
+        rejected.append(str(error.value))
+
+    event_bus.on("session.saved", steer_while_saving)
+
+    async def run() -> None:
+        async for _event in agent.run("question"):
+            pass
+
+    anyio.run(run)
+
+    assert len(rejected) == 1
+    assert agent.queue_state().steering == ()
+
+
 def test_queue_state_is_safe_while_idle(tmp_path: Path) -> None:
     agent = CodingSession(provider=FakeProvider(), sessions=JsonlSessionStore(tmp_path))
 

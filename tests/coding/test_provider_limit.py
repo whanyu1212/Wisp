@@ -19,6 +19,7 @@ from wisp.coding.compaction import (
 )
 from wisp.coding.session import CodingSession
 from wisp.events import (
+    AgentCompleted,
     AgentStarted,
     CompactionCompleted,
     CompactionStarted,
@@ -277,6 +278,11 @@ def test_rechecks_limit_after_preflight_steering(tmp_path: Path) -> None:
             if isinstance(entry, MessageSessionEntry) and entry.id == injected.message_entry_id
         )
         assert persisted.message.content == "x" * 8_000
+        error, completed = events[-2:]
+        assert isinstance(error, ErrorEvent)
+        assert error.message.startswith("Active prompt and steering exceed")
+        assert isinstance(completed, AgentCompleted)
+        assert (completed.outcome, completed.turns) == ("failed", 0)
         assert session.read_context_messages() == history
         assert all(
             entry.operation_id == "prompt-1" for entry in session.read_entries()[entry_start:]
@@ -387,13 +393,21 @@ def test_rejects_unfittable_prompt_before_provider(
         context_reserve_tokens=reserve_tokens,
     )
 
-    async def run() -> list[WispEvent]:
-        return [event async for event in agent.run(prompt)]
+    events: list[WispEvent] = []
+
+    async def run() -> None:
+        async for event in agent.run(prompt):
+            events.append(event)
 
     with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
         anyio.run(run)
     assert provider.calls == []
     assert store.latest().read_context_messages() == ()
+    error, completed = events[-2:]
+    assert isinstance(error, ErrorEvent)
+    assert error.message.startswith("Active prompt exceeds")
+    assert isinstance(completed, AgentCompleted)
+    assert (completed.outcome, completed.turns) == ("failed", 0)
 
 
 def test_stops_when_prompt_remains_over_provider_limit(
