@@ -765,76 +765,13 @@ impl LiveUi {
             match effect {
                 UiEffect::SendCommand(command) => {
                     let value = serde_json::to_value(&command)?;
-                    let command_type = value.get("type").and_then(|value| value.as_str());
-                    let payload = Bytes::from(serde_json::to_vec(&value)?);
-                    if payload.len() > limit
-                        && (matches!(
-                            command_type,
-                            Some(
-                                "get_commands"
-                                    | "get_state"
-                                    | "get_skills"
-                                    | "get_mcp_status"
-                                    | "remove_mcp_server"
-                                    | "set_mcp_server_enabled"
-                                    | "reconnect_mcp"
-                                    | "get_project_files"
-                                    | "get_git_diff"
-                                    | "get_sessions"
-                            )
-                        ) || (command_type == Some("configure")
-                            && (value.get("mode").is_some()
-                                || value.get("auto_compaction_enabled").is_some()
-                                || value.get("web_search").is_some())))
-                    {
-                        pending.extend(reducer::reduce(&mut self.state, UiAction::BackendEvent(BackendEvent::CommandFinished {
-                            command_id: value["id"].as_str().expect("control request ID").into(),
-                            command_type: command_type.expect("control request type").into(), ok: false,
-                            error: Some(format!("Command exceeds the negotiated {limit}-byte frame limit; input was kept.")),
-                        }), &mut self.ids)?);
-                        continue;
-                    }
-                    if payload.len() > limit
-                        && matches!(command_type, Some("configure" | "get_model_catalog"))
-                    {
-                        let command_id = value["id"].as_str().expect("model request ID").to_owned();
-                        pending.extend(reducer::reduce(&mut self.state, UiAction::RejectModelRequest {
-                            command_id, error: format!("Model request exceeds the negotiated {limit}-byte frame limit; input was kept."),
-                        }, &mut self.ids)?);
-                        continue;
-                    }
-                    if payload.len() > limit && command_type == Some("get_session_stats") {
-                        self.notice = Some(format!(
-                            "Skipped session stats refresh because the negotiated {limit}-byte RPC frame limit is too small."
-                        ));
-                        self.render_pending = true;
-                        let command_id = value
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .expect("validated RPC commands have string IDs")
-                            .to_owned();
-                        pending.extend(reducer::reduce(
-                            &mut self.state,
-                            UiAction::SkipStatsRefresh { command_id },
-                            &mut self.ids,
-                        )?);
-                        continue;
-                    }
-                    send_payload(writer, payload, limit).await?;
+                    pending.extend(self.send_command(value, writer, limit).await?);
                 }
                 UiEffect::SendSecretCommand(command) => {
                     let value = serde_json::to_value(command.into_inner())?;
                     send_payload(writer, Bytes::from(serde_json::to_vec(&value)?), limit).await?;
                 }
-                UiEffect::RecordPromptHistory(prompt) => {
-                    self.invalidate_overlay(OverlayKind::PromptHistory);
-                    if self.prompt_history.record(prompt) {
-                        if let Some(view) = &mut self.prompt_history_view {
-                            view.sync(&self.prompt_history);
-                            self.render_pending = true;
-                        }
-                    }
-                }
+                UiEffect::RecordPromptHistory(prompt) => self.record_prompt_history(prompt),
                 UiEffect::ShowConnectionPanel(catalog) => {
                     self.theme_picker = None;
                     self.logo_picker = None;
@@ -862,28 +799,13 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ModelCatalogUpdated(catalog) => {
-                    self.invalidate_overlay(OverlayKind::Model);
-                    self.rendered_model_picker = false;
-                    if let Some(picker) = &mut self.model_picker {
-                        picker.update_catalog(catalog);
-                    }
-                    self.render_pending = true;
+                    self.refresh_model_picker(|picker| picker.update_catalog(catalog));
                 }
                 UiEffect::InvalidateModelCatalog => {
-                    self.invalidate_overlay(OverlayKind::Model);
-                    self.rendered_model_picker = false;
-                    if let Some(picker) = &mut self.model_picker {
-                        picker.invalidate();
-                    }
-                    self.render_pending = true;
+                    self.refresh_model_picker(ModelPicker::invalidate)
                 }
                 UiEffect::ModelCatalogUnavailable => {
-                    self.invalidate_overlay(OverlayKind::Model);
-                    self.rendered_model_picker = false;
-                    if let Some(picker) = &mut self.model_picker {
-                        picker.unavailable();
-                    }
-                    self.render_pending = true;
+                    self.refresh_model_picker(ModelPicker::unavailable);
                 }
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
                 UiEffect::ProjectFilesChanged => {
@@ -950,33 +872,7 @@ impl LiveUi {
                 UiEffect::RestoreDraft {
                     content,
                     local_order: None,
-                } => {
-                    self.prompt_history_view = None;
-                    let outcome = self.editor.prepend_restored(&content);
-                    if outcome.rejected_limit {
-                        self.defer_queue_recovery(content, None);
-                    } else {
-                        if outcome.changed {
-                            self.theme_picker = None;
-                            self.logo_picker = None;
-                            self.recovered_queue_recovery = true;
-                        }
-                        self.notice = if outcome.ignored_controls > 0 {
-                            Some(format!(
-                                "Restored queued text after ignoring {} unsafe terminal control character(s).",
-                                outcome.ignored_controls
-                            ))
-                        } else if outcome.changed {
-                            None
-                        } else {
-                            Some(
-                                "Queued text had no editable content; kept your newer draft unchanged."
-                                    .into(),
-                            )
-                        };
-                        self.render_pending = true;
-                    }
-                }
+                } => self.restore_queued_draft(content),
                 UiEffect::SessionCatalogStarted(id) => {
                     if let Some(picker) = &mut self.session_picker {
                         picker.started(id);
@@ -1007,94 +903,33 @@ impl LiveUi {
                     self.render_pending = true;
                 }
                 UiEffect::ShowSessionTreePage { page, append } => {
-                    self.invalidate_overlay(OverlayKind::SessionTree);
-                    self.prompt_history_view = None;
-                    self.session_picker = None;
-                    if append {
-                        if let Some(picker) = self.session_tree_picker.as_mut() {
-                            if let Err(notice) = picker.append(page) {
-                                self.notice = Some(notice.into());
-                            } else {
-                                self.theme_picker = None;
-                                self.logo_picker = None;
-                            }
-                        } else {
-                            self.notice = Some(
-                                "Session tree picker was closed before its next page arrived."
-                                    .into(),
-                            );
-                        }
-                    } else {
-                        self.theme_picker = None;
-                        self.logo_picker = None;
-                        self.session_tree_picker = Some(SessionTreePicker::new(page));
-                    }
-                    self.render_pending = true;
+                    self.show_session_tree_page(page, append);
                 }
                 UiEffect::CloseSessionTree => {
                     self.session_tree_picker = None;
                     self.render_pending = true;
                 }
-                UiEffect::RestoreSessionDraft(content) => {
-                    self.prompt_history_view = None;
-                    let outcome = self.editor.insert_paste(&content);
-                    if outcome.changed {
-                        self.theme_picker = None;
-                        self.logo_picker = None;
-                    }
-                    self.notice = if outcome.rejected_limit {
-                        Some(
-                            "The restored session prompt exceeds the editor limit; it was not truncated or inserted."
-                                .into(),
-                        )
-                    } else if outcome.ignored_controls > 0 {
-                        Some(format!(
-                            "Restored the session prompt after ignoring {} unsafe terminal control character(s).",
-                            outcome.ignored_controls
-                        ))
-                    } else {
-                        None
-                    };
-                    self.render_pending = true;
-                }
+                UiEffect::RestoreSessionDraft(content) => self.restore_session_draft(&content),
                 UiEffect::SendCommittedHydration {
                     command,
                     session_id: _,
                 } => {
                     let value = serde_json::to_value(&command)?;
-                    let payload = Bytes::from(serde_json::to_vec(&value)?);
-                    if payload.len() > limit {
-                        let command_id = value
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .expect("validated RPC commands have string IDs")
-                            .to_owned();
-                        pending.extend(reducer::reduce(
-                            &mut self.state,
-                            UiAction::RejectCommittedHydration { command_id, limit },
-                            &mut self.ids,
-                        )?);
-                        continue;
-                    }
-                    send_payload(writer, payload, limit).await?;
+                    pending.extend(
+                        self.send_or_reject_oversized(value, writer, limit, |command_id| {
+                            UiAction::RejectCommittedHydration { command_id, limit }
+                        })
+                        .await?,
+                    );
                 }
                 UiEffect::SendPostPromptSessionSync(command) => {
                     let value = serde_json::to_value(&command)?;
-                    let payload = Bytes::from(serde_json::to_vec(&value)?);
-                    if payload.len() > limit {
-                        let command_id = value
-                            .get("id")
-                            .and_then(serde_json::Value::as_str)
-                            .expect("validated RPC commands have string IDs")
-                            .to_owned();
-                        pending.extend(reducer::reduce(
-                            &mut self.state,
-                            UiAction::RejectPostPromptSessionSync { command_id, limit },
-                            &mut self.ids,
-                        )?);
-                        continue;
-                    }
-                    send_payload(writer, payload, limit).await?;
+                    pending.extend(
+                        self.send_or_reject_oversized(value, writer, limit, |command_id| {
+                            UiAction::RejectPostPromptSessionSync { command_id, limit }
+                        })
+                        .await?,
+                    );
                 }
                 UiEffect::ReplaceTranscript => {
                     if self
@@ -1113,37 +948,8 @@ impl LiveUi {
                     self.pending_history_navigation = None;
                     self.render_pending = true;
                 }
-                UiEffect::OpenExactDetail(entry_id) => {
-                    if self.browse_selected != Some(BrowseTarget::Entry(entry_id)) {
-                        self.state.history.active_exact_detail = None;
-                        continue;
-                    }
-                    if let Some(presentation) = self
-                        .state
-                        .history
-                        .active_exact_detail
-                        .as_ref()
-                        .filter(|detail| detail.target == entry_id)
-                        .map(|detail| detail.presentation.clone())
-                    {
-                        self.detail_view.open(entry_id, &presentation);
-                        self.theme_picker = None;
-                        self.logo_picker = None;
-                        self.browse_selected = None;
-                        self.render_pending = true;
-                    }
-                }
-                UiEffect::Diagnostic(message) => {
-                    let notice = self.notice.get_or_insert_with(String::new);
-                    let separator = if notice.is_empty() { "" } else { "; " };
-                    for character in separator.chars().chain(message.chars()) {
-                        if notice.len() + character.len_utf8() > 1024 {
-                            break;
-                        }
-                        notice.push(character);
-                    }
-                    self.render_pending = true;
-                }
+                UiEffect::OpenExactDetail(entry_id) => self.open_exact_detail(entry_id),
+                UiEffect::Diagnostic(message) => self.append_diagnostic(&message),
                 UiEffect::Notice(notice) => {
                     self.notice = Some(notice);
                     self.render_pending = true;
@@ -1153,6 +959,237 @@ impl LiveUi {
             }
         }
         Ok(control)
+    }
+
+    /// Sends a command, or, when it exceeds the frame limit and has a local
+    /// rejection, returns the reducer's effects for that rejection instead.
+    async fn send_command(
+        &mut self,
+        value: serde_json::Value,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<Vec<UiEffect>, Error> {
+        let payload = Bytes::from(serde_json::to_vec(&value)?);
+        if payload.len() > limit {
+            if let Some(action) = self.oversized_command_rejection(&value, limit) {
+                return Ok(reducer::reduce(&mut self.state, action, &mut self.ids)?);
+            }
+        }
+        send_payload(writer, payload, limit).await?;
+        Ok(Vec::new())
+    }
+
+    /// Chooses how an oversized command fails without reaching the backend, keeping
+    /// the user's input. Commands without a local rejection fail in `send_payload`.
+    fn oversized_command_rejection(
+        &mut self,
+        value: &serde_json::Value,
+        limit: usize,
+    ) -> Option<UiAction> {
+        let command_type = value.get("type").and_then(|value| value.as_str());
+        if matches!(
+            command_type,
+            Some(
+                "get_commands"
+                    | "get_state"
+                    | "get_skills"
+                    | "get_mcp_status"
+                    | "remove_mcp_server"
+                    | "set_mcp_server_enabled"
+                    | "reconnect_mcp"
+                    | "get_project_files"
+                    | "get_git_diff"
+                    | "get_sessions"
+            )
+        ) || (command_type == Some("configure")
+            && (value.get("mode").is_some()
+                || value.get("auto_compaction_enabled").is_some()
+                || value.get("web_search").is_some()))
+        {
+            return Some(UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id: value["id"].as_str().expect("control request ID").into(),
+                command_type: command_type.expect("control request type").into(),
+                ok: false,
+                error: Some(format!(
+                    "Command exceeds the negotiated {limit}-byte frame limit; input was kept."
+                )),
+            }));
+        }
+        if matches!(command_type, Some("configure" | "get_model_catalog")) {
+            let command_id = value["id"].as_str().expect("model request ID").to_owned();
+            return Some(UiAction::RejectModelRequest {
+                command_id,
+                error: format!(
+                    "Model request exceeds the negotiated {limit}-byte frame limit; input was kept."
+                ),
+            });
+        }
+        if command_type == Some("get_session_stats") {
+            self.notice = Some(format!(
+                "Skipped session stats refresh because the negotiated {limit}-byte RPC frame limit is too small."
+            ));
+            self.render_pending = true;
+            let command_id = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("validated RPC commands have string IDs")
+                .to_owned();
+            return Some(UiAction::SkipStatsRefresh { command_id });
+        }
+        None
+    }
+
+    /// Sends a command, or returns the reducer's effects for `reject` when the
+    /// command exceeds the frame limit.
+    async fn send_or_reject_oversized(
+        &mut self,
+        value: serde_json::Value,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+        reject: impl FnOnce(String) -> UiAction,
+    ) -> Result<Vec<UiEffect>, Error> {
+        let payload = Bytes::from(serde_json::to_vec(&value)?);
+        if payload.len() > limit {
+            let command_id = value
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .expect("validated RPC commands have string IDs")
+                .to_owned();
+            return Ok(reducer::reduce(
+                &mut self.state,
+                reject(command_id),
+                &mut self.ids,
+            )?);
+        }
+        send_payload(writer, payload, limit).await?;
+        Ok(Vec::new())
+    }
+
+    fn record_prompt_history(&mut self, prompt: String) {
+        self.invalidate_overlay(OverlayKind::PromptHistory);
+        if self.prompt_history.record(prompt) {
+            if let Some(view) = &mut self.prompt_history_view {
+                view.sync(&self.prompt_history);
+                self.render_pending = true;
+            }
+        }
+    }
+
+    fn refresh_model_picker(&mut self, update: impl FnOnce(&mut ModelPicker)) {
+        self.invalidate_overlay(OverlayKind::Model);
+        self.rendered_model_picker = false;
+        if let Some(picker) = &mut self.model_picker {
+            update(picker);
+        }
+        self.render_pending = true;
+    }
+
+    fn restore_queued_draft(&mut self, content: String) {
+        self.prompt_history_view = None;
+        let outcome = self.editor.prepend_restored(&content);
+        if outcome.rejected_limit {
+            self.defer_queue_recovery(content, None);
+            return;
+        }
+        if outcome.changed {
+            self.theme_picker = None;
+            self.logo_picker = None;
+            self.recovered_queue_recovery = true;
+        }
+        self.notice = if outcome.ignored_controls > 0 {
+            Some(format!(
+                "Restored queued text after ignoring {} unsafe terminal control character(s).",
+                outcome.ignored_controls
+            ))
+        } else if outcome.changed {
+            None
+        } else {
+            Some("Queued text had no editable content; kept your newer draft unchanged.".into())
+        };
+        self.render_pending = true;
+    }
+
+    fn show_session_tree_page(&mut self, page: reducer::SessionTreePage, append: bool) {
+        self.invalidate_overlay(OverlayKind::SessionTree);
+        self.prompt_history_view = None;
+        self.session_picker = None;
+        if append {
+            if let Some(picker) = self.session_tree_picker.as_mut() {
+                if let Err(notice) = picker.append(page) {
+                    self.notice = Some(notice.into());
+                } else {
+                    self.theme_picker = None;
+                    self.logo_picker = None;
+                }
+            } else {
+                self.notice =
+                    Some("Session tree picker was closed before its next page arrived.".into());
+            }
+        } else {
+            self.theme_picker = None;
+            self.logo_picker = None;
+            self.session_tree_picker = Some(SessionTreePicker::new(page));
+        }
+        self.render_pending = true;
+    }
+
+    fn restore_session_draft(&mut self, content: &str) {
+        self.prompt_history_view = None;
+        let outcome = self.editor.insert_paste(content);
+        if outcome.changed {
+            self.theme_picker = None;
+            self.logo_picker = None;
+        }
+        self.notice = if outcome.rejected_limit {
+            Some(
+                "The restored session prompt exceeds the editor limit; it was not truncated or inserted."
+                    .into(),
+            )
+        } else if outcome.ignored_controls > 0 {
+            Some(format!(
+                "Restored the session prompt after ignoring {} unsafe terminal control character(s).",
+                outcome.ignored_controls
+            ))
+        } else {
+            None
+        };
+        self.render_pending = true;
+    }
+
+    /// Opens the retained detail for an entry that is still the browse selection;
+    /// a detail for anything else is dropped.
+    fn open_exact_detail(&mut self, entry_id: crate::transcript::TranscriptEntryId) {
+        if self.browse_selected != Some(BrowseTarget::Entry(entry_id)) {
+            self.state.history.active_exact_detail = None;
+            return;
+        }
+        if let Some(presentation) = self
+            .state
+            .history
+            .active_exact_detail
+            .as_ref()
+            .filter(|detail| detail.target == entry_id)
+            .map(|detail| detail.presentation.clone())
+        {
+            self.detail_view.open(entry_id, &presentation);
+            self.theme_picker = None;
+            self.logo_picker = None;
+            self.browse_selected = None;
+            self.render_pending = true;
+        }
+    }
+
+    /// Appends a diagnostic to the notice, keeping the notice within 1,024 bytes.
+    fn append_diagnostic(&mut self, message: &str) {
+        let notice = self.notice.get_or_insert_with(String::new);
+        let separator = if notice.is_empty() { "" } else { "; " };
+        for character in separator.chars().chain(message.chars()) {
+            if notice.len() + character.len_utf8() > 1024 {
+                break;
+            }
+            notice.push(character);
+        }
+        self.render_pending = true;
     }
 
     async fn dispatch_session_action(
