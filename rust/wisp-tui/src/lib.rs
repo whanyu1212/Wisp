@@ -2775,52 +2775,24 @@ impl LiveUi {
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
-                let was_idle = self.state.current_command.is_none();
-                self.notice = None;
-                let control = self.dispatch(UiAction::Init, writer, limit).await?;
-                if was_idle
-                    && self.state.current_command.as_ref().is_some_and(|command| {
-                        command.command_type == reducer::ActiveCommandType::Init
-                    })
-                {
-                    self.editor.clear();
-                }
-                Ok(control)
+                self.dispatch_command_run(
+                    UiAction::Init,
+                    reducer::ActiveCommandType::Init,
+                    writer,
+                    limit,
+                )
+                .await
             }
             Command::UpdateGuidance => {
-                if !self.unsendable_current_response() {
-                    self.notice = Some(
-                        "External update only: run wisp update --check after quitting.".into(),
-                    );
-                }
-                self.key_help = Some(key_help::KeyHelp::updates(self.key_help_owner()));
-                self.mouse_frame = None;
-                self.rendered_overlay = None;
-                self.render_pending = true;
+                self.show_update_guidance();
                 Ok(LoopControl::Continue)
             }
             Command::Theme(selection) => {
-                self.editor.clear();
-                self.logo_picker = None;
-                if let Some(theme) = selection {
-                    self.theme.select(theme);
-                    self.finish_theme_change();
-                } else {
-                    self.theme_picker = Some(ThemePicker::new(self.theme.active));
-                    self.invalidate_theme_presentation();
-                }
+                self.apply_theme_command(selection);
                 Ok(LoopControl::Continue)
             }
             Command::Logo(selection) => {
-                self.editor.clear();
-                self.theme_picker = None;
-                if let Some(choice) = selection {
-                    self.apply_logo_choice(choice);
-                } else {
-                    self.logo_picker = Some(LogoPicker::new(self.logo_choice, self.startup_logo));
-                    self.rendered_overlay = None;
-                    self.render_pending = true;
-                }
+                self.apply_logo_command(selection);
                 Ok(LoopControl::Continue)
             }
             Command::History => {
@@ -2902,17 +2874,13 @@ impl LiveUi {
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
-                let was_idle = self.state.current_command.is_none();
-                self.notice = None;
-                let control = self.dispatch(action, writer, limit).await?;
-                if was_idle
-                    && self.state.current_command.as_ref().is_some_and(|command| {
-                        command.command_type == reducer::ActiveCommandType::Compact
-                    })
-                {
-                    self.editor.clear();
-                }
-                Ok(control)
+                self.dispatch_command_run(
+                    action,
+                    reducer::ActiveCommandType::Compact,
+                    writer,
+                    limit,
+                )
+                .await
             }
             Command::Mode(mode) => {
                 self.notice = None;
@@ -2925,89 +2893,150 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Command::Session(command) => {
-                if self.state.current_command.is_some()
-                    || self.state.session_operation.is_some()
-                    || self.state.configuration_active()
-                    || !self.state.input_ready
-                    || self.state.view_status != ViewStatus::Idle
-                {
-                    self.notice = Some(
-                        "Wait for the current operation before using session commands.".into(),
-                    );
+            Command::Session(command) => self.handle_session_command(command, writer, limit).await,
+        }
+    }
+
+    /// Dispatches an action that may start a command run, and clears the composer
+    /// only when this call started a run of `kind`; a run already in progress
+    /// keeps the draft.
+    async fn dispatch_command_run(
+        &mut self,
+        action: UiAction,
+        kind: reducer::ActiveCommandType,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let was_idle = self.state.current_command.is_none();
+        self.notice = None;
+        let control = self.dispatch(action, writer, limit).await?;
+        if was_idle
+            && self
+                .state
+                .current_command
+                .as_ref()
+                .is_some_and(|command| command.command_type == kind)
+        {
+            self.editor.clear();
+        }
+        Ok(control)
+    }
+
+    fn show_update_guidance(&mut self) {
+        if !self.unsendable_current_response() {
+            self.notice =
+                Some("External update only: run wisp update --check after quitting.".into());
+        }
+        self.key_help = Some(key_help::KeyHelp::updates(self.key_help_owner()));
+        self.mouse_frame = None;
+        self.rendered_overlay = None;
+        self.render_pending = true;
+    }
+
+    fn apply_theme_command(&mut self, selection: Option<&'static theme::Theme>) {
+        self.editor.clear();
+        self.logo_picker = None;
+        if let Some(theme) = selection {
+            self.theme.select(theme);
+            self.finish_theme_change();
+        } else {
+            self.theme_picker = Some(ThemePicker::new(self.theme.active));
+            self.invalidate_theme_presentation();
+        }
+    }
+
+    fn apply_logo_command(&mut self, selection: Option<LogoChoice>) {
+        self.editor.clear();
+        self.theme_picker = None;
+        if let Some(choice) = selection {
+            self.apply_logo_choice(choice);
+        } else {
+            self.logo_picker = Some(LogoPicker::new(self.logo_choice, self.startup_logo));
+            self.rendered_overlay = None;
+            self.render_pending = true;
+        }
+    }
+
+    /// Runs a session command once nothing else is in flight. Session commands
+    /// replace or reshape the transcript, so they wait for every other operation.
+    async fn handle_session_command(
+        &mut self,
+        command: SessionCommand,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.state.current_command.is_some()
+            || self.state.session_operation.is_some()
+            || self.state.configuration_active()
+            || !self.state.input_ready
+            || self.state.view_status != ViewStatus::Idle
+        {
+            self.notice =
+                Some("Wait for the current operation before using session commands.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        match command {
+            SessionCommand::ResumeCatalog => {
+                // Consume the submitted slash command, not an unrelated draft
+                // when this action is invoked programmatically.
+                if matches!(
+                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref()),
+                    Some(Command::Session(SessionCommand::ResumeCatalog))
+                ) {
+                    self.editor.clear();
+                }
+                self.session_picker = Some(SessionPicker::loading());
+                self.render_pending = true;
+                self.poll_session_catalog(writer, limit).await
+            }
+            SessionCommand::ResumeSession(session_id) => {
+                if !reducer::valid_session_id(&session_id) {
+                    self.notice =
+                        Some("Session ID is empty or exceeds the 4096-byte limit.".into());
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
-                match command {
-                    SessionCommand::ResumeCatalog => {
-                        // Consume the submitted slash command, not an unrelated draft
-                        // when this action is invoked programmatically.
-                        if matches!(
-                            commands::classify(
-                                self.editor.text(),
-                                self.state.command_catalog.as_deref()
-                            ),
-                            Some(Command::Session(SessionCommand::ResumeCatalog))
-                        ) {
-                            self.editor.clear();
-                        }
-                        self.session_picker = Some(SessionPicker::loading());
-                        self.render_pending = true;
-                        self.poll_session_catalog(writer, limit).await
-                    }
-                    SessionCommand::ResumeSession(session_id) => {
-                        if !reducer::valid_session_id(&session_id) {
-                            self.notice =
-                                Some("Session ID is empty or exceeds the 4096-byte limit.".into());
-                            self.render_pending = true;
-                            return Ok(LoopControl::Continue);
-                        }
-                        self.dispatch_session_action(
-                            UiAction::SelectSession { session_id },
-                            writer,
-                            limit,
-                        )
-                        .await
-                    }
-                    SessionCommand::New => {
-                        self.dispatch_session_action(UiAction::NewSession, writer, limit)
-                            .await
-                    }
-                    SessionCommand::Name(name) => {
-                        self.dispatch_session_action(UiAction::SetSessionName(name), writer, limit)
-                            .await
-                    }
-                    SessionCommand::Clone => {
-                        self.dispatch_session_action(UiAction::CloneSession, writer, limit)
-                            .await
-                    }
-                    SessionCommand::Tree => {
-                        self.dispatch_session_action(
-                            UiAction::LoadSessionTree {
-                                after_entry_id: None,
-                            },
-                            writer,
-                            limit,
-                        )
-                        .await
-                    }
-                    SessionCommand::Unrevert => {
-                        self.dispatch_session_action(UiAction::UnrevertSessionTree, writer, limit)
-                            .await
-                    }
-                    SessionCommand::Connect => {
-                        self.dispatch(UiAction::OpenConnectionPanel, writer, limit)
-                            .await
-                    }
-                    SessionCommand::Invalid(usage) => {
-                        self.notice = Some(usage.into());
-                        self.render_pending = true;
-                        Ok(LoopControl::Continue)
-                    }
-                    SessionCommand::Prompt => {
-                        unreachable!("classifier only returns supported session commands")
-                    }
-                }
+                self.dispatch_session_action(UiAction::SelectSession { session_id }, writer, limit)
+                    .await
+            }
+            SessionCommand::New => {
+                self.dispatch_session_action(UiAction::NewSession, writer, limit)
+                    .await
+            }
+            SessionCommand::Name(name) => {
+                self.dispatch_session_action(UiAction::SetSessionName(name), writer, limit)
+                    .await
+            }
+            SessionCommand::Clone => {
+                self.dispatch_session_action(UiAction::CloneSession, writer, limit)
+                    .await
+            }
+            SessionCommand::Tree => {
+                self.dispatch_session_action(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: None,
+                    },
+                    writer,
+                    limit,
+                )
+                .await
+            }
+            SessionCommand::Unrevert => {
+                self.dispatch_session_action(UiAction::UnrevertSessionTree, writer, limit)
+                    .await
+            }
+            SessionCommand::Connect => {
+                self.dispatch(UiAction::OpenConnectionPanel, writer, limit)
+                    .await
+            }
+            SessionCommand::Invalid(usage) => {
+                self.notice = Some(usage.into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            SessionCommand::Prompt => {
+                unreachable!("classifier only returns supported session commands")
             }
         }
     }
