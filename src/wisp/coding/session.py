@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -193,6 +193,58 @@ def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
 @dataclass(slots=True)
 class _AutoCompactionStatus:
     skip_final_save: bool = False
+
+
+@dataclass(slots=True)
+class _HarnessLoopState:
+    """What a run has learned from its harness events so far."""
+
+    turn_lifecycle: TurnLifecycle = field(default_factory=TurnLifecycle)
+    outcome: RunOutcome = "completed"
+    saw_loop_error: bool = False
+    overflow_error: ContextOverflowError | None = None
+    tool_presentation_statuses: dict[str, ToolPresentationStatus] = field(default_factory=dict)
+    started_tool_calls: set[str] = field(default_factory=set)
+    queue_batch_started_new_turn: bool = False
+
+    def observe(
+        self,
+        event: WispEvent,
+        *,
+        compaction: _RunCompaction,
+        tool_is_unsafe: Callable[[str], bool],
+    ) -> None:
+        """Update the state from one harness event before it is persisted and published.
+
+        A turn started after overflow recovery clears the pending overflow, and
+        an unsafe tool that actually started rules out overflow retry.
+
+        Args:
+            event (WispEvent): Event from the harness loop.
+            compaction (_RunCompaction): The run's compaction hooks.
+            tool_is_unsafe (Callable[[str], bool]): Whether the named tool is unsafe.
+        """
+
+        self.turn_lifecycle.observe(event)
+        if isinstance(event, TurnStarted):
+            if compaction.recovered_from_overflow:
+                self.overflow_error = None
+        elif isinstance(event, ErrorEvent):
+            self.saw_loop_error = True
+        elif isinstance(event, ContextOverflow):
+            self.overflow_error = ContextOverflowError(event.message)
+        elif isinstance(event, TurnCompleted):
+            self.outcome = event.outcome
+            self.queue_batch_started_new_turn = False
+        elif isinstance(event, ToolExecutionStarted):
+            self.started_tool_calls.add(event.call_id)
+        elif isinstance(event, ToolExecutionEnded):
+            was_started = event.call_id in self.started_tool_calls
+            self.started_tool_calls.discard(event.call_id)
+            if was_started and tool_is_unsafe(event.name):
+                compaction.unsafe_tool_ran()
+        elif isinstance(event, ToolApprovalResolved) and not event.approved:
+            self.tool_presentation_statuses[event.call_id] = "denied"
 
 
 class CodingSession:
@@ -650,17 +702,10 @@ class CodingSession:
         if operation_context.seen_files is not None:
             seen_files = self._seen_files.setdefault(session.session_id, SeenFiles())
             operation_context = replace(operation_context, seen_files=seen_files)
-        recover_history = session.session_id in self._history_refresh_session_ids or any(
-            pending.entry.session_id == session.session_id for pending in self._pending_entries
-        )
-        await self._flush_pending_entries()
-        snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
-        if snapshot.entry_count or recover_history:
-            history = snapshot.replay.messages
-            self._history_refresh_session_ids.discard(session.session_id)
+        history, active_leaf_id = await self._resume_history(session, history)
         persistence = RunPersistence(
             session=session,
-            expected_active_leaf_id=snapshot.active_leaf_id,
+            expected_active_leaf_id=active_leaf_id,
             operation_id=operation_id,
         )
         self._active_persistence = persistence
@@ -727,22 +772,12 @@ class CodingSession:
             AgentStarted(session_id=session.session_id, message_entry_id=user_entry.id)
         )
 
-        for prompt_message in prompt_messages:
-            # The project-context entry also carries its Git snapshot, which
-            # `append_message` has no way to attach, so it is built here.
-            if session_prompt.repository_status is not None and _is_project_context(prompt_message):
-                await persistence.append_entry(
-                    MessageSessionEntry(
-                        session_id=session.session_id,
-                        message=prompt_message,
-                        operation_id=operation_id,
-                        repository_status=session_prompt.repository_status,
-                    )
-                )
-            else:
-                await persistence.append_message(prompt_message)
-
-        await persistence.append_entry(user_entry)
+        await self._persist_run_prompt(
+            persistence,
+            prompt_messages,
+            user_entry,
+            repository_status=session_prompt.repository_status,
+        )
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(user_message)
@@ -776,238 +811,456 @@ class CodingSession:
             prompt_entry_id=user_entry.id,
         )
         if provider_auto_compaction:
-            if history:
-                async for compaction_event in compaction.compact_before_first_request():
-                    yield compaction_event
-            remaining_budget = self._harness_context_budget(harness)
-            if exceeds_provider_auto_compaction_limit(
-                remaining_budget
-            ) and self._recover_via_tool_result_truncation(harness, remaining_budget):
-                # Recovers a session resumed after a crash mid-turn: the crashed
-                # turn's full, untruncated tool result was already durably
-                # persisted before any in-memory truncation could run, and an
-                # incomplete turn (no closing assistant message) can never be
-                # compacted away, so it would otherwise re-trigger this same
-                # overflow on every future prompt in the session, forever.
-                remaining_budget = self._harness_context_budget(harness)
-            if exceeds_provider_auto_compaction_limit(remaining_budget):
-                error_message = (
-                    "Active prompt exceeds the provider auto-compaction limit "
-                    "after compacting all eligible history"
-                )
-                await compaction.rollback_active_prompt()
-                yield await emit(ErrorEvent(message=error_message))
-                yield await emit(
-                    self._run_completed(
-                        run_stats,
-                        session_id=session.session_id,
-                        turns=0,
-                        outcome="failed",
-                    )
-                )
-                raise ContextOverflowError(error_message)
-
-        if provider_auto_compaction:
+            async for event in self._fit_first_request(
+                compaction,
+                harness,
+                resumed=bool(history),
+                emit=emit,
+                run_stats=run_stats,
+                session_id=session.session_id,
+            ):
+                yield event
             # Steering queued while preflight compaction was running must affect
             # the first provider request, not wait for that request to finish.
             self._accepting_queued_messages = False
             try:
-                steering_injected = False
-                for queue_event in harness.drain_steering():
-                    if isinstance(queue_event, QueueMessageInjected):
-                        steering_injected = True
-                        queue_entry_id = self._persist_queue_injection(
-                            session, queue_event, operation_id=operation_id
-                        )
-                        queue_event = queue_event.model_copy(
-                            update={"message_entry_id": queue_entry_id}
-                        )
-                        skill_event = _queued_skill_invoked(
-                            session.session_id, queue_entry_id, queue_event
-                        )
-                        if skill_event is not None:
-                            yield await emit(skill_event)
-                    yield await emit(queue_event)
-                if steering_injected:
-                    async for compaction_event in compaction.compact_before_first_request():
-                        yield compaction_event
-                    remaining_budget = self._harness_context_budget(harness)
-                    if exceeds_provider_auto_compaction_limit(remaining_budget):
-                        error_message = (
-                            "Active prompt and steering exceed the provider "
-                            "auto-compaction limit after compacting all eligible history"
-                        )
-                        await compaction.rollback_active_prompt()
-                        yield await emit(ErrorEvent(message=error_message))
-                        yield await emit(
-                            self._run_completed(
-                                run_stats,
-                                session_id=session.session_id,
-                                turns=0,
-                                outcome="failed",
-                            )
-                        )
-                        raise ContextOverflowError(error_message)
+                async for event in self._steer_first_request(
+                    compaction,
+                    harness,
+                    session=session,
+                    operation_id=operation_id,
+                    emit=emit,
+                    run_stats=run_stats,
+                ):
+                    yield event
             finally:
                 self._accepting_queued_messages = True
 
-        turn_lifecycle = TurnLifecycle()
-        tool_presentation_statuses: dict[str, ToolPresentationStatus] = {}
-        started_tool_calls: set[str] = set()
-        queue_batch_started_new_turn = False
+        loop = _HarnessLoopState()
         harness_events = harness.continue_(
             boundary_preparer=compaction,
             context_overflow_hook=compaction,
         )
-
-        terminal_outcome: RunOutcome = "completed"
-        while True:
-            saw_loop_error = False
-            overflow_error: ContextOverflowError | None = None
-            try:
-                async for event in harness_events:
-                    for compaction_event in compaction.take_events():
-                        yield compaction_event
-                    turn_lifecycle.observe(event)
-                    if isinstance(event, TurnStarted):
-                        if compaction.recovered_from_overflow:
-                            overflow_error = None
-                    elif isinstance(event, ErrorEvent):
-                        saw_loop_error = True
-                    elif isinstance(event, ContextOverflow):
-                        overflow_error = ContextOverflowError(event.message)
-                    elif isinstance(event, TurnCompleted):
-                        terminal_outcome = event.outcome
-                        queue_batch_started_new_turn = False
-                    elif isinstance(event, ToolExecutionStarted):
-                        started_tool_calls.add(event.call_id)
-                    elif isinstance(event, ToolExecutionEnded):
-                        was_started = event.call_id in started_tool_calls
-                        started_tool_calls.discard(event.call_id)
-                        if was_started and self._tool_is_unsafe(event.name):
-                            compaction.unsafe_tool_ran()
-                    elif isinstance(event, ToolApprovalResolved) and not event.approved:
-                        tool_presentation_statuses[event.call_id] = "denied"
-                    completion_entry_id: str | None = None
-                    if isinstance(event, QueueMessageInjected):
-                        queue_entry_id = self._persist_queue_injection(
-                            session, event, operation_id=operation_id
-                        )
-                        event = event.model_copy(update={"message_entry_id": queue_entry_id})
-                        if not turn_lifecycle.had_tool_calls and not queue_batch_started_new_turn:
-                            compaction.queued_turn_started(queue_entry_id)
-                            queue_batch_started_new_turn = True
-                        skill_event = _queued_skill_invoked(
-                            session.session_id, queue_entry_id, event
-                        )
-                        if skill_event is not None:
-                            yield await emit(skill_event)
-                    if isinstance(
-                        event, MessageCompleted | ToolExecutionEnded
-                    ) and completion_event_has_history(event):
-                        tool_status = (
-                            tool_presentation_statuses.pop(event.call_id, None)
-                            if isinstance(event, ToolExecutionEnded)
-                            else None
-                        )
-                        completion_entry_id = self._queue_completion(
-                            session,
-                            event,
-                            operation_id=operation_id,
-                            tool_status=tool_status,
-                            tool_cwd=operation_context.cwd,
-                        )
-                    if (
-                        isinstance(event, MessageCompleted)
-                        and event.finish_reason not in {"error", "cancelled"}
-                        and event.usage is not None
-                        and event.usage.input_tokens > 0
-                        and completion_entry_id is not None
-                    ):
-                        if event.context_observation is not None:
-                            self._context_observations[session.session_id] = (
-                                event.context_observation
-                            )
-
-                    if completion_entry_id is not None:
-                        event = event.model_copy(update={"message_entry_id": completion_entry_id})
-                    yield await emit(event)
+        try:
+            async for event in harness_events:
                 for compaction_event in compaction.take_events():
                     yield compaction_event
-            except ContextOverflowError as exc:
-                overflow_error = exc
-            except Exception as exc:
-                if not saw_loop_error:
-                    # Only an open turn gets a failed completion; one the loop already
-                    # completed must not receive a second terminal.
-                    for terminal_event in turn_lifecycle.terminal_events(
-                        str(exc), outcome="failed"
-                    ):
-                        yield await emit(terminal_event)
-                yield await emit(
-                    self._run_completed(
-                        run_stats,
-                        session_id=session.session_id,
-                        turns=turn_lifecycle.latest_turn,
-                        outcome="failed",
+                loop.observe(event, compaction=compaction, tool_is_unsafe=self._tool_is_unsafe)
+                for published in self._persist_loop_event(
+                    event,
+                    loop,
+                    session=session,
+                    operation_id=operation_id,
+                    compaction=compaction,
+                    tool_cwd=operation_context.cwd,
+                ):
+                    yield await emit(published)
+            for compaction_event in compaction.take_events():
+                yield compaction_event
+        except ContextOverflowError as exc:
+            loop.overflow_error = exc
+        except Exception as exc:
+            for terminal_event in self._failed_run_terminals(
+                loop, exc, run_stats, session_id=session.session_id
+            ):
+                yield await emit(terminal_event)
+            raise
+        finally:
+            with anyio.CancelScope(shield=True):
+                try:
+                    await harness_events.aclose()
+                finally:
+                    await self._repair_and_flush(
+                        session,
+                        harness,
+                        operation_id=operation_id,
                     )
-                )
-                raise
-            finally:
-                with anyio.CancelScope(shield=True):
-                    try:
-                        await harness_events.aclose()
-                    finally:
-                        await self._repair_and_flush(
-                            session,
-                            harness,
-                            operation_id=operation_id,
-                        )
 
-            if overflow_error is None:
-                break
-
+        if loop.overflow_error is not None:
             # The primary loop's overflow hook already made the sole retry
             # decision. The loop publishes the overflow's error and closes its
             # turn, and a boundary overflow rolled the prompt back before it was
             # raised, so only the run's own terminal remains here.
-            terminal_overflow = compaction.recovery_failure or overflow_error
-            if not saw_loop_error:
-                for terminal_event in turn_lifecycle.terminal_events(
-                    str(terminal_overflow), outcome="failed"
-                ):
-                    yield await emit(terminal_event)
-            yield await emit(
-                self._run_completed(
-                    run_stats,
-                    session_id=session.session_id,
-                    turns=turn_lifecycle.latest_turn,
-                    outcome="failed",
-                )
-            )
+            terminal_overflow = compaction.recovery_failure or loop.overflow_error
+            for terminal_event in self._failed_run_terminals(
+                loop, terminal_overflow, run_stats, session_id=session.session_id
+            ):
+                yield await emit(terminal_event)
             raise terminal_overflow from None
 
         self._accepting_queued_messages = False
+        async for event in self._finish_run(
+            compaction,
+            harness,
+            loop,
+            session=session,
+            operation_id=operation_id,
+            status=auto_compaction_status,
+            emit=emit,
+            run_stats=run_stats,
+        ):
+            yield event
+
+    async def _resume_history(
+        self,
+        session: JsonlSession,
+        history: Sequence[Message],
+    ) -> tuple[Sequence[Message], str | None]:
+        """Choose the history a run resumes and read the leaf its writer is pinned to.
+
+        Entries still pending from earlier runs are flushed first, so the
+        snapshot includes them.
+
+        Args:
+            session (JsonlSession): Session the run appends to.
+            history (Sequence[Message]): History the caller supplied.
+
+        Returns:
+            tuple[Sequence[Message], str | None]: The persisted history when the
+            session has entries, had entries pending, or is marked for a history
+            refresh, otherwise `history`; and the session's active leaf.
+        """
+
+        recover_history = session.session_id in self._history_refresh_session_ids or any(
+            pending.entry.session_id == session.session_id for pending in self._pending_entries
+        )
+        await self._flush_pending_entries()
+        snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
+        if snapshot.entry_count or recover_history:
+            history = snapshot.replay.messages
+            self._history_refresh_session_ids.discard(session.session_id)
+        return history, snapshot.active_leaf_id
+
+    async def _persist_run_prompt(
+        self,
+        persistence: RunPersistence,
+        prompt_messages: Sequence[Message],
+        user_entry: MessageSessionEntry,
+        *,
+        repository_status: RepositoryStatusSnapshot | None,
+    ) -> None:
+        """Append a run's system prompt messages, then its user prompt entry.
+
+        Args:
+            persistence (RunPersistence): The run's branch-pinned writer.
+            prompt_messages (Sequence[Message]): System messages the run sends first.
+            user_entry (MessageSessionEntry): Entry for the run's user prompt.
+            repository_status (RepositoryStatusSnapshot | None): Git snapshot the
+                project-context message was built from, saved with that message.
+        """
+
+        for prompt_message in prompt_messages:
+            # The project-context entry also carries its Git snapshot, which
+            # `append_message` has no way to attach, so it is built here.
+            if repository_status is not None and _is_project_context(prompt_message):
+                await persistence.append_entry(
+                    MessageSessionEntry(
+                        session_id=persistence.session.session_id,
+                        message=prompt_message,
+                        operation_id=persistence.operation_id,
+                        repository_status=repository_status,
+                    )
+                )
+            else:
+                await persistence.append_message(prompt_message)
+        await persistence.append_entry(user_entry)
+
+    async def _fit_first_request(
+        self,
+        compaction: _RunCompaction,
+        harness: AgentHarness,
+        *,
+        resumed: bool,
+        emit: Callable[[WispEvent], Awaitable[WispEvent]],
+        run_stats: RunStats,
+        session_id: str,
+    ) -> AsyncIterator[WispEvent]:
+        """Compact resumed history until the first request fits the provider limit.
+
+        Args:
+            compaction (_RunCompaction): The run's compaction hooks.
+            harness (AgentHarness): Harness holding the first request's transcript.
+            resumed (bool): Whether the run resumes history that could be compacted.
+            emit (Callable[[WispEvent], Awaitable[WispEvent]]): Publishes a run event.
+            run_stats (RunStats): The run's statistics, for its failed completion.
+            session_id (str): Session the run appends to.
+
+        Yields:
+            WispEvent: Compaction events, then the rejection's `ErrorEvent` and
+            failed `AgentCompleted` if the request still does not fit.
+
+        Raises:
+            ContextOverflowError: The prompt exceeds the provider auto-compaction
+                limit after compacting all eligible history.
+        """
+
+        if resumed:
+            async for event in compaction.compact_before_first_request():
+                yield event
+        remaining_budget = self._harness_context_budget(harness)
+        if exceeds_provider_auto_compaction_limit(
+            remaining_budget
+        ) and self._recover_via_tool_result_truncation(harness, remaining_budget):
+            # Recovers a session resumed after a crash mid-turn: the crashed
+            # turn's full, untruncated tool result was already durably
+            # persisted before any in-memory truncation could run, and an
+            # incomplete turn (no closing assistant message) can never be
+            # compacted away, so it would otherwise re-trigger this same
+            # overflow on every future prompt in the session, forever.
+            remaining_budget = self._harness_context_budget(harness)
+        if exceeds_provider_auto_compaction_limit(remaining_budget):
+            async for event in self._reject_first_request(
+                "Active prompt exceeds the provider auto-compaction limit "
+                "after compacting all eligible history",
+                compaction=compaction,
+                emit=emit,
+                run_stats=run_stats,
+                session_id=session_id,
+            ):
+                yield event
+
+    async def _steer_first_request(
+        self,
+        compaction: _RunCompaction,
+        harness: AgentHarness,
+        *,
+        session: JsonlSession,
+        operation_id: str | None,
+        emit: Callable[[WispEvent], Awaitable[WispEvent]],
+        run_stats: RunStats,
+    ) -> AsyncIterator[WispEvent]:
+        """Add steering queued during preflight to the first request, then recheck its limit.
+
+        The caller stops accepting queued messages while this runs, so steering
+        sent meanwhile is rejected rather than missing the first request.
+
+        Args:
+            compaction (_RunCompaction): The run's compaction hooks.
+            harness (AgentHarness): Harness holding the queued steering.
+            session (JsonlSession): Session the run appends to.
+            operation_id (str | None): Operation owning the run's entries.
+            emit (Callable[[WispEvent], Awaitable[WispEvent]]): Publishes a run event.
+            run_stats (RunStats): The run's statistics, for its failed completion.
+
+        Yields:
+            WispEvent: The drained queue events, each injected message preceded
+            by the `SkillInvoked` it announces; then, if steering was injected,
+            compaction events and any rejection.
+
+        Raises:
+            ContextOverflowError: The prompt and steering exceed the provider
+                auto-compaction limit after compacting all eligible history.
+        """
+
+        steering_injected = False
+        for queue_event in harness.drain_steering():
+            if isinstance(queue_event, QueueMessageInjected):
+                steering_injected = True
+                queue_entry_id = self._persist_queue_injection(
+                    session, queue_event, operation_id=operation_id
+                )
+                queue_event = queue_event.model_copy(update={"message_entry_id": queue_entry_id})
+                skill_event = _queued_skill_invoked(session.session_id, queue_entry_id, queue_event)
+                if skill_event is not None:
+                    yield await emit(skill_event)
+            yield await emit(queue_event)
+        if not steering_injected:
+            return
+        async for event in compaction.compact_before_first_request():
+            yield event
+        if exceeds_provider_auto_compaction_limit(self._harness_context_budget(harness)):
+            async for event in self._reject_first_request(
+                "Active prompt and steering exceed the provider "
+                "auto-compaction limit after compacting all eligible history",
+                compaction=compaction,
+                emit=emit,
+                run_stats=run_stats,
+                session_id=session.session_id,
+            ):
+                yield event
+
+    async def _reject_first_request(
+        self,
+        message: str,
+        *,
+        compaction: _RunCompaction,
+        emit: Callable[[WispEvent], Awaitable[WispEvent]],
+        run_stats: RunStats,
+        session_id: str,
+    ) -> AsyncIterator[WispEvent]:
+        """Roll back a prompt that cannot fit and fail the run before its first turn.
+
+        Args:
+            message (str): Why the prompt cannot be sent.
+            compaction (_RunCompaction): The run's compaction hooks.
+            emit (Callable[[WispEvent], Awaitable[WispEvent]]): Publishes a run event.
+            run_stats (RunStats): The run's statistics, for its failed completion.
+            session_id (str): Session the run appends to.
+
+        Yields:
+            WispEvent: An `ErrorEvent` with `message`, then a failed
+            `AgentCompleted` with no turns.
+
+        Raises:
+            ContextOverflowError: Always, with `message`, after both events.
+        """
+
+        await compaction.rollback_active_prompt()
+        yield await emit(ErrorEvent(message=message))
+        yield await emit(
+            self._run_completed(run_stats, session_id=session_id, turns=0, outcome="failed")
+        )
+        raise ContextOverflowError(message)
+
+    def _persist_loop_event(
+        self,
+        event: WispEvent,
+        loop: _HarnessLoopState,
+        *,
+        session: JsonlSession,
+        operation_id: str | None,
+        compaction: _RunCompaction,
+        tool_cwd: Path,
+    ) -> tuple[WispEvent, ...]:
+        """Queue the entry a harness event adds to history and return what to publish.
+
+        An injected queue message that opens a new turn, rather than continuing
+        a tool round or an earlier message in the same batch, becomes the start
+        of the active turn for boundary compaction.
+
+        Args:
+            event (WispEvent): Event from the harness loop.
+            loop (_HarnessLoopState): The run's loop state, already updated
+                for `event`.
+            session (JsonlSession): Session the run appends to.
+            operation_id (str | None): Operation owning the run's entries.
+            compaction (_RunCompaction): The run's compaction hooks.
+            tool_cwd (Path): Working directory the run's tools used.
+
+        Returns:
+            tuple[WispEvent, ...]: The events to publish in order: `event`,
+            carrying the id of the entry it was queued under when it has one,
+            preceded by the `SkillInvoked` an injected queue message announces.
+        """
+
+        if isinstance(event, QueueMessageInjected):
+            entry_id = self._persist_queue_injection(session, event, operation_id=operation_id)
+            injected = event.model_copy(update={"message_entry_id": entry_id})
+            if not loop.turn_lifecycle.had_tool_calls and not loop.queue_batch_started_new_turn:
+                compaction.queued_turn_started(entry_id)
+                loop.queue_batch_started_new_turn = True
+            skill_event = _queued_skill_invoked(session.session_id, entry_id, injected)
+            return (injected,) if skill_event is None else (skill_event, injected)
+        if not isinstance(
+            event, MessageCompleted | ToolExecutionEnded
+        ) or not completion_event_has_history(event):
+            return (event,)
+        tool_status = (
+            loop.tool_presentation_statuses.pop(event.call_id, None)
+            if isinstance(event, ToolExecutionEnded)
+            else None
+        )
+        entry_id = self._queue_completion(
+            session,
+            event,
+            operation_id=operation_id,
+            tool_status=tool_status,
+            tool_cwd=tool_cwd,
+        )
+        if (
+            isinstance(event, MessageCompleted)
+            and event.finish_reason not in {"error", "cancelled"}
+            and event.usage is not None
+            and event.usage.input_tokens > 0
+            and event.context_observation is not None
+        ):
+            self._context_observations[session.session_id] = event.context_observation
+        return (event.model_copy(update={"message_entry_id": entry_id}),)
+
+    def _failed_run_terminals(
+        self,
+        loop: _HarnessLoopState,
+        error: Exception,
+        run_stats: RunStats,
+        *,
+        session_id: str,
+    ) -> Iterator[WispEvent]:
+        """Build the events that end a run whose harness loop failed.
+
+        Only an open turn gets a failed completion, and only when the loop has
+        not already published an error; a turn the loop completed must not
+        receive a second terminal. The events are built lazily, so the run
+        completion counts the turn terminals published before it.
+
+        Args:
+            loop (_HarnessLoopState): The run's loop state.
+            error (Exception): Why the run failed.
+            run_stats (RunStats): The run's statistics.
+            session_id (str): Session the run appends to.
+
+        Yields:
+            WispEvent: The turn terminals, if any, then a failed `AgentCompleted`.
+        """
+
+        if not loop.saw_loop_error:
+            yield from loop.turn_lifecycle.terminal_events(str(error), outcome="failed")
+        yield self._run_completed(
+            run_stats,
+            session_id=session_id,
+            turns=loop.turn_lifecycle.latest_turn,
+            outcome="failed",
+        )
+
+    async def _finish_run(
+        self,
+        compaction: _RunCompaction,
+        harness: AgentHarness,
+        loop: _HarnessLoopState,
+        *,
+        session: JsonlSession,
+        operation_id: str | None,
+        status: _AutoCompactionStatus,
+        emit: Callable[[WispEvent], Awaitable[WispEvent]],
+        run_stats: RunStats,
+    ) -> AsyncIterator[WispEvent]:
+        """Compact after a run's last turn if needed, then save and complete the run.
+
+        Args:
+            compaction (_RunCompaction): The run's compaction hooks.
+            harness (AgentHarness): Harness holding the run's transcript.
+            loop (_HarnessLoopState): The finished loop's state.
+            session (JsonlSession): Session the run appends to.
+            operation_id (str | None): Operation owning the run's entries.
+            status (_AutoCompactionStatus): Auto-compaction status for the run.
+            emit (Callable[[WispEvent], Awaitable[WispEvent]]): Publishes a run event.
+            run_stats (RunStats): The run's statistics.
+
+        Yields:
+            WispEvent: Threshold compaction events unless the run recovered from
+            an overflow, `SessionSaved` unless compaction already saved or the
+            final save is skipped, then `AgentCompleted` with the loop's outcome.
+        """
+
         auto_compaction_saved = False
         if not compaction.recovered_from_overflow:
             async for compaction_event in self._maybe_auto_compact(
                 session,
                 harness,
-                status=auto_compaction_status,
+                status=status,
                 operation_id=operation_id,
             ):
                 if isinstance(compaction_event, SessionSaved):
                     auto_compaction_saved = True
                 yield compaction_event
-        if not auto_compaction_saved and not auto_compaction_status.skip_final_save:
+        if not auto_compaction_saved and not status.skip_final_save:
             yield await emit(SessionSaved(session_id=session.session_id, path=session.path))
         completed = self._run_completed(
             run_stats,
             session_id=session.session_id,
-            turns=turn_lifecycle.latest_turn,
-            outcome=terminal_outcome,
+            turns=loop.turn_lifecycle.latest_turn,
+            outcome=loop.outcome,
         )
-        if auto_compaction_status.skip_final_save:
+        if status.skip_final_save:
             yield await self._emit_recoverable_event(completed, session=session)
         else:
             yield await emit(completed)
