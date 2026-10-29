@@ -4172,74 +4172,8 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
-        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ToggleTheme)
-            && key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL)
-        {
-            // Like Textual, a preview cannot accidentally be committed by toggling.
-            if self.theme_picker.is_none() {
-                self.theme.toggle();
-                self.finish_theme_change();
-            }
-            return Ok(LoopControl::Continue);
-        }
-        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::FocusPanel))
-            && self.active_overlay().is_none()
-            && !matches!(
-                self.state.view_status,
-                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-            )
-        {
-            self.side_panel.focus();
-            self.rendered_overlay = None;
-            self.render_pending = true;
-            return Ok(LoopControl::Continue);
-        }
-        if matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::TogglePanel))
-        {
-            // The overlay would open hidden under another overlay or over a decision,
-            // so there Ctrl+B only hides or shows a docked panel.
-            let decision_pending = matches!(
-                self.state.view_status,
-                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-            );
-            let covered = decision_pending
-                || !matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel));
-            if !(covered && self.side_panel.toggles_overlay()) {
-                self.side_panel.toggle();
-                self.rendered_overlay = None;
-                self.render_pending = true;
-            }
-            return Ok(LoopControl::Continue);
-        }
-        if matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel))
-            && self.editor_editable()
-            && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::SessionTree))
-        {
-            // As /tree does, but the draft stays; the panel's session-tree line names
-            // this key.
-            self.side_panel.close_overlay();
-            self.render_pending = true;
-            return self
-                .dispatch_session_action_with(
-                    UiAction::LoadSessionTree {
-                        after_entry_id: None,
-                    },
-                    false,
-                    writer,
-                    limit,
-                )
-                .await;
-        }
-        if self.active_overlay().is_none()
-            && self.editor_editable()
-            && matches!(&input, Input::Key(key) if self.bindings.action(*key) == Some(KeyAction::ManageQueue))
-        {
-            self.queue_view = Some(queue_view::QueueView::default());
-            self.rendered_overlay = None;
-            self.render_pending = true;
-            return self
-                .dispatch(UiAction::RefreshQueueState, writer, limit)
-                .await;
+        if let Some(control) = self.handle_global_shortcut(&input, writer, limit).await? {
+            return Ok(control);
         }
         self.completion.sync(&self.editor);
         let overlay = self.active_overlay();
@@ -4249,29 +4183,7 @@ impl LiveUi {
         );
         if let Some(kind) = overlay {
             if let Input::Key(key) = &input {
-                let activates = match kind {
-                    OverlayKind::Connection => self
-                        .connection_panel
-                        .as_ref()
-                        .expect("active connection")
-                        .key_activates(*key),
-                    OverlayKind::SessionTree => {
-                        matches!(key.code, KeyCode::Enter | KeyCode::Char('f'))
-                    }
-                    OverlayKind::Model
-                    | OverlayKind::Theme
-                    | OverlayKind::Logo
-                    | OverlayKind::Session
-                    | OverlayKind::PromptHistory
-                    | OverlayKind::Queue
-                    | OverlayKind::SidePanel => key.code == KeyCode::Enter,
-                    OverlayKind::Discovery => self
-                        .discovery_view
-                        .as_ref()
-                        .is_some_and(|view| view.key_activates(*key)),
-                    _ => false,
-                };
-                if activates && self.rendered_overlay != Some(kind) {
+                if self.activation_awaits_paint(kind, *key) {
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
@@ -4280,89 +4192,160 @@ impl LiveUi {
             // must be painted before an activation can act on it.
             if matches!(&input, Input::Key(_) | Input::Paste(_)) {
                 self.invalidate_overlay(kind);
+                // These pickers leave Ctrl+C to interrupt the run; every other
+                // overlay handles Ctrl+C itself.
+                let interrupts = matches!(&input, Input::Key(key) if is_ctrl_c(*key))
+                    && matches!(
+                        kind,
+                        OverlayKind::SessionTree | OverlayKind::Session | OverlayKind::Detail
+                    );
+                if !interrupts {
+                    return self.handle_overlay_input(kind, input, writer, limit).await;
+                }
             }
         }
         match input {
-            Input::Key(key) if overlay == Some(OverlayKind::Queue) => {
-                if is_ctrl_c(key) {
-                    return self.interrupt(writer, limit, true).await;
-                }
-                if !key.modifiers.is_empty() {
-                    return Ok(LoopControl::Continue);
-                }
-                let action = self
-                    .queue_view
-                    .as_mut()
-                    .expect("active queue")
-                    .key(key.code, &self.state);
-                self.render_pending = true;
-                match action {
-                    queue_view::Action::None => Ok(LoopControl::Continue),
-                    queue_view::Action::Close => {
-                        self.queue_view = None;
-                        Ok(LoopControl::Continue)
-                    }
-                    queue_view::Action::Refresh => {
-                        self.dispatch(UiAction::RefreshQueueState, writer, limit)
-                            .await
-                    }
-                    queue_view::Action::Mutate(operation, expected_token) => {
-                        self.dispatch_queue_action(
-                            UiAction::ManageQueue {
-                                operation,
-                                expected_token,
-                            },
-                            writer,
-                            limit,
-                        )
-                        .await
-                    }
-                }
+            Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
+            Input::Key(key) => {
+                self.handle_prompt_key(key, decision_pending, writer, limit)
+                    .await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Queue) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Theme) => {
-                let action = self
-                    .theme_picker
-                    .as_mut()
-                    .expect("open theme")
-                    .handle_key(key);
-                match action {
-                    ThemePickerAction::Close => self.theme_picker = None,
-                    ThemePickerAction::Apply(theme) => {
-                        self.theme_picker = None;
-                        self.theme.select(theme);
-                        self.finish_theme_change();
-                    }
-                    ThemePickerAction::None => {}
-                }
-                self.invalidate_theme_presentation();
+            Input::Paste(pasted) => Ok(self.handle_prompt_paste(&pasted, decision_pending)),
+            Input::Redraw => {
+                self.invalidate_rendered_frame();
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Theme) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Logo) => {
-                let action = self
-                    .logo_picker
-                    .as_mut()
-                    .expect("open logo picker")
-                    .handle_key(key);
-                match action {
-                    LogoPickerAction::Close => self.logo_picker = None,
-                    LogoPickerAction::Apply { choice, resolved } => {
-                        self.logo_picker = None;
-                        self.apply_resolved_logo_choice(choice, resolved);
-                    }
-                    LogoPickerAction::None => {}
+            Input::Error(error) => Err(Error::Io(error)),
+            Input::Mouse(_) | Input::Scroll(_) => Ok(LoopControl::Continue),
+        }
+    }
+
+    /// Handles the shortcuts that act before any overlay or the composer sees a key.
+    async fn handle_global_shortcut(
+        &mut self,
+        input: &Input,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<Option<LoopControl>, Error> {
+        let Input::Key(key) = input else {
+            return Ok(None);
+        };
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
+        match self.bindings.action(*key) {
+            Some(KeyAction::ToggleTheme)
+                if key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL =>
+            {
+                // Like Textual, a preview cannot accidentally be committed by toggling.
+                if self.theme_picker.is_none() {
+                    self.theme.toggle();
+                    self.finish_theme_change();
                 }
+                Ok(Some(LoopControl::Continue))
+            }
+            Some(KeyAction::FocusPanel) if self.active_overlay().is_none() && !decision_pending => {
+                self.side_panel.focus();
                 self.rendered_overlay = None;
                 self.render_pending = true;
+                Ok(Some(LoopControl::Continue))
+            }
+            Some(KeyAction::TogglePanel) => {
+                // The overlay would open hidden under another overlay or over a decision,
+                // so there Ctrl+B only hides or shows a docked panel.
+                let covered = decision_pending
+                    || !matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel));
+                if !(covered && self.side_panel.toggles_overlay()) {
+                    self.side_panel.toggle();
+                    self.rendered_overlay = None;
+                    self.render_pending = true;
+                }
+                Ok(Some(LoopControl::Continue))
+            }
+            Some(KeyAction::SessionTree)
+                if matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel))
+                    && self.editor_editable() =>
+            {
+                // As /tree does, but the draft stays; the panel's session-tree line names
+                // this key.
+                self.side_panel.close_overlay();
+                self.render_pending = true;
+                self.dispatch_session_action_with(
+                    UiAction::LoadSessionTree {
+                        after_entry_id: None,
+                    },
+                    false,
+                    writer,
+                    limit,
+                )
+                .await
+                .map(Some)
+            }
+            Some(KeyAction::ManageQueue)
+                if self.active_overlay().is_none() && self.editor_editable() =>
+            {
+                self.queue_view = Some(queue_view::QueueView::default());
+                self.rendered_overlay = None;
+                self.render_pending = true;
+                self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+                    .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn activation_awaits_paint(&self, kind: OverlayKind, key: KeyEvent) -> bool {
+        let activates = match kind {
+            OverlayKind::Connection => self
+                .connection_panel
+                .as_ref()
+                .expect("active connection")
+                .key_activates(key),
+            OverlayKind::SessionTree => {
+                matches!(key.code, KeyCode::Enter | KeyCode::Char('f'))
+            }
+            OverlayKind::Model
+            | OverlayKind::Theme
+            | OverlayKind::Logo
+            | OverlayKind::Session
+            | OverlayKind::PromptHistory
+            | OverlayKind::Queue
+            | OverlayKind::SidePanel => key.code == KeyCode::Enter,
+            OverlayKind::Discovery => self
+                .discovery_view
+                .as_ref()
+                .is_some_and(|view| view.key_activates(key)),
+            _ => false,
+        };
+        activates && self.rendered_overlay != Some(kind)
+    }
+
+    async fn handle_overlay_input(
+        &mut self,
+        kind: OverlayKind,
+        input: Input,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match (kind, input) {
+            (OverlayKind::Queue, Input::Key(key)) => {
+                self.handle_queue_key(key, writer, limit).await
+            }
+            (OverlayKind::Theme, Input::Key(key)) => {
+                self.handle_theme_picker_key(key);
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Logo) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::PromptHistory) => {
+            (OverlayKind::Logo, Input::Key(key)) => {
+                self.handle_logo_picker_key(key);
+                Ok(LoopControl::Continue)
+            }
+            (OverlayKind::PromptHistory, Input::Key(key)) => {
                 self.handle_prompt_history_key(key);
                 Ok(LoopControl::Continue)
             }
-            Input::Paste(pasted) if overlay == Some(OverlayKind::PromptHistory) => {
+            (OverlayKind::PromptHistory, Input::Paste(pasted)) => {
                 self.prompt_history_view
                     .as_mut()
                     .expect("open prompt history")
@@ -4370,434 +4353,606 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Input::Key(key) if overlay == Some(OverlayKind::Discovery) => {
-                let action = self
-                    .discovery_view
-                    .as_mut()
-                    .expect("open discovery view")
-                    .handle_key(key, &self.state);
-                self.render_pending = true;
-                match action {
-                    DiscoveryAction::Close => self.discovery_view = None,
-                    DiscoveryAction::Refresh(action) => {
-                        return self.dispatch_discovery_action(action, writer, limit).await;
-                    }
-                    DiscoveryAction::InsertSkill(prefix) => {
-                        let outcome = self.editor.replace_range(0..0, &prefix);
-                        self.update_edit_notice(outcome);
-                        if !outcome.rejected_limit {
-                            self.discovery_view = None;
-                            self.completion.sync(&self.editor);
-                            self.completion.dismiss();
-                        }
-                    }
-                    DiscoveryAction::None => {}
-                }
-                Ok(LoopControl::Continue)
+            (OverlayKind::Discovery, Input::Key(key)) => {
+                self.handle_discovery_key(key, writer, limit).await
             }
-            Input::Paste(pasted) if overlay == Some(OverlayKind::Discovery) => {
-                let action = self
-                    .discovery_view
-                    .as_mut()
-                    .expect("open discovery view")
-                    .handle_paste(&pasted, &self.state);
-                drop(pasted);
-                self.render_pending = true;
-                match action {
-                    DiscoveryAction::Refresh(action) => {
-                        self.dispatch_discovery_action(action, writer, limit).await
-                    }
-                    _ => Ok(LoopControl::Continue),
-                }
+            (OverlayKind::Discovery, Input::Paste(pasted)) => {
+                self.handle_discovery_paste(pasted, writer, limit).await
             }
-            Input::Key(key) if overlay == Some(OverlayKind::GitDiff) => {
-                self.render_pending = true;
-                if is_escape(key) || is_ctrl_c(key) {
-                    self.git_diff_view = None;
-                    return self
-                        .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
-                        .await;
-                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
-                    return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
-                } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
-                    let card = self
-                        .git_diff_view
-                        .as_mut()
-                        .expect("open diff")
-                        .key(key.code);
-                    if let Some(card) = card {
-                        return self.jump_to_edit(card, writer, limit).await;
-                    }
-                }
-                Ok(LoopControl::Continue)
+            (OverlayKind::GitDiff, Input::Key(key)) => {
+                self.handle_git_diff_key(key, writer, limit).await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::GitDiff) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Context) => {
-                if is_escape(key) || is_ctrl_c(key) {
-                    self.context_view = None;
-                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
-                    self.render_pending = true;
-                    return self.dispatch(UiAction::LoadContext, writer, limit).await;
-                } else {
-                    self.context_view
-                        .as_mut()
-                        .expect("open context")
-                        .key(key.code);
-                }
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
+            (OverlayKind::Context, Input::Key(key)) => {
+                self.handle_context_key(key, writer, limit).await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Context) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Help) => {
-                if is_escape(key) || is_ctrl_c(key) {
-                    self.command_help = None;
-                } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
-                    self.render_pending = true;
-                    return self
-                        .dispatch(UiAction::LoadCommandCatalog, writer, limit)
-                        .await;
-                } else {
-                    let rows = commands::help_rows(
-                        self.state.command_catalog.as_deref(),
-                        self.palette(),
-                        &self.bindings,
-                    )
-                    .len();
-                    self.command_help
-                        .as_mut()
-                        .expect("open help")
-                        .scroll(key.code, rows);
-                }
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
-            }
-            Input::Paste(_) if overlay == Some(OverlayKind::Help) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Model) => {
+            (OverlayKind::Help, Input::Key(key)) => self.handle_help_key(key, writer, limit).await,
+            (OverlayKind::Model, Input::Key(key)) => {
                 self.handle_model_picker_key(key, writer, limit).await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::Model) => Ok(LoopControl::Continue),
-            Input::Key(key) if overlay == Some(OverlayKind::Connection) => {
+            (OverlayKind::Connection, Input::Key(key)) => {
                 self.handle_connection_panel_key(key, writer, limit).await
             }
-            Input::Paste(pasted) if overlay == Some(OverlayKind::Connection) => {
+            (OverlayKind::Connection, Input::Paste(pasted)) => {
                 if let Some(panel) = self.connection_panel.as_mut() {
                     panel.handle_paste(&pasted);
                 }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            // Esc or Ctrl+C closes the overlaid panel, like /diff, so this comes before
-            // Ctrl+C's interrupt. Enter opens the focused row's view in its place,
-            // keeping any draft in the composer.
-            Input::Key(key) if overlay == Some(OverlayKind::SidePanel) => {
-                if is_ctrl_c(key) {
-                    self.side_panel.close_overlay();
-                    self.render_pending = true;
-                    return Ok(LoopControl::Continue);
-                }
-                if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
-                    return Ok(LoopControl::Continue);
-                }
-                match self.side_panel.key(key.code, &self.state) {
-                    side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
-                    side_panel::OverlayKey::Open(target) => {
-                        self.side_panel.close_overlay();
-                        self.render_pending = true;
-                        return self.open_from_panel(target, writer, limit).await;
-                    }
-                    side_panel::OverlayKey::Moved => {}
-                    side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
-                }
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
+            (OverlayKind::SidePanel, Input::Key(key)) => {
+                self.handle_side_panel_key(key, writer, limit).await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::SidePanel) => Ok(LoopControl::Continue),
-            Input::Key(key) if is_ctrl_c(key) => self.interrupt(writer, limit, true).await,
-            Input::Key(key) if overlay == Some(OverlayKind::SessionTree) => {
+            (OverlayKind::SessionTree, Input::Key(key)) => {
                 self.handle_session_tree_picker_key(key, writer, limit)
                     .await
             }
-            Input::Paste(_) if overlay == Some(OverlayKind::SessionTree) => {
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if overlay == Some(OverlayKind::Session) => {
+            (OverlayKind::Session, Input::Key(key)) => {
                 self.handle_session_picker_key(key, writer, limit).await
             }
-            Input::Paste(text) if overlay == Some(OverlayKind::Session) => {
+            (OverlayKind::Session, Input::Paste(text)) => {
                 if let Some(picker) = &mut self.session_picker {
                     picker.insert_paste(&text);
                 }
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
-            Input::Key(key) if overlay == Some(OverlayKind::Detail) => {
-                Ok(self.handle_detail_key(key))
-            }
-            Input::Paste(_) if overlay == Some(OverlayKind::Detail) => Ok(LoopControl::Continue),
-            Input::Key(key) if !decision_pending && self.browse_selected.is_some() => {
-                self.handle_browse_key(key, writer, limit).await
-            }
-            Input::Paste(_) if !decision_pending && self.browse_selected.is_some() => {
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
-                if self.editor_editable() && prompt_editor::is_extended_edit_key(key) =>
-            {
-                if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
-                    self.update_edit_notice(outcome);
-                    self.render_pending |= outcome.changed;
-                }
-                self.completion.sync(&self.editor);
-                self.file_picker.sync_editor(&self.editor);
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if self.editor_editable() && self.handle_file_picker_key(key) => {
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
-                if !matches!(
-                    self.state.view_status,
-                    ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-                ) && self.handle_completion_key(key) =>
-            {
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
-                if !decision_pending
-                    && key.code == KeyCode::Enter
-                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
-                    && self
-                        .completion
-                        .view(
-                            self.state.command_catalog.as_deref(),
-                            self.state.skills.snapshot.as_deref(),
-                        )
-                        .is_some()
-                    && commands::classify(
-                        self.editor.text(),
-                        self.state.command_catalog.as_deref(),
-                    )
-                    .is_some() =>
-            {
-                let command =
-                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
-                        .expect("recognized completion");
-                self.handle_command(command, writer, limit).await
-            }
-            Input::Key(key)
-                if !decision_pending
-                    && self.bindings.action(key) == Some(KeyAction::ToggleTheme) =>
-            {
-                self.theme.toggle();
-                self.finish_theme_change();
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
-                if self.editor_editable()
-                    && self.bindings.action(key) == Some(KeyAction::History) =>
-            {
-                self.open_prompt_history();
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key)
-                if !decision_pending && self.bindings.action(key) == Some(KeyAction::Browse) =>
-            {
-                self.enter_or_cycle_browse();
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if is_escape(key) => self.interrupt(writer, limit, false).await,
-            Input::Key(key)
-                if self.bound_transcript_action(key).is_some()
-                    && !(decision_pending
-                        && (answers_decision(key) || self.unsendable_current_response())) =>
-            {
-                // A docked approval or trust prompt leaves the transcript scrollable, but
-                // never through a key the prompt itself uses.
-                self.navigate_transcript(key, writer, limit).await
-            }
-            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForApproval => {
-                let context_visible =
-                    self.rendered_approval_matches(self.state.pending_approval.as_ref());
-                let confirmation = self
-                    .state
-                    .pending_approval
-                    .as_ref()
-                    .is_some_and(|pending| !pending.grants_allowed);
-                let choice_keys: &[char] = if confirmation {
-                    &CONFIRMATION_CHOICE_KEYS
-                } else {
-                    &APPROVAL_CHOICE_KEYS
-                };
-                let key = match self.decision_choice_key(key, choice_keys) {
-                    Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
-                    Some(DecisionChoiceKey::Confirm(choice)) => choice,
-                    None => key,
-                };
-                match approval_decision(key, self.state.pending_approval.as_ref()) {
-                    Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
-                        Ok(LoopControl::Continue)
-                    }
-                    Some(action) => self.dispatch_decision(action, writer, limit).await,
-                    None if key_can_edit(key) => {
-                        if !self.unsendable_current_response() {
-                            self.notice = Some(if confirmation {
-                                "Choose 1 confirm or 2 deny.".into()
-                            } else {
-                                "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into()
-                            });
-                        }
-                        self.render_pending = true;
-                        Ok(LoopControl::Continue)
-                    }
-                    None => Ok(LoopControl::Continue),
-                }
-            }
-            Input::Key(key) if self.state.view_status == ViewStatus::WaitingForTrust => {
-                let context_visible =
-                    self.rendered_trust_matches(self.state.pending_trust_request_id.as_deref());
-                let key = match self.decision_choice_key(key, &TRUST_CHOICE_KEYS) {
-                    Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
-                    Some(DecisionChoiceKey::Confirm(choice)) => choice,
-                    None => key,
-                };
-                match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
-                    Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
-                        Ok(LoopControl::Continue)
-                    }
-                    Some(action) => self.dispatch_decision(action, writer, limit).await,
-                    None if key_can_edit(key) => {
-                        if !self.unsendable_current_response() {
-                            self.notice = Some("Trust with y, or deny with n/Esc.".into());
-                        }
-                        self.render_pending = true;
-                        Ok(LoopControl::Continue)
-                    }
-                    None => Ok(LoopControl::Continue),
-                }
-            }
-            Input::Key(key)
-                if matches!(
-                    self.bindings.action(key),
-                    Some(KeyAction::Submit | KeyAction::AlternateSubmit)
-                ) && commands::classify(
-                    self.editor.text(),
-                    self.state.command_catalog.as_deref(),
-                )
-                .is_some() =>
-            {
-                let command =
-                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
-                        .expect("recognized command");
-                self.handle_command(command, writer, limit).await
-            }
-            Input::Key(key)
-                if self.editor_editable()
-                    && self.bindings.action(key) == Some(KeyAction::RestoreQueue) =>
-            {
-                if self.retry_deferred_queue_recovery() {
-                    Ok(LoopControl::Continue)
-                } else if self.active_prompt_editable() {
-                    self.dispatch_queue_action(UiAction::RestoreNewestQueueDraft, writer, limit)
-                        .await
-                } else {
-                    Ok(LoopControl::Continue)
-                }
-            }
-            Input::Key(key) if self.editor_editable() => {
-                match self.bindings.action(key) {
-                    Some(KeyAction::Submit | KeyAction::AlternateSubmit)
-                        if self.active_prompt_editable() =>
-                    {
-                        let content = self.editor.text().to_owned();
-                        let alternate =
-                            self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
-                        // Enter queues a follow-up, so a stray Enter waits for the run
-                        // instead of redirecting it; Alt+Enter steers the run now.
-                        let action = match (alternate, self.editor.has_folds()) {
-                            (false, true) => UiAction::FollowUpPresented {
-                                content,
-                                presentation: self.editor.compact_text(),
-                            },
-                            (true, true) => UiAction::SteerPresented {
-                                content,
-                                presentation: self.editor.compact_text(),
-                            },
-                            (false, false) => UiAction::FollowUp(content),
-                            (true, false) => UiAction::Steer(content),
-                        };
-                        self.dispatch_queue_action(action, writer, limit).await
-                    }
-                    Some(KeyAction::Submit) => self.submit_editor(writer, limit).await,
-                    Some(KeyAction::Newline | KeyAction::AlternateSubmit) => {
-                        let outcome = self.editor.replace_range(self.editor.insert_range(), "\n");
-                        self.update_edit_notice(outcome);
-                        self.render_pending = true;
-                        Ok(LoopControl::Continue)
-                    }
-                    Some(_) => Ok(LoopControl::Continue),
-                    // Submission/newline belong to resolved actions, never the raw
-                    // editor fallback after a default has been replaced or unbound.
-                    None if key.code == KeyCode::Enter
-                        || (key.code == KeyCode::Char('j')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)) =>
-                    {
-                        Ok(LoopControl::Continue)
-                    }
-                    None => {
-                        if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
-                            let changed = self.update_edit_notice(outcome);
-                            if outcome.changed || changed {
-                                self.render_pending = true;
-                            }
-                        }
-                        Ok(LoopControl::Continue)
-                    }
-                }
-            }
-            Input::Paste(pasted) if self.editor_editable() => {
-                let outcome = self.editor.insert_paste(&pasted);
-                let notice_changed = self.update_edit_notice(outcome);
-                if outcome.changed || notice_changed {
-                    self.render_pending = true;
-                }
-                Ok(LoopControl::Continue)
-            }
-            Input::Key(key) if key_can_edit(key) => {
-                if !self.unsendable_current_response() {
-                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
-                }
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
-            }
-            Input::Paste(_) => {
-                if !self.unsendable_current_response() {
-                    self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
-                }
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
-            }
-            Input::Redraw => {
-                self.mouse_frame = None;
-                self.transcript_selection = None;
-                self.rendered_overlay = None;
-                self.completion.invalidate();
-                self.file_picker.invalidate();
-                if let Some(view) = &mut self.prompt_history_view {
-                    view.invalidate_selection();
-                }
-                if let Some(view) = &mut self.discovery_view {
-                    view.invalidate_selection();
-                }
-                self.rendered_decision_context = None;
-                self.rendered_decision_choice = None;
-                self.rendered_model_picker = false;
-                self.render_pending = true;
-                Ok(LoopControl::Continue)
-            }
-            Input::Error(error) => Err(Error::Io(error)),
-            Input::Mouse(_) | Input::Scroll(_) => Ok(LoopControl::Continue),
-            Input::Key(_) => Ok(LoopControl::Continue),
+            (OverlayKind::Detail, Input::Key(key)) => Ok(self.handle_detail_key(key)),
+            // The other overlays ignore pasted text.
+            _ => Ok(LoopControl::Continue),
         }
+    }
+
+    async fn handle_queue_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if is_ctrl_c(key) {
+            return self.interrupt(writer, limit, true).await;
+        }
+        if !key.modifiers.is_empty() {
+            return Ok(LoopControl::Continue);
+        }
+        let action = self
+            .queue_view
+            .as_mut()
+            .expect("active queue")
+            .key(key.code, &self.state);
+        self.render_pending = true;
+        match action {
+            queue_view::Action::None => Ok(LoopControl::Continue),
+            queue_view::Action::Close => {
+                self.queue_view = None;
+                Ok(LoopControl::Continue)
+            }
+            queue_view::Action::Refresh => {
+                self.dispatch(UiAction::RefreshQueueState, writer, limit)
+                    .await
+            }
+            queue_view::Action::Mutate(operation, expected_token) => {
+                self.dispatch_queue_action(
+                    UiAction::ManageQueue {
+                        operation,
+                        expected_token,
+                    },
+                    writer,
+                    limit,
+                )
+                .await
+            }
+        }
+    }
+
+    fn handle_theme_picker_key(&mut self, key: KeyEvent) {
+        let action = self
+            .theme_picker
+            .as_mut()
+            .expect("open theme")
+            .handle_key(key);
+        match action {
+            ThemePickerAction::Close => self.theme_picker = None,
+            ThemePickerAction::Apply(theme) => {
+                self.theme_picker = None;
+                self.theme.select(theme);
+                self.finish_theme_change();
+            }
+            ThemePickerAction::None => {}
+        }
+        self.invalidate_theme_presentation();
+    }
+
+    fn handle_logo_picker_key(&mut self, key: KeyEvent) {
+        let action = self
+            .logo_picker
+            .as_mut()
+            .expect("open logo picker")
+            .handle_key(key);
+        match action {
+            LogoPickerAction::Close => self.logo_picker = None,
+            LogoPickerAction::Apply { choice, resolved } => {
+                self.logo_picker = None;
+                self.apply_resolved_logo_choice(choice, resolved);
+            }
+            LogoPickerAction::None => {}
+        }
+        self.rendered_overlay = None;
+        self.render_pending = true;
+    }
+
+    async fn handle_discovery_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let action = self
+            .discovery_view
+            .as_mut()
+            .expect("open discovery view")
+            .handle_key(key, &self.state);
+        self.render_pending = true;
+        match action {
+            DiscoveryAction::Close => self.discovery_view = None,
+            DiscoveryAction::Refresh(action) => {
+                return self.dispatch_discovery_action(action, writer, limit).await;
+            }
+            DiscoveryAction::InsertSkill(prefix) => {
+                let outcome = self.editor.replace_range(0..0, &prefix);
+                self.update_edit_notice(outcome);
+                if !outcome.rejected_limit {
+                    self.discovery_view = None;
+                    self.completion.sync(&self.editor);
+                    self.completion.dismiss();
+                }
+            }
+            DiscoveryAction::None => {}
+        }
+        Ok(LoopControl::Continue)
+    }
+
+    async fn handle_discovery_paste(
+        &mut self,
+        pasted: String,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let action = self
+            .discovery_view
+            .as_mut()
+            .expect("open discovery view")
+            .handle_paste(&pasted, &self.state);
+        drop(pasted);
+        self.render_pending = true;
+        match action {
+            DiscoveryAction::Refresh(action) => {
+                self.dispatch_discovery_action(action, writer, limit).await
+            }
+            _ => Ok(LoopControl::Continue),
+        }
+    }
+
+    async fn handle_git_diff_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.render_pending = true;
+        if is_escape(key) || is_ctrl_c(key) {
+            self.git_diff_view = None;
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                .await;
+        } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+            return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
+        } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
+            let card = self
+                .git_diff_view
+                .as_mut()
+                .expect("open diff")
+                .key(key.code);
+            if let Some(card) = card {
+                return self.jump_to_edit(card, writer, limit).await;
+            }
+        }
+        Ok(LoopControl::Continue)
+    }
+
+    async fn handle_context_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if is_escape(key) || is_ctrl_c(key) {
+            self.context_view = None;
+        } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+            self.render_pending = true;
+            return self.dispatch(UiAction::LoadContext, writer, limit).await;
+        } else {
+            self.context_view
+                .as_mut()
+                .expect("open context")
+                .key(key.code);
+        }
+        self.render_pending = true;
+        Ok(LoopControl::Continue)
+    }
+
+    async fn handle_help_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if is_escape(key) || is_ctrl_c(key) {
+            self.command_help = None;
+        } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
+            self.render_pending = true;
+            return self
+                .dispatch(UiAction::LoadCommandCatalog, writer, limit)
+                .await;
+        } else {
+            let rows = commands::help_rows(
+                self.state.command_catalog.as_deref(),
+                self.palette(),
+                &self.bindings,
+            )
+            .len();
+            self.command_help
+                .as_mut()
+                .expect("open help")
+                .scroll(key.code, rows);
+        }
+        self.render_pending = true;
+        Ok(LoopControl::Continue)
+    }
+
+    /// Esc or Ctrl+C closes the overlaid panel, like /diff, rather than interrupting.
+    /// Enter opens the focused row's view in its place, keeping any draft in the
+    /// composer.
+    async fn handle_side_panel_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if is_ctrl_c(key) {
+            self.side_panel.close_overlay();
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
+            return Ok(LoopControl::Continue);
+        }
+        match self.side_panel.key(key.code, &self.state) {
+            side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
+            side_panel::OverlayKey::Open(target) => {
+                self.side_panel.close_overlay();
+                self.render_pending = true;
+                return self.open_from_panel(target, writer, limit).await;
+            }
+            side_panel::OverlayKey::Moved => {}
+            side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
+        }
+        self.render_pending = true;
+        Ok(LoopControl::Continue)
+    }
+
+    /// Offers a key with no overlay open to each consumer in priority order: composer
+    /// assists, then shortcuts, then a pending decision, then the composer itself.
+    async fn handle_prompt_key(
+        &mut self,
+        key: KeyEvent,
+        decision_pending: bool,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if let Some(control) = self
+            .handle_composer_assist_key(key, decision_pending, writer, limit)
+            .await?
+        {
+            return Ok(control);
+        }
+        if let Some(control) = self
+            .handle_shortcut_key(key, decision_pending, writer, limit)
+            .await?
+        {
+            return Ok(control);
+        }
+        if self.state.view_status == ViewStatus::WaitingForApproval {
+            return self.handle_approval_key(key, writer, limit).await;
+        }
+        if self.state.view_status == ViewStatus::WaitingForTrust {
+            return self.handle_trust_key(key, writer, limit).await;
+        }
+        let action = self.bindings.action(key);
+        if matches!(action, Some(KeyAction::Submit | KeyAction::AlternateSubmit)) {
+            if let Some(command) =
+                commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
+            {
+                return self.handle_command(command, writer, limit).await;
+            }
+        }
+        if self.editor_editable() {
+            if action == Some(KeyAction::RestoreQueue) {
+                return self.restore_queue_draft(writer, limit).await;
+            }
+            return self.handle_composer_key(key, writer, limit).await;
+        }
+        if key_can_edit(key) {
+            self.report_input_unavailable();
+        }
+        Ok(LoopControl::Continue)
+    }
+
+    /// Handles keys for browse selection, extended editing, the file picker and
+    /// command completion, which come before shortcuts so a visible popup keeps them.
+    async fn handle_composer_assist_key(
+        &mut self,
+        key: KeyEvent,
+        decision_pending: bool,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<Option<LoopControl>, Error> {
+        if !decision_pending && self.browse_selected.is_some() {
+            return self.handle_browse_key(key, writer, limit).await.map(Some);
+        }
+        if self.editor_editable() && prompt_editor::is_extended_edit_key(key) {
+            if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
+                self.update_edit_notice(outcome);
+                self.render_pending |= outcome.changed;
+            }
+            self.completion.sync(&self.editor);
+            self.file_picker.sync_editor(&self.editor);
+            return Ok(Some(LoopControl::Continue));
+        }
+        if self.editor_editable() && self.handle_file_picker_key(key) {
+            return Ok(Some(LoopControl::Continue));
+        }
+        if !matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) && self.handle_completion_key(key)
+        {
+            return Ok(Some(LoopControl::Continue));
+        }
+        if !decision_pending
+            && key.code == KeyCode::Enter
+            && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)
+            && self
+                .completion
+                .view(
+                    self.state.command_catalog.as_deref(),
+                    self.state.skills.snapshot.as_deref(),
+                )
+                .is_some()
+        {
+            if let Some(command) =
+                commands::classify(self.editor.text(), self.state.command_catalog.as_deref())
+            {
+                return self.handle_command(command, writer, limit).await.map(Some);
+            }
+        }
+        Ok(None)
+    }
+
+    async fn handle_shortcut_key(
+        &mut self,
+        key: KeyEvent,
+        decision_pending: bool,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<Option<LoopControl>, Error> {
+        let action = self.bindings.action(key);
+        if !decision_pending && action == Some(KeyAction::ToggleTheme) {
+            self.theme.toggle();
+            self.finish_theme_change();
+            return Ok(Some(LoopControl::Continue));
+        }
+        if self.editor_editable() && action == Some(KeyAction::History) {
+            self.open_prompt_history();
+            return Ok(Some(LoopControl::Continue));
+        }
+        if !decision_pending && action == Some(KeyAction::Browse) {
+            self.enter_or_cycle_browse();
+            return Ok(Some(LoopControl::Continue));
+        }
+        if is_escape(key) {
+            return self.interrupt(writer, limit, false).await.map(Some);
+        }
+        if self.bound_transcript_action(key).is_some()
+            && !(decision_pending && (answers_decision(key) || self.unsendable_current_response()))
+        {
+            // A docked approval or trust prompt leaves the transcript scrollable, but
+            // never through a key the prompt itself uses.
+            return self.navigate_transcript(key, writer, limit).await.map(Some);
+        }
+        Ok(None)
+    }
+
+    async fn handle_approval_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let context_visible = self.rendered_approval_matches(self.state.pending_approval.as_ref());
+        let confirmation = self
+            .state
+            .pending_approval
+            .as_ref()
+            .is_some_and(|pending| !pending.grants_allowed);
+        let choice_keys: &[char] = if confirmation {
+            &CONFIRMATION_CHOICE_KEYS
+        } else {
+            &APPROVAL_CHOICE_KEYS
+        };
+        let key = match self.decision_choice_key(key, choice_keys) {
+            Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
+            Some(DecisionChoiceKey::Confirm(choice)) => choice,
+            None => key,
+        };
+        match approval_decision(key, self.state.pending_approval.as_ref()) {
+            Some(UiAction::ApprovalDecision { approved: true, .. }) if !context_visible => {
+                Ok(LoopControl::Continue)
+            }
+            Some(action) => self.dispatch_decision(action, writer, limit).await,
+            None if key_can_edit(key) => {
+                if !self.unsendable_current_response() {
+                    self.notice = Some(if confirmation {
+                        "Choose 1 confirm or 2 deny.".into()
+                    } else {
+                        "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into()
+                    });
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            None => Ok(LoopControl::Continue),
+        }
+    }
+
+    async fn handle_trust_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let context_visible =
+            self.rendered_trust_matches(self.state.pending_trust_request_id.as_deref());
+        let key = match self.decision_choice_key(key, &TRUST_CHOICE_KEYS) {
+            Some(DecisionChoiceKey::Handled) => return Ok(LoopControl::Continue),
+            Some(DecisionChoiceKey::Confirm(choice)) => choice,
+            None => key,
+        };
+        match trust_decision(key, self.state.pending_trust_request_id.as_deref()) {
+            Some(UiAction::TrustDecision { trusted: true, .. }) if !context_visible => {
+                Ok(LoopControl::Continue)
+            }
+            Some(action) => self.dispatch_decision(action, writer, limit).await,
+            None if key_can_edit(key) => {
+                if !self.unsendable_current_response() {
+                    self.notice = Some("Trust with y, or deny with n/Esc.".into());
+                }
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            None => Ok(LoopControl::Continue),
+        }
+    }
+
+    async fn restore_queue_draft(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.retry_deferred_queue_recovery() {
+            Ok(LoopControl::Continue)
+        } else if self.active_prompt_editable() {
+            self.dispatch_queue_action(UiAction::RestoreNewestQueueDraft, writer, limit)
+                .await
+        } else {
+            Ok(LoopControl::Continue)
+        }
+    }
+
+    async fn handle_composer_key(
+        &mut self,
+        key: KeyEvent,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        match self.bindings.action(key) {
+            Some(KeyAction::Submit | KeyAction::AlternateSubmit)
+                if self.active_prompt_editable() =>
+            {
+                let content = self.editor.text().to_owned();
+                let alternate = self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
+                // Enter queues a follow-up, so a stray Enter waits for the run
+                // instead of redirecting it; Alt+Enter steers the run now.
+                let action = match (alternate, self.editor.has_folds()) {
+                    (false, true) => UiAction::FollowUpPresented {
+                        content,
+                        presentation: self.editor.compact_text(),
+                    },
+                    (true, true) => UiAction::SteerPresented {
+                        content,
+                        presentation: self.editor.compact_text(),
+                    },
+                    (false, false) => UiAction::FollowUp(content),
+                    (true, false) => UiAction::Steer(content),
+                };
+                self.dispatch_queue_action(action, writer, limit).await
+            }
+            Some(KeyAction::Submit) => self.submit_editor(writer, limit).await,
+            Some(KeyAction::Newline | KeyAction::AlternateSubmit) => {
+                let outcome = self.editor.replace_range(self.editor.insert_range(), "\n");
+                self.update_edit_notice(outcome);
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
+            Some(_) => Ok(LoopControl::Continue),
+            // Submission/newline belong to resolved actions, never the raw
+            // editor fallback after a default has been replaced or unbound.
+            None if key.code == KeyCode::Enter
+                || (key.code == KeyCode::Char('j')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)) =>
+            {
+                Ok(LoopControl::Continue)
+            }
+            None => {
+                if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
+                    let changed = self.update_edit_notice(outcome);
+                    if outcome.changed || changed {
+                        self.render_pending = true;
+                    }
+                }
+                Ok(LoopControl::Continue)
+            }
+        }
+    }
+
+    fn handle_prompt_paste(&mut self, pasted: &str, decision_pending: bool) -> LoopControl {
+        if !decision_pending && self.browse_selected.is_some() {
+            return LoopControl::Continue;
+        }
+        if self.editor_editable() {
+            let outcome = self.editor.insert_paste(pasted);
+            let notice_changed = self.update_edit_notice(outcome);
+            if outcome.changed || notice_changed {
+                self.render_pending = true;
+            }
+            return LoopControl::Continue;
+        }
+        self.report_input_unavailable();
+        LoopControl::Continue
+    }
+
+    fn report_input_unavailable(&mut self) {
+        if !self.unsendable_current_response() {
+            self.notice = Some("Prompt input is unavailable while Wisp is busy.".into());
+        }
+        self.render_pending = true;
+    }
+
+    fn invalidate_rendered_frame(&mut self) {
+        self.mouse_frame = None;
+        self.transcript_selection = None;
+        self.rendered_overlay = None;
+        self.completion.invalidate();
+        self.file_picker.invalidate();
+        if let Some(view) = &mut self.prompt_history_view {
+            view.invalidate_selection();
+        }
+        if let Some(view) = &mut self.discovery_view {
+            view.invalidate_selection();
+        }
+        self.rendered_decision_context = None;
+        self.rendered_decision_choice = None;
+        self.rendered_model_picker = false;
+        self.render_pending = true;
     }
 }
 

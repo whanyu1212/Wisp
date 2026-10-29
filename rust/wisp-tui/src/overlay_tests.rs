@@ -1355,3 +1355,36 @@ async fn jump_follows_result_entry() {
     assert!(ui.transcript_row_cache.fold().is_expanded(second));
     assert!(!ui.transcript_row_cache.fold().is_expanded(first));
 }
+
+#[tokio::test]
+async fn bound_queue_key_opens_queue_and_requests_its_state() {
+    let mut ui = base();
+    ui.bindings = Bindings::from_json(r#"{"queue.manage":["F5"]}"#).unwrap();
+    ui.render_pending = false;
+    let (writer, mut receiver) = mpsc::channel(8);
+    ui.handle_input(key(KeyCode::F(5)), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::Queue));
+    assert!(ui.render_pending);
+    assert_eq!(command(&mut receiver)["type"], "get_queue_state");
+}
+
+#[tokio::test]
+async fn r_reloads_context_and_help_overlays() {
+    for (kind, command_type) in [
+        (OverlayKind::Context, "get_session_stats"),
+        (OverlayKind::Help, "get_commands"),
+    ] {
+        let mut ui = base();
+        open(&mut ui, kind);
+        ui.render_pending = false;
+        let (writer, mut receiver) = mpsc::channel(8);
+        ui.handle_input(key(KeyCode::Char('r')), &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(ui.active_overlay(), Some(kind));
+        assert!(ui.render_pending, "{kind:?}");
+        assert_eq!(command(&mut receiver)["type"], command_type, "{kind:?}");
+    }
+}
