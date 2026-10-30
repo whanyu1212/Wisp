@@ -13,7 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::borrow::Cow;
-use std::ops::Range;
+use std::ops::{ControlFlow, Range};
 use std::sync::OnceLock;
 use wisp_protocol::{
     commands::AgentMode,
@@ -86,42 +86,64 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         return None;
     }
     let lower = token.to_ascii_lowercase();
-    let name = lower.strip_prefix('/').unwrap_or(&lower);
-    let canonical = if matches!(lower.as_str(), "/exit" | ":q") {
-        "quit"
-    } else if lower.starts_with('/') && usage(name).is_some() && name != "init" {
-        name
-    } else if let Some(descriptor) = command_descriptors(catalog).into_iter().find(|descriptor| {
-        descriptor.slash_command.eq_ignore_ascii_case(token)
-            || descriptor
-                .slash_aliases
-                .iter()
-                .any(|alias| alias.eq_ignore_ascii_case(token))
-    }) {
-        &descriptor.name
-    } else if lower.starts_with('/') && name == "init" {
-        let message = if trimmed[token.len()..].trim().is_empty() {
-            "/init is not available from this backend."
-        } else {
-            "Usage: /init"
-        };
-        return Some(Command::Invalid(message.into()));
-    } else {
-        let bare_word = trimmed == token
-            && lower.starts_with('/')
-            && name.starts_with(|c: char| c.is_ascii_alphabetic())
-            && name.chars().all(|c| c.is_ascii_alphabetic() || c == '-');
-        return bare_word
-            .then(|| Command::Invalid(format!("Unknown command: {token}. Use /help.")));
+    let canonical = match canonical_name(trimmed, token, &lower, catalog) {
+        ControlFlow::Continue(canonical) => canonical,
+        ControlFlow::Break(command) => return command,
     };
     let Some(syntax) = usage(canonical) else {
         return Some(Command::Invalid(format!(
             "{token} is not available in the Rust TUI yet."
         )));
     };
-    let tail = &trimmed[token.len()..];
-    let normalized = format!("/{canonical}{tail}");
-    Some(match canonical {
+    Some(parse_command(canonical, &trimmed[token.len()..], syntax))
+}
+
+/// Resolves the first token to a command name, through Wisp's own names first
+/// and then the backend catalog's slash commands and aliases. Breaks with what
+/// `classify` returns for a token that names no command it can run.
+fn canonical_name<'a>(
+    trimmed: &str,
+    token: &str,
+    lower: &'a str,
+    catalog: Option<&'a [CommandDescriptor]>,
+) -> ControlFlow<Option<Command>, &'a str> {
+    let name = lower.strip_prefix('/').unwrap_or(lower);
+    if matches!(lower, "/exit" | ":q") {
+        return ControlFlow::Continue("quit");
+    }
+    if lower.starts_with('/') && usage(name).is_some() && name != "init" {
+        return ControlFlow::Continue(name);
+    }
+    if let Some(descriptor) = command_descriptors(catalog).into_iter().find(|descriptor| {
+        descriptor.slash_command.eq_ignore_ascii_case(token)
+            || descriptor
+                .slash_aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(token))
+    }) {
+        return ControlFlow::Continue(&descriptor.name);
+    }
+    if lower.starts_with('/') && name == "init" {
+        let message = if trimmed[token.len()..].trim().is_empty() {
+            "/init is not available from this backend."
+        } else {
+            "Usage: /init"
+        };
+        return ControlFlow::Break(Some(Command::Invalid(message.into())));
+    }
+    let bare_word = trimmed == token
+        && lower.starts_with('/')
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphabetic() || c == '-');
+    ControlFlow::Break(
+        bare_word.then(|| Command::Invalid(format!("Unknown command: {token}. Use /help."))),
+    )
+}
+
+/// Parses a known command's arguments. `tail` is the text after the command
+/// token and `syntax` its usage line.
+fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
+    match canonical {
         "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
         | "queue"
             if !tail.trim().is_empty() =>
@@ -133,57 +155,81 @@ pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Opt
         "init" => Command::Init,
         "history" => Command::History,
         "queue" => Command::Queue,
-        "update" => match tail.trim() {
-            "" | "check" | "install" => Command::UpdateGuidance,
-            _ => Command::Invalid("Usage: /update [check|install]".into()),
-        },
-        "theme" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Command::Theme(None),
-            [name] => match theme::resolve(name) {
-                Some(theme) => Command::Theme(Some(theme)),
-                None => Command::Invalid("Unknown theme. Use /theme to browse Wisp themes.".into()),
-            },
-            _ => Command::Invalid("Usage: /theme [name]".into()),
-        },
-        "logo" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Command::Logo(None),
-            [name] => match LogoChoice::resolve(name) {
-                Some(choice) => Command::Logo(Some(choice)),
-                None => Command::Invalid(
-                    "Unknown startup logo. Use /logo to browse available logos.".into(),
-                ),
-            },
-            _ => Command::Invalid("Usage: /logo [name]".into()),
-        },
-        "search" => match tail.trim() {
-            "" => Command::Search(None),
-            "on" => Command::Search(Some(true)),
-            "off" => Command::Search(Some(false)),
-            _ => Command::Invalid(format!("Usage: {syntax}")),
-        },
+        "update" => parse_update(tail),
+        "theme" => parse_theme(tail),
+        "logo" => parse_logo(tail),
+        "search" => parse_search(tail, syntax),
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
-        "permissions" => match tail.trim() {
-            "" => Command::Permissions(None),
-            "ask" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Ask)),
-            "yolo" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
-            _ => Command::Invalid(format!("Usage: {syntax}")),
-        },
+        "permissions" => parse_permissions(tail, syntax),
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
-        "context" => match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
-            [] => Command::Context,
-            ["auto", "on"] => Command::AutoCompaction(true),
-            ["auto", "off"] => Command::AutoCompaction(false),
-            _ => Command::Invalid(format!("Usage: {syntax}")),
-        },
+        "context" => parse_context(tail, syntax),
         "compact" => Command::Compact((!tail.trim().is_empty()).then(|| tail.trim().to_owned())),
         "quit" => Command::Quit,
-        "model" | "provider" => {
-            Command::Model(model_picker::command(&normalized).expect("known model command"))
-        }
-        _ => Command::Session(session_command(&normalized)),
-    })
+        "model" | "provider" => Command::Model(
+            model_picker::command(&format!("/{canonical}{tail}")).expect("known model command"),
+        ),
+        _ => Command::Session(session_command(&format!("/{canonical}{tail}"))),
+    }
+}
+
+fn parse_update(tail: &str) -> Command {
+    match tail.trim() {
+        "" | "check" | "install" => Command::UpdateGuidance,
+        _ => Command::Invalid("Usage: /update [check|install]".into()),
+    }
+}
+
+fn parse_theme(tail: &str) -> Command {
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Theme(None),
+        [name] => match theme::resolve(name) {
+            Some(theme) => Command::Theme(Some(theme)),
+            None => Command::Invalid("Unknown theme. Use /theme to browse Wisp themes.".into()),
+        },
+        _ => Command::Invalid("Usage: /theme [name]".into()),
+    }
+}
+
+fn parse_logo(tail: &str) -> Command {
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Logo(None),
+        [name] => match LogoChoice::resolve(name) {
+            Some(choice) => Command::Logo(Some(choice)),
+            None => Command::Invalid(
+                "Unknown startup logo. Use /logo to browse available logos.".into(),
+            ),
+        },
+        _ => Command::Invalid("Usage: /logo [name]".into()),
+    }
+}
+
+fn parse_search(tail: &str, syntax: &str) -> Command {
+    match tail.trim() {
+        "" => Command::Search(None),
+        "on" => Command::Search(Some(true)),
+        "off" => Command::Search(Some(false)),
+        _ => Command::Invalid(format!("Usage: {syntax}")),
+    }
+}
+
+fn parse_permissions(tail: &str, syntax: &str) -> Command {
+    match tail.trim() {
+        "" => Command::Permissions(None),
+        "ask" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Ask)),
+        "yolo" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
+        _ => Command::Invalid(format!("Usage: {syntax}")),
+    }
+}
+
+fn parse_context(tail: &str, syntax: &str) -> Command {
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Context,
+        ["auto", "on"] => Command::AutoCompaction(true),
+        ["auto", "off"] => Command::AutoCompaction(false),
+        _ => Command::Invalid(format!("Usage: {syntax}")),
+    }
 }
 
 pub(crate) fn is_supported_token(token: &str, catalog: Option<&[CommandDescriptor]>) -> bool {
