@@ -1388,3 +1388,205 @@ async fn r_reloads_context_and_help_overlays() {
         assert_eq!(command(&mut receiver)["type"], command_type, "{kind:?}");
     }
 }
+
+fn retained_edit(
+    ui: &mut LiveUi,
+    call_id: &str,
+    edits: serde_json::Value,
+) -> crate::transcript::TranscriptEntryId {
+    let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+        "type": "tool.call", "call_id": call_id, "name": "edit",
+        "arguments": {"path": "file.txt", "edits": edits}
+    }))
+    .unwrap() else {
+        panic!("tool call")
+    };
+    let id = ui.state.transcript.observe_tool_call(call);
+    let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+        "type": "tool.result", "message_entry_id": null, "call_id": call_id, "name": "edit",
+        "output": "Applied edits", "is_error": false
+    }))
+    .unwrap() else {
+        panic!("tool result")
+    };
+    ui.state.transcript.observe_tool_result(*result);
+    id
+}
+
+fn open_detail(ui: &mut LiveUi, id: crate::transcript::TranscriptEntryId) {
+    let detail = retained_detail(&ui.state, id).unwrap().clone();
+    ui.detail_view.open(id, &detail);
+    ui.browse_selected = Some(BrowseTarget::Entry(id));
+}
+
+async fn press(ui: &mut LiveUi, code: KeyCode) {
+    let (writer, mut received) = mpsc::channel(8);
+    ui.render_pending = false;
+    ui.handle_input(key(code), &writer, 8192).await.unwrap();
+    assert!(received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn diff_keys_scroll_and_jump() {
+    let mut ui = base();
+    let lines = |prefix: &str| {
+        (0..20)
+            .map(|n| format!("{prefix} {n}\n"))
+            .collect::<Vec<_>>()
+            .concat()
+    };
+    let id = retained_edit(
+        &mut ui,
+        "edit-hunks",
+        json!([
+            {"oldText": lines("old a"), "newText": lines("new a")},
+            {"oldText": lines("old b"), "newText": lines("new b")},
+        ]),
+    );
+    open_detail(&mut ui, id);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    let top = |ui: &LiveUi| ui.detail_view.review.top_key().unwrap();
+    let first = top(&ui);
+
+    press(&mut ui, KeyCode::Down).await;
+    assert!(ui.render_pending);
+    let second = top(&ui);
+    assert!(second > first);
+    press(&mut ui, KeyCode::Down).await;
+    press(&mut ui, KeyCode::Up).await;
+    assert_eq!(top(&ui), second);
+    press(&mut ui, KeyCode::PageDown).await;
+    let paged = top(&ui);
+    assert!(paged > second);
+    press(&mut ui, KeyCode::PageUp).await;
+    assert_eq!(top(&ui), second);
+    press(&mut ui, KeyCode::End).await;
+    assert!(top(&ui) > paged);
+    press(&mut ui, KeyCode::Home).await;
+    assert_eq!(top(&ui), first);
+
+    assert_eq!(ui.detail_view.review.hunk_position(), Some((1, 2)));
+    press(&mut ui, KeyCode::Char(']')).await;
+    assert_eq!(ui.detail_view.review.hunk_position(), Some((2, 2)));
+    press(&mut ui, KeyCode::Char('[')).await;
+    assert_eq!(ui.detail_view.review.hunk_position(), Some((1, 2)));
+
+    press(&mut ui, KeyCode::Char('x')).await;
+    assert!(!ui.render_pending);
+    press(&mut ui, KeyCode::Esc).await;
+    assert!(ui.render_pending);
+    assert!(!ui.detail_view.is_open());
+}
+
+#[tokio::test]
+async fn tab_cycles_retained_edits() {
+    let mut ui = base();
+    let edits = ["a", "b", "c"].map(|name| {
+        retained_edit(
+            &mut ui,
+            &format!("edit-{name}"),
+            json!([{"oldText": "old\n", "newText": format!("{name}\n")}]),
+        )
+    });
+    open_detail(&mut ui, edits[1]);
+    for (code, expected) in [
+        (KeyCode::Tab, 2),
+        (KeyCode::Tab, 0),
+        (KeyCode::BackTab, 2),
+        (KeyCode::BackTab, 1),
+    ] {
+        press(&mut ui, code).await;
+        assert_eq!(ui.detail_view.selected_entry(), Some(edits[expected]));
+        assert_eq!(
+            ui.browse_selected,
+            Some(BrowseTarget::Entry(edits[expected]))
+        );
+    }
+}
+
+#[tokio::test]
+async fn plain_detail_keys_scroll() {
+    let mut ui = base();
+    let target = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: "read-long".into(),
+            name: "read".into(),
+            arguments: json!({"path":"README.md"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    let presentation = ToolDetailPresentation {
+        kind: tool_detail::DetailPresentationKind::Read,
+        title: "README.md".into(),
+        summary: "retained detail".into(),
+        additions: 0,
+        deletions: 0,
+        rows: (0..60)
+            .map(|key| tool_detail::DetailRow {
+                key,
+                kind: tool_detail::DetailRowKind::ReadLine,
+                text: format!("line {key}"),
+                old_line: None,
+                new_line: Some(key + 1),
+                hidden_rows: 0,
+                hidden_bytes: 0,
+            })
+            .collect(),
+        truncated: false,
+    };
+    ui.detail_view.open(target, &presentation);
+    ui.state.history.active_exact_detail = Some(reducer::ActiveExactDetail {
+        target,
+        presentation,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    let top = |ui: &mut LiveUi| {
+        let presentation = &ui
+            .state
+            .history
+            .active_exact_detail
+            .as_ref()
+            .unwrap()
+            .presentation;
+        ui.detail_view.visible_rows(presentation)[0].anchor.row_key
+    };
+
+    press(&mut ui, KeyCode::Down).await;
+    assert!(ui.render_pending);
+    assert_eq!(top(&mut ui), 1);
+    press(&mut ui, KeyCode::Down).await;
+    press(&mut ui, KeyCode::Up).await;
+    assert_eq!(top(&mut ui), 1);
+    press(&mut ui, KeyCode::PageDown).await;
+    let paged = top(&mut ui);
+    assert!(paged > 1);
+    press(&mut ui, KeyCode::PageUp).await;
+    assert_eq!(top(&mut ui), 1);
+    press(&mut ui, KeyCode::End).await;
+    assert!(top(&mut ui) > paged);
+    press(&mut ui, KeyCode::Home).await;
+    assert_eq!(top(&mut ui), 0);
+    press(&mut ui, KeyCode::Char('x')).await;
+    assert!(!ui.render_pending);
+}
+
+#[tokio::test]
+async fn detail_closes_when_rows_vanish() {
+    let mut ui = base();
+    open(&mut ui, OverlayKind::Detail);
+    ui.state.history.active_exact_detail = None;
+    ui.browse_selected = ui.detail_view.selected_entry().map(BrowseTarget::Entry);
+
+    press(&mut ui, KeyCode::Down).await;
+
+    assert!(ui.render_pending);
+    assert!(!ui.detail_view.is_open());
+    assert_eq!(ui.browse_selected, None);
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Retained detail is no longer available.")
+    );
+}

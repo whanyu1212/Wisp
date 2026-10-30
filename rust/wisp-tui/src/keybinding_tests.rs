@@ -676,3 +676,55 @@ async fn rebound_browse_enter_keeps_fixed_detail_activation() {
     assert!(!ui.detail_view.is_open());
     assert!(received.try_recv().is_err());
 }
+
+#[test]
+fn help_leads_with_its_owner() {
+    use key_help::{KeyHelp, Owner};
+    let bindings = Bindings::default();
+    let shortcut = bindings.help_entries()[0].description;
+    let cases = [
+        (Owner::Composer, "Editor:"),
+        (Owner::Browse, "Browse:"),
+        (Owner::Files, "Files:"),
+        (Owner::Completion, "Completion:"),
+        (Owner::Overlay(OverlayKind::GitDiff), "Diff:"),
+        (Owner::Overlay(OverlayKind::Connection), "Connections:"),
+        (Owner::Overlay(OverlayKind::Model), "Models:"),
+        (Owner::Overlay(OverlayKind::Theme), "Themes:"),
+        (Owner::Overlay(OverlayKind::Logo), "Startup logos:"),
+        (Owner::Overlay(OverlayKind::PromptHistory), "History:"),
+        (Owner::Overlay(OverlayKind::SessionTree), "Tree:"),
+        (Owner::Overlay(OverlayKind::Session), "Sessions:"),
+        (Owner::Overlay(OverlayKind::Discovery), "Skills/MCP:"),
+        (Owner::Overlay(OverlayKind::Queue), "Queues:"),
+        (
+            Owner::Overlay(OverlayKind::Context),
+            "Up/Down/Page/Home/End scroll",
+        ),
+        (
+            Owner::Overlay(OverlayKind::Help),
+            "Up/Down/Page/Home/End scroll",
+        ),
+        (Owner::Overlay(OverlayKind::SidePanel), "Side panel:"),
+        (Owner::Overlay(OverlayKind::Detail), "Details:"),
+        (
+            Owner::Decision(RenderedDecisionContext::Approval("call".into())),
+            "Approval:",
+        ),
+        (
+            Owner::Decision(RenderedDecisionContext::Trust("request".into())),
+            "Project trust:",
+        ),
+    ];
+    for (owner, lead) in cases {
+        let decision = matches!(owner, Owner::Decision(_));
+        let rows = KeyHelp::new(owner)
+            .rows(&bindings)
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(rows[1].starts_with(lead), "{lead}: {rows:?}");
+        let lists_shortcuts = rows.iter().any(|row| row.ends_with(shortcut));
+        assert_eq!(lists_shortcuts, !decision, "{lead}: {rows:?}");
+    }
+}

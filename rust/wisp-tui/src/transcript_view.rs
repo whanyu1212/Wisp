@@ -8801,4 +8801,288 @@ mod tests {
                 .all(|row| UnicodeWidthStr::width(row.as_str()) <= 4)
         );
     }
+
+    fn normalized(
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        entry_id: TranscriptEntryId,
+        position: RowPosition,
+        width: usize,
+    ) -> Option<RowAnchor> {
+        normalize_anchor(
+            transcript,
+            cache,
+            RowAnchor { entry_id, position },
+            width,
+            AnchorNormalization::Content,
+        )
+    }
+
+    fn entry_rows(
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        entry_id: TranscriptEntryId,
+        width: usize,
+    ) -> Vec<RowAnchor> {
+        let top = RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        };
+        collect_rows(transcript, cache, top, width, 200)
+            .into_iter()
+            .map(|row| row.anchor)
+            .take_while(|anchor| anchor.entry_id == entry_id)
+            .collect()
+    }
+
+    #[test]
+    fn stale_gap_rows_find_neighbours() {
+        let mut transcript = Transcript::default();
+        let prompt = transcript.append_prompt("first".into());
+        let reply = transcript.complete_message(1, "done".into()).unwrap();
+        let mut cache = TranscriptRowCache::default();
+        let end = cache.last_anchor(&transcript, transcript.entry(reply).unwrap(), 40);
+        let lead_out = RowAnchor {
+            entry_id: prompt,
+            position: RowPosition::UserLeadOut,
+        };
+        assert_eq!(
+            normalized(
+                &transcript,
+                &mut cache,
+                prompt,
+                RowPosition::UserLeadOut,
+                40
+            ),
+            Some(lead_out)
+        );
+        for position in [
+            RowPosition::UserLeadIn,
+            RowPosition::UserLeadOut,
+            RowPosition::RunSummary,
+        ] {
+            assert_eq!(
+                normalized(&transcript, &mut cache, reply, position, 40),
+                Some(end),
+                "{position:?}"
+            );
+        }
+
+        transcript.append_prompt("second".into());
+        let lead_in = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::UserLeadIn,
+        };
+        let spacer = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Spacer,
+        };
+        assert_eq!(
+            normalized(&transcript, &mut cache, reply, RowPosition::UserLeadIn, 40),
+            Some(lead_in)
+        );
+        for position in [RowPosition::UserLeadOut, RowPosition::RunSummary] {
+            assert_eq!(
+                normalized(&transcript, &mut cache, reply, position, 40),
+                Some(spacer),
+                "{position:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mid_character_offset_keeps_row() {
+        let mut transcript = Transcript::default();
+        let prompt = transcript.append_prompt("é".repeat(40));
+        let mut cache = TranscriptRowCache::default();
+        let content = entry_rows(&transcript, &mut cache, prompt, 10)
+            .into_iter()
+            .filter(|anchor| matches!(anchor.position, RowPosition::Content(_)))
+            .collect::<Vec<_>>();
+        for row in [content[0], content[2]] {
+            let RowPosition::Content(start) = row.position else {
+                unreachable!()
+            };
+            assert_eq!(
+                normalized(
+                    &transcript,
+                    &mut cache,
+                    prompt,
+                    RowPosition::Content(start + 1),
+                    10
+                ),
+                Some(row)
+            );
+        }
+    }
+
+    #[test]
+    fn card_rows_normalize_to_themselves() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("probe".into());
+        let bash = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "bash-1".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "cargo test --workspace --all-features"}),
+        });
+        let mut done = tool_result("bash-1", "one\ntwo");
+        done.name = "bash".into();
+        done.exit_code = Some(0);
+        transcript.observe_tool_result(done);
+        let failed = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "bash-2".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"command": "false"}),
+        });
+        let mut failure = tool_result("bash-2", "Command exited with code 1: boom\nmore");
+        failure.name = "bash".into();
+        failure.exit_code = Some(1);
+        failure.is_error = true;
+        failure.output_has_exit_status = true;
+        transcript.observe_tool_result(failure);
+        let crate::reducer::BackendEvent::ToolCall(call) =
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.call", "call_id": "edit-1", "name": "edit",
+                "arguments": {"path": "a.rs", "edits": [{"oldText": "old\n", "newText": "new\n"}]}
+            }))
+            .unwrap()
+        else {
+            panic!("tool call")
+        };
+        let edit = transcript.observe_tool_call(call);
+        let crate::reducer::BackendEvent::ToolResult(edited) =
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result", "message_entry_id": null, "call_id": "edit-1",
+                "name": "edit", "output": "Applied 1 edit", "is_error": false
+            }))
+            .unwrap()
+        else {
+            panic!("tool result")
+        };
+        transcript.observe_tool_result(*edited);
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(bash);
+        cache.fold_mut().expand(failed);
+
+        // The edit stays collapsed: its diff preview shows inline. The failed
+        // command closes with an exit-status footer.
+        for card in [bash, failed, edit] {
+            let rows = entry_rows(&transcript, &mut cache, card, 12);
+            assert!(
+                rows.iter()
+                    .any(|anchor| matches!(anchor.position, RowPosition::Card(_))),
+                "{rows:?}"
+            );
+            for row in rows {
+                assert_eq!(
+                    normalized(&transcript, &mut cache, card, row.position, 12),
+                    Some(row)
+                );
+            }
+        }
+        let header = |entry_id| RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        };
+        let action_start = RowPosition::Card(CardPosition {
+            section: CardSection::Action,
+            absolute_byte_offset: 0,
+        });
+        assert_eq!(
+            normalized(&transcript, &mut cache, bash, action_start, 12),
+            Some(header(bash))
+        );
+        // The edit card shows no metadata, so a metadata anchor resumes at its header.
+        let metadata = RowPosition::Card(CardPosition {
+            section: CardSection::Metadata,
+            absolute_byte_offset: 0,
+        });
+        assert_eq!(
+            normalized(&transcript, &mut cache, edit, metadata, 12),
+            Some(header(edit))
+        );
+    }
+
+    #[test]
+    fn markdown_past_end_keeps_last_row() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("probe".into());
+        let reply = transcript
+            .complete_message(1, "alpha beta gamma delta epsilon zeta eta theta".into())
+            .unwrap();
+        let mut cache = TranscriptRowCache::default();
+        let last = *entry_rows(&transcript, &mut cache, reply, 12)
+            .last()
+            .unwrap();
+        let past = RowAnchor {
+            entry_id: reply,
+            position: RowPosition::Markdown(MarkdownPosition {
+                source_offset: 9999,
+                output_offset: 9999,
+                block_gap_offset: None,
+            }),
+        };
+        assert_eq!(
+            normalize_anchor(
+                &transcript,
+                &mut cache,
+                past,
+                12,
+                AnchorNormalization::Geometry
+            ),
+            Some(last)
+        );
+    }
+
+    #[test]
+    fn grouped_cards_resume_at_header() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("explore".into());
+        let [first, second] = ["a.rs", "b.rs"].map(|path| {
+            let id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: path.into(),
+                name: "read".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({ "path": path }),
+            });
+            transcript.observe_tool_result(tool_result(path, "contents"));
+            id
+        });
+        let header = |entry_id| RowAnchor {
+            entry_id,
+            position: RowPosition::Header,
+        };
+        let detail = RowPosition::Card(CardPosition {
+            section: CardSection::Detail,
+            absolute_byte_offset: 0,
+        });
+        let action = RowPosition::Card(CardPosition {
+            section: CardSection::Action,
+            absolute_byte_offset: 0,
+        });
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(second);
+        // A collapsed group draws every member from its header.
+        assert_eq!(
+            normalized(&transcript, &mut cache, second, detail, 60),
+            Some(header(first))
+        );
+        assert_eq!(
+            normalized(&transcript, &mut cache, second, RowPosition::UserLeadIn, 60),
+            Some(header(first))
+        );
+
+        cache.fold_mut().expand_group(first);
+        cache.fold_mut().expand(first);
+        assert_eq!(
+            normalized(&transcript, &mut cache, first, action, 60),
+            Some(card_action_anchor(first))
+        );
+        assert_eq!(
+            normalized(&transcript, &mut cache, second, action, 60),
+            Some(header(second))
+        );
+    }
 }
