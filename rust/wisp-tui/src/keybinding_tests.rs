@@ -839,7 +839,10 @@ async fn browse_paste_is_ignored() {
 #[tokio::test]
 async fn busy_paste_explains_why() {
     let (writer, _receiver) = mpsc::channel(8);
-    let mut ui = LiveUi::default();
+    let mut ui = LiveUi {
+        render_pending: false,
+        ..LiveUi::default()
+    };
     ui.state.current_command = Some(reducer::ActiveCommand {
         id: "prompt-1".into(),
         command_type: reducer::ActiveCommandType::Prompt,
@@ -856,4 +859,26 @@ async fn busy_paste_explains_why() {
         ui.notice.as_deref(),
         Some("Prompt input is unavailable while Wisp is busy.")
     );
+    assert!(ui.render_pending);
+}
+
+#[tokio::test]
+async fn shortcuts_request_a_frame() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let cases = [
+        ("focus panel", press(KeyCode::F(8), KeyModifiers::NONE)),
+        ("toggle panel", ctrl('b')),
+        ("newline", press(KeyCode::Enter, KeyModifiers::SHIFT)),
+        ("redraw", Input::Redraw),
+    ];
+    for (name, input) in cases {
+        let mut ui = LiveUi {
+            render_pending: false,
+            ..LiveUi::default()
+        };
+        ui.handle_input(input, &writer, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        assert!(ui.render_pending, "{name}");
+    }
 }

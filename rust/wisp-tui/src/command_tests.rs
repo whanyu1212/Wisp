@@ -997,9 +997,11 @@ async fn decisions_explain_their_keys() {
         ),
         (trust, "Trust with y, or deny with n/Esc."),
     ] {
+        ui.render_pending = false;
         ui.handle_input(key(KeyCode::Char('x')), &writer, 8192)
             .await
             .unwrap();
         assert_eq!(ui.notice.as_deref(), Some(notice));
+        assert!(ui.render_pending, "{notice}");
     }
 }

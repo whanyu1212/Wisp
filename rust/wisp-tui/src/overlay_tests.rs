@@ -1669,3 +1669,167 @@ async fn idle_queue_ctrl_c_quits() {
     let control = ui.handle_input(ctrl_c(), &writer, 8192).await.unwrap();
     assert_eq!(control, LoopControl::Exit);
 }
+
+#[tokio::test]
+async fn effects_request_a_frame() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let idle: fn(&mut LiveUi) = |_| {};
+    let connection: fn(&mut LiveUi) = |ui| open(ui, OverlayKind::Connection);
+    let device_code: fn(&mut LiveUi) = |ui| {
+        open(ui, OverlayKind::Connection);
+        let panel = ui.connection_panel.as_mut().unwrap();
+        panel.begin_device_code("openai".into());
+    };
+    let prompt_history: fn(&mut LiveUi) = |ui| open(ui, OverlayKind::PromptHistory);
+    let cases = [
+        (
+            "show connection",
+            idle,
+            UiEffect::ShowConnectionPanel(catalog("openai")),
+        ),
+        (
+            "connection catalog",
+            connection,
+            UiEffect::ConnectionCatalogUpdated(catalog("anthropic")),
+        ),
+        ("show model picker", idle, UiEffect::ShowModelPicker),
+        (
+            "model catalog",
+            idle,
+            UiEffect::ModelCatalogUpdated(model_picker::tests::catalog()),
+        ),
+        ("project files", idle, UiEffect::ProjectFilesChanged),
+        ("mode applied", idle, UiEffect::ModeConfigurationApplied),
+        ("model applied", idle, UiEffect::ModelConfigurationApplied),
+        (
+            "device code",
+            device_code,
+            UiEffect::ShowDeviceCode(wisp_protocol::events::DeviceCodeChallenge {
+                provider: "openai".into(),
+                verification_uri: "https://example.invalid/device".into(),
+                user_code: "CODE".into(),
+            }),
+        ),
+        (
+            "device progress",
+            connection,
+            UiEffect::DeviceCodeProgress(wisp_protocol::events::DeviceCodeProgress {
+                provider: "openai".into(),
+                attempt: 2,
+            }),
+        ),
+        ("finish device code", connection, UiEffect::FinishDeviceCode),
+        (
+            "catalog started",
+            idle,
+            UiEffect::SessionCatalogStarted("get_sessions-1".into()),
+        ),
+        (
+            "catalog failed",
+            idle,
+            UiEffect::SessionCatalogFailed {
+                command_id: "get_sessions-1".into(),
+                error: "failed".into(),
+            },
+        ),
+        (
+            "session picker",
+            idle,
+            UiEffect::ShowSessionPicker {
+                command_id: "get_sessions-1".into(),
+                navigation: reducer::CatalogNavigation::default(),
+                sessions: vec![session("one")],
+                selected_session_id: None,
+            },
+        ),
+        (
+            "tree page",
+            idle,
+            UiEffect::ShowSessionTreePage {
+                page: tree("entry-1"),
+                append: false,
+            },
+        ),
+        ("close tree", idle, UiEffect::CloseSessionTree),
+        (
+            "history window",
+            idle,
+            UiEffect::HistoryWindowChanged { older: true },
+        ),
+        ("history failed", idle, UiEffect::HistoryRequestFailed),
+        ("notice", idle, UiEffect::Notice("note".into())),
+        ("diagnostic", idle, UiEffect::Diagnostic("warning".into())),
+        (
+            "oversized stats",
+            idle,
+            UiEffect::SendCommand(
+                WispTypedClientRpcCommands::get_session_stats("get_session_stats-1").unwrap(),
+            ),
+        ),
+        (
+            "prompt history",
+            prompt_history,
+            UiEffect::RecordPromptHistory("newer prompt".into()),
+        ),
+        (
+            "queued draft",
+            idle,
+            UiEffect::RestoreDraft {
+                content: "queued".into(),
+                local_order: None,
+            },
+        ),
+        (
+            "session draft",
+            idle,
+            UiEffect::RestoreSessionDraft("restored".into()),
+        ),
+    ];
+    for (name, prepare, effect) in cases {
+        let mut ui = base();
+        prepare(&mut ui);
+        ui.render_pending = false;
+        // Only the stats command is sent, and this limit makes it oversized.
+        ui.apply_effects(vec![effect], &writer, 8).await.unwrap();
+        assert!(ui.render_pending, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn overlay_keys_request_a_frame() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let paste = || Input::Paste("text".into());
+    let cases = [
+        ("unpainted enter", OverlayKind::Session, key(KeyCode::Enter)),
+        ("history paste", OverlayKind::PromptHistory, paste()),
+        ("connection paste", OverlayKind::Connection, paste()),
+        ("queue", OverlayKind::Queue, key(KeyCode::Down)),
+        ("logo", OverlayKind::Logo, key(KeyCode::Down)),
+        ("discovery", OverlayKind::Discovery, key(KeyCode::Down)),
+        ("diff", OverlayKind::GitDiff, key(KeyCode::Down)),
+        ("context scroll", OverlayKind::Context, key(KeyCode::Down)),
+        ("help scroll", OverlayKind::Help, key(KeyCode::Down)),
+        ("panel ctrl+c", OverlayKind::SidePanel, ctrl_c()),
+        ("panel escape", OverlayKind::SidePanel, key(KeyCode::Esc)),
+    ];
+    for (name, kind, input) in cases {
+        let mut ui = base();
+        open(&mut ui, kind);
+        ui.render_pending = false;
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+        assert!(ui.render_pending, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn help_reload_while_loading_renders() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = base();
+    open(&mut ui, OverlayKind::Help);
+    reducer::reduce(&mut ui.state, UiAction::LoadCommandCatalog, &mut ui.ids).unwrap();
+    ui.render_pending = false;
+    ui.handle_input(key(KeyCode::Char('r')), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.render_pending);
+}
