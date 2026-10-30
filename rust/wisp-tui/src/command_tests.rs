@@ -971,3 +971,35 @@ async fn tool_browsing_hides_completion_until_composer_regains_focus() {
         .unwrap();
     assert!(draw(&mut ui, 80, 24).contains("Describe model"));
 }
+
+#[tokio::test]
+async fn diff_command_reads_changes() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/diff", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.git_diff_view.is_some());
+    assert_eq!(frame(&mut receiver)["type"], "get_git_diff");
+}
+
+#[tokio::test]
+async fn decisions_explain_their_keys() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut trust = ui("", true);
+    trust.state.view_status = ViewStatus::WaitingForTrust;
+    trust.state.pending_trust_request_id = Some("trust-1".into());
+    trust.state.pending_trust_project_path = Some("/project".into());
+    for (mut ui, notice) in [
+        (
+            approval_ui(),
+            "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.",
+        ),
+        (trust, "Trust with y, or deny with n/Esc."),
+    ] {
+        ui.handle_input(key(KeyCode::Char('x')), &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(ui.notice.as_deref(), Some(notice));
+    }
+}

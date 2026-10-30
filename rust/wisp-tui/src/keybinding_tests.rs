@@ -728,3 +728,132 @@ fn help_leads_with_its_owner() {
         assert_eq!(lists_shortcuts, !decision, "{lead}: {rows:?}");
     }
 }
+
+fn press(code: KeyCode, modifiers: KeyModifiers) -> Input {
+    Input::Key(KeyEvent::new(code, modifiers))
+}
+
+#[tokio::test]
+async fn help_holds_global_shortcuts() {
+    let (writer, mut receiver) = mpsc::channel(8);
+    for (code, modifiers) in [
+        (KeyCode::Char('t'), KeyModifiers::ALT),
+        (KeyCode::F(8), KeyModifiers::NONE),
+        (KeyCode::Char('t'), KeyModifiers::CONTROL),
+        (KeyCode::F(9), KeyModifiers::NONE),
+    ] {
+        let mut ui = configured(r#"{"theme.toggle":["alt+t"],"queue.manage":["f9"]}"#);
+        ui.state.selected_session = Some(reducer::SessionIdentity {
+            session_id: "session".into(),
+            session_path: "/sessions/session.jsonl".into(),
+            session_name: None,
+        });
+        ui.command_help = Some(Help::default());
+        let theme = ui.theme.active.name.clone();
+        ui.handle_input(press(code, modifiers), &writer, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        assert_eq!(ui.theme.active.name, theme, "{code:?}");
+        assert!(!ui.side_panel.overlay_open(), "{code:?}");
+        assert!(ui.queue_view.is_none(), "{code:?}");
+        assert!(receiver.try_recv().is_err(), "{code:?}");
+    }
+}
+
+#[tokio::test]
+async fn idle_escape_does_not_quit() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = LiveUi::default();
+    let escape = ui
+        .handle_input(
+            press(KeyCode::Esc, KeyModifiers::NONE),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+    assert_eq!(escape, LoopControl::Continue);
+    let interrupt = ui
+        .handle_input(ctrl('c'), &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert_eq!(interrupt, LoopControl::Exit);
+}
+
+#[tokio::test]
+async fn plain_j_types_and_renders() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = LiveUi {
+        render_pending: false,
+        ..LiveUi::default()
+    };
+    ui.handle_input(
+        press(KeyCode::Char('j'), KeyModifiers::NONE),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.text(), "j");
+    assert!(ui.render_pending);
+}
+
+#[tokio::test]
+async fn idle_paste_renders() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = LiveUi {
+        render_pending: false,
+        ..LiveUi::default()
+    };
+    ui.handle_input(
+        Input::Paste("abc".into()),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.text(), "abc");
+    assert!(ui.render_pending);
+}
+
+#[tokio::test]
+async fn browse_paste_is_ignored() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = LiveUi::default();
+    ui.state.transcript.append_prompt("earlier".into());
+    ui.browse_selected = ui
+        .state
+        .transcript
+        .latest_user_entry()
+        .map(BrowseTarget::Entry);
+    ui.handle_input(
+        Input::Paste("abc".into()),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.editor.text(), "");
+}
+
+#[tokio::test]
+async fn busy_paste_explains_why() {
+    let (writer, _receiver) = mpsc::channel(8);
+    let mut ui = LiveUi::default();
+    ui.state.current_command = Some(reducer::ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: reducer::ActiveCommandType::Prompt,
+    });
+    ui.state.view_status = ViewStatus::Running;
+    ui.handle_input(
+        Input::Paste("abc".into()),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Prompt input is unavailable while Wisp is busy.")
+    );
+}
