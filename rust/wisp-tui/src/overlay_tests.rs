@@ -1590,3 +1590,82 @@ async fn detail_closes_when_rows_vanish() {
         Some("Retained detail is no longer available.")
     );
 }
+
+fn with_alt(code: KeyCode) -> Input {
+    Input::Key(KeyEvent::new(code, KeyModifiers::ALT))
+}
+
+#[tokio::test]
+async fn diff_r_refreshes() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    ui.handle_input(key(KeyCode::Char('r')), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.state.git_diff.loading());
+}
+
+#[tokio::test]
+async fn diff_ignores_modified_keys() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+    let mut ui = base();
+    ui.state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"path": "src/lib.rs", "edits": []}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    ui.state.git_diff.snapshot = Some(edited_snapshot());
+    ui.git_diff_view = Some(git_diff_view::GitDiffView::default());
+    draw(&mut ui, &mut terminal);
+    // Unmodified, these keys open the file and jump to its card.
+    for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Enter] {
+        ui.handle_input(with_alt(code), &writer, 8192)
+            .await
+            .unwrap();
+    }
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+}
+
+#[tokio::test]
+async fn context_arrows_do_not_reload() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.context_view = Some(context_view::ContextView::default());
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    ui.handle_input(key(KeyCode::Char('r')), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(command(&mut receiver)["type"], "get_session_stats");
+}
+
+#[tokio::test]
+async fn panel_ignores_modified_escape() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    open(&mut ui, OverlayKind::SidePanel);
+    ui.handle_input(with_alt(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.side_panel.overlay_open());
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(!ui.side_panel.overlay_open());
+}
+
+#[tokio::test]
+async fn idle_queue_ctrl_c_quits() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = base();
+    open(&mut ui, OverlayKind::Queue);
+    let control = ui.handle_input(ctrl_c(), &writer, 8192).await.unwrap();
+    assert_eq!(control, LoopControl::Exit);
+}

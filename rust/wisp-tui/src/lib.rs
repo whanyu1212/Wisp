@@ -11177,4 +11177,141 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, Error::FrontendVersionMismatch { .. }));
     }
+
+    fn get_commands() -> (serde_json::Value, usize) {
+        let value = json!({"type": "get_commands", "id": "get_commands-1"});
+        let len = serde_json::to_vec(&value).unwrap().len();
+        (value, len)
+    }
+
+    #[tokio::test]
+    async fn command_at_limit_is_sent() {
+        let (writer, mut receiver) = mpsc::channel(8);
+        let mut ui = LiveUi::default();
+        let (value, limit) = get_commands();
+        assert!(
+            ui.send_command(value, &writer, limit)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(receiver.try_recv().is_ok());
+        let (value, limit) = get_commands();
+        ui.send_or_reject_oversized(value, &writer, limit, |command_id| {
+            UiAction::RejectCommittedHydration { command_id, limit }
+        })
+        .await
+        .unwrap();
+        assert!(receiver.try_recv().is_ok());
+    }
+
+    #[test]
+    fn oversized_configure_rejections() {
+        let mut ui = LiveUi::default();
+        for (field, finishes) in [
+            ("mode", true),
+            ("auto_compaction_enabled", true),
+            ("web_search", true),
+            ("model", false),
+        ] {
+            let mut value = json!({"type": "configure", "id": "configure-1"});
+            value[field] = json!(true);
+            let rejection = ui.oversized_command_rejection(&value, 8);
+            assert_eq!(
+                matches!(
+                    rejection,
+                    Some(UiAction::BackendEvent(BackendEvent::CommandFinished { .. }))
+                ),
+                finishes,
+                "{field}"
+            );
+            assert_eq!(
+                matches!(rejection, Some(UiAction::RejectModelRequest { .. })),
+                !finishes,
+                "{field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn restored_drafts_report_controls() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let queued = |content: &str| UiEffect::RestoreDraft {
+            content: content.into(),
+            local_order: None,
+        };
+        let cases = [
+            (queued("plain"), None, true),
+            (
+                queued("a\u{1b}b"),
+                Some("Restored queued text after ignoring 1 unsafe terminal control character(s)."),
+                true,
+            ),
+            (UiEffect::RestoreSessionDraft("plain".into()), None, false),
+        ];
+        for (effect, notice, recovered) in cases {
+            let mut ui = LiveUi::default();
+            ui.apply_effects(vec![effect], &writer, MAX_APPLICATION_FRAME_BYTES)
+                .await
+                .unwrap();
+            assert_eq!(ui.notice.as_deref(), notice);
+            assert_eq!(ui.recovered_queue_recovery, recovered);
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostic_fills_notice_exactly() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let mut ui = LiveUi::default();
+        ui.apply_effects(vec![UiEffect::Diagnostic("x".repeat(1025))], &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(ui.notice.as_deref(), Some("x".repeat(1024).as_str()));
+    }
+
+    #[tokio::test]
+    async fn session_commands_wait_when_busy() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let idle: fn(&mut UiState) = |_| {};
+        let cases = [
+            (idle, false),
+            (
+                |state| {
+                    state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+                        command_id: "get_session_tree-1".into(),
+                        after_entry_id: None,
+                        page: None,
+                        completion: None,
+                    })
+                },
+                true,
+            ),
+            (
+                |state| {
+                    state.current_command = Some(ActiveCommand {
+                        id: "prompt-1".into(),
+                        command_type: ActiveCommandType::Prompt,
+                    })
+                },
+                true,
+            ),
+            (|state| state.input_ready = false, true),
+            (|state| state.view_status = ViewStatus::Running, true),
+        ];
+        for (make_busy, waits) in cases {
+            let mut ui = LiveUi {
+                state: UiState::new("fake".into(), None, None),
+                ..LiveUi::default()
+            };
+            make_busy(&mut ui.state);
+            ui.handle_session_command(SessionCommand::ResumeCatalog, &writer, 8192)
+                .await
+                .unwrap();
+            assert_eq!(
+                ui.notice.as_deref()
+                    == Some("Wait for the current operation before using session commands."),
+                waits
+            );
+        }
+    }
 }
