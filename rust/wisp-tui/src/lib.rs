@@ -11314,4 +11314,90 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn commands_request_a_frame() {
+        let (writer, _receiver) = mpsc::channel(64);
+        // A repeated load that is already in flight reduces to no effects, so the
+        // command itself must request the frame that shows its view.
+        fn loading(ui: &mut LiveUi, action: UiAction) {
+            reducer::reduce(&mut ui.state, action, &mut ui.ids).unwrap();
+        }
+        let idle: fn(&mut LiveUi) = |_| {};
+        let help: fn(&mut LiveUi) = |ui| loading(ui, UiAction::LoadCommandCatalog);
+        let permissions: fn(&mut LiveUi) = |ui| loading(ui, UiAction::Permissions(None));
+        let skills: fn(&mut LiveUi) = |ui| loading(ui, UiAction::LoadSkills);
+        let session: fn(&mut LiveUi) = |ui| {
+            ui.state.selected_session = Some(reducer::SessionIdentity {
+                session_id: "session".into(),
+                session_path: "/sessions/session.jsonl".into(),
+                session_name: None,
+            })
+        };
+        let busy: fn(&mut LiveUi) = |ui| ui.state.view_status = ViewStatus::Running;
+        let cases = [
+            ("oversized init", idle, Command::Init, 8),
+            ("help while loading", help, Command::Help, 8192),
+            (
+                "permissions while loading",
+                permissions,
+                Command::Permissions(None),
+                8192,
+            ),
+            ("skills while loading", skills, Command::Skills, 8192),
+            ("oversized compact", session, Command::Compact(None), 8),
+            ("invalid", idle, Command::Invalid("Unknown".into()), 8192),
+            ("update", idle, Command::UpdateGuidance, 8192),
+            (
+                "busy session",
+                busy,
+                Command::Session(SessionCommand::ResumeCatalog),
+                8192,
+            ),
+        ];
+        for (name, prepare, command, limit) in cases {
+            let mut ui = LiveUi {
+                state: UiState::new("fake".into(), None, None),
+                ..LiveUi::default()
+            };
+            prepare(&mut ui);
+            ui.render_pending = false;
+            ui.handle_command(command, &writer, limit).await.unwrap();
+            assert!(ui.render_pending, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unpainted_picker_ignores_navigation() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let down = || Input::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let picker = |ui: &LiveUi| format!("{:?}", ui.model_picker);
+        let mut ui = model_test_ui("");
+        ui.model_picker = Some(ModelPicker::loading());
+        ui.apply_effects(
+            vec![UiEffect::ModelCatalogUpdated(model_picker::tests::catalog())],
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        let shown = picker(&ui);
+        draw_model_test(&mut ui, 80, 24);
+        ui.apply_effects(
+            vec![UiEffect::ModelCatalogUpdated(model_picker::tests::catalog())],
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        ui.handle_input(down(), &writer, 8192).await.unwrap();
+        assert_eq!(picker(&ui), shown);
+        draw_model_test(&mut ui, 80, 24);
+        ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+        ui.handle_input(down(), &writer, 8192).await.unwrap();
+        assert_eq!(picker(&ui), shown);
+        draw_model_test(&mut ui, 80, 24);
+        ui.handle_input(down(), &writer, 8192).await.unwrap();
+        assert_ne!(picker(&ui), shown);
+    }
 }
