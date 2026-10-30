@@ -4897,43 +4897,7 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    if let Some(effects) = queue_management::finish(state, &event, ids)? {
-        return Ok(effects);
-    }
-    if let Some(effects) = state.git_diff.observe(&event) {
-        return Ok(effects);
-    }
-    if let Some(effects) = state.project_files.observe(&event) {
-        return Ok(effects);
-    }
-    if let Some(effects) = discovery::observe(state, &event) {
-        return Ok(effects);
-    }
-    if let Some(effects) = context::observe(state, &event, ids)? {
-        return Ok(effects);
-    }
-    if let Some(effects) = command_controls::observe(state, &event, ids)? {
-        return Ok(effects);
-    }
-    if let Some(effects) = model_selection::observe(state, &event, ids)? {
-        return Ok(effects);
-    }
-    if let Some(mut effects) = handle_history_backend_event(state, &event) {
-        if state.post_prompt_session_sync_pending
-            && !state.context.loading()
-            && state.history_request.is_none()
-        {
-            effects.extend(start_post_prompt_session_sync(state, ids)?);
-        }
-        return Ok(effects);
-    }
-    if let Some(effects) = handle_session_backend_event(state, &event, ids)? {
-        return Ok(effects);
-    }
-    if let Some(mut effects) = handle_connection_backend_event(state, &event) {
-        if state.connection_operation.is_none() && state.connection_catalog_reload_pending {
-            effects.extend(reload_connection_catalog_after_configuration(state, ids)?);
-        }
+    if let Some(effects) = observe_backend_event(state, &event, ids)? {
         return Ok(effects);
     }
     match event {
@@ -4941,59 +4905,8 @@ fn handle_backend_event(
             entry_id,
             tool_call_ids,
             event,
-        } => {
-            let assistant = matches!(event.as_ref(), BackendEvent::MessageCompleted { .. });
-            let target = match event.as_ref() {
-                BackendEvent::MessageCompleted {
-                    turn,
-                    content,
-                    cost,
-                } => state.transcript.complete_message_with_cost(
-                    *turn,
-                    content.clone(),
-                    cost.clone(),
-                ),
-                BackendEvent::ToolResult(input) => {
-                    let target = state.transcript.observe_tool_result(*input.clone());
-                    state
-                        .transcript
-                        .resolve_history_call(target, &input.call_id);
-                    Some(target)
-                }
-                BackendEvent::ToolExecutionEnded { call_id } => {
-                    state.transcript.tool_entry_for_call(call_id)
-                }
-                BackendEvent::QueueMessageInjected { .. } => {
-                    handle_backend_event(state, *event, ids)?;
-                    state.transcript.latest_user_entry()
-                }
-                BackendEvent::Other { event_type } if event_type == "agent.started" => {
-                    state.transcript.latest_user_entry()
-                }
-                _ => return handle_backend_event(state, *event, ids),
-            };
-            if let Some(target) = target {
-                state.transcript.add_live_origin(target, &entry_id);
-            }
-            if assistant {
-                state
-                    .transcript
-                    .associate_tool_origins(&entry_id, &tool_call_ids);
-            }
-            Ok(vec![UiEffect::RequestRender])
-        }
-        BackendEvent::Diagnostic(message) => {
-            if state
-                .current_command
-                .as_ref()
-                .is_some_and(|command| command.command_type == ActiveCommandType::Compact)
-            {
-                state.context.compaction_notice = Some(message);
-                state.context.compaction_notice_is_warning = true;
-                return Ok(vec![UiEffect::RequestRender]);
-            }
-            Ok(vec![UiEffect::Diagnostic(message), UiEffect::RequestRender])
-        }
+        } => observe_message_origin(state, &entry_id, &tool_call_ids, *event, ids),
+        BackendEvent::Diagnostic(message) => Ok(report_diagnostic(state, message)),
         BackendEvent::MessageStarted { turn } => {
             if let Some(run) = state.run_progress.as_mut() {
                 run.turn = run.turn.max(turn);
@@ -5044,68 +4957,14 @@ fn handle_backend_event(
             state.git_branch = git_branch;
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::RunCompleted(totals) => {
-            let result = crate::transcript::RunResult {
-                duration_ms: totals.duration_ms,
-                outcome: crate::transcript::RunOutcome::parse(&totals.outcome),
-            };
-            let summary = with_session_settings(state, totals).summary_line();
-            // Total the run while its prompt id still finds its replies, steers and
-            // follow-ups included.
-            state.finished_run_cost = state
-                .run_progress
-                .and_then(|run| state.transcript.entry_index(run.prompt))
-                .map(|index| {
-                    crate::web_search::CostTotal::of(
-                        state.transcript.entries()[index + 1..]
-                            .iter()
-                            .filter_map(|entry| entry.cost()),
-                    )
-                });
-            let recorded = state
-                .run_progress
-                .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));
-            // A run that reported nothing to total keeps no summary row.
-            let summarized = !summary.is_empty() && state.transcript.attach_run_summary(summary);
-            if recorded || summarized {
-                Ok(vec![UiEffect::RequestRender])
-            } else {
-                Ok(Vec::new())
-            }
-        }
+        BackendEvent::RunCompleted(totals) => Ok(finish_run(state, totals)),
         BackendEvent::ToolCall(input) => {
             let call_id = input.call_id.clone();
             let target = state.transcript.observe_tool_call(input);
             state.transcript.attach_tool_origin(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::ToolApprovalRequested(pending) => {
-            state.transcript.observe_approval_requested(ToolCallInput {
-                call_id: bounded_identity(&pending.call_id),
-                name: pending.name.clone(),
-                arguments: pending.arguments.clone(),
-                detail_source: pending.detail_source.clone(),
-            });
-            if state.cancel_requested {
-                let id = ids.next_id(CommandKind::Approval);
-                let command = WispTypedClientRpcCommands::approval(
-                    &id,
-                    &pending.call_id,
-                    false,
-                    Some(CANCELLING_APPROVAL_REASON),
-                    None,
-                )?;
-                state.pending_approval = None;
-                return Ok(vec![
-                    UiEffect::SendCommand(command),
-                    UiEffect::RequestRender,
-                ]);
-            }
-            state.pending_approval = Some(pending);
-            state.view_status = ViewStatus::WaitingForApproval;
-            state.interaction_status = InteractionStatus::WaitingForApproval;
-            Ok(vec![UiEffect::RequestRender])
-        }
+        BackendEvent::ToolApprovalRequested(pending) => request_tool_approval(state, pending, ids),
         BackendEvent::ToolApprovalResolved {
             call_id,
             name: _,
@@ -5126,46 +4985,12 @@ fn handle_backend_event(
         BackendEvent::TrustRequested {
             request_id,
             project_path,
-        } => {
-            if state.cancel_requested {
-                let id = ids.next_id(CommandKind::Trust);
-                let command = WispTypedClientRpcCommands::trust(
-                    &id,
-                    &request_id,
-                    false,
-                    Some(CANCELLED_TRUST_REASON),
-                    Some(true),
-                )?;
-                state.pending_trust_request_id = None;
-                state.pending_trust_project_path = None;
-                return Ok(vec![
-                    UiEffect::SendCommand(command),
-                    UiEffect::RequestRender,
-                ]);
-            }
-            state.pending_trust_request_id = Some(request_id);
-            state.pending_trust_project_path = Some(project_path);
-            state.view_status = ViewStatus::WaitingForTrust;
-            state.interaction_status = InteractionStatus::WaitingForTrust;
-            Ok(vec![UiEffect::RequestRender])
-        }
+        } => request_trust(state, request_id, project_path, ids),
         BackendEvent::ProjectConfigApplied {
             provider,
             model,
             effort,
-        } => {
-            if state.provider.as_deref() != Some(provider.as_str()) || state.model != model {
-                state.context.invalidate();
-            }
-            state.provider = Some(provider);
-            state.model = model;
-            state.effort = effort;
-            let mut effects = reload_connection_catalog_after_configuration(state, ids)?;
-            effects.extend(model_selection::invalidate(state, ids)?);
-            state.command_catalog_read = None;
-            effects.extend(command_controls::load_catalog(state, ids)?);
-            Ok(effects)
-        }
+        } => apply_project_config(state, provider, model, effort, ids),
         BackendEvent::QueueSnapshot(snapshot) => {
             queue_management::apply_snapshot(state, snapshot);
             Ok(vec![UiEffect::RequestRender])
@@ -5230,84 +5055,352 @@ fn handle_backend_event(
             command_type,
             ok,
             error,
-        } => {
-            if let Some(mut effects) =
-                handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
-            {
-                if command_type == "pop_queue" && !ok {
-                    state.queue.management.error =
-                        Some(error.unwrap_or_else(|| "Queue restoration failed.".into()));
-                    effects.push(queue_state_effect(state, ids)?);
-                    effects.push(UiEffect::RequestRender);
-                }
-                return Ok(effects);
-            }
-            let matches_current = state.current_command.as_ref().is_some_and(|current| {
-                current.id == command_id && current.command_type.as_str() == command_type
-            });
-            if !matches_current {
-                return Ok(Vec::new());
-            }
-            state.context.compaction = None;
-            if command_type == "compact" && (!ok || state.context.compaction_notice.is_none()) {
-                state.context.compaction_notice = Some(bounded_session_text(
-                    error.as_deref().unwrap_or("Compaction finished."),
-                    SESSION_NOTICE_MAX_BYTES,
-                ));
-                state.context.compaction_notice_is_warning = !ok;
-            }
-            state.current_command = None;
-            state.pending_approval = None;
-            state.pending_trust_request_id = None;
-            state.pending_trust_project_path = None;
-            state.cancel_requested = false;
-            state.transcript.finish_active_response();
-            state.transcript.settle_unresolved_tools(if ok {
-                "tool result missing"
-            } else if error
-                .as_deref()
-                .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX))
-            {
-                "prompt cancelled"
-            } else {
-                "command failed"
-            });
-            state.interaction_status = InteractionStatus::Idle;
-            let was_cancelled = !ok
-                && error
-                    .as_deref()
-                    .is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
-            let history_sync_follows =
-                !(command_type == "init" && !ok && history_session_id(state).is_none());
-            state.post_prompt_session_sync_pending = history_sync_follows;
-            let init_failure = (command_type == "init" && !ok && !was_cancelled).then(|| {
-                bounded_session_text(
-                    &format!(
-                        "Project initialization failed: {}",
-                        error.as_deref().unwrap_or("unknown backend error")
-                    ),
-                    SESSION_NOTICE_MAX_BYTES,
-                )
-            });
-            // A failed prompt is recoverable: keep the composer usable and show why it
-            // failed. Compaction and init report through their own notices.
-            state.view_status = ViewStatus::Idle;
-            if !ok && !was_cancelled && !matches!(command_type.as_str(), "compact" | "init") {
-                state.last_command_error = Some(bounded_session_text(
-                    error.as_deref().unwrap_or("The prompt failed."),
-                    SESSION_NOTICE_MAX_BYTES,
-                ));
-            }
-            // The run may have changed files; the panel's list catches up once it ends.
-            state.git_diff.refresh_for_panel();
-            let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
-            if let Some(message) = init_failure {
-                effects.push(UiEffect::Notice(message));
-                effects.push(UiEffect::RequestRender);
-            }
-            Ok(effects)
-        }
+        } => finish_command(state, command_id, command_type, ok, error, ids),
     }
+}
+
+/// Offers the event to each feature that tracks its own requests, in order, and
+/// returns the first one's effects. `None` leaves the event to the transcript.
+fn observe_backend_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Option<Vec<UiEffect>>, ProtocolDecodeError> {
+    if let Some(effects) = queue_management::finish(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = state.git_diff.observe(event) {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = state.project_files.observe(event) {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = discovery::observe(state, event) {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = context::observe(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = command_controls::observe(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = model_selection::observe(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = observe_history_event(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = handle_session_backend_event(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    observe_connection_event(state, event, ids)
+}
+
+/// Starts the post-prompt session sync once the history request that held it
+/// back has finished.
+fn observe_history_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Option<Vec<UiEffect>>, ProtocolDecodeError> {
+    let Some(mut effects) = handle_history_backend_event(state, event) else {
+        return Ok(None);
+    };
+    if state.post_prompt_session_sync_pending
+        && !state.context.loading()
+        && state.history_request.is_none()
+    {
+        effects.extend(start_post_prompt_session_sync(state, ids)?);
+    }
+    Ok(Some(effects))
+}
+
+/// Reloads the connection catalog once the connection operation that deferred
+/// the reload has finished.
+fn observe_connection_event(
+    state: &mut UiState,
+    event: &BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Option<Vec<UiEffect>>, ProtocolDecodeError> {
+    let Some(mut effects) = handle_connection_backend_event(state, event) else {
+        return Ok(None);
+    };
+    if state.connection_operation.is_none() && state.connection_catalog_reload_pending {
+        effects.extend(reload_connection_catalog_after_configuration(state, ids)?);
+    }
+    Ok(Some(effects))
+}
+
+/// Applies the wrapped event, then records which transcript entry the backend's
+/// `entry_id` names. Events with no entry to attach go through
+/// `handle_backend_event` unchanged.
+fn observe_message_origin(
+    state: &mut UiState,
+    entry_id: &str,
+    tool_call_ids: &[String],
+    event: BackendEvent,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let assistant = matches!(event, BackendEvent::MessageCompleted { .. });
+    let target = match &event {
+        BackendEvent::MessageCompleted {
+            turn,
+            content,
+            cost,
+        } => state
+            .transcript
+            .complete_message_with_cost(*turn, content.clone(), cost.clone()),
+        BackendEvent::ToolResult(input) => {
+            let target = state.transcript.observe_tool_result(*input.clone());
+            state
+                .transcript
+                .resolve_history_call(target, &input.call_id);
+            Some(target)
+        }
+        BackendEvent::ToolExecutionEnded { call_id } => {
+            state.transcript.tool_entry_for_call(call_id)
+        }
+        BackendEvent::QueueMessageInjected { .. } => {
+            handle_backend_event(state, event, ids)?;
+            state.transcript.latest_user_entry()
+        }
+        BackendEvent::Other { event_type } if event_type == "agent.started" => {
+            state.transcript.latest_user_entry()
+        }
+        _ => return handle_backend_event(state, event, ids),
+    };
+    if let Some(target) = target {
+        state.transcript.add_live_origin(target, entry_id);
+    }
+    if assistant {
+        state
+            .transcript
+            .associate_tool_origins(entry_id, tool_call_ids);
+    }
+    Ok(vec![UiEffect::RequestRender])
+}
+
+/// Shows a diagnostic, or keeps it with the compaction notice while a
+/// compaction runs.
+fn report_diagnostic(state: &mut UiState, message: String) -> Vec<UiEffect> {
+    if state
+        .current_command
+        .as_ref()
+        .is_some_and(|command| command.command_type == ActiveCommandType::Compact)
+    {
+        state.context.compaction_notice = Some(message);
+        state.context.compaction_notice_is_warning = true;
+        return vec![UiEffect::RequestRender];
+    }
+    vec![UiEffect::Diagnostic(message), UiEffect::RequestRender]
+}
+
+fn finish_run(state: &mut UiState, totals: crate::transcript::RunTotals) -> Vec<UiEffect> {
+    let result = crate::transcript::RunResult {
+        duration_ms: totals.duration_ms,
+        outcome: crate::transcript::RunOutcome::parse(&totals.outcome),
+    };
+    let summary = with_session_settings(state, totals).summary_line();
+    // Total the run while its prompt id still finds its replies, steers and
+    // follow-ups included.
+    state.finished_run_cost = state
+        .run_progress
+        .and_then(|run| state.transcript.entry_index(run.prompt))
+        .map(|index| {
+            crate::web_search::CostTotal::of(
+                state.transcript.entries()[index + 1..]
+                    .iter()
+                    .filter_map(|entry| entry.cost()),
+            )
+        });
+    let recorded = state
+        .run_progress
+        .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));
+    // A run that reported nothing to total keeps no summary row.
+    let summarized = !summary.is_empty() && state.transcript.attach_run_summary(summary);
+    if recorded || summarized {
+        vec![UiEffect::RequestRender]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Waits for the user's approval, or rejects the call at once when the user has
+/// already asked to cancel the run.
+fn request_tool_approval(
+    state: &mut UiState,
+    pending: PendingApproval,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    state.transcript.observe_approval_requested(ToolCallInput {
+        call_id: bounded_identity(&pending.call_id),
+        name: pending.name.clone(),
+        arguments: pending.arguments.clone(),
+        detail_source: pending.detail_source.clone(),
+    });
+    if state.cancel_requested {
+        let id = ids.next_id(CommandKind::Approval);
+        let command = WispTypedClientRpcCommands::approval(
+            &id,
+            &pending.call_id,
+            false,
+            Some(CANCELLING_APPROVAL_REASON),
+            None,
+        )?;
+        state.pending_approval = None;
+        return Ok(vec![
+            UiEffect::SendCommand(command),
+            UiEffect::RequestRender,
+        ]);
+    }
+    state.pending_approval = Some(pending);
+    state.view_status = ViewStatus::WaitingForApproval;
+    state.interaction_status = InteractionStatus::WaitingForApproval;
+    Ok(vec![UiEffect::RequestRender])
+}
+
+/// Waits for the user's trust decision, or declines for this run only when the
+/// user has already asked to cancel it.
+fn request_trust(
+    state: &mut UiState,
+    request_id: String,
+    project_path: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.cancel_requested {
+        let id = ids.next_id(CommandKind::Trust);
+        let command = WispTypedClientRpcCommands::trust(
+            &id,
+            &request_id,
+            false,
+            Some(CANCELLED_TRUST_REASON),
+            Some(true),
+        )?;
+        state.pending_trust_request_id = None;
+        state.pending_trust_project_path = None;
+        return Ok(vec![
+            UiEffect::SendCommand(command),
+            UiEffect::RequestRender,
+        ]);
+    }
+    state.pending_trust_request_id = Some(request_id);
+    state.pending_trust_project_path = Some(project_path);
+    state.view_status = ViewStatus::WaitingForTrust;
+    state.interaction_status = InteractionStatus::WaitingForTrust;
+    Ok(vec![UiEffect::RequestRender])
+}
+
+/// Records the project's configured model and reloads what depends on it.
+fn apply_project_config(
+    state: &mut UiState,
+    provider: String,
+    model: Option<String>,
+    effort: Option<String>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.provider.as_deref() != Some(provider.as_str()) || state.model != model {
+        state.context.invalidate();
+    }
+    state.provider = Some(provider);
+    state.model = model;
+    state.effort = effort;
+    let mut effects = reload_connection_catalog_after_configuration(state, ids)?;
+    effects.extend(model_selection::invalidate(state, ids)?);
+    state.command_catalog_read = None;
+    effects.extend(command_controls::load_catalog(state, ids)?);
+    Ok(effects)
+}
+
+/// Finishes a queue command, or the current prompt, init or compaction run.
+/// A finish for any other command changes nothing.
+fn finish_command(
+    state: &mut UiState,
+    command_id: String,
+    command_type: String,
+    ok: bool,
+    error: Option<String>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(mut effects) =
+        handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
+    {
+        if command_type == "pop_queue" && !ok {
+            state.queue.management.error =
+                Some(error.unwrap_or_else(|| "Queue restoration failed.".into()));
+            effects.push(queue_state_effect(state, ids)?);
+            effects.push(UiEffect::RequestRender);
+        }
+        return Ok(effects);
+    }
+    let matches_current = state.current_command.as_ref().is_some_and(|current| {
+        current.id == command_id && current.command_type.as_str() == command_type
+    });
+    if !matches_current {
+        return Ok(Vec::new());
+    }
+    finish_current_command(state, &command_type, ok, error.as_deref(), ids)
+}
+
+fn finish_current_command(
+    state: &mut UiState,
+    command_type: &str,
+    ok: bool,
+    error: Option<&str>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let was_cancelled =
+        !ok && error.is_some_and(|message| message.starts_with(RPC_CANCELLED_PREFIX));
+    state.context.compaction = None;
+    if command_type == "compact" && (!ok || state.context.compaction_notice.is_none()) {
+        state.context.compaction_notice = Some(bounded_session_text(
+            error.unwrap_or("Compaction finished."),
+            SESSION_NOTICE_MAX_BYTES,
+        ));
+        state.context.compaction_notice_is_warning = !ok;
+    }
+    state.current_command = None;
+    state.pending_approval = None;
+    state.pending_trust_request_id = None;
+    state.pending_trust_project_path = None;
+    state.cancel_requested = false;
+    state.transcript.finish_active_response();
+    state.transcript.settle_unresolved_tools(if ok {
+        "tool result missing"
+    } else if was_cancelled {
+        "prompt cancelled"
+    } else {
+        "command failed"
+    });
+    state.interaction_status = InteractionStatus::Idle;
+    let history_sync_follows =
+        !(command_type == "init" && !ok && history_session_id(state).is_none());
+    state.post_prompt_session_sync_pending = history_sync_follows;
+    let init_failure = (command_type == "init" && !ok && !was_cancelled).then(|| {
+        bounded_session_text(
+            &format!(
+                "Project initialization failed: {}",
+                error.unwrap_or("unknown backend error")
+            ),
+            SESSION_NOTICE_MAX_BYTES,
+        )
+    });
+    // A failed prompt is recoverable: keep the composer usable and show why it
+    // failed. Compaction and init report through their own notices.
+    state.view_status = ViewStatus::Idle;
+    if !ok && !was_cancelled && !matches!(command_type, "compact" | "init") {
+        state.last_command_error = Some(bounded_session_text(
+            error.unwrap_or("The prompt failed."),
+            SESSION_NOTICE_MAX_BYTES,
+        ));
+    }
+    // The run may have changed files; the panel's list catches up once it ends.
+    state.git_diff.refresh_for_panel();
+    let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
+    if let Some(message) = init_failure {
+        effects.push(UiEffect::Notice(message));
+        effects.push(UiEffect::RequestRender);
+    }
+    Ok(effects)
 }
 
 /// Fill the mode, model and effort a backend did not report from what the UI shows,
