@@ -7815,6 +7815,7 @@ mod tests {
                 .as_deref(),
             Some("renamed")
         );
+        assert!(state.input_ready);
 
         reduce(
             &mut state,
@@ -10681,5 +10682,398 @@ mod tests {
             state.history.active_leaf_id.as_deref(),
             Some("advanced-leaf")
         );
+    }
+
+    fn answer_session_operation(
+        action: UiAction,
+        events: Vec<BackendEvent>,
+    ) -> (UiState, Vec<UiEffect>) {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("leaf-1".into());
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, action, &mut ids).unwrap();
+        let mut effects = Vec::new();
+        for event in events {
+            effects = reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+        (state, effects)
+    }
+
+    fn derived(source: &str, leaf: &str, entry: Option<&str>) -> SessionDerivation {
+        SessionDerivation {
+            source_active_leaf_id: Some(leaf.into()),
+            selected_entry_id: entry.map(Into::into),
+            ..derivation(source, "target")
+        }
+    }
+
+    fn navigated(session_id: &str, entry: &str, leaf: &str, changed: bool) -> BackendEvent {
+        BackendEvent::SessionTreeNavigated {
+            command_id: "navigate_session_tree-1".into(),
+            navigation: SessionTreeNavigation {
+                session: session(session_id),
+                selected_entry_id: entry.into(),
+                previous_active_leaf_id: Some(leaf.into()),
+                active_leaf_id: Some("leaf-2".into()),
+                editor_text: Some("draft".into()),
+                changed,
+                entry_count: 3,
+            },
+        }
+    }
+
+    fn tree_reported(
+        session_id: &str,
+        leaf: &str,
+        nodes: &[&str],
+        next_after: Option<&str>,
+    ) -> BackendEvent {
+        BackendEvent::SessionTreeReported {
+            command_id: "get_session_tree-1".into(),
+            page: SessionTreePage {
+                session: Some(session(session_id)),
+                active_leaf_id: Some(leaf.into()),
+                total_node_count: 3,
+                nodes: nodes
+                    .iter()
+                    .map(|entry_id| SessionTreeNode {
+                        entry_id: (*entry_id).into(),
+                        parent_id: None,
+                        created_at: "2026-01-02T03:04:05Z".into(),
+                        kind: SessionTreeNodeKind::Message,
+                        role: Some("user".into()),
+                        preview: "hello".into(),
+                        preview_truncated: false,
+                    })
+                    .collect(),
+                truncated: next_after.is_some(),
+                next_after_entry_id: next_after.map(Into::into),
+            },
+        }
+    }
+
+    #[test]
+    fn mismatched_session_results_are_rejected() {
+        let clone = |derived| BackendEvent::SessionCloned {
+            command_id: "clone_session-1".into(),
+            derived,
+        };
+        let fork_action = || UiAction::ForkSession {
+            entry_id: "user-2".into(),
+        };
+        let fork = |derived| BackendEvent::SessionForked {
+            command_id: "fork_session-1".into(),
+            derived,
+        };
+        let navigate = || UiAction::NavigateSessionTree {
+            entry_id: "user-2".into(),
+        };
+        let unrevert = |session_id: &str, leaf: &str| BackendEvent::SessionTreeUnreverted {
+            command_id: "unrevert_session_tree-1".into(),
+            unreverted: SessionTreeUnrevert {
+                session: session(session_id),
+                source_transition_id: "transition-1".into(),
+                previous_active_leaf_id: Some(leaf.into()),
+                active_leaf_id: Some("leaf-2".into()),
+                entry_count: 4,
+            },
+        };
+        let tree = || UiAction::LoadSessionTree {
+            after_entry_id: Some("cursor".into()),
+        };
+        let cases = [
+            (
+                "clone source",
+                UiAction::CloneSession,
+                clone(derived("other", "leaf-1", None)),
+                "session clone failed",
+            ),
+            (
+                "clone leaf",
+                UiAction::CloneSession,
+                clone(derived("source", "stale", None)),
+                "session clone failed",
+            ),
+            (
+                "fork source",
+                fork_action(),
+                fork(derived("other", "leaf-1", Some("user-2"))),
+                "session fork failed",
+            ),
+            (
+                "fork leaf",
+                fork_action(),
+                fork(derived("source", "stale", Some("user-2"))),
+                "session fork failed",
+            ),
+            (
+                "fork entry",
+                fork_action(),
+                fork(derived("source", "leaf-1", Some("user-3"))),
+                "session fork failed",
+            ),
+            (
+                "navigation session",
+                navigate(),
+                navigated("other", "user-2", "leaf-1", true),
+                "session tree navigation failed",
+            ),
+            (
+                "navigation leaf",
+                navigate(),
+                navigated("source", "user-2", "stale", true),
+                "session tree navigation failed",
+            ),
+            (
+                "unrevert session",
+                UiAction::UnrevertSessionTree,
+                unrevert("other", "leaf-1"),
+                "session tree unrevert failed",
+            ),
+            (
+                "unrevert leaf",
+                UiAction::UnrevertSessionTree,
+                unrevert("source", "stale"),
+                "session tree unrevert failed",
+            ),
+            (
+                "tree session",
+                tree(),
+                tree_reported("other", "leaf-1", &["user-3"], None),
+                "session tree failed",
+            ),
+            (
+                "tree leaf",
+                tree(),
+                tree_reported("source", "stale", &["user-3"], None),
+                "session tree failed",
+            ),
+            (
+                "tree repeats cursor",
+                tree(),
+                tree_reported("source", "leaf-1", &["cursor"], None),
+                "session tree failed",
+            ),
+            (
+                "tree loops to cursor",
+                tree(),
+                tree_reported("source", "leaf-1", &["user-3"], Some("cursor")),
+                "session tree failed",
+            ),
+        ];
+        for (name, action, result, failure) in cases {
+            let (state, effects) = answer_session_operation(action, vec![result]);
+            assert!(state.session_operation.is_none(), "{name}");
+            assert!(state.input_ready, "{name}");
+            assert!(
+                effects.iter().any(
+                    |effect| matches!(effect, UiEffect::Notice(text) if text.starts_with(failure))
+                ),
+                "{name}: {effects:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn next_tree_page_appends() {
+        let (state, effects) = answer_session_operation(
+            UiAction::LoadSessionTree {
+                after_entry_id: Some("cursor".into()),
+            },
+            vec![
+                finished("get_session_tree-1", "get_session_tree", true),
+                tree_reported("source", "leaf-1", &["user-3"], None),
+            ],
+        );
+        assert!(state.input_ready);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                UiEffect::ShowSessionTreePage { append: true, .. },
+                UiEffect::RequestRender
+            ]
+        ));
+    }
+
+    #[test]
+    fn unchanged_navigation_restores_draft() {
+        let (state, effects) = answer_session_operation(
+            UiAction::NavigateSessionTree {
+                entry_id: "user-2".into(),
+            },
+            vec![
+                finished("navigate_session_tree-1", "navigate_session_tree", true),
+                navigated("source", "user-2", "leaf-1", false),
+            ],
+        );
+        assert!(state.input_ready);
+        assert!(state.session_operation.is_none());
+        assert!(matches!(
+            effects.as_slice(),
+            [UiEffect::RestoreSessionDraft(text), UiEffect::RequestRender] if text == "draft"
+        ));
+    }
+
+    #[test]
+    fn failed_clone_hydration_offers_resume() {
+        let (_, effects) = answer_session_operation(
+            UiAction::CloneSession,
+            vec![
+                BackendEvent::SessionCloned {
+                    command_id: "clone_session-1".into(),
+                    derived: derived("source", "leaf-1", None),
+                },
+                finished("clone_session-1", "clone_session", true),
+                BackendEvent::MessagesProjectionFailed {
+                    command_id: "get_messages-1".into(),
+                    error: "bad page".into(),
+                },
+            ],
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(text) if text.contains("bad page. Use /resume target to retry")
+        )));
+    }
+
+    #[test]
+    fn agent_start_marks_the_prompt() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("hello".into());
+        let mut expected = state.transcript.clone();
+        let prompt = expected.latest_user_entry().unwrap();
+        expected.add_live_origin(prompt, "origin-1");
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessageOrigin {
+                entry_id: "origin-1".into(),
+                tool_call_ids: Vec::new(),
+                event: Box::new(BackendEvent::Other {
+                    event_type: "agent.started".into(),
+                }),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.transcript, expected);
+    }
+
+    #[test]
+    fn diagnostics_join_a_running_compaction() {
+        for (command_type, joins) in [
+            (ActiveCommandType::Compact, true),
+            (ActiveCommandType::Prompt, false),
+        ] {
+            let mut state = UiState::unconfigured();
+            state.current_command = Some(ActiveCommand {
+                id: "command-1".into(),
+                command_type,
+            });
+            let mut ids = DeterministicIds::default();
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::Diagnostic("disk low".into())),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(
+                state.context.compaction_notice.as_deref(),
+                joins.then_some("disk low")
+            );
+            assert_eq!(
+                effects
+                    .iter()
+                    .any(|effect| matches!(effect, UiEffect::Diagnostic(_))),
+                !joins
+            );
+        }
+    }
+
+    #[test]
+    fn model_change_resets_context() {
+        for (provider, model, resets) in [
+            ("fake", "model", false),
+            ("other", "model", true),
+            ("fake", "next", true),
+        ] {
+            let mut state = UiState::new("fake".into(), Some("model".into()), None);
+            state.context.error = Some("stale".into());
+            let mut ids = DeterministicIds::default();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ProjectConfigApplied {
+                    provider: provider.into(),
+                    model: Some(model.into()),
+                    effort: None,
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.context.error.is_none(), resets, "{provider} {model}");
+        }
+    }
+
+    #[test]
+    fn command_outcomes_set_notices() {
+        use ActiveCommandType::{Compact, Init, Prompt};
+        let cancelled = "RPC command cancelled: by user";
+        // (command, ok, error, notice before, has session) ->
+        // (notice after, prompt error, history sync, init failure)
+        let cases = [
+            (Compact, true, None, None, true),
+            (Compact, true, None, Some("Kept 3 turns."), true),
+            (Compact, false, Some("boom"), Some("Compacting"), true),
+            (Prompt, true, None, None, true),
+            (Prompt, false, Some(cancelled), None, true),
+            (Prompt, false, Some("boom"), None, false),
+            (Init, false, Some("boom"), None, false),
+        ];
+        let expected = [
+            (Some("Compaction finished."), false, true, false),
+            (Some("Kept 3 turns."), false, true, false),
+            (Some("boom"), false, true, false),
+            (None, false, true, false),
+            (None, false, true, false),
+            (None, true, true, false),
+            (None, false, false, true),
+        ];
+        for ((command_type, ok, error, notice, has_session), expected) in
+            cases.into_iter().zip(expected)
+        {
+            let mut state = UiState::unconfigured();
+            if has_session {
+                state.history.session = Some(session("source"));
+            }
+            state.context.compaction_notice = notice.map(Into::into);
+            state.current_command = Some(ActiveCommand {
+                id: "command-1".into(),
+                command_type,
+            });
+            let mut ids = DeterministicIds::default();
+            let effects = reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::CommandFinished {
+                    command_id: "command-1".into(),
+                    command_type: command_type.as_str().into(),
+                    ok,
+                    error: error.map(Into::into),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            let init_failed = effects.iter().any(|effect| {
+                matches!(effect, UiEffect::Notice(text) if text.starts_with("Project initialization failed"))
+            });
+            let actual = (
+                state.context.compaction_notice.as_deref(),
+                state.last_command_error.is_some(),
+                state.post_prompt_session_sync_pending,
+                init_failed,
+            );
+            assert_eq!(actual, expected, "{command_type:?} ok={ok} {error:?}");
+        }
     }
 }

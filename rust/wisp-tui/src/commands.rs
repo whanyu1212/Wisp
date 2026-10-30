@@ -672,6 +672,23 @@ pub(crate) mod tests {
         ));
     }
 
+    #[test]
+    fn context_accepts_auto_on_off() {
+        assert!(matches!(classify("/context", None), Some(Command::Context)));
+        assert!(matches!(
+            classify("/context auto on", None),
+            Some(Command::AutoCompaction(true))
+        ));
+        assert!(matches!(
+            classify("/context auto off", None),
+            Some(Command::AutoCompaction(false))
+        ));
+        assert!(matches!(
+            classify("/context auto", None),
+            Some(Command::Invalid(_))
+        ));
+    }
+
     pub(crate) fn catalog() -> Vec<CommandDescriptor> {
         [
             "help", "init", "plan", "build", "model", "provider", "connect", "resume", "new",
