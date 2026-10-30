@@ -1607,36 +1607,40 @@ pub fn reduce(
         } => answer_trust(state, request_id, trusted, reason, transient, ids),
         UiAction::Cancel => cancel(state, ids),
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
-        UiAction::TransportClosed { .. } => {
-            state.context.close();
-            state.skills.close();
-            state.mcp.close();
-            state.mcp_preview.close();
-            state.permissions.close();
-            state.project_files.close();
-            state.git_diff.close();
-            state.model_operation = None;
-            state.mode_change = None;
-            state.mode_read = None;
-            state.search_read = None;
-            state.search_change = None;
-            state.command_catalog_read = None;
-            state.queue.clear_local_presentations();
-            for pending in state.pending_queue_submissions.values_mut() {
-                pending.local_display = None;
-            }
-            state.view_status = ViewStatus::Error;
-            state.transcript.finish_active_response();
-            state
-                .transcript
-                .settle_unresolved_tools("event stream closed");
-            Ok(vec![UiEffect::RequestRender, UiEffect::Exit])
-        }
+        UiAction::TransportClosed { .. } => Ok(close_transport(state)),
     }?;
     effects.extend(context::refresh_if_ready(state, ids)?);
     effects.extend(project_files::refresh_if_ready(state, ids)?);
     effects.extend(git_diff::refresh_if_ready(state, ids)?);
     Ok(effects)
+}
+
+/// Settles everything still waiting on the backend once its event stream
+/// closes, then exits.
+fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
+    state.context.close();
+    state.skills.close();
+    state.mcp.close();
+    state.mcp_preview.close();
+    state.permissions.close();
+    state.project_files.close();
+    state.git_diff.close();
+    state.model_operation = None;
+    state.mode_change = None;
+    state.mode_read = None;
+    state.search_read = None;
+    state.search_change = None;
+    state.command_catalog_read = None;
+    state.queue.clear_local_presentations();
+    for pending in state.pending_queue_submissions.values_mut() {
+        pending.local_display = None;
+    }
+    state.view_status = ViewStatus::Error;
+    state.transcript.finish_active_response();
+    state
+        .transcript
+        .settle_unresolved_tools("event stream closed");
+    vec![UiEffect::RequestRender, UiEffect::Exit]
 }
 
 fn submit(
