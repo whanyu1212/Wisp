@@ -17,6 +17,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Debug and test builds keep only line tables, so panics still report file and
+  # line while builds link faster and the Rust caches stay small. rust-cache
+  # hashes CARGO_* variables into its key, so changing this starts fresh caches.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
   changes:
     name: Select required checks
