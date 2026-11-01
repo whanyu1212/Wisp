@@ -800,12 +800,14 @@ impl MarkdownSnapshot {
                         0,
                         span_start.saturating_add(source_within_span.min(span.text.len())),
                     )
+                } else if source_offset < span.affinity.source_offset {
+                    (span.affinity.source_offset - source_offset, span_start)
                 } else {
+                    // Past the span: its output end is the nearest position, so a
+                    // shortened reply keeps the anchor on its last row.
                     (
-                        source_offset
-                            .abs_diff(span.affinity.source_offset)
-                            .min(source_offset.abs_diff(span.affinity.source_end)),
-                        span_start,
+                        source_offset - span.affinity.source_end,
+                        span_start.saturating_add(span.text.len()),
                     )
                 };
                 if best.is_none_or(|(best_distance, _)| distance < best_distance) {
@@ -9024,16 +9026,37 @@ mod tests {
                 block_gap_offset: None,
             }),
         };
-        assert_eq!(
-            normalize_anchor(
-                &transcript,
-                &mut cache,
-                past,
-                12,
-                AnchorNormalization::Geometry
-            ),
-            Some(last)
-        );
+        for (label, mode) in [
+            ("geometry", AnchorNormalization::Geometry),
+            ("content", AnchorNormalization::Content),
+        ] {
+            assert_eq!(
+                normalize_anchor(&transcript, &mut cache, past, 12, mode),
+                Some(last),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_source_between_blocks_maps_to_nearer_block() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("probe".into());
+        let source = "alpha\n\n\n\n\nbeta";
+        let reply = transcript.complete_message(1, source.into()).unwrap();
+        let mut cache = TranscriptRowCache::default();
+        let snapshot = cache.markdown_snapshot(transcript.entry(reply).unwrap(), 80);
+        let alpha_end = snapshot.output_for_source("alpha".len(), 0);
+        let beta_start = snapshot.output_for_source(source.find("beta").unwrap(), 0);
+        assert!(alpha_end < beta_start);
+
+        for (source_offset, expected) in [(6, alpha_end), (9, beta_start)] {
+            assert_eq!(
+                snapshot.output_for_source(source_offset, 0),
+                expected,
+                "source offset {source_offset}"
+            );
+        }
     }
 
     #[test]
