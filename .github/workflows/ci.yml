@@ -110,6 +110,18 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      # The macOS image ships Homebrew's rustup. Its cargo shim can't run rustc
+      # in rust-cache's post step, so `cargo metadata` fails and rust-cache saves
+      # an empty cache (actions/runner-images#14099). Remove it so the toolchain
+      # step installs its own rustup into ~/.cargo/bin.
+      - name: Remove Homebrew rustup
+        if: runner.os == 'macOS'
+        run: |
+          if brew list rustup &>/dev/null; then
+            brew uninstall --ignore-dependencies rustup
+          fi
+          rm -rf "$HOME/.cargo/bin"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.85.0
         with:
@@ -119,6 +131,8 @@ jobs:
         uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
         with:
           key: ${{ matrix.os }}
+          # CI installs nothing with `cargo install`; ~/.cargo/bin holds only rustup.
+          cache-bin: false
 
       - name: Check Rust formatting
         if: runner.os == 'Linux'
@@ -161,6 +175,18 @@ jobs:
       - name: Install Python dependencies
         run: uv sync --locked
 
+      # The macOS image ships Homebrew's rustup. Its cargo shim can't run rustc
+      # in rust-cache's post step, so `cargo metadata` fails and rust-cache saves
+      # an empty cache (actions/runner-images#14099). Remove it so the toolchain
+      # step installs its own rustup into ~/.cargo/bin.
+      - name: Remove Homebrew rustup
+        if: runner.os == 'macOS'
+        run: |
+          if brew list rustup &>/dev/null; then
+            brew uninstall --ignore-dependencies rustup
+          fi
+          rm -rf "$HOME/.cargo/bin"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.85.0
 
@@ -168,6 +194,8 @@ jobs:
         uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
         with:
           key: tui-handoff-${{ matrix.os }}
+          # CI installs nothing with `cargo install`; ~/.cargo/bin holds only rustup.
+          cache-bin: false
 
       - name: Build Rust TUI
         run: cargo build -p wisp-tui
