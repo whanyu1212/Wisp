@@ -4749,79 +4749,15 @@ fn handle_connection_backend_event(
     state: &mut UiState,
     event: &BackendEvent,
 ) -> Option<Vec<UiEffect>> {
-    let operation = state.connection_operation.as_ref()?;
-    let belongs_to_operation = match (operation, event) {
-        (
-            ConnectionOperation::Catalog { command_id, .. }
-            | ConnectionOperation::DeviceCode { command_id, .. },
-            BackendEvent::ConnectionCatalogReported {
-                command_id: received,
-                ..
-            }
-            | BackendEvent::DeviceCodeReported {
-                command_id: received,
-                ..
-            }
-            | BackendEvent::DeviceCodeProgress {
-                command_id: received,
-                ..
-            },
-        ) => received == command_id,
-        (
-            ConnectionOperation::Catalog {
-                command_id,
-                command_type,
-                ..
-            },
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type: received_type,
-                ..
-            },
-        ) => received == command_id && received_type == command_type,
-        (
-            ConnectionOperation::DeviceCode { command_id, .. },
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ..
-            },
-        ) => received == command_id && command_type == "begin_device_code",
-        _ => false,
-    };
-    if !belongs_to_operation {
-        return None;
-    }
-    let mut operation = state.connection_operation.take().expect("checked above");
+    let mut operation = state.connection_operation.take()?;
     let mut effects = Vec::new();
-    match &mut operation {
+    let captured = match &mut operation {
         ConnectionOperation::Catalog {
             command_id,
             command_type,
             report,
             completion,
-            ..
-        } => match event {
-            BackendEvent::ConnectionCatalogReported {
-                command_id: received,
-                catalog,
-            } if received == command_id && report.is_none() => *report = Some(catalog.clone()),
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type: received_type,
-                ok,
-                error,
-            } if received == command_id
-                && received_type == command_type
-                && completion.is_none() =>
-            {
-                *completion = Some(SessionCompletion {
-                    ok: *ok,
-                    error: error.clone(),
-                });
-            }
-            _ => {}
-        },
+        } => capture_connection_catalog(event, command_id, command_type, report, completion),
         ConnectionOperation::DeviceCode {
             command_id,
             provider,
@@ -4830,71 +4766,188 @@ fn handle_connection_backend_event(
             progress,
             completion,
             ..
-        } => match event {
-            BackendEvent::ConnectionCatalogReported {
-                command_id: received,
-                catalog,
-            } if received == command_id && report.is_none() => *report = Some(catalog.clone()),
-            BackendEvent::DeviceCodeReported {
-                command_id: received,
-                challenge: received_challenge,
-            } if received == command_id
-                && received_challenge.provider == *provider
-                && challenge.is_none() =>
-            {
-                *challenge = Some(received_challenge.clone());
-                effects.push(UiEffect::ShowDeviceCode(received_challenge.clone()));
-                effects.push(UiEffect::RequestRender);
+        } => capture_device_code(
+            event,
+            command_id,
+            provider,
+            report,
+            challenge,
+            progress,
+            completion,
+            &mut effects,
+        ),
+    };
+    if !captured {
+        state.connection_operation = Some(operation);
+        return None;
+    }
+    Some(finish_connection_operation(state, operation, effects))
+}
+
+fn capture_connection_catalog(
+    event: &BackendEvent,
+    command_id: &str,
+    command_type: &str,
+    report: &mut Option<ConnectionCatalogSnapshot>,
+    completion: &mut Option<SessionCompletion>,
+) -> bool {
+    match event {
+        BackendEvent::ConnectionCatalogReported {
+            command_id: received,
+            catalog,
+        } if received == command_id => {
+            if report.is_none() {
+                *report = Some(catalog.clone());
             }
-            BackendEvent::DeviceCodeProgress {
-                command_id: received,
-                progress: received_progress,
-            } if received == command_id
-                && received_progress.provider == *provider
-                && progress
-                    .as_ref()
-                    .is_none_or(|previous| received_progress.attempt > previous.attempt) =>
-            {
-                *progress = Some(received_progress.clone());
-                effects.push(UiEffect::DeviceCodeProgress(received_progress.clone()));
-                effects.push(UiEffect::RequestRender);
-            }
-            BackendEvent::CommandFinished {
-                command_id: received,
-                command_type,
-                ok,
-                error,
-            } if received == command_id
-                && command_type == "begin_device_code"
-                && completion.is_none() =>
-            {
+            true
+        }
+        BackendEvent::CommandFinished {
+            command_id: received,
+            command_type: received_type,
+            ok,
+            error,
+        } if received == command_id && received_type == command_type => {
+            if completion.is_none() {
                 *completion = Some(SessionCompletion {
                     ok: *ok,
                     error: error.clone(),
                 });
             }
-            _ => {}
-        },
+            true
+        }
+        _ => false,
     }
+}
 
+#[allow(clippy::too_many_arguments)]
+fn capture_device_code(
+    event: &BackendEvent,
+    command_id: &str,
+    provider: &str,
+    report: &mut Option<ConnectionCatalogSnapshot>,
+    challenge: &mut Option<DeviceCodeChallenge>,
+    progress: &mut Option<DeviceCodeProgress>,
+    completion: &mut Option<SessionCompletion>,
+    effects: &mut Vec<UiEffect>,
+) -> bool {
+    match event {
+        BackendEvent::ConnectionCatalogReported {
+            command_id: received,
+            catalog,
+        } if received == command_id => {
+            if report.is_none() {
+                *report = Some(catalog.clone());
+            }
+            true
+        }
+        BackendEvent::DeviceCodeReported {
+            command_id: received,
+            challenge: received_challenge,
+        } if received == command_id => {
+            if received_challenge.provider == provider && challenge.is_none() {
+                *challenge = Some(received_challenge.clone());
+                effects.push(UiEffect::ShowDeviceCode(received_challenge.clone()));
+                effects.push(UiEffect::RequestRender);
+            }
+            true
+        }
+        BackendEvent::DeviceCodeProgress {
+            command_id: received,
+            progress: received_progress,
+        } if received == command_id => {
+            if received_progress.provider == provider
+                && progress
+                    .as_ref()
+                    .is_none_or(|previous| received_progress.attempt > previous.attempt)
+            {
+                *progress = Some(received_progress.clone());
+                effects.push(UiEffect::DeviceCodeProgress(received_progress.clone()));
+                effects.push(UiEffect::RequestRender);
+            }
+            true
+        }
+        BackendEvent::CommandFinished {
+            command_id: received,
+            command_type,
+            ok,
+            error,
+        } if received == command_id && command_type == "begin_device_code" => {
+            if completion.is_none() {
+                *completion = Some(SessionCompletion {
+                    ok: *ok,
+                    error: error.clone(),
+                });
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn finish_connection_operation(
+    state: &mut UiState,
+    operation: ConnectionOperation,
+    mut effects: Vec<UiEffect>,
+) -> Vec<UiEffect> {
     match operation {
         ConnectionOperation::Catalog {
-            completion: Some(SessionCompletion { ok: false, error }),
-            ..
-        } => Some(connection_failure("Connection request", error)),
-        ConnectionOperation::Catalog {
-            report: Some(report),
-            completion: Some(SessionCompletion { ok: true, .. }),
-            ..
+            command_id,
+            command_type,
+            report,
+            completion,
+        } => finish_connection_catalog(state, command_id, command_type, report, completion, effects),
+        ConnectionOperation::DeviceCode {
+            command_id,
+            provider,
+            report,
+            challenge,
+            progress,
+            completion,
+            cancel_requested,
         } => {
-            effects.extend(adopt_connection_catalog(state, report));
-            Some(effects)
+            if let Some(completion) = completion {
+                effects.extend(finish_device_code(
+                    state,
+                    &provider,
+                    report,
+                    completion,
+                    cancel_requested,
+                ));
+            } else {
+                state.connection_operation = Some(ConnectionOperation::DeviceCode {
+                    command_id,
+                    provider,
+                    report,
+                    challenge,
+                    progress,
+                    completion: None,
+                    cancel_requested,
+                });
+            }
+            effects
         }
-        ConnectionOperation::Catalog {
-            command_type: "store_api_key" | "disconnect_provider",
-            completion: Some(SessionCompletion { ok: true, .. }),
-            ..
-        } => {
+    }
+}
+
+fn finish_connection_catalog(
+    state: &mut UiState,
+    command_id: String,
+    command_type: &'static str,
+    report: Option<ConnectionCatalogSnapshot>,
+    completion: Option<SessionCompletion>,
+    mut effects: Vec<UiEffect>,
+) -> Vec<UiEffect> {
+    match (report, completion) {
+        (_, Some(SessionCompletion { ok: false, error })) => {
+            connection_failure("Connection request", error)
+        }
+        (Some(report), Some(SessionCompletion { ok: true, .. })) => {
+            effects.extend(adopt_connection_catalog(state, report));
+            effects
+        }
+        (None, Some(SessionCompletion { ok: true, .. }))
+            if matches!(command_type, "store_api_key" | "disconnect_provider") =>
+        {
             effects.extend(adopt_connection_catalog(
                 state,
                 ConnectionCatalogSnapshot {
@@ -4905,61 +4958,60 @@ fn handle_connection_backend_event(
                 "Credentials updated, but connection status could not be refreshed.".into(),
             ));
             effects.push(UiEffect::RequestRender);
-            Some(effects)
+            effects
         }
-        ConnectionOperation::DeviceCode {
-            completion: Some(SessionCompletion { ok: false, error }),
-            cancel_requested,
-            ..
-        } => {
-            effects.push(UiEffect::FinishDeviceCode);
-            if cancel_requested {
-                effects.push(UiEffect::Notice("Device login cancelled.".into()));
-                effects.push(UiEffect::RequestRender);
-            } else {
-                effects.extend(connection_failure("Device login", error));
-            }
-            Some(effects)
-        }
-        ConnectionOperation::DeviceCode {
-            provider,
-            report: Some(report),
-            completion: Some(SessionCompletion { ok: true, .. }),
-            ..
-        } => {
-            effects.extend(adopt_connection_catalog(state, report));
-            effects.push(UiEffect::FinishDeviceCode);
-            effects.push(UiEffect::Notice(bounded_session_text(
-                &format!("Connected: {provider}"),
-                SESSION_NOTICE_MAX_BYTES,
-            )));
-            effects.push(UiEffect::RequestRender);
-            Some(effects)
-        }
-        ConnectionOperation::DeviceCode {
-            provider,
-            completion: Some(SessionCompletion { ok: true, .. }),
-            ..
-        } => {
-            effects.extend(adopt_connection_catalog(
-                state,
-                ConnectionCatalogSnapshot {
-                    providers: Vec::new(),
-                },
-            ));
-            effects.push(UiEffect::FinishDeviceCode);
-            effects.push(UiEffect::Notice(bounded_session_text(
-                &format!("Connected: {provider}. Connection status could not be refreshed."),
-                SESSION_NOTICE_MAX_BYTES,
-            )));
-            effects.push(UiEffect::RequestRender);
-            Some(effects)
-        }
-        operation => {
-            state.connection_operation = Some(operation);
-            Some(effects)
+        (report, completion) => {
+            state.connection_operation = Some(ConnectionOperation::Catalog {
+                command_id,
+                command_type,
+                report,
+                completion,
+            });
+            effects
         }
     }
+}
+
+fn finish_device_code(
+    state: &mut UiState,
+    provider: &str,
+    report: Option<ConnectionCatalogSnapshot>,
+    completion: SessionCompletion,
+    cancel_requested: bool,
+) -> Vec<UiEffect> {
+    if !completion.ok {
+        let mut effects = vec![UiEffect::FinishDeviceCode];
+        if cancel_requested {
+            effects.push(UiEffect::Notice("Device login cancelled.".into()));
+            effects.push(UiEffect::RequestRender);
+        } else {
+            effects.extend(connection_failure("Device login", completion.error));
+        }
+        return effects;
+    }
+    if let Some(report) = report {
+        let mut effects = adopt_connection_catalog(state, report);
+        effects.push(UiEffect::FinishDeviceCode);
+        effects.push(UiEffect::Notice(bounded_session_text(
+            &format!("Connected: {provider}"),
+            SESSION_NOTICE_MAX_BYTES,
+        )));
+        effects.push(UiEffect::RequestRender);
+        return effects;
+    }
+    let mut effects = adopt_connection_catalog(
+        state,
+        ConnectionCatalogSnapshot {
+            providers: Vec::new(),
+        },
+    );
+    effects.push(UiEffect::FinishDeviceCode);
+    effects.push(UiEffect::Notice(bounded_session_text(
+        &format!("Connected: {provider}. Connection status could not be refreshed."),
+        SESSION_NOTICE_MAX_BYTES,
+    )));
+    effects.push(UiEffect::RequestRender);
+    effects
 }
 
 fn handle_backend_event(
@@ -9624,7 +9676,7 @@ mod tests {
             &mut state,
             UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
                 command_id: "get_connection_catalog-1".into(),
-                catalog: fresh,
+                catalog: fresh.clone(),
             }),
             &mut ids,
         )
@@ -9655,6 +9707,104 @@ mod tests {
                     && command["id"] == "get_connection_catalog-2"
             })
         }));
+
+        // Foreign finishes do not capture or overwrite the active catalog operation,
+        // and only the first report and first finish are kept.
+        let mut state = UiState::new("fake".into(), None, None);
+        state.connection_catalog = old.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::LoadConnectionCatalog, &mut ids).unwrap();
+        reduce(&mut state, UiAction::Submit("run".into()), &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("prompt-1", "get_connection_catalog", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.current_command.is_some());
+        assert!(state.connection_operation.is_some());
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.current_command.is_none());
+        assert!(!effects.is_empty());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("get_connection_catalog-1", "prompt", false)),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                command_id: "get_connection_catalog-1".into(),
+                catalog: fresh.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                command_id: "get_connection_catalog-1".into(),
+                catalog: connection_catalog("Duplicate", "stored"),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "get_connection_catalog-1",
+                "get_connection_catalog",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.connection_catalog, fresh);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::ConnectionCatalogUpdated(catalog) if catalog == &fresh
+        )));
+
+        let mut state = UiState::unconfigured();
+        state.connection_catalog = old.clone();
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::LoadConnectionCatalog, &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "get_connection_catalog-1",
+                "get_connection_catalog",
+                true,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                "get_connection_catalog-1",
+                "get_connection_catalog",
+                false,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                command_id: "get_connection_catalog-1".into(),
+                catalog: fresh.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.connection_catalog, fresh);
     }
 
     #[test]
@@ -9847,7 +9997,7 @@ mod tests {
                 .any(|effect| matches!(effect, UiEffect::Notice(_)))
         );
 
-        let mut device = UiState::unconfigured();
+        let mut device = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
         reduce(
             &mut device,
@@ -9857,11 +10007,49 @@ mod tests {
             &mut ids,
         )
         .unwrap();
+        reduce(&mut device, UiAction::Submit("run".into()), &mut ids).unwrap();
+        reduce(
+            &mut device,
+            UiAction::BackendEvent(finished("prompt-1", "begin_device_code", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(device.current_command.is_some());
+        assert!(device.connection_operation.is_some());
+        let effects = reduce(
+            &mut device,
+            UiAction::BackendEvent(finished("prompt-1", "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(device.current_command.is_none());
+        assert!(!effects.is_empty());
+        reduce(
+            &mut device,
+            UiAction::BackendEvent(finished("begin_device_code-1", "prompt", false)),
+            &mut ids,
+        )
+        .unwrap();
         let challenge = DeviceCodeChallenge {
             provider: "openai-codex".into(),
             verification_uri: "https://example.test/device".into(),
             user_code: "ABCD".into(),
         };
+        assert!(
+            reduce(
+                &mut device,
+                UiAction::BackendEvent(BackendEvent::DeviceCodeReported {
+                    command_id: "begin_device_code-1".into(),
+                    challenge: DeviceCodeChallenge {
+                        provider: "openai".into(),
+                        ..challenge.clone()
+                    },
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
         let effects = reduce(
             &mut device,
             UiAction::BackendEvent(BackendEvent::DeviceCodeReported {
@@ -9875,6 +10063,21 @@ mod tests {
             effect,
             UiEffect::ShowDeviceCode(received) if received == &challenge
         )));
+        assert!(
+            reduce(
+                &mut device,
+                UiAction::BackendEvent(BackendEvent::DeviceCodeReported {
+                    command_id: "begin_device_code-1".into(),
+                    challenge: DeviceCodeChallenge {
+                        user_code: "LATE".into(),
+                        ..challenge
+                    },
+                }),
+                &mut ids,
+            )
+            .unwrap()
+            .is_empty()
+        );
         let progress = DeviceCodeProgress {
             provider: "openai-codex".into(),
             attempt: 2,
@@ -9940,6 +10143,113 @@ mod tests {
         assert!(effects.iter().any(|effect| matches!(
             effect,
             UiEffect::Notice(notice) if notice == "Device login cancelled."
+        )));
+
+        // Device login commits the first catalog report and first finish.
+        let fresh = connection_catalog("Fresh", "stored");
+        let mut device = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut device,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        let report = BackendEvent::ConnectionCatalogReported {
+            command_id: "begin_device_code-1".into(),
+            catalog: fresh.clone(),
+        };
+        let duplicate = BackendEvent::ConnectionCatalogReported {
+            command_id: "begin_device_code-1".into(),
+            catalog: connection_catalog("Duplicate", "stored"),
+        };
+        let ok_finish = finished("begin_device_code-1", "begin_device_code", true);
+        let late_fail = finished("begin_device_code-1", "begin_device_code", false);
+        reduce(&mut device, UiAction::BackendEvent(report), &mut ids).unwrap();
+        reduce(&mut device, UiAction::BackendEvent(duplicate), &mut ids).unwrap();
+        let effects = reduce(&mut device, UiAction::BackendEvent(ok_finish), &mut ids).unwrap();
+        assert!(device.connection_operation.is_none());
+        assert_eq!(device.connection_catalog, fresh);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::FinishDeviceCode))
+        );
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(notice) if notice == "Connected: openai-codex"
+        )));
+        assert!(
+            reduce(&mut device, UiAction::BackendEvent(late_fail), &mut ids)
+                .unwrap()
+                .is_empty()
+        );
+
+        let mut device = UiState::unconfigured();
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut device,
+            UiAction::BeginDeviceCode {
+                provider: "openai-codex".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        if let Some(ConnectionOperation::DeviceCode {
+            ref mut completion, ..
+        }) = device.connection_operation
+        {
+            *completion = Some(SessionCompletion {
+                ok: true,
+                error: None,
+            });
+        }
+        let effects = reduce(
+            &mut device,
+            UiAction::BackendEvent(BackendEvent::ConnectionCatalogReported {
+                command_id: "begin_device_code-1".into(),
+                catalog: fresh.clone(),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(device.connection_operation.is_none());
+        assert_eq!(device.connection_catalog, fresh);
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(notice) if notice == "Connected: openai-codex"
+        )));
+
+        let mut device = UiState::unconfigured();
+        if let ConnectionOperation::DeviceCode {
+            ref mut completion, ..
+        } = *device.connection_operation.insert(ConnectionOperation::DeviceCode {
+            command_id: "begin_device_code-1".into(),
+            provider: "openai-codex".into(),
+            report: None,
+            challenge: None,
+            progress: None,
+            completion: Some(SessionCompletion {
+                ok: true,
+                error: None,
+            }),
+            cancel_requested: false,
+        }) {
+            assert!(completion.is_some());
+        }
+        let effects = reduce(
+            &mut device,
+            UiAction::BackendEvent(finished("begin_device_code-1", "begin_device_code", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::Notice(notice)
+                if notice
+                    == "Connected: openai-codex. Connection status could not be refreshed."
         )));
     }
 
