@@ -4895,7 +4895,9 @@ fn finish_connection_operation(
             command_type,
             report,
             completion,
-        } => finish_connection_catalog(state, command_id, command_type, report, completion, effects),
+        } => {
+            finish_connection_catalog(state, command_id, command_type, report, completion, effects)
+        }
         ConnectionOperation::DeviceCode {
             command_id,
             provider,
@@ -10225,18 +10227,21 @@ mod tests {
         let mut device = UiState::unconfigured();
         if let ConnectionOperation::DeviceCode {
             ref mut completion, ..
-        } = *device.connection_operation.insert(ConnectionOperation::DeviceCode {
-            command_id: "begin_device_code-1".into(),
-            provider: "openai-codex".into(),
-            report: None,
-            challenge: None,
-            progress: None,
-            completion: Some(SessionCompletion {
-                ok: true,
-                error: None,
-            }),
-            cancel_requested: false,
-        }) {
+        } = *device
+            .connection_operation
+            .insert(ConnectionOperation::DeviceCode {
+                command_id: "begin_device_code-1".into(),
+                provider: "openai-codex".into(),
+                report: None,
+                challenge: None,
+                progress: None,
+                completion: Some(SessionCompletion {
+                    ok: true,
+                    error: None,
+                }),
+                cancel_requested: false,
+            })
+        {
             assert!(completion.is_some());
         }
         let effects = reduce(
