@@ -42,6 +42,9 @@ mod prompt_history_tests;
 mod prompt_history_view;
 mod queue_view;
 pub mod reducer;
+mod runtime;
+#[cfg(test)]
+mod runtime_tests;
 #[cfg(test)]
 mod session_catalog_tests;
 mod session_picker;
@@ -76,7 +79,7 @@ use clipboard::{ClipboardAction, ClipboardBackend, SystemClipboard};
 use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
 use file_picker::{FilePicker, PickerAction};
@@ -5198,7 +5201,48 @@ async fn run(cli: Cli) -> Result<(), Error> {
         },
     };
     let _panic_hook = PanicHookGuard::install();
-    let (mut backend, stdin, stdout, stderr) = BackendProcess::spawn(&cli.backend)?;
+    let (process, stdin, stdout, stderr) = BackendProcess::spawn(&cli.backend)?;
+    run_with_io(
+        cli,
+        bindings,
+        binding_warning,
+        runtime::BackendIo {
+            process,
+            stdin,
+            stdout,
+            stderr,
+        },
+        |mouse_enabled| {
+            Ok((
+                TerminalGuard::enter(mouse_enabled)?,
+                runtime::TerminalEvents,
+            ))
+        },
+    )
+    .await
+}
+
+async fn run_with_io<P, W, R, E, T, S>(
+    cli: Cli,
+    bindings: Bindings,
+    binding_warning: Option<String>,
+    backend_io: runtime::BackendIo<P, W, R, E>,
+    open_terminal: impl FnOnce(bool) -> Result<(T, S), Error>,
+) -> Result<(), Error>
+where
+    P: runtime::Process,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    E: AsyncRead + Unpin + Send + 'static,
+    T: runtime::TerminalSession,
+    S: runtime::EventSource,
+{
+    let runtime::BackendIo {
+        process: mut backend,
+        stdin,
+        stdout,
+        stderr,
+    } = backend_io;
     let (writer_tx, writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
     let (handshake_tx, handshake_rx) = oneshot::channel();
     let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
@@ -5259,10 +5303,10 @@ async fn run(cli: Cli) -> Result<(), Error> {
             };
             let no_color = std::env::var_os("NO_COLOR").is_some();
             let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
-            let mut terminal = TerminalGuard::enter(mouse_enabled)?;
+            let (mut terminal, input_source) = open_terminal(mouse_enabled)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
             let (input_stop_tx, input_stop_rx) = watch::channel(false);
-            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled));
+            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled, input_source));
             let connection = ConnectionInfo {
                 backend_version: actual_version,
             };
@@ -5699,10 +5743,11 @@ fn input_task(
     sender: mpsc::Sender<Input>,
     mut stop: watch::Receiver<bool>,
     mouse_enabled: bool,
+    mut source: impl runtime::EventSource,
 ) -> Result<(), Error> {
     let mut deferred = None;
     while !*stop.borrow() {
-        if deferred.is_none() && !event::poll(Duration::from_millis(50))? {
+        if deferred.is_none() && !source.poll(Duration::from_millis(50))? {
             match stop.has_changed() {
                 Ok(true) => {
                     let _ = stop.borrow_and_update();
@@ -5712,7 +5757,7 @@ fn input_task(
             }
             continue;
         }
-        let terminal_event = deferred.take().map_or_else(event::read, Ok);
+        let terminal_event = deferred.take().map_or_else(|| source.read(), Ok);
         match terminal_event {
             Ok(Event::Key(key))
                 if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
@@ -5734,8 +5779,9 @@ fn input_task(
             Ok(Event::Mouse(event)) if mouse_enabled && mouse::supported(event) => {
                 let input = if mouse::Scroll::from_event(event).is_some() {
                     let (scroll, next) = collect_scroll_run(event, || {
-                        event::poll(SCROLL_DRAIN_POLL)?
-                            .then(event::read)
+                        source
+                            .poll(SCROLL_DRAIN_POLL)?
+                            .then(|| source.read())
                             .transpose()
                     })?;
                     deferred = next;
