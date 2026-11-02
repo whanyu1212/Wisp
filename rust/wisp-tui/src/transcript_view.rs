@@ -4684,19 +4684,7 @@ fn normalize_anchor(
     let entry = transcript.entry(anchor.entry_id)?;
     match anchor.position {
         RowPosition::Markdown(position) if uses_markdown(entry) => {
-            let snapshot = cache.markdown_snapshot(entry, width);
-            let output = match normalization {
-                AnchorNormalization::Geometry if !snapshot.document.has_tables() => {
-                    snapshot.normalize_offset(position.output_offset)
-                }
-                AnchorNormalization::Geometry | AnchorNormalization::Content => {
-                    snapshot.output_for_position(position)
-                }
-            };
-            if output >= snapshot.output_len {
-                return cache.content_anchor_before(transcript, entry, snapshot.output_len, width);
-            }
-            cache.content_anchor_before(transcript, entry, snapshot.next_boundary(output), width)
+            normalize_markdown_anchor(transcript, cache, entry, position, width, normalization)
         }
         RowPosition::Markdown(position) => normalize_anchor(
             transcript,
@@ -4730,93 +4718,7 @@ fn normalize_anchor(
             })
         }
         RowPosition::Card(position) => {
-            let collapsed_group = collapsed_group_start(&cache.fold, transcript, entry.id);
-            let action = if card_run(transcript, entry.id).is_some_and(|(start, members)| {
-                start == entry.id && cache.fold.is_run_expanded(&members)
-            }) {
-                card_action_anchor(entry.id)
-            } else {
-                RowAnchor {
-                    entry_id: collapsed_group.unwrap_or(entry.id),
-                    position: RowPosition::Header,
-                }
-            };
-            let projection = cache.card_snapshot(entry)?;
-            if (!cache.fold.is_expanded(entry.id) && !projection.inline_detail)
-                || collapsed_group.is_some()
-            {
-                return Some(action);
-            }
-            let normalized = match position.section {
-                CardSection::Action => {
-                    let offset = position.absolute_byte_offset.min(projection.action.len());
-                    RowAnchor {
-                        entry_id: entry.id,
-                        position: if offset == 0 {
-                            action.position
-                        } else {
-                            RowPosition::Card(CardPosition {
-                                section: CardSection::Action,
-                                absolute_byte_offset: offset,
-                            })
-                        },
-                    }
-                }
-                CardSection::Metadata if !projection.metadata.is_empty() => RowAnchor {
-                    entry_id: entry.id,
-                    position: RowPosition::Card(CardPosition {
-                        section: CardSection::Metadata,
-                        absolute_byte_offset: position
-                            .absolute_byte_offset
-                            .min(projection.metadata.len()),
-                    }),
-                },
-                CardSection::Detail if !projection.detail.is_empty() => {
-                    let end = projection
-                        .detail_base
-                        .saturating_add(projection.detail.len());
-                    let offset = position
-                        .absolute_byte_offset
-                        .clamp(projection.detail_base, end);
-                    RowAnchor {
-                        entry_id: entry.id,
-                        position: RowPosition::Card(CardPosition {
-                            section: CardSection::Detail,
-                            absolute_byte_offset: offset,
-                        }),
-                    }
-                }
-                CardSection::Omission if projection.omission.is_some() => RowAnchor {
-                    entry_id: entry.id,
-                    position: RowPosition::Card(CardPosition {
-                        section: CardSection::Omission,
-                        absolute_byte_offset: position
-                            .absolute_byte_offset
-                            .min(projection.omission.as_ref().map_or(0, String::len)),
-                    }),
-                },
-                CardSection::Footer if projection.footer.is_some() => RowAnchor {
-                    entry_id: entry.id,
-                    position: RowPosition::Card(CardPosition {
-                        section: CardSection::Footer,
-                        absolute_byte_offset: position
-                            .absolute_byte_offset
-                            .min(projection.footer.as_ref().map_or(0, String::len)),
-                    }),
-                },
-                _ => RowAnchor {
-                    entry_id: entry.id,
-                    position: RowPosition::Header,
-                },
-            };
-            if cache.row_at(transcript, normalized, width).is_some() {
-                Some(normalized)
-            } else {
-                Some(RowAnchor {
-                    entry_id: entry.id,
-                    position: RowPosition::Header,
-                })
-            }
+            normalize_card_anchor(transcript, cache, entry, position, width)
         }
         // The lead-in exists only while a prompt directly follows its owner. A history page or
         // recovery can splice entries between them, which would leave an unbuildable top row
@@ -4851,6 +4753,106 @@ fn normalize_anchor(
         }
         _ => Some(anchor),
     }
+}
+
+/// Preserve output position on rewrap, and source affinity when content changes.
+fn normalize_markdown_anchor(
+    transcript: &Transcript,
+    cache: &mut TranscriptRowCache,
+    entry: &TranscriptEntry,
+    position: MarkdownPosition,
+    width: usize,
+    normalization: AnchorNormalization,
+) -> Option<RowAnchor> {
+    let snapshot = cache.markdown_snapshot(entry, width);
+    let output = match normalization {
+        AnchorNormalization::Geometry if !snapshot.document.has_tables() => {
+            snapshot.normalize_offset(position.output_offset)
+        }
+        AnchorNormalization::Geometry | AnchorNormalization::Content => {
+            snapshot.output_for_position(position)
+        }
+    };
+    if output >= snapshot.output_len {
+        return cache.content_anchor_before(transcript, entry, snapshot.output_len, width);
+    }
+    cache.content_anchor_before(transcript, entry, snapshot.next_boundary(output), width)
+}
+
+/// Keep a card anchor on a visible section, or resume at its folded action row.
+fn normalize_card_anchor(
+    transcript: &Transcript,
+    cache: &mut TranscriptRowCache,
+    entry: &TranscriptEntry,
+    position: CardPosition,
+    width: usize,
+) -> Option<RowAnchor> {
+    let collapsed_group = collapsed_group_start(&cache.fold, transcript, entry.id);
+    let action = if card_run(transcript, entry.id)
+        .is_some_and(|(start, members)| start == entry.id && cache.fold.is_run_expanded(&members))
+    {
+        card_action_anchor(entry.id)
+    } else {
+        RowAnchor {
+            entry_id: collapsed_group.unwrap_or(entry.id),
+            position: RowPosition::Header,
+        }
+    };
+    let projection = cache.card_snapshot(entry)?;
+    if (!cache.fold.is_expanded(entry.id) && !projection.inline_detail) || collapsed_group.is_some()
+    {
+        return Some(action);
+    }
+    let normalized = RowAnchor {
+        entry_id: entry.id,
+        position: normalize_card_position(&projection, position, action.position),
+    };
+    if cache.row_at(transcript, normalized, width).is_some() {
+        Some(normalized)
+    } else {
+        Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Header,
+        })
+    }
+}
+
+/// Clamp offsets to retained section bytes; absent sections resume at the header.
+fn normalize_card_position(
+    projection: &CardProjection,
+    position: CardPosition,
+    action: RowPosition,
+) -> RowPosition {
+    let offset = position.absolute_byte_offset;
+    let absolute_byte_offset = match position.section {
+        CardSection::Action => {
+            let offset = offset.min(projection.action.len());
+            if offset == 0 {
+                return action;
+            }
+            offset
+        }
+        CardSection::Metadata if !projection.metadata.is_empty() => {
+            offset.min(projection.metadata.len())
+        }
+        CardSection::Detail if !projection.detail.is_empty() => {
+            let end = projection
+                .detail_base
+                .saturating_add(projection.detail.len());
+            offset.clamp(projection.detail_base, end)
+        }
+        CardSection::Omission if projection.omission.is_some() => {
+            offset.min(projection.omission.as_ref().map_or(0, String::len))
+        }
+        CardSection::Footer if projection.footer.is_some() => {
+            offset.min(projection.footer.as_ref().map_or(0, String::len))
+        }
+        _ => return RowPosition::Header,
+    };
+    RowPosition::Card(CardPosition {
+        section: position.section,
+        absolute_byte_offset,
+    })
 }
 
 fn ends_with_line_break(content: &str) -> bool {
