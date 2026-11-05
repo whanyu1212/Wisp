@@ -8,6 +8,11 @@ These scenarios answer two separate questions:
 Generate profile artifacts under the ignored `profiles/` directory. Compare absolute timings only
 on the same machine, with the same Python build and benchmark arguments.
 
+This directory holds the benchmark scenarios and the evidence they produced. The tests for the
+scenarios themselves live in `tests/benchmarks/`: they run each scenario at a small size to check
+that it still works and reports what it claims, not how fast it is. CI runs them with
+`uv run pytest tests/benchmarks`.
+
 ## Evidence reports
 
 `evidence/` keeps dated measurements and decision records behind choices that still shape the

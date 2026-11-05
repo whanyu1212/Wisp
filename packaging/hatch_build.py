@@ -1,4 +1,9 @@
-"""Candidate platform-wheel hook for Wisp's optional native components."""
+"""Candidate platform-wheel hook for Wisp's optional native components.
+
+Only the native wheels built by ``rust-tui-wheels.yml`` use Hatchling and this hook; the
+sdist and pure wheel use ``uv_build``, the ``[build-system]`` in ``pyproject.toml``.
+site/src/content/pages/contributing/building.md explains why there are two backends.
+"""
 
 from __future__ import annotations
 
