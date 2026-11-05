@@ -275,9 +275,9 @@ not an exception that ends the run.
 
 **Creating files and running processes.** `write` creates missing parent
 directories, and `overwrite: false` refuses to replace a file that already exists.
-`bash` with `operation: start` returns while the process keeps running; `cancel`
-stops it along with every process it started. Process IDs are random, so the
-transcript shows `<process_id>` in their place.
+`bash` with `operation: start` returns with the first output while the process
+keeps running, and a later `poll` reports its exit code once it has finished.
+Process IDs are random, so the transcript shows `<process_id>` in their place.
 
 ```text
 {{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:write}}
@@ -286,7 +286,7 @@ transcript shows `<process_id>` in their place.
 
 {{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-start}}
 
-{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-cancel}}
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-poll}}
 ```
 
 ### Go deeper: how each built-in works

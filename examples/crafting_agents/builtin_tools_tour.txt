@@ -108,13 +108,13 @@ error: File already exists: docs/CHANGELOG.md
 # ANCHOR_END: write-exists
 
 # ANCHOR: bash-start
-> bash {"operation": "start", "command": "echo 'server ready'; sleep 30", "yield_seconds": 5}
+> bash {"operation": "start", "command": "echo 'build started'; sleep 1", "yield_seconds": 5}
 Process <process_id> is still running
 stdout:
-server ready
+build started
 # ANCHOR_END: bash-start
 
-# ANCHOR: bash-cancel
-> bash {"operation": "cancel", "process_id": "<process_id>"}
-Process <process_id> cancelled
-# ANCHOR_END: bash-cancel
+# ANCHOR: bash-poll
+> bash {"operation": "poll", "process_id": "<process_id>", "wait_seconds": 5}
+Process <process_id> completed with exit code 0
+# ANCHOR_END: bash-poll

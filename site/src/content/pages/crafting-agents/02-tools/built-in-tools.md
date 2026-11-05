@@ -529,14 +529,15 @@ Arguments: `operation` (`run`, `start`, `poll`, or `cancel`; default `run`),
 fields for long-running processes.
 
 In the [tour](../02-tools.md#watch-the-built-ins-work-on-a-project), a failing test run reports its exit code, and a started process
-returns its first output while it keeps running:
+returns its first output while it keeps running. A later `poll` reports the exit
+code once it has finished:
 
 ```text
 {{#include ../../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-fail}}
 
 {{#include ../../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-start}}
 
-{{#include ../../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-cancel}}
+{{#include ../../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-poll}}
 ```
 
 The code lives in

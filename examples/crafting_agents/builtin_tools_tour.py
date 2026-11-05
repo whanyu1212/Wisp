@@ -196,14 +196,19 @@ async def run_tour(project: Path) -> list[TourStep]:
         await tour.call("write", "write", changelog)
         await tour.call("write-exists", "write", {**changelog, "overwrite": False})
 
-        # Start a long-running process, read its first output, and stop it.
+        # Start a background process, read its first output, then poll until it exits.
         started = await tour.call(
             "bash-start",
             "bash",
-            {"operation": "start", "command": "echo 'server ready'; sleep 30", "yield_seconds": 5},
+            {"operation": "start", "command": "echo 'build started'; sleep 1", "yield_seconds": 5},
         )
         process_id = str(started.data["process_id"])
-        await tour.call("bash-cancel", "bash", {"operation": "cancel", "process_id": process_id})
+        poll = {"operation": "poll", "process_id": process_id, "wait_seconds": 5}
+        # How many polls the exit takes depends on timing, so only the last one, which
+        # reports the exit code, is kept. The process prints nothing after its first
+        # line, so the earlier polls carry no output.
+        while (await tour.call("bash-poll", "bash", poll)).data.get("process_state") == "running":
+            tour.steps.pop()
     finally:
         await supervisor.aclose()
     return [

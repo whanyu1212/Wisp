@@ -53,7 +53,7 @@ uv run python -m examples.crafting_agents.builtin_tools_tour
 
 - `builtin_tools_tour.py`: explore the project with `ls`, `find`, `grep`, and `read`;
   reproduce and repair a bug with `bash` and `edit`; create a file with `write`;
-  and start and cancel a long-running process.
+  and start a background process, then poll it until it exits.
 - `builtin_tools_tour.txt`: the transcript the documentation includes, generated
   with `--transcript`. `tests/docs/crafting/test_builtin_tools_tour.py` fails when
   a fresh run no longer matches it.
