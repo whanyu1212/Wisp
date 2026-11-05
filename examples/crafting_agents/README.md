@@ -41,6 +41,23 @@ python3 -m examples.crafting_agents.checkpoint_05 --scenario stale-input
   content checks under the trusted, single-writer fixture assumption.
 - `checkpoint_05.py`: repair, policy denial, approval denial, and stale-input scenarios.
 
+## Built-in tools tour
+
+Chapter 2 also shows Wisp's real built-in tools working on a small temporary
+project. Unlike the checkpoints, the tour imports Wisp, so run it from the
+development checkout after `uv sync --locked`:
+
+```bash
+uv run python -m examples.crafting_agents.builtin_tools_tour
+```
+
+- `builtin_tools_tour.py`: explore the project with `ls`, `find`, `grep`, and `read`;
+  reproduce and repair a bug with `bash` and `edit`; create a file with `write`;
+  and start and cancel a long-running process.
+- `builtin_tools_tour.txt`: the transcript the documentation includes, generated
+  with `--transcript`. `tests/docs/crafting/test_builtin_tools_tour.py` fails when
+  a fresh run no longer matches it.
+
 The default providers replay authored decisions and check observations. They are not
 live models or autonomous solvers. `model_finished` means the last response had no tool
 calls; it does not mean the task succeeded. The file-based checkpoints print the

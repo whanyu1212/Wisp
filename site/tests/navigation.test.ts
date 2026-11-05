@@ -106,5 +106,18 @@ test("the real collections expose the same section order, course sequence, and n
     course.filter((page) => page.chapter).map((page) => page.chapter),
     [1, 2, 3, 4, 5],
   );
-  assert.ok(course.slice(6).every((page) => !page.chapter));
+  // A chapter's companion page follows it directly; case studies follow the chapters.
+  assert.deepEqual(
+    course.slice(0, 7).map((page) => page.source),
+    [
+      "crafting-agents/index.md",
+      "crafting-agents/01-core-loop.md",
+      "crafting-agents/02-tools.md",
+      "crafting-agents/02-tools/built-in-tools.md",
+      "crafting-agents/03-context.md",
+      "crafting-agents/04-providers.md",
+      "crafting-agents/05-side-effects.md",
+    ],
+  );
+  assert.ok(course.slice(7).every((page) => !page.chapter));
 });
