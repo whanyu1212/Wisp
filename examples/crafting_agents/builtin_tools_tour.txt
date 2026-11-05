@@ -1,0 +1,120 @@
+# Output of: uv run python -m examples.crafting_agents.builtin_tools_tour --transcript
+# tests/docs/crafting/test_builtin_tools_tour.py keeps it current.
+
+# ANCHOR: ls
+> ls {}
+build/
+README.md
+run-tests.sh
+src/
+tests/
+# ANCHOR_END: ls
+
+# ANCHOR: ls-all
+> ls {"all": true}
+.git/
+.gitignore
+build/
+README.md
+run-tests.sh
+src/
+tests/
+# ANCHOR_END: ls-all
+
+# ANCHOR: find
+> find {"pattern": "*.py"}
+src/greeting.py
+src/names.py
+tests/test_greeting.py
+# ANCHOR_END: find
+
+# ANCHOR: grep
+> grep {"pattern": "TODO"}
+src/greeting.py:2:    # TODO: ignore surrounding whitespace
+# ANCHOR_END: grep
+
+# ANCHOR: grep-context
+> grep {"pattern": "def \\w+", "path": "src", "context": 1}
+src/greeting.py:1:def greet(name):
+src/greeting.py-2-    # TODO: ignore surrounding whitespace
+src/greeting.py-5-
+src/greeting.py:6:def farewell(name):
+src/greeting.py-7-    return f"Goodbye, {name}!"
+--
+src/names.py-3-
+src/names.py:4:def normalize(name):
+src/names.py-5-    return name.strip().title()
+# ANCHOR_END: grep-context
+
+# ANCHOR: read-page
+> read {"path": "README.md", "limit": 3}
+# Greeter
+
+A tiny project for touring Wisp's built-in tools.
+[More lines follow. Use offset=4 to continue.]
+# ANCHOR_END: read-page
+
+# ANCHOR: read-protected
+> read {"path": ".env"}
+error: Access to protected path denied: .env
+# ANCHOR_END: read-protected
+
+# ANCHOR: bash-fail
+> bash {"command": "./run-tests.sh"}
+Command exited with code 1: FAILED (failures=1)
+# ANCHOR_END: bash-fail
+
+# ANCHOR: edit-unread
+> edit {"path": "src/greeting.py", "edits": [{"oldText": "    # TODO: ignore surrounding whitespace\n    return f\"Hello, {name}!\"\n", "newText": "    return f\"Hello, {name.strip()}!\"\n"}]}
+error (stale_input): Read src/greeting.py before changing it
+hint: Read the file, then retry with its current contents in mind.
+# ANCHOR_END: edit-unread
+
+# ANCHOR: read
+> read {"path": "src/greeting.py"}
+def greet(name):
+    # TODO: ignore surrounding whitespace
+    return f"Hello, {name}!"
+
+
+def farewell(name):
+    return f"Goodbye, {name}!"
+# ANCHOR_END: read
+
+# ANCHOR: edit-ambiguous
+> edit {"path": "src/greeting.py", "edits": [{"oldText": "return f\"", "newText": "return f\"> "}]}
+error (invalid_arguments): edits[0].oldText matches 2 places; it must match once
+hint: Include enough surrounding lines in oldText to make it unique.
+# ANCHOR_END: edit-ambiguous
+
+# ANCHOR: edit
+> edit {"path": "src/greeting.py", "edits": [{"oldText": "    # TODO: ignore surrounding whitespace\n    return f\"Hello, {name}!\"\n", "newText": "    return f\"Hello, {name.strip()}!\"\n"}]}
+Applied 1 edit(s) to src/greeting.py
+# ANCHOR_END: edit
+
+# ANCHOR: bash-pass
+> bash {"command": "./run-tests.sh"}
+Command exited with code 0: OK
+# ANCHOR_END: bash-pass
+
+# ANCHOR: write
+> write {"path": "docs/CHANGELOG.md", "content": "- greet() ignores whitespace\n"}
+Wrote 29 bytes to docs/CHANGELOG.md
+# ANCHOR_END: write
+
+# ANCHOR: write-exists
+> write {"path": "docs/CHANGELOG.md", "content": "- greet() ignores whitespace\n", "overwrite": false}
+error: File already exists: docs/CHANGELOG.md
+# ANCHOR_END: write-exists
+
+# ANCHOR: bash-start
+> bash {"operation": "start", "command": "echo 'build started'; sleep 1", "yield_seconds": 5}
+Process <process_id> is still running
+stdout:
+build started
+# ANCHOR_END: bash-start
+
+# ANCHOR: bash-poll
+> bash {"operation": "poll", "process_id": "<process_id>", "wait_seconds": 5}
+Process <process_id> completed with exit code 0
+# ANCHOR_END: bash-poll

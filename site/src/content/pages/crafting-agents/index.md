@@ -88,8 +88,10 @@ Each chapter follows the same progression:
    costs, alternatives, and tests.
 6. **Complete a checkpoint.** Make a focused change and verify its behavior.
 
-Code listings are included from the runnable sources so the book and examples
-share the same implementation. The teaching agent is intentionally smaller than
+Chapter code listings are included from the runnable sources so the book and
+examples share the same implementation. Pages that explain Wisp's own source, such
+as [Inside Wisp's built-in tools](02-tools/built-in-tools.md), use shortened
+excerpts instead and say so at the top. The teaching agent is intentionally smaller than
 Wisp; each chapter names the guarantees it has yet to earn.
 
 ## Curriculum
@@ -118,6 +120,9 @@ distinguish runtime correctness from live-model task success.
 
 These deeper readings preserve implementation detail without making it a
 prerequisite for the first working agent:
+
+- [Inside Wisp's built-in tools](02-tools/built-in-tools.md): a companion to
+  chapter 2 that explains how each built-in tool works at the system-call level.
 
 - [Hardening the tool boundary](case-studies/tool-boundary.md): file races,
   process lifetime, search, scheduling, and current limitations.

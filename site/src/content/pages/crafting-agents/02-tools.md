@@ -19,7 +19,9 @@ piece of text, and run the project's tests.
 
 By the end, the trace will show a failing test before the edit and passing tests
 afterward. We will also deny the edit and confirm that a finished run can leave
-the task unresolved.
+the task unresolved. A companion page,
+[Inside Wisp's built-in tools](02-tools/built-in-tools.md), then explains how each
+of Wisp's seven built-in tools works at the operating-system level.
 
 ## 1. A tool has two contracts
 
@@ -202,13 +204,117 @@ to describe and audit, but Wisp's exact-match edits and unranked search can requ
 more interactions than specialized operations. Tool design should be evaluated
 against actual tasks, not just the number of tools offered.
 
+### Watch the built-ins work on a project
+
+Our calculator tools were written for one fixture. To see Wisp's real tools work on
+files, run the built-in tools tour. Unlike the checkpoints, it imports Wisp, so run
+it from a development checkout:
+
+```bash
+uv run python -m examples.crafting_agents.builtin_tools_tour
+```
+
+[`builtin_tools_tour.py`](https://github.com/whanyu1212/Wisp/blob/main/examples/crafting_agents/builtin_tools_tour.py)
+writes a small project to a temporary directory: `src/greeting.py` with a TODO
+and a whitespace bug, a test that catches the bug, a `run-tests.sh` script that
+prints the test verdict, a README, a `.gitignore` that excludes `build/`, and a
+`.env` file holding a secret. It then calls each tool's
+`run` method with a `ToolContext`, as Wisp's executor does once policy and
+approval checks have passed. No model is involved; the calls are fixed in the
+script. The output below comes from the checked-in
+[transcript](https://github.com/whanyu1212/Wisp/blob/main/examples/crafting_agents/builtin_tools_tour.txt),
+which a test regenerates and compares on every run.
+
+**Exploring.** `ls` hides dot-files unless `all` is set, and even then it never
+shows `.env`, which matches a default protected-path pattern. `find` and `grep`
+skip `build/` because `.gitignore` excludes it, even though `build/greeting.py`
+is a `.py` file that contains `TODO`.
+
+```text
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:ls}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:ls-all}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:find}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:grep}}
+```
+
+`read` returns a page of a file and says where the next page starts. A protected
+file is refused before it is opened:
+
+```text
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:read-page}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:read-protected}}
+```
+
+**Reproducing and repairing.** As in our checkpoint, a failing test is an ordinary
+result that carries its exit code. The first edit fails because the file has not
+been read yet: Wisp refuses to change a file the model has not seen. After a read,
+an `oldText` that matches in two places is refused for the same reason our
+teaching edit requires exactly one match. A unique `oldText` then succeeds, and
+the tests pass:
+
+```text
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-fail}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:edit-unread}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:read}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:edit-ambiguous}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:edit}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-pass}}
+```
+
+Each refusal is a `ToolError` with a failure code and a hint the model can act on,
+not an exception that ends the run.
+
+**Creating files and running processes.** `write` creates missing parent
+directories, and `overwrite: false` refuses to replace a file that already exists.
+`bash` with `operation: start` returns with the first output while the process
+keeps running, and a later `poll` reports its exit code once it has finished.
+Process IDs are random, so the transcript shows `<process_id>` in their place.
+
+```text
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:write}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:write-exists}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-start}}
+
+{{#include ../../../../../examples/crafting_agents/builtin_tools_tour.txt:bash-poll}}
+```
+
+### Go deeper: how each built-in works
+
+The tour shows what each tool returns, not how. The companion page
+[Inside Wisp's built-in tools](02-tools/built-in-tools.md) follows each of the
+seven tools from the model's call down to the system calls it makes: how a path
+is opened without following a swapped-in symbolic link, how `write` replaces a
+file atomically, how `edit` locates its text, how `bash` finds and stops every
+process a command started, and how `grep` bounds a search of an untrusted
+repository. It is optional on a first read; chapter 3 does not depend on it.
+
 ### Follow the implementation
 
 - [`tools/base.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/base.py)
   and [`tools/result.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/result.py):
   tool and result contracts.
+- [`coding/tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/tool_execution.py):
+  policy, approval, and the conversion of results and errors into observations.
+- [`tools/files/secure_fs.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/files/secure_fs.py)
+  and [`tools/files/paths.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/files/paths.py):
+  path policy and descriptor-relative opens.
 - [`tools/files/operations.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/files/operations.py):
   the read, write, and edit implementations.
+- [`tools/shell/`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/shell/):
+  the bash tool, process supervisor, process-tree cleanup, and watchdog.
+- [`tools/search/tools.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/search/tools.py):
+  grep, find, ls, and the secured directory walk.
 - [`loop/prepared_tools.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/agent/loop/prepared_tools.py):
   approval preparation and execution scheduling.
 - [`test_tool_execution.py`](https://github.com/whanyu1212/Wisp/blob/main/tests/coding/test_tool_execution.py):

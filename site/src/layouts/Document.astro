@@ -36,7 +36,12 @@ const toc = headings.filter(
   (heading) => heading.depth > 1 && heading.depth < 4,
 );
 const course = page.layout === "course";
-const caseStudy = course && !page.chapter && page.source !== root?.source;
+// A course page nested under a chapter is that chapter's companion, not a case study.
+const companionOf = course
+  ? breadcrumbs.findLast((item) => item.chapter)?.chapter
+  : undefined;
+const caseStudy =
+  course && !page.chapter && !companionOf && page.source !== root?.source;
 const hasToc = toc.length > 0 && page.layout !== "home";
 ---
 
@@ -158,9 +163,11 @@ const hasToc = toc.length > 0 && page.layout !== "home";
                 : current?.title}
               {page.chapter
                 ? ` / Chapter ${page.chapter}`
-                : caseStudy
-                  ? " / Case study"
-                  : ""}
+                : companionOf
+                  ? ` / Chapter ${companionOf} companion`
+                  : caseStudy
+                    ? " / Case study"
+                    : ""}
             </div>
           </div>
         )}

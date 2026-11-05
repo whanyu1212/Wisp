@@ -1,6 +1,6 @@
 ---
 title: 'Case study: Hardening the tool boundary'
-description: How Wisp handles file races, protected paths, process supervision, bounded search, and concurrency across built-in tools.
+description: Why Wisp's built-in tools guard against file races, runaway processes, and unbounded search, what those protections cost, and what remains open.
 route: crafting-agents/case-studies/tool-boundary.html
 section: learn
 order: 6
@@ -16,35 +16,32 @@ navGroup: Case studies
 The [chapter 2 checkpoint](../02-tools.md) assumes a small trusted fixture and a
 single writer. Wisp operates inside developer repositories, runs long-lived
 commands, and accepts calls from models and custom executors. This case study
-connects those pressures to the mechanisms around its built-in tools.
+explains which of those pressures shaped its built-in tools, what each response
+costs, and what remains unsolved.
+
+It deliberately leaves out _how_ the tools work. For the step-by-step mechanics,
+with code, read [Inside Wisp's built-in tools](../02-tools/built-in-tools.md);
+the links below point to the relevant sections.
 
 ## Files: a path check is not enough
 
-A file can change between checking its path and opening it. An entry that was a
-regular file can become a symlink; another process can replace the target while
-an edit is being prepared. These are time-of-check/time-of-use races.
+**The pressure.** The teaching tools check a path string, then open it. In a real
+repository, the file system can change in between: a directory can be replaced by a
+symbolic link that leads outside the project, or the user, a formatter, or another
+process can rewrite the file the model is about to change. A check on a string says
+nothing about what the later `open` reaches.
 
-Wisp's `src/wisp/tools/files/secure_fs.py` uses component-by-component,
-descriptor-relative access with `O_NOFOLLOW` on POSIX and a junction-aware Windows
-path. File operations check identity and version information rather than relying
-only on a previously validated string.
+**The response.** Wisp treats the check and the open as one operation: every path
+component is opened relative to the directory before it, without following links,
+so a swapped-in link makes the open fail rather than escape. Changes require the
+file version the model last read, and are published by an atomic rename. See
+[From a path string to an open file](../02-tools/built-in-tools.md#2-from-a-path-string-to-an-open-file)
+and [`write`](../02-tools/built-in-tools.md#4-write).
 
-A read may name a path that goes through a symbolic link. Wisp resolves it first,
-requires the resolved path to pass the same workspace and protected-path checks,
-then opens that resolved path without following links. A link swapped in after the
-check makes the open fail rather than escape. Writes and edits refuse links and
-name the target to write instead, because an atomic replace would replace the link.
-
-On top of that, `src/wisp/tools/files/operations.py` supplies:
-
-- **Read:** 1-indexed offset/limit slicing inside the secured open, avoiding a
-  whole-file load for a small page.
-- **Write:** a same-directory temporary file and atomic replacement in the common
-  case, preserving metadata and checking for concurrent replacement. Prior text
-  snapshots are capped so diffs do not flood the event wire.
-- **Edit:** every `oldText` must match exactly once, apart from line endings and
-  trailing whitespace on whole lines; replacements must not overlap; a detected
-  concurrent modification aborts rather than silently merging.
+**The cost.** This needs platform primitives (`openat`, `O_NOFOLLOW`, directory
+descriptors) and a separate Windows path. Where they are missing, Wisp denies
+access instead of falling back to plain path opens. The read-before-write rule also
+costs the model an extra `read` before editing a file it already knows.
 
 “Atomic write” is not a universal guarantee here. When the destination has
 multiple hard links, or a permission fallback requires it, Wisp writes in place
@@ -52,58 +49,65 @@ to preserve the inode. Other readers may observe a partial write, and hard-link
 aliases see the change. That is a meaningful compatibility trade-off to document,
 not hide behind an atomic-write label.
 
-Descriptor handling, metadata preservation, and platform differences explain why
-file tools are much larger than their schemas. A short schema is a model-facing
-interface, not a measure of implementation complexity.
-
 ## Shell: output and lifetime need owners
 
-`BashTool` in `src/wisp/tools/shell/tool.py` supports `run`, `start`, `poll`, and
-`cancel` through a shared `ProcessSupervisor`. A bare `run` has a 30-second default
-timeout. `start` retains a managed process with a lifetime cap, and `poll` returns
-bounded increments of output.
+**The pressure.** The chapter's `subprocess.run(..., capture_output=True)` holds all
+output in memory and only truncates it afterwards, and it waits only for the
+process it started. A real command can print gigabytes, start a background server
+that outlives the shell, or detach completely into its own session. Each of these
+can exhaust memory or keep consuming resources after the tool call returns.
 
-Results report process state, separate stdout/stderr truncation information, and
-dropped-byte counts. An exit code is available only once the process terminates.
-This distinguishes “still running,” “finished,” and “I saw only part of its log.”
+**The response.** One `ProcessSupervisor` owns every process a command starts, not
+just the first one. It keeps a bounded tail of output as it arrives, stops the whole
+process tree when a call ends, and reports results that distinguish “still
+running,” “finished,” and “I saw only part of its log.” See
+[`bash`](../02-tools/built-in-tools.md#6-bash). These concerns live beside the
+supervisor rather than in each frontend, so the TUI, SDK, and RPC clients cannot
+disagree about them.
 
-The chapter's `subprocess.run(..., capture_output=True)` only truncates after
-capture. Wisp retains bounded process output as it arrives. Resource cleanup
-also needs to handle process trees, not just the immediate child. These concerns
-belong beside the process supervisor rather than in each frontend.
+**The cost.** Finding every process a command started is platform-specific work:
+process groups, a Linux subreaper, a recorded list of background jobs, an
+environment token, and a watchdog process for the case where the backend dies.
+Cleanup can still fail to account for a process, and then the call fails rather
+than claiming success. Stopping background processes at the end of `run` also
+surprises users who expected `npm run dev &` to keep running; they must use
+`operation=start` instead.
 
 The output-retention kernel is partly native; [the Rust case study](rust-boundary.md)
 explains the measurement behind that boundary.
 
 ## Search: two engines, one policy
 
-Recursive search must handle hidden files, ignore rules, huge directories,
-binary input, oversized lines, and expensive regular expressions. Otherwise a
-read-only call can still exhaust memory or tie up execution.
+**The pressure.** A read-only tool can still do damage. A recursive search of an
+untrusted repository can meet huge directories, enormous ignore files, binary
+input, minified one-line bundles, and regular expressions that take exponential
+time. Without limits, a “safe” `grep` can exhaust memory or hold the turn
+indefinitely, and it can print secrets that a `read` would refuse.
 
-Wisp's `GrepTool` and `FindTool` in `src/wisp/tools/search/tools.py` traverse with
-open directory descriptors, skip hidden names and symlinks, and honor
-`.gitignore`, `.ignore`, `.rgignore`, and `.git/info/exclude`. Only the search root
-may be a link, resolved as for reads. The traversal caps
-directory entries and ignore-file size and pattern count. Scanning adds binary
-detection, incremental UTF-8 decoding, a per-line ceiling, and regex timeouts.
+**The response.** `grep` and `find` share one secured walk. It applies the file
+tools' link and protected-path rules plus the repository's ignore rules, with
+explicit caps on directory size, depth, ignore files, line length, regex time, and
+total duration.
+See [`grep`](../02-tools/built-in-tools.md#7-grep).
 
-`LsTool` has a narrower contract: a single-directory listing, optional hidden
-entries, and no recursive ignore filtering. Sharing a tool family does not imply
-identical traversal semantics.
-
-Literal, case-sensitive grep can send an already-open descriptor to the optional
-`wisp-search` Rust scanner. Regex and case-insensitive matching remain in Python;
-unsupported native inputs or sandbox failures fall back. Protected files are
-skipped during traversal, before either engine reads them. An acceleration path
-must not become a different permissions path.
+**The cost.** Results are capped and in path order, not ranked, so the most relevant
+match can be cut off. The caps also reject some legitimate inputs: a minified
+file is skipped, and a directory with more than 100,000 entries fails the search.
+Using the optional Rust scanner and walk adds a second implementation that must
+stay exactly equivalent. Wisp keeps the policy in one
+place for that reason: protected files are skipped during the walk, before either
+engine reads them. An acceleration path must not become a different permissions
+path.
 
 ## Execution: prepare approvals before side effects
 
 Wisp separates `ToolPolicy` (“may this operation run?”) from `ToolApprovalPolicy`
-(“must the user confirm it?”). `ToolContext` carries host-owned working directory,
-output budgets, protected paths, and write scopes. Model arguments cannot grant
-approval or change a tool's safety category.
+(“must the user confirm it?”), and keeps working directory, budgets, protected
+paths, and write scopes in a host-owned `ToolContext`. Model arguments cannot grant
+approval or change a tool's safety category. The order of those checks is shown in
+[What happens before `run`](../02-tools/built-in-tools.md#what-happens-before-run). This section covers
+what happens around them: checking that executors behave, and scheduling a batch of
+calls.
 
 The lifecycle validator in `src/wisp/agent/loop/tool_execution.py` checks ordering
 and identity: approval request before resolution, one terminal execution result,
