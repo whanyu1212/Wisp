@@ -1,7 +1,7 @@
 // Compose the README banner from the synthetic TUI captures, overwriting it in place.
 // Usage: node --import tsx scripts/render-banner.ts /tmp/wisp-docs-captures
 // Run scripts/render-tui-captures.ts on the same directory first.
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { chromium } from "@playwright/test";
@@ -53,14 +53,9 @@ const welcomeImage = dataUrl(
   join(repoRoot, "assets/docs/tui-welcome.png"),
   "image/png",
 );
-// A real session screenshot. macOS names it with a narrow no-break space before
-// "PM", so it is found by prefix rather than spelled out.
-const screenshotName = readdirSync(join(repoRoot, "assets")).find((name) =>
-  name.startsWith("Screenshot 2026-10-25 at 12.58.53"),
-);
-if (!screenshotName) throw new Error("The session screenshot is missing");
+// A real session screenshot.
 const screenshotImage = dataUrl(
-  join(repoRoot, "assets", screenshotName),
+  join(repoRoot, "assets/tui-ember-session-reference.png"),
   "image/png",
 );
 // The terminal's own pixels inside the screenshot, without the macOS chrome,
