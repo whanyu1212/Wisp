@@ -16,6 +16,7 @@ from uuid import uuid4
 import anyio
 
 from wisp.tools.output_store import OutputStore, SavedStream, saved_output_notice
+from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError
 from wisp.tools.shell.process import (
     ProcessResult,
@@ -44,6 +45,10 @@ POST_TERMINATION_DRAIN_TIMEOUT = 0.25
 # message has a small budget of its own.
 _TIMEOUT_TAIL_BYTES = 1_000
 _TIMEOUT_TAIL_LINES = 20
+# How often a running one-shot command's output is sampled for progress, and how
+# much of each stream's end a sample carries. The executor throttles delivery.
+_PROGRESS_SAMPLE_SECONDS = 0.25
+_PROGRESS_TAIL_BYTES = 4_096
 PROCESS_TREE_CLEANUP_ERROR = "Failed to terminate process tree"
 _LINE_BREAK_CHARACTERS = frozenset(
     {"\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"}
@@ -422,8 +427,26 @@ class ProcessSupervisor:
         timeout: float,
         max_output_bytes: int,
         env: Mapping[str, str] | None = None,
+        progress: ToolProgress | None = None,
     ) -> ProcessResult:
-        """Run one compatibility command while tracking it for shutdown."""
+        """Run one command to completion while tracking it for shutdown.
+
+        Args:
+            command (str): Shell command to run.
+            cwd (Path): Working directory.
+            timeout (float): Seconds before the process tree is stopped.
+            max_output_bytes (int): Bytes of each stream's tail to keep.
+            env (Mapping[str, str] | None, optional): Environment for the command.
+                Defaults to None.
+            progress (ToolProgress | None, optional): Receives the output so far
+                while the command runs. Defaults to None.
+
+        Returns:
+            ProcessResult: The exit status and captured output.
+
+        Raises:
+            ToolError: The command timed out, or its process tree could not be stopped.
+        """
 
         async with self._lock:
             self._ensure_open()
@@ -447,6 +470,11 @@ class ProcessSupervisor:
 
         release_ownership = False
         output_reported = False
+        sampler = (
+            asyncio.create_task(_sample_progress(progress, stdout_tail, stderr_tail))
+            if progress is not None
+            else None
+        )
         try:
             try:
                 captured = await asyncio.wait_for(
@@ -536,6 +564,11 @@ class ProcessSupervisor:
             output_reported = True
             return result
         finally:
+            if sampler is not None:
+                # Not awaited: during cancellation an await here would raise again and
+                # skip the cleanup below. The sampler is parked in its sleep, so it
+                # cannot report again, and the executor ignores reports after the call.
+                sampler.cancel()
             if not output_reported:
                 # No result will name this output, so nothing could ever read it.
                 for tail in (stdout_tail, stderr_tail):
@@ -1108,6 +1141,28 @@ class ProcessSupervisor:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("ProcessSupervisor is closed")
+
+
+async def _sample_progress(
+    progress: ToolProgress, stdout: _StreamTail, stderr: _StreamTail
+) -> None:
+    """Report a running command's output whenever it has grown since the last sample."""
+
+    reported: tuple[int, int] = (0, 0)
+    while True:
+        await asyncio.sleep(_PROGRESS_SAMPLE_SECONDS)
+        totals = (stdout.total_bytes, stderr.total_bytes)
+        if totals == reported:
+            continue
+        reported = totals
+        progress.report(
+            OutputProgress(
+                stdout_tail=stdout.text_tail(_PROGRESS_TAIL_BYTES),
+                stderr_tail=stderr.text_tail(_PROGRESS_TAIL_BYTES),
+                stdout_bytes=totals[0],
+                stderr_bytes=totals[1],
+            )
+        )
 
 
 async def _timeout_message(timeout: float, stdout: _StreamTail, stderr: _StreamTail) -> str:

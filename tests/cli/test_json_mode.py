@@ -81,6 +81,45 @@ def test_json_mode_outputs_tool_events_as_jsonl(
     )
 
 
+def test_json_mode_includes_tool_progress_between_start_and_end(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    import anyio
+
+    import wisp.coding.tool_progress as tool_progress_module
+    from wisp.tools.progress import OutputProgress
+
+    async def run_with_progress(
+        self: DangerTool, arguments: ToolArguments, context: ToolContext
+    ) -> ToolResult:
+        assert context.progress is not None
+        context.progress.report(
+            OutputProgress(stdout_tail="working\n", stderr_tail="", stdout_bytes=8, stderr_bytes=0)
+        )
+        await anyio.sleep(0.2)
+        return ToolResult(text=f"changed {arguments['path']}")
+
+    monkeypatch.setattr(tool_progress_module, "_FIRST_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(DangerTool, "run", run_with_progress)
+    monkeypatch.setattr(rpc_host_module, "build_runtime", build_tool_runtime)
+
+    result = CliRunner().invoke(
+        app,
+        ["-p", "use tool", "--mode", "json", "--allow-tool", "danger", "--yes"]
+        + ["--session-dir", str(tmp_path)],
+        env={"WISP_PROVIDER": "tool-test", "WISP_MODEL": ""},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    types = [record["type"] for record in records]
+    progress = types.index("tool.execution.progress")
+    assert types.index("tool.execution.started") < progress < types.index("tool.execution.ended")
+    assert records[progress]["stdout_tail"] == "working\n"
+    assert records[progress]["sequence"] == 1
+
+
 def test_json_mode_validation_errors_are_jsonl(tmp_path: Path) -> None:
     runner = CliRunner()
 

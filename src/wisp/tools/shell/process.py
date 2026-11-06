@@ -226,6 +226,20 @@ class _StreamTail:
         del self._retained[:excess]
         self._dropped_bytes += excess
 
+    @property
+    def total_bytes(self) -> int:
+        """Bytes the stream has produced so far, kept or dropped."""
+
+        return len(self._retained) + self._dropped_bytes
+
+    def text_tail(self, max_bytes: int) -> str:
+        """Decode the last ``max_bytes`` kept bytes, starting on a character boundary."""
+
+        start = max(0, len(self._retained) - max_bytes)
+        while start < len(self._retained) and self._retained[start] & 0xC0 == 0x80:
+            start += 1
+        return self._retained[start:].decode("utf-8", errors="replace")
+
     def result(self) -> _LimitedStreamResult:
         return _LimitedStreamResult(
             output=bytes(self._retained),

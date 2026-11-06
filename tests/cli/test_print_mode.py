@@ -509,6 +509,7 @@ def test_print_mode_resume_uses_compaction_replay(
         *,
         session: JsonlSession | None = None,
         history: Sequence[Message] = (),
+        live_event_sink: object = None,
     ) -> AsyncIterator[WispEvent]:
         nonlocal captured_history
         captured_history = tuple(history)

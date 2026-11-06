@@ -221,10 +221,60 @@ pub struct ToolResultInput {
     pub process_ended_at_ms: Option<i64>,
 }
 
+/// A running call's output so far, from one `tool.execution.progress` event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolProgressInput {
+    pub sequence: u64,
+    pub stdout_tail: String,
+    pub stderr_tail: String,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+}
+
+impl ToolProgressInput {
+    /// Both tails as a shell result shows them: stdout first, each without its
+    /// trailing newlines.
+    fn combined_output(&self) -> String {
+        [self.stdout_tail.as_str(), self.stderr_tail.as_str()]
+            .into_iter()
+            .map(|tail| tail.trim_end_matches('\n'))
+            .filter(|tail| !tail.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Bytes each stream printed before its tail began.
+    fn omitted_bytes(&self) -> u64 {
+        let before = |total: u64, tail: &str| {
+            total.saturating_sub(u64::try_from(tail.len()).unwrap_or(u64::MAX))
+        };
+        before(self.stdout_bytes, &self.stdout_tail)
+            .saturating_add(before(self.stderr_bytes, &self.stderr_tail))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessCallIdentity {
     pub process_id: String,
     pub operation: ProcessOperation,
+}
+
+/// Characters of a running call's latest output line shown beside its action.
+const LIVE_LINE_MAX_CHARS: usize = 120;
+
+/// The last non-blank line of `tail`, without terminal control characters.
+fn latest_line(tail: &str) -> Option<String> {
+    let line = tail
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(
+        line.chars()
+            .filter(|character| !character.is_control() && !crate::is_bidi_control(*character))
+            .take(LIVE_LINE_MAX_CHARS)
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -254,6 +304,13 @@ pub struct ToolCardSnapshot {
     pub display_base: Option<std::sync::Arc<str>>,
     /// A shell's exit status, when its output opens with Wisp's completion envelope.
     pub exit_code: Option<i32>,
+    /// The newest live-progress snapshot shown while the call runs, so an older
+    /// one arriving late is ignored.
+    pub progress_sequence: u64,
+    /// Byte totals of the last snapshot, to tell which stream moved since.
+    pub progress_bytes: (u64, u64),
+    /// The latest line of the stream that last moved, shown while collapsed.
+    pub live_line: Option<String>,
 }
 
 impl ToolCardSnapshot {
@@ -278,6 +335,9 @@ impl ToolCardSnapshot {
             started_at_ms: None,
             display_base: None,
             exit_code: None,
+            progress_sequence: 0,
+            progress_bytes: (0, 0),
+            live_line: None,
         }
     }
 
@@ -458,6 +518,58 @@ impl ToolCardSnapshot {
         }
         self.detail_source = ToolDetailSource::None;
         true
+    }
+
+    /// Shows the end of a running call's output so far.
+    ///
+    /// Returns whether the card changed. A snapshot is ignored once the call has a
+    /// result, while it waits for approval, or when it is older than the one shown;
+    /// the result's own output replaces the last snapshot.
+    pub fn apply_progress(&mut self, progress: &ToolProgressInput) -> bool {
+        if self.status.terminal()
+            || self.status == ToolStatus::AwaitingApproval
+            || progress.sequence <= self.progress_sequence
+        {
+            return false;
+        }
+        let (previous_stdout, previous_stderr) = self.progress_bytes;
+        // Show the stream that grew since the last snapshot; stdout when both did.
+        let moving_tail = if progress.stdout_bytes > previous_stdout
+            || progress.stderr_bytes <= previous_stderr
+        {
+            &progress.stdout_tail
+        } else {
+            &progress.stderr_tail
+        };
+        if let Some(line) = latest_line(moving_tail) {
+            self.live_line = Some(line);
+        }
+        self.progress_sequence = progress.sequence;
+        self.progress_bytes = (progress.stdout_bytes, progress.stderr_bytes);
+        let mut live = BoundedText::tail(
+            &normalize_newlines(&progress.combined_output()),
+            TOOL_OUTPUT_MAX_BYTES,
+            TOOL_OUTPUT_MAX_LINES,
+        );
+        // The tails are already the end of each stream; count what came before them,
+        // and what the card's own bound cut, so an expanded card says earlier output
+        // scrolled away.
+        let before_tails = progress.omitted_bytes();
+        live.dropped_bytes = live.dropped_bytes.saturating_add(before_tails);
+        live.source_bytes = live.source_bytes.saturating_add(before_tails);
+        live.base_offset = live.dropped_bytes;
+        self.retained_output = live;
+        self.detail.clear();
+        true
+    }
+
+    /// The latest output line shown beside a running card's action while it is
+    /// collapsed; `None` before any progress and once the call has a result.
+    pub fn live_line(&self) -> Option<&str> {
+        if self.status.terminal() {
+            return None;
+        }
+        self.live_line.as_deref()
     }
 
     pub fn cancel(&mut self, reason: &str) -> bool {

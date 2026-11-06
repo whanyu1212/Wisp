@@ -7,7 +7,9 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress, ModelCatalogSnapshot,
 };
 
-use crate::tool_cards::{BoundedText, ToolCallInput, ToolResultInput, bounded_identity};
+use crate::tool_cards::{
+    BoundedText, ToolCallInput, ToolProgressInput, ToolResultInput, bounded_identity,
+};
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{
@@ -1106,6 +1108,11 @@ pub enum BackendEvent {
     /// Carries a session-assigned result origin; presentation waits for `tool.result`.
     ToolExecutionEnded {
         call_id: String,
+    },
+    /// The end of a running call's output so far; newer sequences replace older ones.
+    ToolExecutionProgress {
+        call_id: String,
+        progress: ToolProgressInput,
     },
     GitDiffReported {
         command_id: String,
@@ -5100,6 +5107,14 @@ fn handle_backend_event(
                 .observe_approval_resolved(&call_id, approved, reason.as_deref());
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::ToolExecutionProgress { call_id, progress } => {
+            let changed = state.transcript.observe_tool_progress(&call_id, &progress);
+            Ok(if changed {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
         BackendEvent::ToolResult(result) => {
             let call_id = result.call_id.clone();
             let target = state.transcript.observe_tool_result(*result);
@@ -6433,6 +6448,96 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn tool_progress_shows_live_output_until_the_result_replaces_it() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let mut apply = |state: &mut UiState, event: Value| {
+            reduce(
+                state,
+                UiAction::BackendEvent(BackendEvent::from_projection_value(&event).unwrap()),
+                &mut ids,
+            )
+            .unwrap()
+        };
+        let progress = |sequence: u64, stdout: &str, stderr: &str| {
+            serde_json::json!({
+                "type": "tool.execution.progress", "call_id": "build", "name": "bash",
+                "sequence": sequence, "elapsed_ms": 500 * sequence,
+                "stdout_tail": stdout, "stderr_tail": stderr,
+                "stdout_bytes": stdout.len(), "stderr_bytes": stderr.len()
+            })
+        };
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.call", "call_id": "build", "name": "bash",
+                "arguments": {"command": "make"}
+            }),
+        );
+        let target = state
+            .transcript
+            .tool_entry_for_call(&bounded_identity("build"))
+            .unwrap();
+        let card = |state: &UiState| {
+            state
+                .transcript
+                .entry(target)
+                .and_then(|entry| entry.tool_card())
+                .unwrap()
+                .clone()
+        };
+
+        let effects = apply(
+            &mut state,
+            progress(2, "compiling a\ncompiling b\n", "warn\n"),
+        );
+        assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+        let live = card(&state);
+        assert_eq!(live.retained_output.text, "compiling a\ncompiling b\nwarn");
+        assert_eq!(live.retained_output.dropped_bytes, 0);
+        assert_eq!(live.live_line(), Some("compiling b"));
+
+        // A snapshot older than the one shown arrives late and is ignored.
+        assert!(apply(&mut state, progress(1, "stale\n", "")).is_empty());
+        assert_eq!(card(&state).live_line(), Some("compiling b"));
+
+        // Only stderr moved, so the collapsed card follows it.
+        apply(
+            &mut state,
+            progress(3, "compiling a\ncompiling b\n", "warn\nlinking\n"),
+        );
+        assert_eq!(card(&state).live_line(), Some("linking"));
+
+        // Tails shorter than the totals mean earlier output scrolled away.
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.execution.progress", "call_id": "build", "name": "bash",
+                "sequence": 4, "elapsed_ms": 2000,
+                "stdout_tail": "compiling z\n", "stderr_tail": "",
+                "stdout_bytes": 112, "stderr_bytes": 12
+            }),
+        );
+        assert_eq!(card(&state).retained_output.dropped_bytes, 100 + 12);
+
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.result", "call_id": "build", "name": "bash",
+                "output": "Command exited with code 0: done", "is_error": false,
+                "exit_code": 0, "output_has_exit_status": true
+            }),
+        );
+        let finished = card(&state);
+        assert_eq!(finished.live_line(), None);
+        assert!(!finished.retained_output.text.contains("linking"));
+
+        // Progress can no longer change a card that has its result.
+        assert!(apply(&mut state, progress(5, "late\n", "")).is_empty());
+        assert_eq!(card(&state), finished);
     }
 
     #[test]

@@ -6025,6 +6025,75 @@
       "title": "ToolExecutionEnded",
       "type": "object"
     },
+    "ToolExecutionProgress": {
+      "additionalProperties": false,
+      "description": "A transient snapshot of a running tool's output.\n\nPublished only between ``tool.execution.started`` and ``tool.execution.ended``\nfor the same call. Each event replaces the previous one, so a consumer may skip\nany of them and still show the latest state. Progress is never persisted and\nnever reaches the model.",
+      "properties": {
+        "call_id": {
+          "title": "ToolExecutionProgressCallId",
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "minimum": 0,
+          "title": "ToolExecutionProgressElapsedMs",
+          "type": "integer"
+        },
+        "name": {
+          "title": "ToolExecutionProgressName",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "ToolExecutionProgressSequence",
+          "type": "integer"
+        },
+        "stderr_bytes": {
+          "minimum": 0,
+          "title": "ToolExecutionProgressStderrBytes",
+          "type": "integer"
+        },
+        "stderr_tail": {
+          "maxLength": 4096,
+          "title": "ToolExecutionProgressStderrTail",
+          "type": "string"
+        },
+        "stdout_bytes": {
+          "minimum": 0,
+          "title": "ToolExecutionProgressStdoutBytes",
+          "type": "integer"
+        },
+        "stdout_tail": {
+          "maxLength": 4096,
+          "title": "ToolExecutionProgressStdoutTail",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "ToolExecutionProgressTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.execution.progress",
+          "default": "tool.execution.progress",
+          "title": "ToolExecutionProgressType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "call_id",
+        "name",
+        "sequence",
+        "elapsed_ms",
+        "stdout_tail",
+        "stderr_tail",
+        "stdout_bytes",
+        "stderr_bytes"
+      ],
+      "title": "ToolExecutionProgress",
+      "type": "object"
+    },
     "ToolExecutionStarted": {
       "additionalProperties": false,
       "properties": {
@@ -6885,6 +6954,7 @@
       "tool.approval.resolved": "#/$defs/ToolApprovalResolved",
       "tool.call": "#/$defs/ToolCallRequested",
       "tool.execution.ended": "#/$defs/ToolExecutionEnded",
+      "tool.execution.progress": "#/$defs/ToolExecutionProgress",
       "tool.execution.started": "#/$defs/ToolExecutionStarted",
       "tool.result": "#/$defs/ToolResultReady",
       "trust.requested": "#/$defs/TrustRequested",
@@ -6946,6 +7016,9 @@
     },
     {
       "$ref": "#/$defs/ProjectConfigApplied"
+    },
+    {
+      "$ref": "#/$defs/ToolExecutionProgress"
     },
     {
       "$ref": "#/$defs/ToolExecutionEnded"

@@ -4609,6 +4609,84 @@
    "accepted": false
   },
   {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "elapsed_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "sequence"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "stderr_bytes"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "stderr_tail"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "stdout_bytes"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "stdout_tail"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.progress",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "tool.execution.started",
    "operation": "remove",
    "path": [

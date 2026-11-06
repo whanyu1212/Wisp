@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import cast
 
@@ -12,6 +12,7 @@ from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolPreparationEvent,
 )
+from wisp.coding.tool_progress import LiveEventSink, run_with_progress
 from wisp.events import (
     ManagedProcessState,
     ToolApprovalRequested,
@@ -25,6 +26,7 @@ from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.progress import ToolProgress
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
@@ -167,11 +169,13 @@ class ConfiguredToolExecutor:
         context: ToolContext,
         policy: ToolPolicy,
         approval_policy: ToolApprovalPolicy,
+        progress_sink: LiveEventSink | None = None,
     ) -> None:
         self._registry = registry
         self._context = context
         self._policy = policy
         self._approval_policy = approval_policy
+        self._progress_sink = progress_sink
 
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         prepared: PreparedToolExecution | None = None
@@ -327,7 +331,9 @@ class ConfiguredToolExecutor:
         tool_name: str,
     ) -> _ToolRunOutcome:
         try:
-            result = await tool.run(arguments, self._context)
+            result = await self._run_reporting_progress(
+                tool, arguments, call_id=call_id, tool_name=tool_name
+            )
         except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
             return _tool_exception_outcome(exc)
 
@@ -401,6 +407,25 @@ class ConfiguredToolExecutor:
             )
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
+
+    async def _run_reporting_progress(
+        self,
+        tool: Tool,
+        arguments: dict[str, object],
+        *,
+        call_id: str,
+        tool_name: str,
+    ) -> ToolResult:
+        """Run a tool, giving it a progress handle when a frontend is listening."""
+
+        sink = self._progress_sink
+        if sink is None:
+            return await tool.run(arguments, self._context)
+
+        async def run(progress: ToolProgress) -> ToolResult:
+            return await tool.run(arguments, replace(self._context, progress=progress))
+
+        return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
 
 
 def _execution_ended(tool_call: ToolCall, outcome: _ToolRunOutcome) -> ToolExecutionEnded:

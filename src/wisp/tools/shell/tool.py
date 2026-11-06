@@ -163,6 +163,7 @@ class BashTool:
                 timeout=float(timeout),
                 max_output_bytes=context.max_output_bytes,
                 env=_command_environment(context),
+                progress=context.progress,
             )
         stdout = truncate_text_tail(
             result.stdout,

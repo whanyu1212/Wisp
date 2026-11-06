@@ -15,6 +15,7 @@ from wisp.trust.permissions import permissions_directory
 if TYPE_CHECKING:
     from wisp.config.runtime import WispConfig
     from wisp.tools.files.operations import CreateOnlyWriteReceipt
+    from wisp.tools.progress import ToolProgress
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,9 @@ class ToolContext:
     # None leaves the check off, as for tools an embedding calls directly; contexts
     # built from config turn it on, and a coding session keeps one per conversation.
     seen_files: SeenFiles | None = None
+    # Where the running call reports progress. The executor sets one per call when
+    # a frontend is listening; None means nobody is, and tools skip reporting.
+    progress: ToolProgress | None = None
 
     @classmethod
     def default(cls) -> ToolContext:

@@ -398,7 +398,7 @@ deprecation policy.
 | Assistant output | `MessageStarted`, `MessageDelta`, `WebSearchPerformed`, `MessageCompleted` |
 | Run lifecycle | `AgentStarted`, `TurnStarted`, `TurnCompleted`, `AgentCompleted`, `ErrorEvent` |
 | Safety | `TrustRequested`, `TrustResolved`, `ToolApprovalRequested`, `ToolApprovalResolved` |
-| Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionEnded`, `ToolResultReady` |
+| Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionProgress`, `ToolExecutionEnded`, `ToolResultReady` |
 | Compaction/context | `ContextEstimated`, `ContextPressure`, `ContextOverflow`, `CompactionStarted`, `CompactionCompleted` |
 | Queues | `QueueUpdated`, `QueueItemsRemoved`, `QueueMessageInjected` |
 | Snapshots | `SessionStatsReported`, `RpcStateReported`, `RpcCommandsReported`, `RpcSkillsReported`, `RpcMcpStatusReported`, `RpcProjectFilesReported` |

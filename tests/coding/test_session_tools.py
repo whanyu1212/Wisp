@@ -9,6 +9,7 @@ import anyio
 import pytest
 
 import wisp.coding.tool_execution as tool_execution
+import wisp.coding.tool_progress as tool_progress_module
 from tests.coding.session_support import (
     CapturingProvider,
     EchoTool,
@@ -27,9 +28,11 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolCallRequested,
     ToolExecutionEnded,
+    ToolExecutionProgress,
     ToolExecutionStarted,
     ToolResultReady,
     TurnCompleted,
+    WispEvent,
 )
 from wisp.providers.base import (
     ToolCall,
@@ -60,7 +63,8 @@ from wisp.tools.base import (
 from wisp.tools.builtin import ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolResult
+from wisp.tools.progress import OutputProgress
+from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.seen_files import SeenFiles
 
 
@@ -1247,3 +1251,111 @@ def test_seen_files_belong_to_one_conversation(
     assert result.is_error is not write_allowed
     expected = "new\n" if write_allowed else "old\n"
     assert (workspace / "notes.txt").read_text(encoding="utf-8") == expected
+
+
+class _ReportingTool:
+    """Reports progress and waits until the frontend has received it."""
+
+    name = "reporting"
+    safety = "read"
+    description = "Report progress."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    def __init__(self, delivered: anyio.Event) -> None:
+        self.delivered = delivered
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        assert context.progress is not None
+        context.progress.report(
+            OutputProgress(stdout_tail="halfway\n", stderr_tail="", stdout_bytes=8, stderr_bytes=0)
+        )
+        await self.delivered.wait()
+        return ToolResult(text="done")
+
+
+def test_progress_reaches_the_live_sink_between_start_and_end_without_persisting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tool_progress_module, "_FIRST_DELAY_SECONDS", 0.0)
+    provider = ToolLoopProvider(
+        [[ToolCall(call_id="call-1", name="reporting", arguments={})], ["finished"]]
+    )
+    observed: list[WispEvent] = []
+    extension_types: list[str] = []
+
+    async def run_agent() -> tuple[list[WispEvent], Path]:
+        delivered = anyio.Event()
+        tools = ToolRegistry()
+        tools.register(_ReportingTool(delivered))
+        event_bus = EventBus()
+        event_bus.on("*", lambda event: extension_types.append(event.type))
+
+        async def live_sink(event: WispEvent) -> None:
+            observed.append(event)
+            delivered.set()
+
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            events=event_bus,
+            tool_registry=tools,
+        )
+        yielded = []
+        async for event in agent.run("go", live_event_sink=live_sink):
+            observed.append(event)
+            yielded.append(event)
+        saved = next(event for event in yielded if isinstance(event, SessionSaved))
+        return yielded, saved.path
+
+    yielded, session_path = anyio.run(run_agent)
+
+    types = [event.type for event in observed]
+    started = types.index("tool.execution.started")
+    progress = types.index("tool.execution.progress")
+    ended = types.index("tool.execution.ended")
+    assert started < progress < ended
+    assert types.count("tool.execution.progress") == 1
+    assert not any(isinstance(event, ToolExecutionProgress) for event in yielded)
+    assert "tool.execution.progress" in extension_types
+    assert "tool.execution.progress" not in session_path.read_text()
+
+
+class _FailingTool:
+    name = "failing"
+    safety = "read"
+    description = "Fail with an actionable error."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        raise ToolError(
+            "Command timed out after 1 seconds",
+            failure_code="timeout",
+            retryable=True,
+            recovery_hint="Retry with a longer timeout.",
+        )
+
+
+def test_tool_error_stays_actionable_with_a_live_sink(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [[ToolCall(call_id="call-1", name="failing", arguments={})], ["ok"]]
+    )
+
+    async def run_agent() -> list[WispEvent]:
+        tools = ToolRegistry()
+        tools.register(_FailingTool())
+
+        async def live_sink(event: WispEvent) -> None:
+            pass
+
+        agent = CodingSession(
+            provider=provider, sessions=JsonlSessionStore(tmp_path), tool_registry=tools
+        )
+        return [event async for event in agent.run("go", live_event_sink=live_sink)]
+
+    events = anyio.run(run_agent)
+
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.is_error is True
+    assert ended.failure_code == "timeout"
+    assert ended.retryable is True
+    assert ended.output.startswith("Command timed out after 1 seconds")
