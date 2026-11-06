@@ -247,3 +247,20 @@ def test_throttles_delivery_to_the_minimum_interval(monkeypatch: pytest.MonkeyPa
 )
 def test_bounded_tail(text: str, expected: str) -> None:
     assert bounded_tail(text) == expected
+
+
+@pytest.mark.parametrize("error", [ValueError("bad input"), KeyError("missing")])
+def test_a_tool_error_escapes_unwrapped(error: Exception) -> None:
+    # Callers recognise tool failures by type, so the task group that runs the
+    # forwarder must not wrap the tool's own exception in an ExceptionGroup.
+    sink = RecordingSink()
+
+    async def tool(progress: ToolProgress) -> None:
+        raise error
+
+    async def scenario() -> None:
+        await run_with_progress(sink, call_id="call-1", name="bash", run=tool)
+
+    with pytest.raises(type(error)) as caught:
+        run(scenario)
+    assert caught.value is error

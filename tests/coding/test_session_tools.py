@@ -64,7 +64,7 @@ from wisp.tools.builtin import ReadTool, WriteTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import OutputProgress
-from wisp.tools.result import ToolResult
+from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.seen_files import SeenFiles
 
 
@@ -1318,3 +1318,44 @@ def test_progress_reaches_the_live_sink_between_start_and_end_without_persisting
     assert not any(isinstance(event, ToolExecutionProgress) for event in yielded)
     assert "tool.execution.progress" in extension_types
     assert "tool.execution.progress" not in session_path.read_text()
+
+
+class _FailingTool:
+    name = "failing"
+    safety = "read"
+    description = "Fail with an actionable error."
+    input_schema: ToolInputSchema = {"type": "object", "properties": {}}
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        raise ToolError(
+            "Command timed out after 1 seconds",
+            failure_code="timeout",
+            retryable=True,
+            recovery_hint="Retry with a longer timeout.",
+        )
+
+
+def test_tool_error_stays_actionable_with_a_live_sink(tmp_path: Path) -> None:
+    provider = ToolLoopProvider(
+        [[ToolCall(call_id="call-1", name="failing", arguments={})], ["ok"]]
+    )
+
+    async def run_agent() -> list[WispEvent]:
+        tools = ToolRegistry()
+        tools.register(_FailingTool())
+
+        async def live_sink(event: WispEvent) -> None:
+            pass
+
+        agent = CodingSession(
+            provider=provider, sessions=JsonlSessionStore(tmp_path), tool_registry=tools
+        )
+        return [event async for event in agent.run("go", live_event_sink=live_sink)]
+
+    events = anyio.run(run_agent)
+
+    ended = next(event for event in events if isinstance(event, ToolExecutionEnded))
+    assert ended.is_error is True
+    assert ended.failure_code == "timeout"
+    assert ended.retryable is True
+    assert ended.output.startswith("Command timed out after 1 seconds")

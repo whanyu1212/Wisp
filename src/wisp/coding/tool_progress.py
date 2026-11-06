@@ -105,15 +105,16 @@ async def run_with_progress[T](
             if progress is None:
                 continue
             sequence += 1
-            event = _progress_event(
-                progress,
-                call_id=call_id,
-                name=name,
-                sequence=sequence,
-                elapsed_ms=int((time.monotonic() - started) * 1000),
-            )
             try:
-                await sink(event)
+                await sink(
+                    _progress_event(
+                        progress,
+                        call_id=call_id,
+                        name=name,
+                        sequence=sequence,
+                        elapsed_ms=int((time.monotonic() - started) * 1000),
+                    )
+                )
             except Exception:
                 # Progress is optional. A frontend that cannot take it fails on the
                 # run's own events; the tool keeps running either way.
@@ -121,12 +122,20 @@ async def run_with_progress[T](
                 return
             next_send = time.monotonic() + _MIN_INTERVAL_SECONDS
 
+    failure: Exception | None = None
     async with anyio.create_task_group() as task_group:
         task_group.start_soon(forward)
         try:
             result = await run(slot)
+        except Exception as exc:
+            # A task group wraps what escapes its body in an ExceptionGroup, and
+            # callers recognise a tool's failure by its type, so carry it past the
+            # group and raise it unchanged.
+            failure = exc
         finally:
             slot.close()
+    if failure is not None:
+        raise failure
     return result
 
 
