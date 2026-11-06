@@ -10,7 +10,15 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.6.0 — Unreleased
+
+0.6.0 is a minor release about long-running commands: `bash` now saves the output its result has
+to cut, so the model can read an early error instead of running the command again, and the
+terminal UI shows a command's output while it runs. It adds one transient event,
+`tool.execution.progress`, and one read-only tool, `read_output`. It changes no command,
+handshake, session, settings, credential, or trust format, so 0.5.x and 0.6.0 read each other's
+sessions. The backend and frontend must come from the same release, which matters more than usual
+here: a 0.5 terminal UI does not recognise the new event.
 
 ### Events
 
@@ -36,6 +44,18 @@ this policy.
   also shows the last lines of output. Saved output is private to the user, bounded (8 MiB per
   stream, 64 MiB and 32 streams per runtime), and deleted when Wisp exits. `read_output` is
   exposed whenever `bash` is. No event, command, or session format changes. (HY-434)
+
+### Terminal UI
+
+- When a reply gets shorter, for example when the final text replaces a longer streamed draft, the
+  view no longer jumps to the reply's first row; it stays on the last row. (#896)
+
+### Python API
+
+- `CodingSession.run()` gains an optional `live_event_sink` that receives `ToolExecutionProgress`
+  events, and `ToolContext` gains an optional `progress` handle that tools report through.
+  `ProcessSupervisor` gains an `output_store` (and an optional `output_store=` argument), and
+  `builtin_tools()` includes `ReadOutputTool`. Existing calls keep working unchanged. (#905, #906)
 
 <!-- Keeps links to the pre-release "0.5.0 — Unreleased" heading working. -->
 <a id="050--unreleased"></a>
