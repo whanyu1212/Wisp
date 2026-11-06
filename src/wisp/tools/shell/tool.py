@@ -13,6 +13,7 @@ import anyio
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
+from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_bounded, _run_shell
 from wisp.tools.shell.supervisor import ProcessSupervisor, ProcessUpdate
@@ -175,19 +176,31 @@ class BashTool:
             max_lines=context.max_output_lines,
             input_truncated=result.stderr_truncated,
         )
-        # Format from the captured streams rather than the per-stream bounded copies
-        # so the text carries one truncation marker, ahead of the combined tail.
-        output = _format_process_output_bounded(
-            result.exit_code,
-            result.stdout,
-            result.stderr,
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
-            capture_truncated=result.stdout_truncated or result.stderr_truncated,
-            notice=_BACKGROUND_STOPPED_NOTICE if result.background_stopped else None,
-        )
+        background_notice = _BACKGROUND_STOPPED_NOTICE if result.background_stopped else None
+
+        def format_output(notice: str | None) -> TruncatedText:
+            # Format from the captured streams rather than the per-stream bounded copies
+            # so the text carries one truncation marker, ahead of the combined tail.
+            return _format_process_output_bounded(
+                result.exit_code,
+                result.stdout,
+                result.stderr,
+                max_bytes=context.max_output_bytes,
+                max_lines=context.max_output_lines,
+                capture_truncated=result.stdout_truncated or result.stderr_truncated,
+                notice=notice,
+            )
+
+        output = format_output(background_notice)
         stdout_truncated = result.stdout_truncated or stdout.truncated
         stderr_truncated = result.stderr_truncated or stderr.truncated
+        saved_streams: tuple[tuple[str, SaveStatus | None], ...] = ()
+        if stdout_truncated or stderr_truncated or output.truncated:
+            saved_streams = await _save_streams(
+                stdout=result.stdout_saved, stderr=result.stderr_saved
+            )
+            if saved_notice := saved_output_notice(saved_streams):
+                output = format_output(_join_notices(saved_notice, background_notice))
         stdout_dropped_bytes = result.stdout_dropped_bytes + _additional_dropped_bytes(
             result.stdout,
             stdout,
@@ -200,18 +213,20 @@ class BashTool:
             retained_source_bytes=result.stderr_retained_bytes,
             source_byte_lengths=result.stderr_source_byte_lengths,
         )
+        data: dict[str, object] = {
+            "exit_code": result.exit_code,
+            "output_has_exit_status": True,
+            "stdout": stdout.text,
+            "stderr": stderr.text,
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "stdout_dropped_bytes": stdout_dropped_bytes,
+            "stderr_dropped_bytes": stderr_dropped_bytes,
+        }
+        data.update(_saved_output_ids(saved_streams))
         return ToolResult(
             text=output.text,
-            data={
-                "exit_code": result.exit_code,
-                "output_has_exit_status": True,
-                "stdout": stdout.text,
-                "stderr": stderr.text,
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
-                "stdout_dropped_bytes": stdout_dropped_bytes,
-                "stderr_dropped_bytes": stderr_dropped_bytes,
-            },
+            data=data,
             truncated=(stdout_truncated or stderr_truncated or output.truncated),
         )
 
@@ -252,7 +267,7 @@ class BashTool:
             with anyio.CancelScope(shield=True):
                 await supervisor.cancel(process_id)
             raise
-        return _managed_update_result(update, context=context)
+        return await _managed_update_result(update, context=context)
 
     async def _poll(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         supervisor = self._require_process_supervisor("poll")
@@ -267,13 +282,13 @@ class BashTool:
                 f"bash.wait_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
             )
         update = await supervisor.poll(process_id, wait_seconds=wait_seconds)
-        return _managed_update_result(update, context=context)
+        return await _managed_update_result(update, context=context)
 
     async def _cancel(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         supervisor = self._require_process_supervisor("cancel")
         process_id = _required_string(arguments, "process_id")
         update = await supervisor.cancel(process_id)
-        return _managed_update_result(update, context=context)
+        return await _managed_update_result(update, context=context)
 
     def _require_process_supervisor(self, operation: BashOperation) -> ProcessSupervisor:
         if self._process_supervisor is None:
@@ -319,7 +334,35 @@ def _optional_number(
     return number
 
 
-def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> ToolResult:
+async def _save_streams(
+    *, stdout: SavedStream | None, stderr: SavedStream | None
+) -> tuple[tuple[str, SaveStatus | None], ...]:
+    """Save the full streams behind a truncated result and return where they went."""
+
+    return tuple(
+        [
+            (name, await stream.save())
+            for name, stream in (("stdout", stdout), ("stderr", stderr))
+            if stream is not None
+        ]
+    )
+
+
+def _saved_output_ids(
+    saved_streams: Sequence[tuple[str, SaveStatus | None]],
+) -> dict[str, str]:
+    return {
+        f"{name}_output_id": status.output_id
+        for name, status in saved_streams
+        if isinstance(status, SavedOutput)
+    }
+
+
+def _join_notices(*notices: str | None) -> str:
+    return " ".join(notice for notice in notices if notice)
+
+
+async def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> ToolResult:
     stdout = truncate_text_tail(
         update.stdout,
         max_bytes=context.max_output_bytes,
@@ -330,9 +373,20 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         max_bytes=context.max_output_bytes,
         max_lines=context.max_output_lines,
     )
-    output = _format_managed_update(update, stdout=stdout.text, stderr=stderr.text, context=context)
     stdout_truncated = update.stdout_truncated or stdout.truncated
     stderr_truncated = update.stderr_truncated or stderr.truncated
+    output = _format_managed_update(update, stdout=stdout.text, stderr=stderr.text, context=context)
+    saved_streams: tuple[tuple[str, SaveStatus | None], ...] = ()
+    if stdout_truncated or stderr_truncated or output.truncated:
+        saved_streams = await _save_streams(stdout=update.stdout_saved, stderr=update.stderr_saved)
+        if saved_notice := saved_output_notice(saved_streams):
+            output = _format_managed_update(
+                update,
+                stdout=stdout.text,
+                stderr=stderr.text,
+                context=context,
+                notice=saved_notice,
+            )
     stdout_dropped_bytes = update.stdout_dropped_bytes + _additional_dropped_bytes(
         update.stdout,
         stdout,
@@ -363,6 +417,7 @@ def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> To
         data["process_started_at"] = update.started_at
     if update.ended_at is not None:
         data["process_ended_at"] = update.ended_at
+    data.update(_saved_output_ids(saved_streams))
     text = (
         f"{output.text}\n{_BACKGROUND_STOPPED_NOTICE}" if update.background_stopped else output.text
     )
@@ -464,7 +519,23 @@ def _format_managed_update(
     stdout: str,
     stderr: str,
     context: ToolContext,
+    notice: str | None = None,
 ) -> TruncatedText:
+    """Format a managed-process update within the output budget.
+
+    Args:
+        update (ProcessUpdate): The snapshot whose header and state are shown.
+        stdout (str): Bounded stdout to show.
+        stderr (str): Bounded stderr to show.
+        context (ToolContext): Supplies the output budget.
+        notice (str | None): A line after the output. It takes its room from the
+            body budget so a later bounding pass cannot cut it, and is left out
+            when the budget is too small.
+
+    Returns:
+        TruncatedText: The header, the tail of the output, and any notice.
+    """
+
     header = _managed_update_header(update)
     parts: list[str] = []
     if stdout:
@@ -480,12 +551,21 @@ def _format_managed_update(
         has_stdout=bool(stdout),
         has_stderr=bool(stderr),
     )
+    max_bytes = context.max_output_bytes
+    max_lines = context.max_output_lines
+    notice_bytes = len(notice.encode("utf-8")) + 1 if notice is not None else 0
+    if notice is not None and notice_bytes < max_bytes and max_lines > 1:
+        max_bytes -= notice_bytes
+        max_lines -= 1
+    else:
+        notice = None
     body = truncate_text_tail(
         "\n".join(parts),
-        max_bytes=context.max_output_bytes + label_bytes,
-        max_lines=context.max_output_lines + label_lines,
+        max_bytes=max_bytes + label_bytes,
+        max_lines=max_lines + label_lines,
     )
-    return TruncatedText(f"{header}\n{body.text}", truncated=body.truncated)
+    notice_line = f"\n{notice}" if notice else ""
+    return TruncatedText(f"{header}\n{body.text}{notice_line}", truncated=body.truncated)
 
 
 def _managed_output_label_overhead(*, has_stdout: bool, has_stderr: bool) -> tuple[int, int]:

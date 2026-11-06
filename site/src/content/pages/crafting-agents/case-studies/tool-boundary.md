@@ -60,7 +60,9 @@ can exhaust memory or keep consuming resources after the tool call returns.
 **The response.** One `ProcessSupervisor` owns every process a command starts, not
 just the first one. It keeps a bounded tail of output as it arrives, stops the whole
 process tree when a call ends, and reports results that distinguish “still
-running,” “finished,” and “I saw only part of its log.” See
+running,” “finished,” and “I saw only part of its log.” When a result shows only
+part of the log, the full streams are saved, within fixed limits, for `read_output`
+to page through, so the model does not rerun a command to see its beginning. See
 [`bash`](../02-tools/built-in-tools.md#6-bash). These concerns live beside the
 supervisor rather than in each frontend, so the TUI, SDK, and RPC clients cannot
 disagree about them.

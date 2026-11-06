@@ -21,7 +21,7 @@ By the end, the trace will show a failing test before the edit and passing tests
 afterward. We will also deny the edit and confirm that a finished run can leave
 the task unresolved. A companion page,
 [Inside Wisp's built-in tools](02-tools/built-in-tools.md), then explains how each
-of Wisp's seven built-in tools works at the operating-system level.
+of Wisp's eight built-in tools works at the operating-system level.
 
 ## 1. A tool has two contracts
 
@@ -293,7 +293,7 @@ Process IDs are random, so the transcript shows `<process_id>` in their place.
 
 The tour shows what each tool returns, not how. The companion page
 [Inside Wisp's built-in tools](02-tools/built-in-tools.md) follows each of the
-seven tools from the model's call down to the system calls it makes: how a path
+eight tools from the model's call down to the system calls it makes: how a path
 is opened without following a swapped-in symbolic link, how `write` replaces a
 file atomically, how `edit` locates its text, how `bash` finds and stops every
 process a command started, and how `grep` bounds a search of an untrusted

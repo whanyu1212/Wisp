@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 _SEARCH_GUIDELINE = "Prefer the dedicated read-only search tools over bash when they fit."
 _PARALLEL_TOOL_EXECUTION = ToolExecutionMetadata(parallel_safe=True)
-_PARALLEL_SAFE_TOOL_NAMES = frozenset({"ls", "read"})
+_PARALLEL_SAFE_TOOL_NAMES = frozenset({"ls", "read", "read_output"})
 # grep and find only read, but the Python directory walk holds the GIL: on `src/`, a batch
 # of 8 ran find 1.35x and grep up to 1.27x slower in parallel than one at a time. The native
 # walk releases it: the same batch runs find 1.09x and literal grep 1.27x faster, and regex
@@ -52,6 +52,12 @@ _BUILTIN_TOOL_PROMPTS = {
         ),
         guidelines=(
             "Treat nonzero exit codes and timeouts as failures unless documented otherwise.",
+        ),
+    ),
+    "read_output": ToolPromptMetadata(
+        prompt_snippet=(
+            "Use read_output to page through output a truncated result saved instead of "
+            "rerunning the command."
         ),
     ),
     "grep": ToolPromptMetadata(guidelines=(_SEARCH_GUIDELINE,)),

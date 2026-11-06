@@ -10,6 +10,10 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 
+# Tools that only serve another tool, mapped to the tool they serve. read_output
+# reads the output bash saves, so it is useless without bash and needed with it.
+_COMPANION_TOOLS = {"read_output": "bash"}
+
 
 def tool_approval_policy(approve_unsafe_tools: bool) -> ToolApprovalPolicy:
     """Return the explicit approval policy selected by an embedding frontend."""
@@ -45,8 +49,10 @@ def select_tools(
     """Filter registered tools without weakening their approval requirements.
 
     A tool is exposed when all tools are selected, it is explicitly named, or it
-    is read-only and ``allow_read_tools`` is set. Named unknown tools fail before
-    a run begins unless their prefix belongs to an isolated startup failure.
+    is read-only and ``allow_read_tools`` is set. A companion tool, which only
+    serves another tool, is exposed with that tool unless it is named itself.
+    Named unknown tools fail before a run begins unless their prefix belongs to an
+    isolated startup failure.
     Exposing a mutating or command tool never auto-approves it.
     """
 
@@ -55,9 +61,16 @@ def select_tools(
         if not name.startswith(ignored_unknown_prefixes):
             tools.get(name)
 
+    def exposed(name: str) -> bool:
+        if all_tools or name in allowed_names:
+            return True
+        if (companion := _COMPANION_TOOLS.get(name)) is not None:
+            return companion in tools.names() and exposed(companion)
+        return allow_read_tools and tools.get(name).safety == "read"
+
     filtered = ToolRegistry()
     for tool in tools.all():
-        if all_tools or tool.name in allowed_names or (allow_read_tools and tool.safety == "read"):
+        if exposed(tool.name):
             filtered.register(
                 tool,
                 execution=tools.execution_metadata_for(tool.name),

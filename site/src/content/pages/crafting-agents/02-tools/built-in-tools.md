@@ -1,6 +1,6 @@
 ---
 title: Inside Wisp's built-in tools
-description: How Wisp's read, write, edit, bash, grep, find, and ls tools work at the operating-system level, from path checks to process cleanup.
+description: How Wisp's read, write, edit, bash, grep, find, ls, and read_output tools work at the operating-system level, from path checks to process cleanup.
 route: crafting-agents/02-tools/built-in-tools.html
 section: learn
 order: 1
@@ -14,8 +14,8 @@ parent: crafting-agents/02-tools.md
 # Inside Wisp's built-in tools
 
 [Chapter 2](../02-tools.md) built three narrow tools for a trusted fixture. Wisp's
-seven built-ins (`read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls`) take
-several thousand lines of Python, plus optional Rust kernels. Very little of that
+eight built-ins (`read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, and
+`read_output`, which pages through output `bash` saved) take several thousand lines of Python, plus optional Rust kernels. Very little of that
 is the schema the model sees. Most of it answers questions a schema cannot: which
 file a path really names, what happens if the file changes while we read it, and
 who stops a process that a command left running in the background.
@@ -64,6 +64,7 @@ returns one instance of each class:
 | `grep`, `find` | `read` | Only when the native directory walk is installed | Worker thread with a deadline |
 | `write`, `edit` | `mutating` | No | Worker thread |
 | `bash` | `command` | No | Child processes, watched by asyncio |
+| `read_output` | `read` | Yes | Worker thread |
 
 Parallel safety is registered next to the tools, in `extensions/builtin.py`, not
 in the schema. `grep` and `find` only read, but the Python directory walk holds
@@ -557,10 +558,12 @@ most of this code handles the processes a command leaves behind.
    process slots (eight in the runtime) are full.
 4. Spawn the process and capture its output under `asyncio.wait_for(timeout)`.
 5. On timeout, stop the whole process tree and return a retryable `timeout`
-   error. Its hint says the result is inconclusive.
+   error. It names where the output so far was saved and shows its last lines;
+   its hint says the result is inconclusive.
 6. After a normal exit, *still* stop the process tree, in case the command left
    background processes running.
 7. Decode the output as UTF-8, replacing invalid bytes, and format the result.
+   If the result cannot show all of it, save the full streams and say where.
 
 If the tool call itself is cancelled, for example because the user interrupted
 the run, the same tree cleanup runs, shielded from the cancellation, before the
@@ -724,8 +727,62 @@ When the output does not fit, it is cut from the front: `[truncated]` follows th
 prefix, then the tail of the output. The status prefix sits outside the output budget, so even a tiny budget never
 hides whether the command succeeded. As in the chapter's teaching tool, a nonzero exit code
 is an ordinary result rather than a `ToolError`. `data` carries the exit code,
-separate stdout and stderr tails, truncation flags, and how many bytes were dropped
-from each stream.
+separate stdout and stderr tails, truncation flags, how many bytes were dropped
+from each stream, and the id of each stream that was saved.
+
+### Saving what the result cut
+
+A tail is the right default, but some failures print their cause first: a build
+that reports one missing header and then thousands of follow-on errors. Without the
+beginning, the model's only way back to the cause is to run the command again,
+which is slow for a test suite and unsafe for a migration or a deploy. So each
+stream's reader also feeds a `SavedStream` from
+[`tools/output_store.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/tools/output_store.py):
+
+```python
+async def append(self, chunk: bytes) -> None:
+    with self._lock:  # a threading lock: file writes happen in worker threads
+        # ... count bytes past the 8 MiB stream cap as omitted
+        self._buffer += chunk
+        if self._fd is not None:
+            flush_due = len(self._buffer) >= _WRITE_BATCH_BYTES  # 64 KiB batches
+        else:
+            flush_due = len(self._buffer) > self._spill_threshold  # the tail budget
+    if flush_due:
+        await _run_in_thread(self._flush)  # creates the file on first use
+```
+
+Output that fits the budget stays in memory and never touches the disk. When a
+stream outgrows the budget, or the result is cut for another reason such as the
+line limit, the tool saves both streams and ends its text with one line:
+
+```text
+[Full output saved: stdout output_id=3f9c0a1b2c3d4e5f (2481533 bytes, 31007 lines). Read it with read_output.]
+```
+
+`read_output` takes that id with the same `offset` and `limit` paging as `read`.
+The model never passes a path, so it cannot use the tool to reach any other file.
+The streams are kept separate: two pipes read concurrently arrive in no reliable
+order, so a combined log would claim an interleaving Wisp does not know.
+
+The store bounds itself and cleans up after itself:
+
+- **Limits.** 8 MiB per stream, keeping the beginning, since the result already
+  shows the end. At most 64 MiB and 32 streams per runtime; when either is
+  reached, the oldest finished stream is deleted, as is a running stream whose
+  id no result has reported yet. Once a stream loses bytes to a limit, saving
+  stops for good, so what is saved is always an unbroken prefix.
+- **Lifetime.** Files live in a private directory, `~/.wisp/tool-output/runtime-*`
+  (mode 0700, files 0600), which closing the runtime deletes. Reads go through a
+  descriptor opened when the file was created, never through its path. Output does not
+  survive a restart, like a `process_id`. Each runtime holds an exclusive lock on
+  a file in its directory, and the first runtime to save output deletes any
+  directory whose lock it can take, which removes what a crashed runtime left.
+- **Failures.** A disk error never changes the command's result. That stream is
+  reported as not saved, with the reason, and its partial file is deleted.
+- **Cancellation.** A write in progress finishes before a cancelled reader
+  continues, so the file is never closed under a worker thread. A run that is
+  cancelled or fails discards its streams, because no result will name them.
 
 ### `start`, `poll`, and `cancel`
 
@@ -734,7 +791,8 @@ spawns the command the same way but returns a `process_id` instead of waiting.
 The supervisor then keeps three tasks per process: one reader for each stream and
 one completion task that enforces `lifetime_seconds` (default 300, up to a day).
 Readers append into a buffer bounded by bytes and lines that drops the oldest
-output first. An optional Rust implementation of that buffer lives in
+output first, and into a `SavedStream`, so a poll that reports dropped output can
+also say where the full output was saved. An optional Rust implementation of that buffer lives in
 `rust/wisp-process-text`.
 
 `poll` returns only the output produced since the previous poll:

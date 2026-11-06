@@ -126,7 +126,7 @@ def test_one_shot_capture_error_retains_ownership_when_cleanup_fails(
 
     async def fail_capture(
         _process: asyncio.subprocess.Process,
-        _budget: object,
+        *_tails: object,
     ) -> tuple[bytes, bytes]:
         raise OSError("broken pipe")
 
@@ -353,7 +353,7 @@ def test_one_shot_capture_error_terminates_process_before_releasing_ownership(
 
     async def fail_capture(
         process: asyncio.subprocess.Process,
-        _budget: object,
+        *_tails: object,
     ) -> tuple[bytes, bytes]:
         captured_processes.append(process)
         raise OSError("broken pipe")

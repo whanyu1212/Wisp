@@ -10,6 +10,18 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Tools
+
+- When a `bash` result has to cut output, the full stdout and stderr are saved and the result
+  names an `output_id`. The new read-only `read_output` tool pages through saved output, so the
+  model no longer reruns a command to see an error printed early. A poll of a started process
+  that dropped output, and a timed-out command, report saved output the same way; a timeout error
+  also shows the last lines of output. Saved output is private to the user, bounded (8 MiB per
+  stream, 64 MiB and 32 streams per runtime), and deleted when Wisp exits. `read_output` is
+  exposed whenever `bash` is. No event, command, or session format changes. (HY-434)
+
 <!-- Keeps links to the pre-release "0.5.0 — Unreleased" heading working. -->
 <a id="050--unreleased"></a>
 
