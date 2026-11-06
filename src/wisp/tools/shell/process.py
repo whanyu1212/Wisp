@@ -21,7 +21,7 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import anyio
 
@@ -29,6 +29,9 @@ from wisp.tools.result import ToolError
 from wisp.tools.shell.watchdog import WatchedCommand, release_command, watch_command
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
+
+if TYPE_CHECKING:
+    from wisp.tools.output_store import SavedStream
 
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
@@ -139,6 +142,10 @@ class ProcessResult:
     stderr_source_byte_lengths: tuple[int, ...] | None = None
     background_stopped: bool = False
     """Whether processes still holding the output, or detached from the command, were stopped."""
+    stdout_saved: SavedStream | None = None
+    """The full stdout, which the caller saves if its result shows only part of it."""
+    stderr_saved: SavedStream | None = None
+    """The full stderr, which the caller saves if its result shows only part of it."""
 
 
 @dataclass(frozen=True)
@@ -198,13 +205,15 @@ class _StreamTail:
     """The last ``max_bytes`` bytes of one output stream, plus how many were dropped.
 
     Command output is kept from the end because failures, tracebacks, and summaries
-    are printed last.
+    are printed last. When ``saved`` is set, the reader also feeds every byte to it,
+    so output the tail drops can still be saved in full.
     """
 
-    def __init__(self, max_bytes: int) -> None:
+    def __init__(self, max_bytes: int, saved: SavedStream | None = None) -> None:
         self._max_bytes = max(0, max_bytes)
         self._retained = bytearray()
         self._dropped_bytes = 0
+        self.saved = saved
 
     def append(self, chunk: bytes) -> None:
         self._retained += chunk
@@ -237,7 +246,9 @@ async def _run_shell(
 
     try:
         captured = await asyncio.wait_for(
-            _collect_limited_output(process, max_output_bytes),
+            _collect_limited_output(
+                process, _StreamTail(max_output_bytes), _StreamTail(max_output_bytes)
+            ),
             timeout=timeout,
         )
     except TimeoutError as exc:
@@ -1726,21 +1737,21 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
 
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
-    max_stream_bytes: int,
+    stdout_tail: _StreamTail,
+    stderr_tail: _StreamTail,
 ) -> _CapturedOutput:
     """Capture the tail of stdout and stderr until the shell exits.
 
-    Each stream keeps its own last ``max_stream_bytes`` bytes, so a noisy stdout
-    cannot crowd out stderr. Capture ends at end-of-file on both streams, or
-    ``_OUTPUT_DRAIN_GRACE_SECONDS`` after the shell exits if a background job still
-    holds a pipe; the caller's process-tree cleanup then terminates that job.
+    Each stream fills its own tail, so a noisy stdout cannot crowd out stderr.
+    Capture ends at end-of-file on both streams, or ``_OUTPUT_DRAIN_GRACE_SECONDS``
+    after the shell exits if a background job still holds a pipe; the caller's
+    process-tree cleanup then terminates that job. The tails belong to the caller,
+    so what they hold is still available if capture times out or is cancelled.
     """
 
     assert process.stdout is not None
     assert process.stderr is not None
 
-    stdout_tail = _StreamTail(max_stream_bytes)
-    stderr_tail = _StreamTail(max_stream_bytes)
     readers = (
         asyncio.create_task(_read_stream_tail(process.stdout, stdout_tail)),
         asyncio.create_task(_read_stream_tail(process.stderr, stderr_tail)),
@@ -1773,8 +1784,15 @@ async def _collect_limited_output(
 
 
 async def _read_stream_tail(stream: asyncio.StreamReader, tail: _StreamTail) -> None:
-    while chunk := await stream.read(8192):
-        tail.append(chunk)
+    try:
+        while chunk := await stream.read(8192):
+            tail.append(chunk)
+            if tail.saved is not None:
+                await tail.saved.append(chunk)
+    finally:
+        # Capture ends here however it stops: end of file, timeout, or cancellation.
+        if tail.saved is not None:
+            tail.saved.close()
 
 
 def _format_process_output_bounded(

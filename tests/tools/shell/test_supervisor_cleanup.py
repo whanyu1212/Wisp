@@ -482,7 +482,7 @@ def test_supervisor_close_bounds_one_shot_capture_drain(
 
     async def hold_capture(
         _process: asyncio.subprocess.Process,
-        _budget: object,
+        *_tails: object,
     ) -> tuple[bytes, bytes]:
         capture_started.set()
         await asyncio.Event().wait()

@@ -7,6 +7,7 @@ import shutil
 import sys
 import time
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import anyio
@@ -215,7 +216,7 @@ def test_bash_managed_update_preserves_retained_stdout_after_label(tmp_path: Pat
         stdout="tail\n",
     )
 
-    result = shell_tools_module._managed_update_result(update, context=context)
+    result = anyio.run(partial(shell_tools_module._managed_update_result, update, context=context))
 
     assert result.text == "Process p123 is still running\nstdout:\ntail\n"
     assert result.data["stdout"] == "tail\n"
@@ -231,7 +232,7 @@ def test_bash_managed_update_adds_poll_time_dropped_bytes(tmp_path: Path) -> Non
         stdout_dropped_bytes=3,
     )
 
-    result = shell_tools_module._managed_update_result(update, context=context)
+    result = anyio.run(partial(shell_tools_module._managed_update_result, update, context=context))
     stdout = str(result.data["stdout"])
 
     assert result.data["stdout_truncated"] is True
@@ -253,7 +254,7 @@ def test_bash_managed_update_counts_marker_only_output_as_dropped_bytes(
         stdout="abcde",
     )
 
-    result = shell_tools_module._managed_update_result(update, context=context)
+    result = anyio.run(partial(shell_tools_module._managed_update_result, update, context=context))
 
     assert result.data["stdout"] == "[trun"
     assert result.data["stdout_truncated"] is True
@@ -729,7 +730,9 @@ def test_stderr_survives_noisy_stdout(tmp_path: Path) -> None:
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
     assert result.text.startswith("Command exited with code 1: [truncated] ")
-    assert result.text.endswith("4998\n4999\nfinal failure")
+    body, notice = result.text.rsplit("\n", 1)
+    assert body.endswith("4998\n4999\nfinal failure")
+    assert notice.startswith("[Full output saved: stdout output_id=")
     assert result.data["stderr"] == "final failure\n"
     assert result.truncated is True
 

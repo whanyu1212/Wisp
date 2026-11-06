@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from threading import Event, get_ident
 
@@ -39,7 +40,7 @@ from wisp.runtime import (
     WispRuntime,
 )
 from wisp.runtime.extensions import activate_builtin_extensions, activate_extensions, build_runtime
-from wisp.tools.builtin import ReadTool
+from wisp.tools.builtin import ReadTool, builtin_tools
 from wisp.tools.search import FindTool, GrepTool
 from wisp.tools.search import tools as search_tools_module
 from wisp.tools.selection import select_tools
@@ -468,6 +469,27 @@ def test_tool_selection_preserves_metadata_only_for_selected_tools() -> None:
     assert filtered.prompt_metadata(("read", "bash")) == (read_prompt,)
 
 
+@pytest.mark.parametrize(
+    ("select", "expected"),
+    [
+        (partial(select_tools, allowed_tools=("bash",)), ("bash", "read_output")),
+        (partial(select_tools, allow_read_tools=True), ("read",)),
+        (partial(select_tools, allowed_tools=("read_output",)), ("read_output",)),
+        (partial(select_tools, all_tools=True), ("read", "bash", "read_output")),
+    ],
+    ids=["bash-brings-read-output", "read-only-without-bash", "named", "all"],
+)
+def test_read_output_is_exposed_with_bash_unless_named(
+    select: Callable[[ToolRegistry], ToolRegistry], expected: tuple[str, ...]
+) -> None:
+    registry = ToolRegistry()
+    for tool in builtin_tools():
+        if tool.name in {"read", "bash", "read_output"}:
+            registry.register(tool)
+
+    assert select(registry).names() == expected
+
+
 def test_tool_selection_ignores_unknown_names_from_failed_startup_extension() -> None:
     registry = ToolRegistry()
     registry.register(ReadTool())
@@ -593,6 +615,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "grep",
             "find",
             "ls",
+            "read_output",
             "skill",
             "list_mcp_servers",
             "propose_mcp_server",

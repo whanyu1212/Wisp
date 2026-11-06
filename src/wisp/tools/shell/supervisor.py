@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import anyio
 
+from wisp.tools.output_store import OutputStore, SavedStream, saved_output_notice
 from wisp.tools.result import ToolError
 from wisp.tools.shell.process import (
     ProcessResult,
@@ -22,10 +23,13 @@ from wisp.tools.shell.process import (
     _collect_limited_output,
     _create_shell_process,
     _kill_process_tree_and_wait,
+    _process_output_parts,
+    _StreamTail,
     _terminate_process_tree,
     _wait_for_exit,
     stopped_detached_processes,
 )
+from wisp.tools.truncation import truncate_text_tail
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
@@ -36,6 +40,10 @@ DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
 DEFAULT_MAX_RETAINED_LINES = 2_000
 POST_TERMINATION_DRAIN_TIMEOUT = 0.25
+# The last output a timeout error shows. The full output is saved, and an error
+# message has a small budget of its own.
+_TIMEOUT_TAIL_BYTES = 1_000
+_TIMEOUT_TAIL_LINES = 20
 PROCESS_TREE_CLEANUP_ERROR = "Failed to terminate process tree"
 _LINE_BREAK_CHARACTERS = frozenset(
     {"\n", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"}
@@ -66,6 +74,9 @@ class ProcessUpdate:
     ended_at: datetime | None = None
     # Whether cleanup stopped processes the command had detached, such as a daemon.
     background_stopped: bool = False
+    # The full streams, which the caller saves if its result shows only part of them.
+    stdout_saved: SavedStream | None = None
+    stderr_saved: SavedStream | None = None
 
 
 @dataclass
@@ -334,6 +345,8 @@ class _ManagedProcess:
     command: str
     stdout: _PendingTextLike
     stderr: _PendingTextLike
+    stdout_saved: SavedStream
+    stderr_saved: SavedStream
     state: ProcessState = "running"
     exit_code: int | None = None
     terminal_override: ProcessState | None = None
@@ -377,11 +390,13 @@ class ProcessSupervisor:
         self,
         *,
         max_processes: int = DEFAULT_MAX_MANAGED_PROCESSES,
+        output_store: OutputStore | None = None,
         _pending_text_backend: _PendingTextBackend = "auto",
     ) -> None:
         if max_processes < 1:
             raise ValueError("max_processes must be greater than or equal to 1")
         self._max_processes = max_processes
+        self._output_store = output_store if output_store is not None else OutputStore()
         self._pending_text_class = _pending_text_class(_pending_text_backend)
         self._managed: dict[str, _ManagedProcess] = {}
         self._one_shot: dict[
@@ -392,6 +407,12 @@ class ProcessSupervisor:
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+
+    @property
+    def output_store(self) -> OutputStore:
+        """Return the store that keeps full output of commands whose results truncate it."""
+
+        return self._output_store
 
     async def run_to_completion(
         self,
@@ -411,10 +432,21 @@ class ProcessSupervisor:
                 raise self._capacity_error()
             process = await self._spawn(command, cwd=cwd, env=env)
             self._one_shot_locks[process] = asyncio.Lock()
-            capture_task = asyncio.create_task(_collect_limited_output(process, max_output_bytes))
+            stdout_tail = _StreamTail(
+                max_output_bytes,
+                self._open_saved_stream("stdout", command, spill_threshold=max_output_bytes),
+            )
+            stderr_tail = _StreamTail(
+                max_output_bytes,
+                self._open_saved_stream("stderr", command, spill_threshold=max_output_bytes),
+            )
+            capture_task = asyncio.create_task(
+                _collect_limited_output(process, stdout_tail, stderr_tail)
+            )
             self._one_shot[process] = capture_task
 
         release_ownership = False
+        output_reported = False
         try:
             try:
                 captured = await asyncio.wait_for(
@@ -437,8 +469,10 @@ class ProcessSupervisor:
                 release_ownership = cleanup_succeeded
                 if not cleanup_succeeded:
                     raise ToolError(PROCESS_TREE_CLEANUP_ERROR) from exc
+                message = await _timeout_message(timeout, stdout_tail, stderr_tail)
+                output_reported = True
                 raise ToolError(
-                    f"Command timed out after {timeout:g} seconds",
+                    message,
                     failure_code="timeout",
                     retryable=True,
                     recovery_hint=(
@@ -495,10 +529,18 @@ class ProcessSupervisor:
                 background_stopped=(
                     captured.pipes_held_after_exit or stopped_detached_processes(process)
                 ),
+                stdout_saved=stdout_tail.saved,
+                stderr_saved=stderr_tail.saved,
             )
             release_ownership = True
+            output_reported = True
             return result
         finally:
+            if not output_reported:
+                # No result will name this output, so nothing could ever read it.
+                for tail in (stdout_tail, stderr_tail):
+                    if tail.saved is not None:
+                        tail.saved.discard()
             if release_ownership:
                 release_task = asyncio.create_task(self._release_one_shot(process))
                 await self._await_task_before_propagating_cancellation(release_task)
@@ -535,12 +577,18 @@ class ProcessSupervisor:
                 command=command,
                 stdout=stdout,
                 stderr=stderr,
+                stdout_saved=self._open_saved_stream(
+                    "stdout", command, spill_threshold=max_retained_bytes
+                ),
+                stderr_saved=self._open_saved_stream(
+                    "stderr", command, spill_threshold=max_retained_bytes
+                ),
             )
             managed.stdout_task = asyncio.create_task(
-                self._read_stream(managed, process.stdout, managed.stdout)
+                self._read_stream(managed, process.stdout, managed.stdout, managed.stdout_saved)
             )
             managed.stderr_task = asyncio.create_task(
-                self._read_stream(managed, process.stderr, managed.stderr)
+                self._read_stream(managed, process.stderr, managed.stderr, managed.stderr_saved)
             )
             managed.completion_task = asyncio.create_task(
                 self._wait_for_completion(managed, timeout)
@@ -777,6 +825,8 @@ class ProcessSupervisor:
                 self._one_shot.clear()
                 self._one_shot_locks.clear()
 
+        # Saved output is owned by this runtime and goes away with it.
+        await self._output_store.aclose()
         if failed_managed_ids or failed_one_shot_processes:
             for item in managed_to_cleanup:
                 if item.process_id in failed_managed_ids:
@@ -809,22 +859,34 @@ class ProcessSupervisor:
             except KeyError as exc:
                 raise ToolError(f"Unknown managed process: {process_id}") from exc
 
+    def _open_saved_stream(self, name: str, command: str, *, spill_threshold: int) -> SavedStream:
+        return self._output_store.open_stream(
+            f"{name} of `{_command_summary(command)}`",
+            spill_threshold=spill_threshold,
+        )
+
     async def _read_stream(
         self,
         managed: _ManagedProcess,
         stream: asyncio.StreamReader | None,
         output: _PendingTextLike,
+        saved: SavedStream,
     ) -> None:
-        if stream is None:
-            return
-        while True:
-            chunk = await stream.read(8192)
-            if not chunk:
-                break
-            output.append_bytes(chunk)
+        try:
+            if stream is None:
+                return
+            while True:
+                chunk = await stream.read(8192)
+                if not chunk:
+                    break
+                output.append_bytes(chunk)
+                managed.changed.set()
+                await saved.append(chunk)
+            output.append_bytes(b"", final=True)
             managed.changed.set()
-        output.append_bytes(b"", final=True)
-        managed.changed.set()
+        finally:
+            # Reading ends here however it stops: end of file or cancellation.
+            saved.close()
 
     async def _wait_for_completion(self, managed: _ManagedProcess, timeout: float) -> None:
         assert managed.stdout_task is not None
@@ -1034,6 +1096,8 @@ class ProcessSupervisor:
             background_stopped=(
                 managed.state != "running" and stopped_detached_processes(managed.process)
             ),
+            stdout_saved=managed.stdout_saved,
+            stderr_saved=managed.stderr_saved,
         )
 
     def _evict_terminals_for_capacity(self) -> None:
@@ -1044,6 +1108,35 @@ class ProcessSupervisor:
     def _ensure_open(self) -> None:
         if self._closed:
             raise RuntimeError("ProcessSupervisor is closed")
+
+
+async def _timeout_message(timeout: float, stdout: _StreamTail, stderr: _StreamTail) -> str:
+    """Describe a one-shot timeout with where its output was saved and how it ended.
+
+    The saved-output notice comes before the tail because error text is shortened
+    from the end.
+    """
+
+    lines = [f"Command timed out after {timeout:g} seconds."]
+    statuses = [
+        (name, await tail.saved.save())
+        for name, tail in (("stdout", stdout), ("stderr", stderr))
+        if tail.saved is not None
+    ]
+    if notice := saved_output_notice(statuses):
+        lines.append(notice)
+    parts = _process_output_parts(
+        stdout.result().output.decode("utf-8", errors="replace"),
+        stderr.result().output.decode("utf-8", errors="replace"),
+    )
+    if parts:
+        tail = truncate_text_tail(
+            "\n".join(parts),
+            max_bytes=_TIMEOUT_TAIL_BYTES,
+            max_lines=_TIMEOUT_TAIL_LINES,
+        )
+        lines.append(f"Last output:\n{tail.text}")
+    return "\n".join(lines)
 
 
 def _bounded_text_tail(text: str, *, max_bytes: int, max_lines: int) -> tuple[str, int]:

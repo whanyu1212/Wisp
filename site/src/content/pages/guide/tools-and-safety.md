@@ -19,7 +19,7 @@ instead. Links found while searching a directory are skipped.
 
 | Category | Tools | Approval |
 |----------|-------|----------|
-| **Read** | `read` · `grep` · `find` · `ls` | Runs directly |
+| **Read** | `read` · `grep` · `find` · `ls` · `read_output` | Runs directly |
 | **Mutating** | `write` · `edit` | Required |
 | **Command** | `bash` | Required |
 
@@ -44,6 +44,32 @@ the same safety category and approval policy. A one-shot `timeout` is at most 3,
 started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds` and `wait_seconds`
 at most 600. When every process slot is taken, the error lists the processes holding them, so the
 model can poll or cancel one.
+
+### Output a result cuts is saved
+
+A `bash` result shows at most the tool output budget (50,000 bytes and 2,000 lines by default),
+keeping the end of the output. When it has to cut more than that, Wisp saves the full stdout and
+stderr and ends the result with a line such as
+`[Full output saved: stdout output_id=3f9c0a1b2c3d4e5f (2481533 bytes, 31007 lines). Read it with read_output.]`.
+The model pages through a saved stream with `read_output`, using the same `offset` and `limit` as
+`read`, instead of running the command again. This also applies to a poll of a started process
+that dropped output, and to a timed-out command, whose error names the saved output and shows its
+last lines.
+
+- `read_output` is a read tool and needs no approval. It accepts only ids Wisp issued, never a
+  path, so it cannot reach other files. It is exposed whenever `bash` is, including with
+  `--allow-tool bash`.
+- Each stream keeps its first 8 MiB; the result already shows how it ended. A runtime keeps at most
+  64 MiB and 32 saved streams, deleting the oldest finished one to make room. stdout and stderr are
+  saved separately, because Wisp cannot know how they interleaved.
+- Saved output lasts while Wisp runs. It lives in a directory only you can read,
+  `~/.wisp/tool-output/`, which is deleted when Wisp exits; after a crash, the next Wisp process to
+  save output removes it. Saved output is not stored with the session, so a session resumed in a
+  later Wisp process cannot read it.
+- Command output can contain secrets the command printed. Saving it keeps them on disk, readable
+  only by you, until Wisp exits, in addition to the part the transcript already holds.
+- If the output cannot be saved, for example because the disk is full, the command's result is
+  unchanged and says why the output was not saved.
 
 Commands inherit Wisp's environment except the variables Wisp reads provider API keys from:
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`,
@@ -96,7 +122,8 @@ do not trust. YOLO and "allow this tool for the session" grants skip that review
 
 ## Print mode exposes no tools unless you ask
 
-Read tools are enabled as a group; mutating and command tools require per-tool opt-in:
+Read tools are enabled as a group; mutating and command tools require per-tool opt-in. Allowing
+`bash` also exposes `read_output`, which reads the output `bash` saves:
 
 ```bash
 wisp -p "list files" --allow-read-tools
