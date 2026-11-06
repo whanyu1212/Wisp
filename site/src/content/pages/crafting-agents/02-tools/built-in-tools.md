@@ -769,10 +769,12 @@ The store bounds itself and cleans up after itself:
 
 - **Limits.** 8 MiB per stream, keeping the beginning, since the result already
   shows the end. At most 64 MiB and 32 streams per runtime; when either is
-  reached, the oldest finished stream is deleted, and a stream still being
-  written is never evicted.
+  reached, the oldest finished stream is deleted, as is a running stream whose
+  id no result has reported yet. Once a stream loses bytes to a limit, saving
+  stops for good, so what is saved is always an unbroken prefix.
 - **Lifetime.** Files live in a private directory, `~/.wisp/tool-output/runtime-*`
-  (mode 0700, files 0600), which closing the runtime deletes. Output does not
+  (mode 0700, files 0600), which closing the runtime deletes. Reads go through a
+  descriptor opened when the file was created, never through its path. Output does not
   survive a restart, like a `process_id`. Each runtime holds an exclusive lock on
   a file in its directory, and the first runtime to save output deletes any
   directory whose lock it can take, which removes what a crashed runtime left.

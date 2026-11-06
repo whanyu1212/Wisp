@@ -356,19 +356,50 @@ def test_symlinked_root_is_refused(tmp_path: Path) -> None:
     assert list(target.iterdir()) == []
 
 
-def test_replaced_file_is_not_read(root: Path) -> None:
-    async def scenario() -> None:
+@pytest.mark.skipif(os.name != "posix", reason="Windows cannot replace an open file")
+def test_replacing_the_file_on_disk_does_not_change_what_is_read(root: Path) -> None:
+    async def scenario() -> tuple[str, ...]:
         store = OutputStore(root)
         stream = await saved_stream(store, b"genuine\n")
         saved_file = saved_files(root)[0]
         saved_file.unlink()
         saved_file.write_bytes(b"substituted\n")
-        with pytest.raises(ToolError, match="replaced"):
-            await store.read_page(
-                stream.output_id, offset=1, limit=None, max_bytes=100, max_lines=10
-            )
+        page = await store.read_page(
+            stream.output_id, offset=1, limit=None, max_bytes=100, max_lines=10
+        )
+        return page.lines
 
-    run(scenario)
+    assert run(scenario) == ("genuine",)
+
+
+def test_saving_stops_for_good_once_the_total_cap_drops_bytes(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Bytes dropped at the cap must not be followed by later bytes that fit after
+    # space frees up, or the saved output would silently skip part of the stream.
+    monkeypatch.setattr(output_store_module, "MAX_SAVED_TOTAL_BYTES", 30)
+
+    async def scenario() -> tuple[object, tuple[str, ...]]:
+        store = OutputStore(root)
+        running = store.open_stream("stdout", spill_threshold=0)
+        await running.append(b"x" * 20)
+        await running.save()  # reported and running: holds 20 bytes
+        capped = store.open_stream("stderr", spill_threshold=0)
+        await capped.append(b"1234567890ab")
+        await capped.save()
+        running.close()  # finished, so its bytes can now be evicted
+        await capped.append(b"cd\n")
+        capped.close()
+        page = await store.read_page(
+            capped.output_id, offset=1, limit=None, max_bytes=100, max_lines=10
+        )
+        return capped.status(), page.lines
+
+    status, lines = run(scenario)
+
+    assert lines == ("1234567890",)
+    assert isinstance(status, SavedOutput)
+    assert (status.saved_bytes, status.omitted_bytes) == (10, 5)
 
 
 def test_running_stream_pages_show_buffered_output(root: Path) -> None:

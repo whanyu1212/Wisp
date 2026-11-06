@@ -60,7 +60,8 @@ last lines.
   path, so it cannot reach other files. It is exposed whenever `bash` is, including with
   `--allow-tool bash`.
 - Each stream keeps its first 8 MiB; the result already shows how it ended. A runtime keeps at most
-  64 MiB and 32 saved streams, deleting the oldest finished one to make room. stdout and stderr are
+  64 MiB and 32 saved streams, deleting the oldest finished one to make room. A stream cut short by
+  either limit stops there, so saved output never skips a part of the stream. stdout and stderr are
   saved separately, because Wisp cannot know how they interleaved.
 - Saved output lasts while Wisp runs. It lives in a directory only you can read,
   `~/.wisp/tool-output/`, which is deleted when Wisp exits; after a crash, the next Wisp process to

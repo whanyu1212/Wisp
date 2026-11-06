@@ -31,7 +31,6 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -188,6 +187,10 @@ class OutputStore:
         self._saved: OrderedDict[str, SavedStream] = OrderedDict()
         # Bytes each saved stream has claimed, including a write still in progress.
         self._claimed: dict[str, int] = {}
+        # A read-only descriptor per saved file, opened when the file is created.
+        # Reads go through copies of it, never through the path, so replacing the
+        # file on disk cannot change what read_output returns.
+        self._read_fds: dict[str, int] = {}
         self._total_bytes = 0
         self._closed = False
 
@@ -266,8 +269,11 @@ class OutputStore:
             self._closed = True
             for stream in self._saved.values():
                 stream._evicted = True
+            for read_fd in self._read_fds.values():
+                os.close(read_fd)
             self._saved.clear()
             self._claimed.clear()
+            self._read_fds.clear()
             self._total_bytes = 0
             runtime_dir = self._runtime_dir
             lock_fd = self._lock_fd
@@ -296,8 +302,15 @@ class OutputStore:
                 fd = os.open(path, _new_file_flags(os.O_WRONLY), _PRIVATE_FILE_MODE)
             except OSError as exc:
                 raise _SaveFailed(_os_error_reason(exc)) from exc
+            try:
+                read_fd = _open_same_file(path, fd)
+            except OSError as exc:
+                os.close(fd)
+                _unlink_quietly(path)
+                raise _SaveFailed(_os_error_reason(exc)) from exc
             self._saved[stream.output_id] = stream
             self._claimed[stream.output_id] = 0
+            self._read_fds[stream.output_id] = read_fd
             return fd, path
 
     def _reserve(self, stream: SavedStream, size: int) -> int:
@@ -315,6 +328,18 @@ class OutputStore:
             self._claimed[stream.output_id] += granted
             self._total_bytes += granted
             return granted
+
+    def _duplicate_read_fd(self, stream: SavedStream) -> int:
+        """Return a copy of a saved stream's read descriptor for the caller to close."""
+
+        with self._lock:
+            read_fd = self._read_fds.get(stream.output_id)
+            if read_fd is None or self._saved.get(stream.output_id) is not stream:
+                raise ToolError(
+                    f"Saved output {stream.output_id} is no longer available",
+                    failure_code="not_found",
+                )
+            return os.dup(read_fd)
 
     def _release(self, stream: SavedStream) -> None:
         """Forget a stream that is no longer saved and return the bytes it claimed."""
@@ -345,12 +370,12 @@ class OutputStore:
             self._forget(output_id)
             stream._evicted = True
             if stream._path is not None:
-                with suppress(FileNotFoundError):
-                    stream._path.unlink()
+                _unlink_quietly(stream._path)
 
     def _forget(self, output_id: str) -> None:
         del self._saved[output_id]
         self._total_bytes -= self._claimed.pop(output_id)
+        os.close(self._read_fds.pop(output_id))
 
     def _ensure_runtime_dir(self) -> Path:
         if self._runtime_dir is not None:
@@ -393,12 +418,16 @@ class SavedStream:
         self._buffer = bytearray()
         self._fd: int | None = None
         self._path: Path | None = None
-        self._file_id: tuple[int, int] | None = None
+        # Serializes reads, which share one file offset through duplicated descriptors.
+        self._read_lock = threading.Lock()
         self._saved_bytes = 0
         self._omitted_bytes = 0
         self._newlines = 0
         self._ends_with_newline = True
         self._failure: str | None = None
+        # Set once any byte is not saved. Saving stops there for good, so saved
+        # output is always an unbroken prefix of what the command printed.
+        self._capped = False
         self._ended = False
         self._discarded = False
         # Written under the store lock, which eviction holds instead of this stream's.
@@ -416,9 +445,14 @@ class SavedStream:
         with self._lock:
             if self._ended or self._discarded or self._failure is not None or self._evicted:
                 return
+            if self._capped:
+                self._omitted_bytes += len(chunk)
+                return
             room = max(0, MAX_SAVED_STREAM_BYTES - self._saved_bytes - len(self._buffer))
             self._buffer += chunk[:room]
-            self._omitted_bytes += max(0, len(chunk) - room)
+            if len(chunk) > room:
+                self._omitted_bytes += len(chunk) - room
+                self._capped = True
             if self._fd is not None:
                 flush_due = len(self._buffer) >= _WRITE_BATCH_BYTES
             else:
@@ -471,10 +505,9 @@ class SavedStream:
             if self._fd is not None:
                 os.close(self._fd)
                 self._fd = None
-            if self._path is not None:
-                with suppress(FileNotFoundError):
-                    self._path.unlink()
             self._store._release(self)
+            if self._path is not None:
+                _unlink_quietly(self._path)
 
     def status(self) -> SaveStatus | None:
         """Return where the stream is saved, why it is not, or None if not needed.
@@ -509,10 +542,8 @@ class SavedStream:
                     return
                 try:
                     self._fd, self._path = self._store._create_file(self)
-                    info = os.fstat(self._fd)
-                    self._file_id = (info.st_dev, info.st_ino)
-                except (_SaveFailed, OSError) as exc:
-                    self._fail(str(exc) if isinstance(exc, _SaveFailed) else _os_error_reason(exc))
+                except _SaveFailed as exc:
+                    self._fail(str(exc))
                     return
             self._write_buffer()
 
@@ -522,7 +553,9 @@ class SavedStream:
         assert self._fd is not None
         granted = self._store._reserve(self, len(self._buffer))
         pending = bytes(self._buffer[:granted])
-        self._omitted_bytes += len(self._buffer) - granted
+        if granted < len(self._buffer):
+            self._omitted_bytes += len(self._buffer) - granted
+            self._capped = True
         self._buffer.clear()
         if not pending:
             return
@@ -553,10 +586,9 @@ class SavedStream:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
-        if self._path is not None:
-            with suppress(FileNotFoundError):
-                self._path.unlink()
         self._store._release(self)
+        if self._path is not None:
+            _unlink_quietly(self._path)
 
     def _line_count(self) -> int:
         if self._saved_bytes == 0:
@@ -574,12 +606,6 @@ class SavedStream:
         with self._lock:
             if self._fd is not None:
                 self._write_buffer()
-            if self._evicted or self._path is None or self._failure is not None:
-                raise ToolError(
-                    f"Saved output {self.output_id} is no longer available",
-                    failure_code="not_found",
-                )
-            path, file_id = self._path, self._file_id
             size = self._saved_bytes
             line_count = self._line_count()
             omitted_bytes = self._omitted_bytes
@@ -591,7 +617,12 @@ class SavedStream:
                 retryable=True,
                 recovery_hint=f"Use an offset from 1 to {max(line_count, 1)}.",
             )
-        content = _read_saved_file(path, file_id, size)
+        read_fd = self._store._duplicate_read_fd(self)
+        try:
+            with self._read_lock:
+                content = _read_from_start(read_fd, size)
+        finally:
+            os.close(read_fd)
         lines, line_truncated = _select_lines(
             content,
             offset=offset,
@@ -610,28 +641,46 @@ class SavedStream:
         )
 
 
-def _read_saved_file(path: Path, file_id: tuple[int, int] | None, size: int) -> bytes:
-    """Read a saved file, refusing one that was replaced since it was created."""
+def _read_from_start(fd: int, size: int) -> bytes:
+    """Read the first ``size`` bytes of an open file."""
+
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(fd, min(remaining, 1 << 20))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _open_same_file(path: Path, written_fd: int) -> int:
+    """Open a read-only descriptor for the file ``written_fd`` just created."""
+
+    read_fd = os.open(path, _read_flags())
+    written, read = os.fstat(written_fd), os.fstat(read_fd)
+    if (written.st_dev, written.st_ino) != (read.st_dev, read.st_ino):
+        os.close(read_fd)
+        raise OSError(errno.EEXIST, "the saved-output file changed while it was opened")
+    return read_fd
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Delete a saved file, leaving it for ``aclose`` if the platform refuses.
+
+    Windows cannot delete a file another descriptor still holds open, such as an
+    evicted stream whose command is still writing. Its bytes are already returned
+    to the budget, and closing the store removes the whole directory.
+    """
 
     try:
-        fd = os.open(path, _read_flags())
-    except OSError as exc:
-        raise ToolError("Saved output is no longer available", failure_code="not_found") from exc
-    try:
-        info = os.fstat(fd)
-        if (info.st_dev, info.st_ino) != file_id or not stat.S_ISREG(info.st_mode):
-            raise ToolError("Saved output was replaced and cannot be read")
-        chunks: list[bytes] = []
-        remaining = size
-        while remaining > 0:
-            chunk = os.read(fd, min(remaining, 1 << 20))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
+        path.unlink()
+    except FileNotFoundError:
+        return
+    except PermissionError as exc:
+        _logger.debug("Could not delete saved output %s yet: %s", path.name, exc)
 
 
 _LINE_TRUNCATED_MARKER: Final = " [line truncated]"
