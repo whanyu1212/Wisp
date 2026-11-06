@@ -784,6 +784,47 @@ The store bounds itself and cleans up after itself:
   continues, so the file is never closed under a worker thread. A run that is
   cancelled or fails discards its streams, because no result will name them.
 
+### Progress while a command runs
+
+A build can run for minutes, and without progress a frontend shows only that it
+is running. While a one-shot command runs, the supervisor samples the same tails
+every 250 ms and, when either stream has grown, reports them to the call's
+progress handle (`ToolContext.progress`). A tool called without a handle, from
+an SDK test for example, reports nothing.
+
+Delivery belongs to the coding layer, in
+[`coding/tool_progress.py`](https://github.com/whanyu1212/Wisp/blob/main/src/wisp/coding/tool_progress.py).
+The handle is a one-slot buffer: each report replaces the last, and a forwarder
+task sends whatever is newest when the frontend can take it:
+
+```python
+async with anyio.create_task_group() as task_group:
+    task_group.start_soon(forward)  # waits 0.5 s, then sends at most every 0.25 s
+    try:
+        result = await run(slot)    # the tool reports into the slot as it likes
+    finally:
+        slot.close()                # stops the forwarder before the result is returned
+return result
+```
+
+Three properties follow from that shape:
+
+- **Nothing queues up.** Reporting never waits, so reading the command's pipes
+  never stalls behind a slow frontend; the frontend just sees fewer snapshots.
+  Each `tool.execution.progress` event is a whole snapshot rather than a delta,
+  which is what makes skipping safe.
+- **Progress stays inside the call.** The runner closes the slot and waits for a
+  delivery in flight before it returns `tool.execution.ended`, so no progress
+  event can follow it.
+- **The agent loop is unchanged.** The runner is a plain coroutine, so it may own
+  the forwarder's task group. Merging progress into the loop's event generator
+  would mean holding a task group open across `yield`, which anyio does not allow.
+
+Progress is not persisted and never reaches the model. `CodingSession.run()`
+takes the frontend's sink as `live_event_sink`; the RPC host passes its own
+event rendering, so progress reaches the TUI and SDK in order with the run's
+other events, and JSON mode passes its writer.
+
 ### `start`, `poll`, and `cancel`
 
 A dev server or a long build should not block one tool call. `operation=start`

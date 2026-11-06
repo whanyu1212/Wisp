@@ -11,8 +11,8 @@ use super::{
 };
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
-    BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolResultInput,
-    bounded_identity, bounded_tool_arguments, bounded_tool_name,
+    BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolProgressInput,
+    ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
 };
 use crate::tool_detail::{capture_write_before, project_tool_detail_source};
 use serde_json::Value;
@@ -463,6 +463,16 @@ impl BackendEvent {
             },
             "tool.execution.ended" => Self::ToolExecutionEnded {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+            },
+            "tool.execution.progress" => Self::ToolExecutionProgress {
+                call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                progress: ToolProgressInput {
+                    sequence: u64_field(value, &event_type, "sequence")?,
+                    stdout_tail: string_field(value, &event_type, "stdout_tail")?,
+                    stderr_tail: string_field(value, &event_type, "stderr_tail")?,
+                    stdout_bytes: u64_field(value, &event_type, "stdout_bytes")?,
+                    stderr_bytes: u64_field(value, &event_type, "stderr_bytes")?,
+                },
             },
             "tool.result" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;

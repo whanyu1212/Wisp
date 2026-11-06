@@ -27,8 +27,8 @@ const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries o
 
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
-    ToolCallInput, ToolCardSnapshot, ToolResultInput, ToolStatus, identity_for_display,
-    process_call_identity,
+    ToolCallInput, ToolCardSnapshot, ToolProgressInput, ToolResultInput, ToolStatus,
+    identity_for_display, process_call_identity,
 };
 use crate::tool_detail::{
     DetailAvailability, DetailUnavailableReason, ToolDetailPresentation, ToolDetailSource,
@@ -867,6 +867,25 @@ impl Transcript {
             self.mark_tool_binding_resolved(call_id);
         }
         Some(binding.entry_id)
+    }
+
+    /// Shows a running call's latest output on its card; returns whether it changed.
+    pub fn observe_tool_progress(&mut self, call_id: &str, progress: &ToolProgressInput) -> bool {
+        let Some(binding) = self.call_entries.get(call_id).copied() else {
+            return false;
+        };
+        if binding.resolved || binding.kind != ToolBindingKind::Tool {
+            return false;
+        }
+        let entry = self.entry_mut(binding.entry_id);
+        let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+            unreachable!("tool binding must target a tool card")
+        };
+        let changed = card.apply_progress(progress);
+        if changed {
+            self.bump_card(binding.entry_id);
+        }
+        changed
     }
 
     pub fn observe_tool_result(&mut self, input: ToolResultInput) -> TranscriptEntryId {

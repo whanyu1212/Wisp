@@ -142,11 +142,14 @@ from wisp.events.sessions import (
     _RpcSessionDerived,
 )
 from wisp.events.tools import (
+    TOOL_PROGRESS_TAIL_MAX_BYTES,
+    TOOL_PROGRESS_TAIL_MAX_LINES,
     ProjectConfigApplied,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolCallRequested,
     ToolExecutionEnded,
+    ToolExecutionProgress,
     ToolExecutionStarted,
     ToolResultReady,
     TrustRequested,
@@ -182,6 +185,8 @@ from wisp.events.usage import (
 )
 
 __all__ = [
+    "TOOL_PROGRESS_TAIL_MAX_BYTES",
+    "TOOL_PROGRESS_TAIL_MAX_LINES",
     "DEFAULT_AGENT_MODE",
     "MAX_RPC_CONNECTION_LABEL_CHARS",
     "MAX_RPC_CONNECTION_METHODS",
@@ -314,6 +319,7 @@ __all__ = [
     "ToolCallRequested",
     "ToolCallSnapshot",
     "ToolExecutionEnded",
+    "ToolExecutionProgress",
     "ToolExecutionStarted",
     "ToolPresentationStatus",
     "ToolResultReady",
@@ -353,6 +359,7 @@ type KnownWispEvent = Annotated[
     | TrustRequested
     | TrustResolved
     | ProjectConfigApplied
+    | ToolExecutionProgress
     | ToolExecutionEnded
     | ToolResultReady
     | TurnCompleted

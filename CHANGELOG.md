@@ -12,8 +12,23 @@ this policy.
 
 ## Unreleased
 
+### Events
+
+- New transient event `tool.execution.progress` (`ToolExecutionProgress`): a snapshot of a running
+  call's output, with a per-call `sequence`, `elapsed_ms`, the last 4 KiB and 20 lines of stdout and
+  stderr, and byte totals. It arrives only between the call's `tool.execution.started` and
+  `tool.execution.ended`; each snapshot replaces the previous one, so consumers may skip any of
+  them. It is not persisted. JSON output mode, RPC, and the SDK include it; text print mode does
+  not show it. `CodingSession.run()` takes an optional `live_event_sink` to receive it. The schema
+  bundle and conformance fixture are regenerated; the same-release rule applies.
+
 ### Tools
 
+- A one-shot `bash` command that runs longer than half a second now reports its output while it
+  runs. The TUI shows the latest line beside the running card and the last lines of both streams
+  when it is expanded. Updates come at most four times a second and only when output changed; a
+  frontend that falls behind skips to the newest output instead of slowing the command. Progress
+  never reaches the model and is not saved in the session. (HY-432)
 - When a `bash` result has to cut output, the full stdout and stderr are saved and the result
   names an `output_id`. The new read-only `read_output` tool pages through saved output, so the
   model no longer reruns a command to see an error printed early. A poll of a started process

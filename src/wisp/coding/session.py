@@ -64,6 +64,7 @@ from wisp.coding.prompt import (
 )
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.tool_execution import ConfiguredToolExecutor
+from wisp.coding.tool_progress import LiveEventSink
 from wisp.events import (
     DEFAULT_AGENT_MODE,
     AgentCompleted,
@@ -605,6 +606,7 @@ class CodingSession:
         operation_instructions: str | None = None,
         operation_tool_names: frozenset[str] | None = None,
         operation_ready: Callable[[], Awaitable[None]] | None = None,
+        live_event_sink: LiveEventSink | None = None,
     ) -> AsyncIterator[WispEvent]:
         """Run one prompt to completion and stream its events.
 
@@ -635,6 +637,12 @@ class CodingSession:
             operation_ready (Callable[[], Awaitable[None]] | None, optional):
                 Awaited once the run accepts queued messages, before prompt
                 construction. Defaults to None.
+            live_event_sink (LiveEventSink | None, optional): Receives transient
+                `ToolExecutionProgress` events while tools run. They are not
+                yielded, persisted, or sent to the model, and each arrives between
+                its call's `ToolExecutionStarted` and `ToolExecutionEnded`. The
+                sink may wait while its frontend catches up; the tool keeps running
+                and newer progress replaces what was not delivered. Defaults to None.
 
         Yields:
             WispEvent: The run's events in publication order. A `QueueUpdated`
@@ -661,6 +669,7 @@ class CodingSession:
                 operation_instructions=operation_instructions,
                 operation_tool_names=operation_tool_names,
                 operation_ready=operation_ready,
+                live_event_sink=live_event_sink,
             )
             try:
                 async for event in events:
@@ -692,6 +701,7 @@ class CodingSession:
         operation_instructions: str | None = None,
         operation_tool_names: frozenset[str] | None = None,
         operation_ready: Callable[[], Awaitable[None]] | None = None,
+        live_event_sink: LiveEventSink | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
         user_message = await self._prepare_user_message(prompt, context=operation_context)
@@ -722,6 +732,7 @@ class CodingSession:
             operation_registry,
             operation_tool_names,
             context=operation_context,
+            progress_sink=self._progress_sink(live_event_sink),
         )
         harness, restored_queues = self._start_run_harness(
             session,
@@ -1289,6 +1300,7 @@ class CodingSession:
         operation_tool_names: frozenset[str] | None,
         *,
         context: ToolContext,
+        progress_sink: LiveEventSink | None = None,
     ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
         """Select the tools one run may use and build the executor that enforces them.
 
@@ -1297,6 +1309,8 @@ class CodingSession:
             operation_tool_names (frozenset[str] | None): Names an operation
                 restricts the run to, or None for every tool the mode allows.
             context (ToolContext): Tool context the executor runs tools with.
+            progress_sink (LiveEventSink | None, optional): Where running tools'
+                progress goes, or None when nobody listens. Defaults to None.
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
@@ -1335,8 +1349,27 @@ class CodingSession:
                 else self._effective_tool_policy(effective_tools)
             ),
             approval_policy=self.tool_approval_policy,
+            progress_sink=progress_sink,
         )
         return effective_tools, executor
+
+    def _progress_sink(self, live_event_sink: LiveEventSink | None) -> LiveEventSink | None:
+        """Return where tool progress goes: extensions observing events, then the caller.
+
+        Progress is transient, so unlike the run's other events it is not persisted.
+        """
+
+        bus = self.events
+        if bus is None and live_event_sink is None:
+            return None
+
+        async def publish(event: WispEvent) -> None:
+            if bus is not None:
+                await bus.emit(event)
+            if live_event_sink is not None:
+                await live_event_sink(event)
+
+        return publish
 
     def _start_run_harness(
         self,

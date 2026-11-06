@@ -476,6 +476,14 @@ async def run_rpc_prompt_command(
         with anyio.CancelScope(shield=True):
             await send.send(_RpcPromptReady(command_id=command_id))
 
+    async def publish_live(event: WispEvent) -> None:
+        # Rendered like the run's own events, so it takes the same output lock and
+        # waits for the same client; it falls between the run's events, never inside.
+        async def single_event() -> AsyncIterator[WispEvent]:
+            yield event
+
+        await render_events(single_event())
+
     async def track_run_start(events: AsyncIterator[WispEvent]) -> AsyncIterator[WispEvent]:
         nonlocal run_active_leaf_id, run_entry_start, run_start_captured
         async for event in events:
@@ -511,6 +519,7 @@ async def run_rpc_prompt_command(
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
                     operation_ready=mark_prompt_ready,
+                    live_event_sink=publish_live,
                 )
                 if operation_context is None
                 else agent.run(
@@ -522,6 +531,7 @@ async def run_rpc_prompt_command(
                     operation_instructions=operation_instructions,
                     operation_tool_names=operation_tool_names,
                     operation_ready=mark_prompt_ready,
+                    live_event_sink=publish_live,
                 )
             )
             await render_events(track_run_start(agent_events))

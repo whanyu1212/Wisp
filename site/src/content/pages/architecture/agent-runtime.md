@@ -190,6 +190,9 @@ Runtime event order is observable through the SDK, RPC, persistence, and fronten
   session (all three track turns with `wisp.agent.turn_lifecycle.TurnLifecycle`);
 - completed tool executions emit `ToolExecutionEnded` immediately before the matching
   `ToolResultReady`;
+- transient `ToolExecutionProgress` events reach the caller's live sink only between a
+  call's `ToolExecutionStarted` and its `ToolExecutionEnded`, and are never yielded by
+  the run, persisted, or sent to the model;
 - approval events are ordered request, resolution, then terminal result;
 - steering drains before follow-up, with FIFO order within each queue;
 - interrupted tool exchanges are repaired before the next provider request;

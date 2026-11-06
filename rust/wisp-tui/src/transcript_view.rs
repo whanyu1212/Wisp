@@ -3256,7 +3256,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                 action_argument_start,
                 action_argument_style,
             ) = tool_action_projection(card);
-            let note_start = push_status_note(&mut action, card.status_note());
+            let note_start = push_status_note(&mut action, card.status_note().or(card.live_line()));
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
                     detail.kind,

@@ -48,6 +48,34 @@ class ToolApprovalResolved(WispEvent):
     reason: str | None = None
 
 
+# Bounds of one progress snapshot's output tail, per stream. The tail is already
+# bounded by bytes where it is sampled; characters never outnumber UTF-8 bytes.
+TOOL_PROGRESS_TAIL_MAX_BYTES = 4_096
+TOOL_PROGRESS_TAIL_MAX_LINES = 20
+
+
+class ToolExecutionProgress(WispEvent):
+    """A transient snapshot of a running tool's output.
+
+    Published only between ``tool.execution.started`` and ``tool.execution.ended``
+    for the same call. Each event replaces the previous one, so a consumer may skip
+    any of them and still show the latest state. Progress is never persisted and
+    never reaches the model.
+    """
+
+    type: Literal["tool.execution.progress"] = "tool.execution.progress"
+    call_id: str
+    name: str
+    # 1, 2, 3, ... per call; a consumer ignores a snapshot older than one it has.
+    sequence: int = Field(ge=1)
+    elapsed_ms: int = Field(ge=0)
+    stdout_tail: str = Field(max_length=TOOL_PROGRESS_TAIL_MAX_BYTES)
+    stderr_tail: str = Field(max_length=TOOL_PROGRESS_TAIL_MAX_BYTES)
+    # Bytes each stream has produced so far, including those outside the tail.
+    stdout_bytes: int = Field(ge=0)
+    stderr_bytes: int = Field(ge=0)
+
+
 class TrustRequested(WispEvent):
     type: Literal["trust.requested"] = "trust.requested"
     request_id: str

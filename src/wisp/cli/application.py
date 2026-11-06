@@ -23,6 +23,7 @@ from wisp.events import (
     ErrorEvent,
     MessageCompleted,
     MessageDelta,
+    WispEvent,
 )
 from wisp.providers.base import ProviderError
 from wisp.rpc.configuration import _ConfigOverrides
@@ -601,7 +602,17 @@ async def _run_print_with_runtime(
         project_context_root=project_context_root,
     )
 
-    events = agent.run(prompt, session=session, history=history)
+    async def write_live_event(event: WispEvent) -> None:
+        _write_json_event(event)
+
+    # JSON output is the full event stream, transient tool progress included; text
+    # output does not show progress.
+    events = agent.run(
+        prompt,
+        session=session,
+        history=history,
+        live_event_sink=write_live_event if mode is OutputMode.json else None,
+    )
     if mode is OutputMode.json:
         for event in runtime.startup_events:
             _write_json_event(event)

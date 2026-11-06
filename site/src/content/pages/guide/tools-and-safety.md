@@ -45,6 +45,19 @@ started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds`
 at most 600. When every process slot is taken, the error lists the processes holding them, so the
 model can poll or cancel one.
 
+### Watching a command while it runs
+
+A one-shot `bash` command that runs longer than half a second shows its output as it arrives. In the
+TUI, the running card shows the latest output line beside the command, and expanding the card shows
+the last lines of both streams. The view updates at most four times a second, and only when the
+output changed, so a quiet command shows nothing until it finishes. When the result arrives, it
+replaces the live view.
+
+Progress is for watching only. It never reaches the model, which gets the same result it always
+did, and it is not saved in the session. A frontend that falls behind skips to the newest output
+instead of slowing the command down. SDK clients receive the same updates as
+`ToolExecutionProgress` events, and `--mode json` includes them as `tool.execution.progress` lines.
+
 ### Output a result cuts is saved
 
 A `bash` result shows at most the tool output budget (50,000 bytes and 2,000 lines by default),

@@ -27,6 +27,10 @@ Later slices must preserve:
   the previous pair has closed (Google fallback IDs are `call-{name}-{index}`
   per response). Denied approval ends in an error result. Optional approval
   is request then resolution then result.
+- `ToolExecutionProgress` is out of band: it goes to the run's live sink, not
+  the run's event stream, and only between that call's `ToolExecutionStarted`
+  and `ToolExecutionEnded` (the executor stops forwarding before returning the
+  terminal). It is never persisted and never model-visible.
 - Provider stream order already enforced by the loop: optional retries, then
   either one start → deltas/tool calls → one completed/failed, or a startless
   `ProviderResponseFailed` when the request never opened. OpenAI's
