@@ -1958,8 +1958,6 @@ impl LiveUi {
                         &self.state,
                         &self.side_panel,
                         &self.bindings,
-                        self.activity_frame,
-                        activity_elapsed,
                         palette,
                     );
                     mouse::Rows::default()

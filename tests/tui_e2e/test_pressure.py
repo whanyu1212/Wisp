@@ -19,6 +19,7 @@ import pytest
 from tests.tui_e2e.support import (
     run_settled,
     screen_shows,
+    welcome_ready,
 )
 from wisp import __version__
 
@@ -282,10 +283,7 @@ class _TuiProcess:
 
     def wait_ready(self) -> None:
         self.wait_until(
-            lambda output: (
-                b"Type a prompt or / for commands." in output
-                or b"/connect to add a provider" in output
-            ),
+            lambda output: welcome_ready(output),
             failure="Rust TUI did not finish startup",
         )
 

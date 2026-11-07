@@ -14,7 +14,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from tests.tui_e2e.support import rendered_without_spacing
+from tests.tui_e2e.support import screen_shows
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 from wisp.messages import Message
@@ -140,12 +140,12 @@ main()
         tui.send(b"\x1b")
         # Escape has a terminal decoding delay. Wait for the UI acknowledgement
         # before sending '/', which could otherwise be decoded as Alt+/. Resize
-        # only once the picker has closed and repainted the welcome text it
-        # covered: crossterm's input sources are edge-triggered, so a resize
-        # ready in the same wake-up can leave Escape unread.
+        # only once the replayed screen shows the welcome without the picker:
+        # crossterm's input sources are edge-triggered, so a resize ready in the
+        # same wake-up can leave Escape unread.
         tui.wait_until(
             lambda output: (
-                b"Typeapromptor/forcommands." in rendered_without_spacing(output[offset:])
+                screen_shows(output, "Browse commands") and not screen_shows(output, "Catalog item")
             ),
             failure="picker did not close",
         )

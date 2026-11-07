@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.tui_e2e.support import welcome_ready
+
 
 @pytest.mark.process
 @pytest.mark.parametrize(
@@ -83,11 +85,7 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
                 context_redrawn = True
                 output.clear()
                 continue
-            if (
-                phase == "startup"
-                and context_redrawn
-                and b"Type a prompt or / for commands." in output
-            ):
+            if phase == "startup" and context_redrawn and welcome_ready(output):
                 os.write(terminal_fd, b"mouse draft")
                 phase = "draft"
                 output.clear()
