@@ -213,7 +213,10 @@ pub fn render(
         &mut composer_layout_cache,
         editor,
         connection,
-        notice,
+        notice.map(|text| FooterNotice {
+            text,
+            shown_for: std::time::Duration::ZERO,
+        }),
         None,
         true,
         None,
@@ -236,7 +239,7 @@ pub fn render_interactive(
     composer_layout_cache: &mut ComposerLayoutCache,
     editor: &PromptEditor,
     connection: &ConnectionInfo,
-    notice: Option<&str>,
+    notice: Option<FooterNotice<'_>>,
     browse_selected: Option<BrowseTarget>,
     composer_focused: bool,
     completion: Option<&crate::commands::CompletionView<'_>>,
@@ -285,7 +288,14 @@ pub fn render_interactive(
     // composer (the draft is kept). Decisions are keyboard-only, so no mouse regions.
     if decision_pending(state) {
         if area.height < DECISION_PANEL_SHARED_MIN_HEIGHT {
-            render_decision_panel(frame, area, state, notice, decision_choice, palette);
+            render_decision_panel(
+                frame,
+                area,
+                state,
+                notice.map(|notice| notice.text),
+                decision_choice,
+                palette,
+            );
             return mouse::Conversation::default();
         }
         let panel_height = decision_panel_height(state, area);
@@ -310,8 +320,15 @@ pub fn render_interactive(
             bindings,
             startup_logo,
         );
-        render_decision_panel(frame, chunks[1], state, notice, decision_choice, palette);
-        render_footer(
+        render_decision_panel(
+            frame,
+            chunks[1],
+            state,
+            notice.map(|notice| notice.text),
+            decision_choice,
+            palette,
+        );
+        let notice_scrolls = render_footer(
             frame,
             content_area(chunks[2]),
             state,
@@ -324,7 +341,10 @@ pub fn render_interactive(
             column.width,
         );
         // The jump label is drawn but not clickable: clicks never act while deciding.
-        return mouse::Conversation::default();
+        return mouse::Conversation {
+            notice_scrolls,
+            ..mouse::Conversation::default()
+        };
     }
 
     let editor_width = composer_editor_width(area.width);
@@ -388,7 +408,7 @@ pub fn render_interactive(
         palette,
         bindings,
     );
-    render_footer(
+    let notice_scrolls = render_footer(
         frame,
         content_area(chunks[4]),
         state,
@@ -417,6 +437,7 @@ pub fn render_interactive(
         completion: completion_rows,
         completion_visible: completion_height > 0,
         fold_rows,
+        notice_scrolls,
     }
 }
 
@@ -2714,13 +2735,13 @@ fn render_footer(
     area: Rect,
     state: &UiState,
     viewport: &TranscriptViewport,
-    notice: Option<&str>,
+    notice: Option<FooterNotice<'_>>,
     palette: Palette,
     bindings: &Bindings,
     jump_painted: bool,
     identity_in_composer: bool,
     column_width: u16,
-) {
+) -> bool {
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow,
     // measured on the conversation's column rather than beside a docked panel.
@@ -2733,7 +2754,11 @@ fn render_footer(
         .compaction_notice
         .as_deref()
         .filter(|_| state.context.compaction_notice_is_warning);
-    let notice = notice.or(compaction_notice);
+    // Only a notice with a clock scrolls; a compaction warning keeps to its row.
+    let (notice, notice_shown_for) = match notice {
+        Some(notice) => (Some(notice.text), Some(notice.shown_for)),
+        None => (compaction_notice, None),
+    };
     let status_budget = if notice.is_some() {
         if terminal_width >= 80 {
             (terminal_width / 2).max(24)
@@ -2829,6 +2854,12 @@ fn render_footer(
             }
         }
     };
+    let notice_ticker =
+        notice_shown_for.filter(|_| beside_status > 0 && left.width() > beside_status);
+    let left = match notice_ticker {
+        Some(shown_for) => notice_ticker_window(&left, beside_status, shown_for),
+        None => left,
+    };
     let left_width = left.width().min(beside_status);
     // Where the panel is not docked, offer it with what room the workspace and the
     // other hints leave, so it is the first thing a narrow footer drops.
@@ -2873,6 +2904,54 @@ fn render_footer(
             ..area
         },
     );
+    notice_ticker.is_some()
+}
+
+/// A footer notice and how long it has been on screen, which paces its ticker.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FooterNotice<'a> {
+    pub text: &'a str,
+    pub shown_for: std::time::Duration,
+}
+
+/// Milliseconds the notice ticker takes to move one column.
+const NOTICE_TICKER_STEP_MS: u128 = 125;
+/// Steps the ticker holds with the notice's start at the left edge, so each lap can be
+/// read from the beginning.
+const NOTICE_TICKER_PAUSE_STEPS: u128 = 16;
+/// Blank columns between the notice's end and its next lap entering from the right.
+const NOTICE_TICKER_GAP: usize = 6;
+
+/// The `room` columns of a notice too long for them, after it has been shown for
+/// `shown_for`. The notice holds at its start, scrolls left one column per step until
+/// its end has passed, and enters again from the right after a short gap.
+fn notice_ticker_window(text: &str, room: usize, shown_for: std::time::Duration) -> String {
+    let lap = text.width() + NOTICE_TICKER_GAP;
+    let lap_steps = NOTICE_TICKER_PAUSE_STEPS + lap as u128;
+    let step = (shown_for.as_millis() / NOTICE_TICKER_STEP_MS) % lap_steps;
+    let offset = usize::try_from(step.saturating_sub(NOTICE_TICKER_PAUSE_STEPS))
+        .expect("the offset is below one lap's width");
+    // Two laps cover the window: the offset stays within the first, and `room` is
+    // narrower than the notice.
+    let gap = " ".repeat(NOTICE_TICKER_GAP);
+    let end = offset + room;
+    let mut window = String::new();
+    let mut column = 0;
+    // Step by grapheme so an emoji sequence moves as the one glyph `width` counts.
+    for grapheme in [text, &gap, text].concat().graphemes(true) {
+        if column >= end {
+            break;
+        }
+        let next = column + grapheme.width();
+        if column >= offset && next <= end {
+            window.push_str(grapheme);
+        } else if next > offset {
+            // A wide glyph cut by either edge leaves blanks for its visible half.
+            window.push_str(&" ".repeat(next.min(end) - column.max(offset)));
+        }
+        column = next;
+    }
+    window
 }
 
 /// Style the footer's status line: the label in the status colour and the context
@@ -3761,7 +3840,10 @@ mod tests {
                     &mut composer_layout_cache,
                     editor,
                     &connection(),
-                    notice,
+                    notice.map(|text| FooterNotice {
+                        text,
+                        shown_for: std::time::Duration::ZERO,
+                    }),
                     None,
                     true,
                     None,
@@ -4047,6 +4129,99 @@ mod tests {
         state.context.compaction_notice_is_warning = true;
         let failed = render_to_string(100, 18, &state, &PromptEditor::default());
         assert!(failed.contains("compaction failed"), "{failed}");
+    }
+
+    #[test]
+    fn notice_ticker_loops() {
+        let step = |steps: u64| std::time::Duration::from_millis(steps * 125);
+        // Ten columns, a six-column gap, and a sixteen-step hold make a 32-step lap.
+        for (steps, window) in [
+            (0, "abcd"),
+            (15, "abcd"),
+            (17, "bcde"),
+            (24, "ij  "),
+            (29, "   a"),
+            (31, " abc"),
+            (32, "abcd"),
+            (49, "bcde"),
+        ] {
+            assert_eq!(
+                notice_ticker_window("abcdefghij", 4, step(steps)),
+                window,
+                "after {steps} steps"
+            );
+        }
+        // A wide character cut by the left edge leaves a blank for its visible half.
+        assert_eq!(notice_ticker_window("日本語テキスト", 3, step(17)), " 本");
+        // An emoji sequence is one glyph: every window keeps the room's width.
+        let notice = "saved 👨‍👩‍👧 and ❤️ notes";
+        for steps in 0..64 {
+            let window = notice_ticker_window(notice, 7, step(steps));
+            assert_eq!(window.width(), 7, "after {steps} steps: {window:?}");
+        }
+    }
+
+    fn footer_with_notice(
+        width: u16,
+        notice: &str,
+        shown_for: std::time::Duration,
+    ) -> (String, bool) {
+        let state = UiState::new("fake".into(), Some("model-x".into()), None);
+        let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+        let mut conversation = mouse::Conversation::default();
+        terminal
+            .draw(|frame| {
+                conversation = render_interactive(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &mut ComposerLayoutCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    Some(FooterNotice {
+                        text: notice,
+                        shown_for,
+                    }),
+                    None,
+                    true,
+                    None,
+                    0,
+                    Palette::default(),
+                    &Bindings::default(),
+                    LogoChoice::AdalBraille,
+                    None,
+                    None,
+                    None,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let footer = (0..width)
+            .map(|x| buffer[(x, buffer.area.height - 1)].symbol())
+            .collect();
+        (footer, conversation.notice_scrolls)
+    }
+
+    #[test]
+    fn long_notice_scrolls() {
+        let notice = "trust is not saved for /Users/someone: it is your home folder, \
+                      a folder above it, or a temporary folder, so Wisp asks each session";
+        let (start, scrolls) = footer_with_notice(60, notice, std::time::Duration::ZERO);
+        assert!(scrolls);
+        assert!(start.contains("trust is not saved"), "{start}");
+
+        let (later, _) = footer_with_notice(60, notice, std::time::Duration::from_secs(6));
+        assert!(!later.contains("trust is not saved"), "{later}");
+        assert!(later.contains("home folder"), "{later}");
+
+        let (short, scrolls) = footer_with_notice(
+            60,
+            "Model selection applied.",
+            std::time::Duration::from_secs(6),
+        );
+        assert!(!scrolls);
+        assert!(short.contains("Model selection applied."), "{short}");
     }
 
     #[test]

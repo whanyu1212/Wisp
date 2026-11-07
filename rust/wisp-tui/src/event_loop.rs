@@ -474,7 +474,13 @@ async fn run_with_interrupts<B: FrameBackend>(
         let now = Instant::now();
         if now >= next_activity {
             ui.advance_activity_animation();
-            next_activity = now + ACTIVITY_INTERVAL;
+            ui.advance_notice_ticker();
+            // Keep a fixed cadence so wake-up lag does not build up and make the
+            // notice ticker skip a column; restart it after a long stall.
+            next_activity += ACTIVITY_INTERVAL;
+            if next_activity <= now {
+                next_activity = now + ACTIVITY_INTERVAL;
+            }
         }
         if now >= next_age_tick {
             // `/diff` counts its snapshot's age in seconds.
@@ -537,7 +543,7 @@ async fn run_with_interrupts<B: FrameBackend>(
                 match event { Some(event) => *sources.ready_event = Some(event), None => events_open = false }
             }
             _ = tokio::time::sleep_until(next_paint), if ui.render_pending || ui.stream_reveal_pending() => {}
-            _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() => {}
+            _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() || ui.notice_scrolling => {}
             _ = tokio::time::sleep_until(next_age_tick), if ui.diff_age_shown() => {}
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}
         }

@@ -308,6 +308,9 @@ pub(crate) struct Conversation {
     pub completion: Rows,
     pub completion_visible: bool,
     pub fold_rows: Vec<FoldRow>,
+    /// Whether the footer notice is too long for its row and scrolls, so the
+    /// footer needs repainting while it stays on screen.
+    pub notice_scrolls: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
