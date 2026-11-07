@@ -268,16 +268,7 @@ pub fn render_interactive(
     let column = match side_panel.filter(|panel| panel.docked()) {
         Some(panel) => {
             let (column, panel_area) = panel.split(area);
-            side_panel::render(
-                frame,
-                panel_area,
-                state,
-                panel,
-                bindings,
-                activity_frame,
-                activity_elapsed,
-                palette,
-            );
+            side_panel::render(frame, panel_area, state, panel, bindings, palette);
             column
         }
         None => area,
@@ -393,6 +384,7 @@ pub fn render_interactive(
             state,
             activity_frame,
             activity_elapsed,
+            column.width < frame.area().width,
             palette,
         );
     }
@@ -894,7 +886,6 @@ fn render_transcript(
             palette,
             visible_lines,
             content_width,
-            bindings,
             startup_logo,
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
@@ -1102,12 +1093,15 @@ fn status_line_height(state: &UiState) -> u16 {
 /// The run's status line: what is running and for how long, the session turn, and
 /// the run's tool count and time on the left; queued messages and the context on the
 /// right. The running item's text is clipped first, then the turn details drop.
+/// Beside a docked side panel, which shows the context, the context appears here
+/// only once the window is mostly full.
 fn render_status_line(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     activity_frame: u8,
     run_elapsed: Option<std::time::Duration>,
+    panel_docked: bool,
     palette: Palette,
 ) {
     let width = usize::from(area.width);
@@ -1121,20 +1115,24 @@ fn render_status_line(
         .saturating_add(state.queued_follow_ups());
     if queued > 0 {
         right.push(Span::styled(format!("{queued} queued"), running));
-        right.push(Span::styled(" · ", dim));
     }
-    let context = crate::context_view::indicator(state, 0);
     let pressured =
         crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
-    right.push(Span::styled("ctx ", muted));
-    right.push(Span::styled(
-        context.strip_prefix("ctx ").unwrap_or(&context).to_owned(),
-        if pressured {
-            Style::default().fg(palette.warning)
-        } else {
-            muted
-        },
-    ));
+    if pressured || !panel_docked {
+        if !right.is_empty() {
+            right.push(Span::styled(" · ", dim));
+        }
+        let context = crate::context_view::indicator(state, 0);
+        right.push(Span::styled("ctx ", muted));
+        right.push(Span::styled(
+            context.strip_prefix("ctx ").unwrap_or(&context).to_owned(),
+            if pressured {
+                Style::default().fg(palette.warning)
+            } else {
+                muted
+            },
+        ));
+    }
     let right = Line::from(right);
 
     let activity = run_activity(state);
@@ -2589,7 +2587,6 @@ fn empty_transcript_lines(
     palette: Palette,
     height: usize,
     width: usize,
-    bindings: &Bindings,
     startup_logo: LogoChoice,
 ) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
@@ -2626,9 +2623,15 @@ fn empty_transcript_lines(
         )
     };
 
+    let hint = if state.provider.is_none() {
+        "/connect to add a provider"
+    } else {
+        EMPTY_TRANSCRIPT_HINT
+    };
     if width >= EMPTY_TRANSCRIPT_PANEL_WIDTH {
-        let submit = primary_label(bindings, KeyAction::Submit);
-        let mut actions = vec![("Ask Wisp anything", submit.as_str())];
+        // The action list names the keys the hint line and the composer's placeholder
+        // already give, so it replaces the hint and leaves out typing a prompt.
+        let mut actions = Vec::new();
         if state.provider.is_none() {
             actions.push(("Connect a provider", "/connect"));
         }
@@ -2637,7 +2640,7 @@ fn empty_transcript_lines(
             ("Browse commands", "/"),
             ("Mention a project file", "@"),
         ]);
-        let copy_height = 4;
+        let copy_height = 3;
         let action_height = actions.len() + 1;
         // The separator after the logo can be omitted at the exact-fit boundary.
         let action_logo_height = height
@@ -2654,7 +2657,7 @@ fn empty_transcript_lines(
             panel = startup_logo::preview_lines(
                 startup_logo,
                 u16::try_from(width).unwrap_or(u16::MAX),
-                u16::try_from(height.saturating_sub(copy_height)).unwrap_or(u16::MAX),
+                u16::try_from(height.saturating_sub(copy_height + 1)).unwrap_or(u16::MAX),
                 palette,
                 palette.is_monochrome(),
             );
@@ -2669,21 +2672,10 @@ fn empty_transcript_lines(
             ),
             width,
         ));
-        panel.push(centered_welcome_line(
-            Line::styled(
-                if state.provider.is_none() {
-                    "/connect to add a provider"
-                } else {
-                    EMPTY_TRANSCRIPT_HINT
-                },
-                muted,
-            ),
-            width,
-        ));
 
         let mut full_height = panel.len().saturating_add(1).saturating_add(actions.len());
         if height + 1 == full_height {
-            // Give the new composer padding its row without hiding connection guidance.
+            // Give the new composer padding its row without hiding the actions.
             panel.remove(mark_height);
             full_height -= 1;
         }
@@ -2696,6 +2688,7 @@ fn empty_transcript_lines(
             );
             return center_welcome_panel(panel, height);
         }
+        panel.push(centered_welcome_line(Line::styled(hint, muted), width));
         if height >= panel.len() {
             return center_welcome_panel(panel, height);
         }
@@ -2712,12 +2705,11 @@ fn empty_transcript_lines(
         ));
     }
     if height >= 2 {
-        let hint = if state.provider.is_none() {
-            "/connect to add a provider"
-        } else if EMPTY_TRANSCRIPT_HINT.width() <= width {
-            EMPTY_TRANSCRIPT_HINT
-        } else {
+        // Only the prompt hint has a shorter form; connection guidance stays whole.
+        let hint = if state.provider.is_some() && hint.width() > width {
             "Type a prompt or /"
+        } else {
+            hint
         };
         panel.push(centered_welcome_line(Line::styled(hint, muted), width));
     }
@@ -3997,8 +3989,14 @@ mod tests {
         let rendered = render_to_string(80, 18, &state, &PromptEditor::default());
         assert!(rendered.contains("Wisp 0.9.0"));
         assert!(rendered.contains(EMPTY_TRANSCRIPT_TAGLINE));
-        assert!(rendered.contains(EMPTY_TRANSCRIPT_HINT));
-        assert!(rendered.contains("Ask Wisp anything"));
+        // The action list replaces the hint line, and the composer's placeholder is
+        // the only prompt to type.
+        assert!(!rendered.contains(EMPTY_TRANSCRIPT_HINT));
+        assert_eq!(
+            rendered.matches("Ask Wisp anything").count(),
+            1,
+            "{rendered}"
+        );
         assert!(rendered.contains("Resume a session"));
         assert!(rendered.contains("Browse commands"));
         assert!(rendered.contains("Mention a project file"));
@@ -4023,17 +4021,9 @@ mod tests {
     #[test]
     fn empty_welcome_renders_selected_logo_with_its_color_treatment() {
         let state = UiState::new("fake".into(), Some("model-x".into()), None);
-        let bindings = Bindings::default();
         for logo in LogoChoice::ALL {
-            let lines = empty_transcript_lines(
-                &state,
-                &connection(),
-                Palette::default(),
-                35,
-                80,
-                &bindings,
-                logo,
-            );
+            let lines =
+                empty_transcript_lines(&state, &connection(), Palette::default(), 35, 80, logo);
             assert!(lines.len() <= 35, "{}", logo.name());
             assert!(lines.iter().all(|line| line.width() <= 80));
         }
@@ -4045,7 +4035,6 @@ mod tests {
             monochrome,
             14,
             80,
-            &bindings,
             LogoChoice::AdalBraille,
         );
         let mark = lines
@@ -4074,7 +4063,6 @@ mod tests {
                         Palette::default(),
                         height,
                         width,
-                        &Bindings::default(),
                         LogoChoice::AdalBraille,
                     );
                     assert!(lines.len() <= height);
@@ -4086,7 +4074,6 @@ mod tests {
 
     #[test]
     fn welcome_actions_survive_responsive_logo_size_transitions() {
-        let bindings = Bindings::default();
         for logo in LogoChoice::ALL {
             let configured = UiState::new("fake".into(), Some("model-x".into()), None);
             for height in 13..=35 {
@@ -4096,19 +4083,18 @@ mod tests {
                     Palette::default(),
                     height,
                     80,
-                    &bindings,
                     logo,
                 )
                 .into_iter()
                 .map(|line| line.to_string())
                 .collect::<String>();
                 assert!(
-                    text.contains("Ask Wisp anything"),
+                    text.contains("Resume a session"),
                     "{} at {height}",
                     logo.name()
                 );
                 assert!(
-                    text.contains("Resume a session"),
+                    !text.contains("Ask Wisp anything") && !text.contains(EMPTY_TRANSCRIPT_HINT),
                     "{} at {height}",
                     logo.name()
                 );
@@ -4123,7 +4109,6 @@ mod tests {
                     Palette::default(),
                     height,
                     80,
-                    &bindings,
                     logo,
                 )
                 .into_iter()
@@ -4415,11 +4400,6 @@ mod tests {
             None,
             &bindings,
         );
-        let welcome_action = rendered
-            .lines()
-            .find(|line| line.contains("Ask Wisp anything"))
-            .unwrap();
-        assert!(welcome_action.contains("Ctrl+Enter"));
         assert!(!rendered.contains("F4 history"));
         assert!(rendered.contains("Ctrl+G help"));
         assert!(!rendered.contains("Unbound theme"));
@@ -4458,6 +4438,15 @@ mod tests {
     }
 
     fn status_row(state: &UiState, width: u16, elapsed: Option<u64>) -> (String, TestBackend) {
+        status_row_with_panel(state, width, elapsed, false)
+    }
+
+    fn status_row_with_panel(
+        state: &UiState,
+        width: u16,
+        elapsed: Option<u64>,
+        panel_docked: bool,
+    ) -> (String, TestBackend) {
         let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
         terminal
             .draw(|frame| {
@@ -4467,6 +4456,7 @@ mod tests {
                     state,
                     0,
                     elapsed.map(std::time::Duration::from_secs),
+                    panel_docked,
                     Palette::default(),
                 );
             })
@@ -4700,6 +4690,30 @@ mod tests {
             palette.secondary
         );
         assert_eq!(style_at_text(&backend, "~71%").unwrap().0, palette.warning);
+    }
+
+    #[test]
+    fn docked_panel_owns_context() {
+        let mut state = running_state();
+        let budget = |total_tokens| ContextBudget {
+            estimate: ContextEstimate { total_tokens },
+            observed_tokens: None,
+            observed_is_current: false,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::FullyEstimated,
+            context_window: Some(10_000),
+            reserve_tokens: 1000,
+        };
+        state.context.budget = Some(budget(3_000));
+        let (alone, _) = status_row_with_panel(&state, 100, None, false);
+        let (docked, _) = status_row_with_panel(&state, 100, None, true);
+        assert!(alone.contains("ctx ~30%"), "{alone}");
+        assert!(!docked.contains("ctx"), "{docked}");
+
+        // A mostly full window is a warning the status line keeps.
+        state.context.budget = Some(budget(7_100));
+        let (docked, _) = status_row_with_panel(&state, 100, None, true);
+        assert!(docked.trim_end().ends_with("ctx ~71%"), "{docked}");
     }
 
     #[test]

@@ -668,8 +668,6 @@ pub(crate) fn render(
     state: &UiState,
     panel: &SidePanel,
     bindings: &Bindings,
-    activity_frame: u8,
-    run_elapsed: Option<Duration>,
     palette: Palette,
 ) {
     let overlay = !panel.docked();
@@ -706,18 +704,11 @@ pub(crate) fn render(
         Section::Context,
         header_lines(state, bindings, width, palette),
     );
-    match focus {
-        Focus::Idle => {}
-        Focus::Running => {
-            rows.section(
-                Section::Queue,
-                now_lines(state, activity_frame, run_elapsed, width, palette),
-            );
-        }
-        Focus::Approval => {
-            if let Some(lines) = approval_lines(state, width, palette) {
-                rows.section(Section::Queue, lines);
-            }
+    // What a run is doing shows on the status line above the composer, so a running
+    // panel leads with its queue rather than repeating it.
+    if focus == Focus::Approval {
+        if let Some(lines) = approval_lines(state, width, palette) {
+            rows.section(Section::Queue, lines);
         }
     }
     if focus != Focus::Idle {
@@ -912,16 +903,10 @@ fn header_lines(
                 .map(|entry| first_line(entry.display_content()))
         })
         .unwrap_or_else(|| "New session".to_owned());
-    let mut lines = vec![spread(
-        vec![Span::styled(
-            title,
-            Style::default().add_modifier(Modifier::BOLD),
-        )],
-        vec![Span::styled(
-            ui::status_label(state),
-            Style::default().fg(ui::status_color(state, palette)),
-        )],
-        width,
+    // Run state stays in the footer and status line, which show with or without the panel.
+    let mut lines = vec![Line::styled(
+        ui::clip_columns(&title, width),
+        Style::default().add_modifier(Modifier::BOLD),
     )];
     let workspace = ui::footer_workspace_parts(state);
     if !workspace.is_empty() {
@@ -984,60 +969,6 @@ fn first_line(text: &str) -> String {
     )
     .trim()
     .to_owned()
-}
-
-/// `Now`: what the run is doing and for how long, then the turn it has reached, its
-/// tool count and time.
-fn now_lines(
-    state: &UiState,
-    activity_frame: u8,
-    run_elapsed: Option<Duration>,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let running = Style::default().fg(palette.secondary);
-    let muted = Style::default().fg(palette.muted);
-    let activity = ui::run_activity(state);
-    let spinner = Span::styled(format!("{} ", ui::spinner_frame(activity_frame)), running);
-    let doing = match activity.item {
-        Some(item) => spread(
-            vec![
-                spinner,
-                Span::styled(item.label.clone(), palette.chip(&item.label)),
-                Span::raw(" "),
-                Span::raw(item.detail),
-            ],
-            item.elapsed
-                .map(|elapsed| vec![Span::styled(duration(elapsed), running)])
-                .unwrap_or_default(),
-            width,
-        ),
-        None => Line::from(vec![
-            spinner,
-            Span::styled(ui::activity_phase(state), running),
-        ]),
-    };
-    let mut totals = Vec::new();
-    if activity.turn > 0 {
-        totals.push(format!("turn {}", activity.turn));
-    }
-    totals.push(format!(
-        "{} tool{}",
-        activity.tools,
-        if activity.tools == 1 { "" } else { "s" }
-    ));
-    if let Some(elapsed) = run_elapsed {
-        totals.push(duration(elapsed));
-    }
-    vec![
-        Line::from(heading("Now", palette)),
-        doing,
-        spread(
-            vec![Span::styled(totals.join(" · "), muted)],
-            ui::keycap_hints("Esc interrupt", palette).spans,
-            width,
-        ),
-    ]
 }
 
 fn duration(elapsed: Duration) -> String {
@@ -1795,8 +1726,6 @@ mod tests {
                         &state,
                         &panel,
                         &Bindings::default(),
-                        0,
-                        None,
                         Palette::default(),
                     )
                 })
@@ -1819,8 +1748,6 @@ mod tests {
                     &state,
                     &panel,
                     &Bindings::default(),
-                    0,
-                    None,
                     Palette::default(),
                 )
             })
@@ -1968,7 +1895,7 @@ mod tests {
                 .draw(|frame| {
                     let area = panel.split(frame.area()).1;
                     let bindings = Bindings::default();
-                    render(frame, area, &session(), panel, &bindings, 0, None, palette);
+                    render(frame, area, &session(), panel, &bindings, palette);
                 })
                 .unwrap();
             terminal.backend().buffer()[(200 - panel.docked_width(200), 5)].fg
@@ -2285,6 +2212,19 @@ mod tests {
     }
 
     #[test]
+    fn run_state_stays_in_footer() {
+        let rows = screen(&session(), &mut SidePanel::default(), 200);
+        let panel = panel_text(&rows, 200);
+        let start = usize::from(200 - auto_width(200));
+        let column: Vec<String> = rows
+            .iter()
+            .map(|row| row.chars().take(start).collect())
+            .collect();
+        assert!(!panel.contains("idle"), "{panel}");
+        assert!(column.last().unwrap().contains("idle"), "{column:#?}");
+    }
+
+    #[test]
     fn idle_context_split_rows() {
         let state = with_split(session());
         let mut view = SidePanel::default();
@@ -2374,21 +2314,22 @@ mod tests {
         assert!(!panel.contains("Messages"), "{panel}");
     }
 
+    /// Whether the panel has a `Now` section heading.
+    fn has_now(panel: &str) -> bool {
+        panel.lines().any(|line| line.trim() == "Now")
+    }
+
     #[test]
-    fn running_leads_with_now() {
-        let panel = panel_text(&screen(&running(), &mut SidePanel::default(), 200), 200);
-        for expected in [
-            "working",
-            "Bash git push -u origin fix/timeouts",
-            "turn 6 · 1 tool",
-            "Esc interrupt",
-            "▸ Recent turns 3",
-            "collapsed while running",
-            "Permissions",
-        ] {
+    fn running_leaves_activity_to_status_line() {
+        let rows = screen(&running(), &mut SidePanel::default(), 200);
+        let panel = panel_text(&rows, 200);
+        for expected in ["▸ Recent turns 3", "collapsed while running", "Permissions"] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
-        assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
+        // The status line above the composer names the run's turn; the panel does not.
+        assert!(!has_now(&panel), "{panel}");
+        assert!(!panel.contains("turn 6"), "{panel}");
+        assert!(rows.iter().any(|row| row.contains("turn 6")), "{rows:#?}");
         // The turn list folds, and an empty queue takes no rows.
         assert!(!panel.contains("4m 12s ✓"), "{panel}");
         assert!(!panel.contains("Queue"), "{panel}");
@@ -2420,7 +2361,6 @@ mod tests {
                 .contains("also check the docs")
         );
         assert_eq!(row_of(&panel, "2 ⏎ follow-up then draft"), steer + 1);
-        assert!(row_of(&panel, "Now") < row_of(&panel, "Queue"), "{panel}");
         assert!(
             row_of(&panel, "Queue") < row_of(&panel, "Context"),
             "{panel}"
@@ -2474,8 +2414,6 @@ mod tests {
                     state,
                     &panel,
                     &Bindings::default(),
-                    0,
-                    None,
                     Palette::default(),
                 );
             })
@@ -2490,7 +2428,8 @@ mod tests {
     #[test]
     fn overlay_follows_state() {
         let panel = overlay_text(&running());
-        assert!(row_of(&panel, "Now") < row_of(&panel, "Context"), "{panel}");
+        assert!(!has_now(&panel), "{panel}");
+        assert!(panel.contains("Context"), "{panel}");
         assert!(
             panel.contains("Esc close · Tab sections · Enter"),
             "{panel}"
@@ -2526,8 +2465,6 @@ mod tests {
                     state,
                     panel,
                     &Bindings::default(),
-                    0,
-                    None,
                     Palette::default(),
                 )
             })
@@ -2621,8 +2558,6 @@ mod tests {
                     state,
                     panel,
                     &Bindings::default(),
-                    0,
-                    None,
                     Palette::default(),
                 );
             })

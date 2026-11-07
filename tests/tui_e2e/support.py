@@ -281,9 +281,15 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
 
 
 def welcome_ready(output: bytes | bytearray) -> bool:
-    """Recognize the hydrated welcome screen with or without a provider."""
+    """Recognize the hydrated welcome screen with or without a provider.
+
+    A screen tall enough for the action list shows it in place of the hint line.
+    """
     rendered = rendered_without_spacing(output)
-    return b"Typeapromptor/forcommands." in rendered or b"/connecttoaddaprovider" in rendered
+    return any(
+        marker in rendered
+        for marker in (b"Browsecommands", b"Typeapromptor/forcommands.", b"/connecttoaddaprovider")
+    )
 
 
 def complete_logged_commands(path: Path) -> list[dict[str, object]]:

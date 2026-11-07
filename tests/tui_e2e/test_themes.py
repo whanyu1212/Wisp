@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.paths import REPO_ROOT
+from tests.tui_e2e.support import welcome_ready
 
 ROOT = REPO_ROOT
 CATALOG = ROOT / "rust/wisp-tui/src/theme_catalog.json"
@@ -163,11 +164,7 @@ def _run_theme_session(
                 context_redrawn = True
                 output.clear()
                 continue
-            if (
-                phase == "startup"
-                and context_redrawn
-                and b"Type a prompt or / for commands." in output
-            ):
+            if phase == "startup" and context_redrawn and welcome_ready(output):
                 assert _background(initial, no_color) in backgrounds
                 os.write(terminal_fd, b"/theme\r" if preview else b"\x14")
                 phase = "picker" if preview else "toggled"

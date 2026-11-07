@@ -22,6 +22,7 @@ from tests.tui_e2e.support import (
     rendered_without_spacing,
     run_settled,
     screen_shows,
+    welcome_ready,
 )
 
 
@@ -93,10 +94,7 @@ class _TuiProcess:
         # The identity line styles model and provider apart, so read it from the
         # replayed screen rather than the raw bytes.
         self.wait_until(
-            lambda output: (
-                b"Type a prompt or / for commands." in output[offset:]
-                and screen_shows(output, "fake fake")
-            ),
+            lambda output: welcome_ready(output[offset:]) and screen_shows(output, "fake fake"),
             failure="Rust TUI did not finish startup hydration",
         )
 
@@ -378,9 +376,8 @@ def test_composer_undo_redo_keys_submit_only_the_current_edit_branch(tmp_path: P
             failure="undo did not clear the composer",
         )
         tui.resize(width=102)
-        tui.wait_for(
-            b"Type a prompt or / for commands.",
-            since=offset,
+        tui.wait_until(
+            lambda output: welcome_ready(output[offset:]),
             failure="undo did not restore the empty composer",
         )
 
@@ -525,11 +522,13 @@ def test_context_help_preserves_draft_and_update_is_local_guidance(tmp_path: Pat
 
         offset = len(tui.output)
         tui.send(b"\x1b")
-        # The draft is also visible beneath help. Wait for the covered welcome
-        # hint to return before resizing or sending input to the composer.
-        tui.wait_for(
-            b"Type a prompt or / for commands.",
-            since=offset,
+        # The draft is also visible beneath help. Wait for the replayed screen to
+        # show the welcome without help before resizing or sending input to the
+        # composer; closing repaints only the cells help covered.
+        tui.wait_until(
+            lambda output: (
+                screen_shows(output, "Browse commands") and not screen_shows(output, "Undo:")
+            ),
             failure="contextual key help did not close",
         )
         offset = len(tui.output)
