@@ -1329,6 +1329,8 @@ pub mod events {
         pub id: String,
         pub lifecycle: Option<ModelLifecycle>,
         pub effort_levels: Vec<String>,
+        /// The level the provider uses when a request names none, when documented.
+        pub default_effort: Option<String>,
     }
 
     /// One catalog provider and its runtime availability.

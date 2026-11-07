@@ -3573,6 +3573,20 @@
       "additionalProperties": false,
       "description": "Picker-relevant metadata for one canonical provider model.",
       "properties": {
+        "default_effort": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Default Effort"
+        },
         "effort_levels": {
           "default": [],
           "items": {
@@ -3611,7 +3625,8 @@
       "required": [
         "id",
         "lifecycle",
-        "effort_levels"
+        "effort_levels",
+        "default_effort"
       ],
       "title": "RpcModelCatalogEntry",
       "type": "object"
@@ -7996,6 +8011,7 @@
             "display_name": "Fixture",
             "models": [
               {
+                "default_effort": "high",
                 "effort_levels": [
                   "low",
                   "high"

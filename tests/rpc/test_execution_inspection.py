@@ -293,6 +293,47 @@ def test_model_catalog_marks_unregistered_providers_without_constructing_deferre
     assert constructed is False
 
 
+def test_model_catalog_reports_default_effort() -> None:
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    models = ModelRegistry(
+        ModelCatalog(
+            schema_version=2,
+            providers=(
+                ModelCatalogProviderEntry(
+                    name="fake",
+                    display_name="Fake",
+                    default_model="fake",
+                    docs_url="https://example.test/fake",
+                    models=("fake", "plain"),
+                    effort_levels={"fake": ("low", "high"), "plain": ("low",)},
+                    default_effort={"fake": "high"},
+                ),
+            ),
+        )
+    )
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=models,
+    )
+
+    snapshot = rpc_inspection_module.rpc_model_catalog_snapshot(
+        runtime=runtime, provider=provider, model=None, effort=None
+    )
+
+    assert snapshot.selection.effort is None
+    assert [(model.id, model.default_effort) for model in snapshot.providers[0].models] == [
+        ("fake", "high"),
+        ("plain", None),
+    ]
+
+
 def test_oversized_model_catalog_does_not_block_typed_configuration(tmp_path: Path) -> None:
     provider = FakeProvider()
     providers = ProviderRegistry()

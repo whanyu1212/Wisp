@@ -458,6 +458,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
                             "id": "fixture-model",
                             "lifecycle": "stable",
                             "effort_levels": ("low", "high"),
+                            "default_effort": "high",
                         },
                     ),
                 },

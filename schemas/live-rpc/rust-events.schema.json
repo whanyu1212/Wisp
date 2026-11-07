@@ -3337,6 +3337,20 @@
       "additionalProperties": false,
       "description": "Picker-relevant metadata for one canonical provider model.",
       "properties": {
+        "default_effort": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcModelCatalogEntryDefaultEffort"
+        },
         "effort_levels": {
           "default": [],
           "items": {
@@ -3375,7 +3389,8 @@
       "required": [
         "id",
         "lifecycle",
-        "effort_levels"
+        "effort_levels",
+        "default_effort"
       ],
       "title": "RpcModelCatalogEntry",
       "type": "object"

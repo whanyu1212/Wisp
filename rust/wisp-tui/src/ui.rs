@@ -487,14 +487,55 @@ fn header_identity(state: &UiState) -> Option<String> {
         identity.push('/');
         identity.push_str(model);
     }
-    if let Some(effort) = state.effort.as_deref() {
+    if let Some(effort) = shown_effort(state) {
         identity.push_str(" · ");
-        identity.push_str(effort);
+        identity.push_str(effort.level);
     }
     if state.model_selection_stale {
         identity.push_str(" (last confirmed; selection unavailable)");
     }
     Some(identity)
+}
+
+/// The effort level the next request runs at, as the identity shows it.
+struct ShownEffort<'a> {
+    level: &'a str,
+    /// True when no level is chosen, so the provider applies its default.
+    is_default: bool,
+}
+
+/// The chosen effort, or with none chosen, the current model's documented default
+/// from the model catalog. A model with effort levels but no documented default
+/// shows `default`; a model without effort levels shows none.
+fn shown_effort(state: &UiState) -> Option<ShownEffort<'_>> {
+    if let Some(level) = state.effort.as_deref() {
+        return Some(ShownEffort {
+            level,
+            is_default: false,
+        });
+    }
+    if state.model_selection_stale {
+        return None;
+    }
+    let selection = &state.model_catalog.as_ref()?.selection;
+    let catalog_model = selection.catalog_model.as_deref()?;
+    let model = state
+        .model_catalog
+        .as_ref()?
+        .providers
+        .iter()
+        .find(|provider| provider.name == selection.provider)?
+        .models
+        .iter()
+        .find(|model| model.id == catalog_model)?;
+    if model.effort_levels.is_empty() {
+        return None;
+    }
+    let level = model.default_effort.as_deref().unwrap_or("default");
+    Some(ShownEffort {
+        level,
+        is_default: true,
+    })
 }
 
 /// Folders longer than this show only their last component.
@@ -1794,14 +1835,17 @@ fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
             sanitize_for_terminal(provider),
             Style::default().fg(palette.muted),
         ));
-        if let Some(effort) = state.effort.as_deref() {
+        if let Some(effort) = shown_effort(state) {
             spans.push(separator());
-            spans.push(Span::styled(
-                sanitize_for_terminal(effort),
+            // A chosen level stands out; the model's default stays quiet.
+            let style = if effort.is_default {
+                Style::default().fg(palette.muted)
+            } else {
                 Style::default()
                     .fg(palette.warning)
-                    .add_modifier(Modifier::BOLD),
-            ));
+                    .add_modifier(Modifier::BOLD)
+            };
+            spans.push(Span::styled(sanitize_for_terminal(effort.level), style));
         }
         if state.model_selection_stale {
             spans.push(Span::styled(
@@ -7899,6 +7943,44 @@ mod tests {
             .unwrap();
         assert_eq!(effort.style.fg, Some(Palette::default().warning));
         assert!(effort.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn unset_effort_shows_model_default() {
+        let palette = Palette::default();
+        // A documented default, an undocumented one, and a model without effort.
+        for (model, shown) in [
+            ("one", Some("medium")),
+            ("two", Some("default")),
+            ("three", None),
+        ] {
+            let mut state = UiState::new("alpha".into(), Some(model.into()), None);
+            state.model_catalog = Some(
+                serde_json::from_value(serde_json::json!({
+                    "selection": {"provider": "alpha", "model": model,
+                        "effective_model": model, "catalog_model": model, "effort": null},
+                    "providers": [{"name": "alpha", "display_name": "Alpha",
+                        "default_model": "one", "available": true, "models": [
+                            {"id": "one", "effort_levels": ["low", "medium"],
+                                "default_effort": "medium"},
+                            {"id": "two", "effort_levels": ["low", "high"]},
+                            {"id": "three", "effort_levels": []}]}]
+                }))
+                .unwrap(),
+            );
+            let line = composer_identity_line(&state, palette);
+            let effort = line.spans.last().unwrap();
+            match shown {
+                Some(level) => {
+                    assert_eq!(effort.content, level, "{model}");
+                    assert_eq!(effort.style.fg, Some(palette.muted), "{model}");
+                    assert!(!effort.style.add_modifier.contains(Modifier::BOLD));
+                    let identity = header_identity(&state).unwrap();
+                    assert!(identity.ends_with(&format!(" · {level}")), "{identity}");
+                }
+                None => assert_eq!(effort.content, "alpha", "{model}"),
+            }
+        }
     }
 
     #[test]

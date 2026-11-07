@@ -154,6 +154,7 @@ def rpc_model_catalog_snapshot(
                     id=model_id,
                     lifecycle=entry.model_lifecycle.get(model_id),
                     effort_levels=entry.effort_levels.get(model_id, ()),
+                    default_effort=entry.default_effort.get(model_id),
                 )
                 for model_id in entry.models
             ),
