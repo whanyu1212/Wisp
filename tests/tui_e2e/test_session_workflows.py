@@ -290,9 +290,10 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and context_redraw_offset is not None
-                and command_types[:7]
+                and command_types[:8]
                 == [
                     "get_messages",
+                    "get_permissions",
                     "get_connection_catalog",
                     "get_model_catalog",
                     "get_commands",

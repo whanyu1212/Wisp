@@ -58,7 +58,9 @@ long tokens, without adding newlines to the submitted prompt. The composer grows
 height, then keeps the cursor's wrapped row visible. The frame collapses on short terminals to
 preserve editing space. The footer separates the keys for the current workflow on the left from
 status (`idle`, `working`, `approval`, `trust`), mode, model, and context on the right, as space
-permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a centered startup
+permits. When YOLO is on, the mode line names it in the warning colour, after the agent mode and
+ahead of the model; YOLO that is not saved for the project reads `YOLO (session)`. Ask, the safe
+default, is not shown. The backend version stays in `Ctrl+G` help. An empty transcript shows a centered startup
 logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
 terminals.
@@ -222,8 +224,8 @@ historical replay displays raw content. Markers are never written into session h
 
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
 folder and branch, compact context usage, named MCP servers, skills, changed files, and the three
-most recent turns. The latest turn is highlighted; permissions stay at the bottom. Model and effort
-remain in the composer. Context's **Breakdown** expands source totals and costs; `/context` opens
+most recent turns. The latest turn is highlighted. Model, effort, and YOLO remain in the composer,
+and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens
 full details.
 
 **MCP servers** and **Skills** start expanded. MCP rows show connection status and expand to tool

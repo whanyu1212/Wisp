@@ -9808,9 +9808,11 @@ mod tests {
             )
             .await
             .unwrap();
-        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
-            panic!("startup hydration must queue one frame");
-        };
+        for command in ["history", "permissions"] {
+            let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
+                panic!("startup hydration must request {command}");
+            };
+        }
         live_ui
             .dispatch(
                 UiAction::BackendEvent(BackendEvent::MessagesReported {

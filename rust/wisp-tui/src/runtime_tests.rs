@@ -365,6 +365,7 @@ async fn run_shutdown(send_completion: bool) -> Result<(), Error> {
         kinds,
         [
             "get_messages",
+            "get_permissions",
             "get_connection_catalog",
             "get_model_catalog",
             "get_commands",

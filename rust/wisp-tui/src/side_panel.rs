@@ -659,7 +659,7 @@ impl Focus {
 /// boxed so it reads as lying over the transcript.
 ///
 /// The Reading layout keeps context compact and named inventories open by default.
-/// A running operation or pending decision leads; permissions stay at the bottom.
+/// A running operation or pending decision leads.
 /// Overflow scrolls independently, including while sections are expanded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
@@ -756,8 +756,10 @@ pub(crate) fn render(
         rows.action(0, PanelAction::Open(Target::Tree));
     }
 
-    // Permissions and navigation stay anchored while the inventory scrolls.
-    let footer_height = height.min(2);
+    // The bottom row stays anchored while the inventory scrolls. A focused panel
+    // names its keys there; otherwise the row appears only to show the scroll
+    // position, since the main footer carries the panel's keys.
+    let footer_height = usize::from(panel.overlay_open() || rows.lines.len() > height);
     let body = Rect {
         height: inner.height.saturating_sub(footer_height as u16),
         ..inner
@@ -796,35 +798,20 @@ pub(crate) fn render(
         height: footer_height as u16,
         ..inner
     };
-    let mut lines = Vec::new();
-    if footer_height > 1 {
-        lines.push(spread(
-            vec![Span::styled("Permissions", muted)],
-            vec![Span::styled(
-                permission_mode(state).unwrap_or("unknown"),
-                Style::default().fg(palette.warning),
-            )],
-            width,
-        ));
-    }
-    let toggle = ui::primary_label(bindings, KeyAction::TogglePanel);
-    let tree = ui::primary_label(bindings, KeyAction::SessionTree);
     let hint = if panel.overlay_open() {
-        "Esc close · Tab sections · Enter".to_owned()
+        ui::keycap_hints("Esc close · Tab sections · Enter", palette).spans
     } else {
-        format!("{toggle} panel · {tree} tree")
+        Vec::new()
     };
     let more = if max_scroll > 0 {
         format!(" {}/{}", offset + 1, max_scroll + 1)
     } else {
         String::new()
     };
-    lines.push(spread(
-        ui::keycap_hints(&hint, palette).spans,
-        vec![Span::styled(more, muted)],
-        width,
-    ));
-    frame.render_widget(Paragraph::new(lines), footer);
+    frame.render_widget(
+        Paragraph::new(spread(hint, vec![Span::styled(more, muted)], width)),
+        footer,
+    );
 }
 
 /// A row with `left` at the start and `right` against the end; the left side is
@@ -1605,7 +1592,6 @@ mod tests {
             "/srv/wisp · fix/timeouts",
             "198.8k / 272.0k",
             "73%",
-            "Permissions",
             "2 · /diff",
             "M src/lib.rs",
             "+2 −1",
@@ -1613,9 +1599,41 @@ mod tests {
             "Recent turns",
             "add a read timeout setting",
             "2/2 connected",
-            "Ctrl+B panel",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
+        }
+        // The composer names YOLO and the main footer carries the panel's keys.
+        for moved in ["Permissions", "Ctrl+B panel"] {
+            assert!(!panel.contains(moved), "{moved}\n{panel}");
+        }
+        assert!(
+            rows.iter().any(|row| row.contains("Ctrl+B panel")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn docked_panel_leaves_yolo_to_main_column() {
+        let mut state = session();
+        state.permissions.snapshot = Some(Arc::new(wisp_protocol::events::PermissionState {
+            mode: PermissionMode::Yolo,
+            saved_mode: Some(PermissionMode::Yolo),
+            project_path: Some("/srv/wisp".into()),
+            session_only_yolo: false,
+        }));
+        let mut compacting = state.clone();
+        compacting.view_status = ViewStatus::Running;
+        compacting.interaction_status = crate::reducer::InteractionStatus::Compacting;
+        // A framed composer names it; a short terminal's footer does, also while
+        // the status line names a compaction the composer cannot frame.
+        for (state, height) in [(&state, 40), (&state, 12), (&compacting, 40)] {
+            let rows = screen_of_height(state, &mut SidePanel::default(), 200, height);
+            let panel = panel_text(&rows, 200);
+            assert!(!panel.contains("YOLO"), "{panel}");
+            assert!(
+                rows.iter().any(|row| row.contains("YOLO")),
+                "{height}\n{rows:#?}"
+            );
         }
     }
 
@@ -1655,7 +1673,6 @@ mod tests {
             "◇ frontend-design",
             "Changed files",
             "Recent turns",
-            "Permissions",
         ] {
             let row = row_of(&text, label);
             assert!(row >= previous, "{label}\n{text}");
@@ -2007,8 +2024,11 @@ mod tests {
             "{sibling}"
         );
         let rows = screen(&session(), &mut SidePanel::default(), 200);
-        let footer = panel_text(&rows, 200);
-        assert!(footer.contains("Ctrl+T tree"), "{footer}");
+        assert!(!panel_text(&rows, 200).contains("Ctrl+T tree"));
+        assert!(
+            rows.iter().any(|row| row.contains("Ctrl+T tree")),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -2323,7 +2343,7 @@ mod tests {
     fn running_leaves_activity_to_status_line() {
         let rows = screen(&running(), &mut SidePanel::default(), 200);
         let panel = panel_text(&rows, 200);
-        for expected in ["▸ Recent turns 3", "collapsed while running", "Permissions"] {
+        for expected in ["▸ Recent turns 3", "collapsed while running"] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
         // The status line above the composer names the run's turn; the panel does not.

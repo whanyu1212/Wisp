@@ -38,6 +38,8 @@ struct PendingInspection<T> {
     id: String,
     report: Option<Result<Arc<T>, String>>,
     superseded: bool,
+    /// The request changes backend state rather than only reading it.
+    change: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +47,9 @@ pub(crate) struct Inspection<T> {
     pub snapshot: Option<Arc<T>>,
     pub error: Option<String>,
     pending: Option<PendingInspection<T>>,
+    /// A read was asked for while another request was in flight, whose report may
+    /// predate the change that prompted it.
+    read_again: bool,
 }
 
 impl<T> Default for Inspection<T> {
@@ -53,6 +58,7 @@ impl<T> Default for Inspection<T> {
             snapshot: None,
             error: None,
             pending: None,
+            read_again: false,
         }
     }
 }
@@ -62,11 +68,25 @@ impl<T> Inspection<T> {
         self.pending.is_some()
     }
 
+    /// Whether a request that changes backend state is in flight.
+    pub fn changing(&self) -> bool {
+        self.pending.as_ref().is_some_and(|pending| pending.change)
+    }
+
     fn start(&mut self, id: String) {
+        self.begin(id, false);
+    }
+
+    fn start_change(&mut self, id: String) {
+        self.begin(id, true);
+    }
+
+    fn begin(&mut self, id: String, change: bool) {
         self.pending = Some(PendingInspection {
             id,
             report: None,
             superseded: false,
+            change,
         });
         self.error = None;
     }
@@ -128,6 +148,7 @@ impl<T> Inspection<T> {
     }
 
     pub(super) fn close(&mut self) {
+        self.read_again = false;
         if self.pending.take().is_some() {
             self.error = Some("Connection closed before discovery finished.".into());
         }
@@ -291,7 +312,17 @@ pub(super) fn permissions(
     mode: Option<wisp_protocol::commands::PermissionMode>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    if state.permissions.loading() || state.exit_requested {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.permissions.loading() {
+        if mode.is_some() {
+            return Ok(vec![UiEffect::Notice(
+                "Permissions are still loading; try again.".into(),
+            )]);
+        }
+        // The answer in flight may predate the grant that asked for this read.
+        state.permissions.read_again = true;
         return Ok(Vec::new());
     }
     if mode.is_some() && (!state.can_select_model() || super::session_sync_pending(state)) {
@@ -301,11 +332,27 @@ pub(super) fn permissions(
     }
     let id = ids.next_id(CommandKind::Permissions);
     let command = WispTypedClientRpcCommands::permissions(&id, mode)?;
-    state.permissions.start(id);
+    if mode.is_some() {
+        state.permissions.start_change(id);
+    } else {
+        state.permissions.start(id);
+    }
     Ok(vec![
         UiEffect::SendCommand(command),
         UiEffect::RequestRender,
     ])
+}
+
+/// Send the permission read that was asked for while another request was in flight,
+/// once that request has finished.
+pub(super) fn read_permissions_again(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.permissions.loading() || !std::mem::take(&mut state.permissions.read_again) {
+        return Ok(Vec::new());
+    }
+    permissions(state, None, ids)
 }
 
 pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<UiEffect>> {
