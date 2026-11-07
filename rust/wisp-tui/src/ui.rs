@@ -607,6 +607,11 @@ fn yolo_style(palette: Palette) -> Style {
 
 fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = vec![status_label(state)];
+    // YOLO follows the label, which the status budget always leaves room for, so
+    // a narrow row never shows YOLO as if it were Ask.
+    if !identity_in_composer {
+        parts.extend(yolo_label(state).map(str::to_owned));
+    }
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
         let follow_up = state.queued_follow_ups();
@@ -616,14 +621,11 @@ fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<Stri
             parts.push(format!("+{omitted}"));
         }
     }
-    // Queue and modes stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, YOLO, or ctx on a 30-column row or a notice-budget
-    // footer. A framed composer names the modes first on its identity line instead.
-    if !identity_in_composer {
-        if state.mode_confirmed {
-            parts.push(state.mode.as_str().to_string());
-        }
-        parts.extend(yolo_label(state).map(str::to_owned));
+    // Queue and mode stay ahead of identity so a long model name cannot hide
+    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
+    // framed composer names the modes first on its identity line instead.
+    if state.mode_confirmed && !identity_in_composer {
+        parts.push(state.mode.as_str().to_string());
     }
     parts
 }
@@ -2832,6 +2834,12 @@ fn render_footer(
         }
     } else {
         (terminal_width / 2).max(19)
+    };
+    // Without a framed composer the footer is YOLO's only home, so the status keeps
+    // room for it beside the label, at the expense of the notice and the hints.
+    let status_budget = match yolo_label(state).filter(|_| !identity_in_composer) {
+        Some(yolo) => status_budget.max(status_label(state).width() + 3 + yolo.width()),
+        None => status_budget,
     };
 
     // Right: the status the footer always keeps, label first since it carries the
@@ -8087,7 +8095,19 @@ mod tests {
         assert!(!framed.contains("high"), "{framed}");
         // Too short to frame the composer: the footer names YOLO beside the mode.
         let short = draw(100, 12);
-        assert!(short.contains("idle · build · YOLO"), "{short}");
+        assert!(short.contains("idle · YOLO · build"), "{short}");
+        // Short and narrow at once, even the longer session label keeps its room.
+        for (width, height) in [(40, 12), (30, 8)] {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            state.mode_confirmed = true;
+            with_permissions(&mut state, PermissionMode::Yolo, None, true);
+            let screen = render_to_string(width, height, &state, &PromptEditor::default());
+            let footer = screen.lines().last().unwrap();
+            assert!(
+                footer.contains("YOLO (session)"),
+                "{width}x{height}\n{screen}"
+            );
+        }
         // During a run the status line names the run, and the footer keeps YOLO.
         let mut running = UiState::new("fake".into(), Some("model-x".into()), None);
         with_permissions(&mut running, PermissionMode::Yolo, None, true);
