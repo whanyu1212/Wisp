@@ -2166,6 +2166,19 @@
     0,
     "models",
     0,
+    "default_effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "providers",
+    0,
+    "models",
+    0,
     "effort_levels"
    ],
    "accepted": true

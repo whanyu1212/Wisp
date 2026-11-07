@@ -108,7 +108,9 @@ Compatibility targets streaming `/chat/completions`, including client-defined fu
 Explicit model IDs pass through unchanged; add a user-only `~/.wisp/catalog.toml` overlay when
 model-picker metadata, context limits, effort tiers, or pricing are desired. The catalog provider
 `name` must equal `provider_name`; list models in `models` and provider-native effort strings under
-`[providers.effort_levels]`.
+`[providers.effort_levels]`. Optionally name the level a model uses when no effort is set under
+`[providers.default_effort]`; the TUI shows it until you choose a level, and shows `default` for a
+model that has effort levels but no listed default.
 
 ## Web search
 

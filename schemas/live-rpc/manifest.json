@@ -5,9 +5,9 @@
   "schema_hashes": {
     "client-handshake.schema.json": "2ba0112f0a8df9451f6a70aeeadb35c613474c66a167f4ff135ca9fabeebebdd",
     "commands.schema.json": "fd5b209140491e8026523e6e116038dfe3279c69f5c06a3f0454dca8c9a36aa4",
-    "events.schema.json": "170c6b06f7debdc33654fe9641395aecb2167cc60513a24e4bdff4b6a2b61cbb",
+    "events.schema.json": "4ebbc256ed3888184065972ed1668603864cffc43242993e55d861ab8953a807",
     "rust-commands.schema.json": "9016496bd23e720bba47abb491083e39958beb43149f8c2b6af07bbbf6d9a40a",
-    "rust-events.schema.json": "43adcf0c1a388a213c3949c64b34345562e1f3f6f69d0907a27eb7d1b45b44af",
+    "rust-events.schema.json": "8080093fa1d0f1dc31a652c722d98db738e32a6ea5be1f19d9b68e252c6225ae",
     "server-handshake.schema.json": "d2e352d42b90576a4151b42967603ec0d6301d5c81c8c405b531ab665f3e4c4b"
   },
   "schemas": {

@@ -246,6 +246,7 @@ class RpcModelCatalogEntry(BaseModel):
         default=(),
         max_length=MAX_RPC_MODEL_CATALOG_EFFORT_LEVELS,
     )
+    default_effort: RpcModelEffort | None = None
 
 
 class RpcModelProviderSnapshot(BaseModel):

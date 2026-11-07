@@ -108,6 +108,10 @@ class ModelCatalogProviderEntry(BaseModel):
     # provider (e.g. Claude Haiku supports none at all). A model absent from
     # this table has no settable effort level.
     effort_levels: dict[str, tuple[str, ...]] = {}
+    # The tier the provider applies when a request names none, for models whose
+    # documentation states it. Wisp never sends it; frontends show it so a default
+    # selection still names a real level.
+    default_effort: dict[str, str] = {}
     # One model can have both time-based and long-context price bands. Rates are
     # immutable snapshots for calculating new requests, never a source for
     # repricing historical session entries.
@@ -186,6 +190,12 @@ class ModelCatalogProviderEntry(BaseModel):
             if len(set(levels)) != len(levels):
                 raise ValueError(
                     f"provider {self.name!r} effort_levels[{model_id!r}] has duplicate entries"
+                )
+        for model_id, level in self.default_effort.items():
+            if level not in self.effort_levels.get(model_id, ()):
+                raise ValueError(
+                    f"provider {self.name!r} default_effort[{model_id!r}] {level!r} "
+                    "is not one of the model's effort_levels"
                 )
         for model_id, bands in self.pricing.items():
             if model_id not in model_set:

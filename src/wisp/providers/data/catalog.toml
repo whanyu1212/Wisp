@@ -75,6 +75,18 @@ models = [
 "gpt-5.6-luna" = ["none", "low", "medium", "high", "xhigh", "max"]
 "gpt-5.5" = ["none", "minimal", "low", "medium", "high", "xhigh"]
 
+# The tier each API applies when a request sets no reasoning.effort, from the model
+# pages and the reasoning guide, verified 2026-11-07. gpt-6-astra's page names no
+# default, so it has none here.
+[providers.default_effort]
+"gpt-6.1-sol" = "medium"
+"gpt-6-sol" = "medium"
+"gpt-6-luna" = "medium"
+"gpt-5.6-sol" = "medium"
+"gpt-5.6-terra" = "medium"
+"gpt-5.6-luna" = "medium"
+"gpt-5.5" = "medium"
+
 # Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
 # OpenAI GPT-6/5.6 standard API list prices per million tokens, verified 2026-10-13:
 # https://developers.openai.com/api/docs/pricing
@@ -342,6 +354,21 @@ models = [
 "claude-opus-4-6" = ["low", "medium", "high", "max"]
 "claude-sonnet-4-6" = ["low", "medium", "high", "max"]
 
+# Defaults from Anthropic's effort guide, verified 2026-11-07: "Most Claude models
+# default to high effort"; Opus 5.5 and Haiku 5.5 default to medium.
+[providers.default_effort]
+"claude-fable-5-1" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+"claude-haiku-5-5" = "medium"
+"claude-opus-5" = "high"
+"claude-fable-5" = "high"
+"claude-sonnet-5" = "high"
+"claude-opus-4-8" = "high"
+"claude-opus-4-7" = "high"
+"claude-opus-4-6" = "high"
+"claude-sonnet-4-6" = "high"
+
 # Anthropic first-party API standard list prices per million tokens, verified
 # 2026-10-13: https://platform.claude.com/docs/en/about-claude/pricing
 # Cache-write rates are the standard five-minute rate. Wisp does not currently
@@ -490,6 +517,16 @@ models = [
 "gemini-3.1-pro-preview" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-3-flash-preview" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
 
+# Default thinking levels from the thinking guide's model table, verified
+# 2026-11-07. gemini-3.1-flash-lite has no row there, so it has none here.
+[providers.default_effort]
+"gemini-4-argon" = "MEDIUM"
+"gemini-3.8-flash" = "MEDIUM"
+"gemini-3.6-flash" = "MEDIUM"
+"gemini-3.5-flash-lite" = "MINIMAL"
+"gemini-3.1-pro-preview" = "HIGH"
+"gemini-3-flash-preview" = "HIGH"
+
 # Standard text-token prices verified 2026-10-13:
 # https://ai.google.dev/gemini-api/docs/pricing
 # Argon's introductory rates end November 30; Flash's end December 31. Storage
@@ -549,6 +586,11 @@ models = [
 "deepseek-v4-pro" = ["low", "high", "max"]
 "deepseek-flash" = ["low", "high", "max"]
 
+# The thinking-mode guide, verified 2026-11-07: "the default effort being high".
+[providers.default_effort]
+"deepseek-v4-pro" = "high"
+"deepseek-flash" = "high"
+
 [[providers]]
 name = "xai"
 display_name = "xAI"
@@ -594,6 +636,13 @@ models = [
 # For the multi-agent model, effort controls agent count rather than ordinary
 # reasoning depth; Wisp forwards the provider-native value unchanged.
 "grok-4.20-multi-agent-0309" = ["low", "medium", "high", "xhigh"]
+
+# The reasoning guide and model pages, verified 2026-11-07: "If not specified,
+# reasoning_effort defaults to high". The multi-agent model states no default.
+[providers.default_effort]
+"grok-4.7" = "high"
+"grok-4.6" = "high"
+"grok-4.5" = "high"
 
 # xAI bills every token at the long-context rate once a prompt reaches 200K
 # tokens ("≥ 200k" on the model pages), so these bands start at 200000, not

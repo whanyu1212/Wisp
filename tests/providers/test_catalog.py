@@ -132,6 +132,16 @@ _ACME_ENTRY = {
             "duplicate entries",
             id="effort-duplicate",
         ),
+        pytest.param(
+            {"effort_levels": {"acme-1": ["low"]}, "default_effort": {"acme-1": "high"}},
+            "not one of the model's effort_levels",
+            id="default-effort-unlisted",
+        ),
+        pytest.param(
+            {"default_effort": {"acme-1": "low"}},
+            "not one of the model's effort_levels",
+            id="default-effort-without-levels",
+        ),
         pytest.param({"models": []}, "at least one model", id="no-models"),
     ],
 )

@@ -582,6 +582,10 @@ struct LiveUi {
     activity_frame: u8,
     /// The command whose run the working row times, and when it was first drawn.
     activity_clock: Option<(String, std::time::Instant)>,
+    /// The footer notice as first drawn, and when, which paces its ticker.
+    notice_clock: Option<(String, std::time::Instant)>,
+    /// Whether the last frame's notice was too long for the footer and scrolls.
+    notice_scrolling: bool,
     rendered_decision_context: Option<RenderedDecisionContext>,
     /// The highlighted choice of the pending decision; reset when the decision changes.
     decision_choice: Option<usize>,
@@ -640,6 +644,8 @@ impl Default for LiveUi {
             render_pending: true,
             activity_frame: 0,
             activity_clock: None,
+            notice_clock: None,
+            notice_scrolling: false,
             rendered_decision_context: None,
             decision_choice: None,
             rendered_decision_choice: None,
@@ -1668,6 +1674,7 @@ impl LiveUi {
             view.invalidate_selection();
         }
         let activity_elapsed = self.activity_elapsed();
+        let notice_shown_for = self.notice_shown_for();
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
@@ -1689,7 +1696,10 @@ impl LiveUi {
                 &mut self.composer_layout_cache,
                 &self.editor,
                 connection,
-                self.notice.as_deref(),
+                self.notice.as_deref().map(|text| ui::FooterNotice {
+                    text,
+                    shown_for: notice_shown_for,
+                }),
                 self.browse_selected,
                 overlay.is_none() && self.browse_selected.is_none(),
                 completion_view.as_ref(),
@@ -1966,6 +1976,7 @@ impl LiveUi {
                 picker.mark_rendered();
             }
         }
+        self.notice_scrolling = painted.conversation.notice_scrolls;
         self.mouse_frame = self.mouse_enabled.then_some(painted);
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
@@ -2006,6 +2017,32 @@ impl LiveUi {
         self.activity_clock
             .as_ref()
             .map(|(_, started)| started.elapsed())
+    }
+
+    /// How long the footer notice has been on screen. The clock restarts when the
+    /// notice text changes and clears when no notice is shown.
+    fn notice_shown_for(&mut self) -> std::time::Duration {
+        let Some(notice) = self.notice.as_deref() else {
+            self.notice_clock = None;
+            return std::time::Duration::ZERO;
+        };
+        if self
+            .notice_clock
+            .as_ref()
+            .is_none_or(|(shown, _)| shown != notice)
+        {
+            self.notice_clock = Some((notice.to_owned(), std::time::Instant::now()));
+        }
+        self.notice_clock
+            .as_ref()
+            .map_or(std::time::Duration::ZERO, |(_, shown)| shown.elapsed())
+    }
+
+    /// Repaint a scrolling footer notice so its ticker moves on.
+    fn advance_notice_ticker(&mut self) {
+        if self.notice_scrolling {
+            self.render_pending = true;
+        }
     }
 
     /// Show the next part of a paced reply, if one is waiting, and repaint if it changed.
