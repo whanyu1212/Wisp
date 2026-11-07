@@ -23,6 +23,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use wisp_protocol::commands::PermissionMode;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
@@ -586,8 +587,31 @@ pub(crate) fn run_in_status_line(state: &UiState) -> bool {
             || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
 }
 
+/// The permission mode where the main column names it: only YOLO, since Ask is the
+/// safe default. YOLO that is not saved for the project reads as a session grant.
+pub(crate) fn yolo_label(state: &UiState) -> Option<&'static str> {
+    let permissions = state.permissions.snapshot.as_ref()?;
+    if permissions.mode != PermissionMode::Yolo {
+        return None;
+    }
+    let saved =
+        permissions.saved_mode == Some(PermissionMode::Yolo) && !permissions.session_only_yolo;
+    Some(if saved { "YOLO" } else { "YOLO (session)" })
+}
+
+fn yolo_style(palette: Palette) -> Style {
+    Style::default()
+        .fg(palette.warning)
+        .add_modifier(Modifier::BOLD)
+}
+
 fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
     let mut parts = vec![status_label(state)];
+    // YOLO follows the label, which the status budget always leaves room for, so
+    // a narrow row never shows YOLO as if it were Ask.
+    if !identity_in_composer {
+        parts.extend(yolo_label(state).map(str::to_owned));
+    }
     if state.active_prompt_editable() {
         let steering = state.queued_steering();
         let follow_up = state.queued_follow_ups();
@@ -599,7 +623,7 @@ fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<Stri
     }
     // Queue and mode stay ahead of identity so a long model name cannot hide
     // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
-    // framed composer names the mode first on its identity line instead.
+    // framed composer names the modes first on its identity line instead.
     if state.mode_confirmed && !identity_in_composer {
         parts.push(state.mode.as_str().to_string());
     }
@@ -1795,8 +1819,8 @@ fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
     editable(state) && padded && area.height >= 4
 }
 
-/// The framed composer's last row: mode first so narrow widths cut the model
-/// and effort, never the mode.
+/// The framed composer's last row: mode and YOLO first so narrow widths cut the
+/// model and effort, never the modes.
 fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
     let separator = || Span::styled(" · ", Style::default().fg(palette.muted));
     let mut spans = Vec::new();
@@ -1812,6 +1836,12 @@ fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
                 .fg(palette.primary)
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+    if let Some(yolo) = yolo_label(state) {
+        if !spans.is_empty() {
+            spans.push(separator());
+        }
+        spans.push(Span::styled(yolo, yolo_style(palette)));
     }
     if let Some(provider) = state.provider.as_deref() {
         if !spans.is_empty() {
@@ -2727,16 +2757,12 @@ fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
 }
 
 fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
-    join_hints(footer_hint_parts(state, bindings, None), width)
+    join_hints(footer_hint_parts(state, bindings, Vec::new()), width)
 }
 
-/// The footer's key hints in order. An offered `panel` hint goes beside the interrupt
+/// The footer's key hints in order. Offered `panel` hints go beside the interrupt
 /// key during a run, and last otherwise.
-fn footer_hint_parts(
-    state: &UiState,
-    bindings: &Bindings,
-    mut panel: Option<String>,
-) -> Vec<String> {
+fn footer_hint_parts(state: &UiState, bindings: &Bindings, mut panel: Vec<String>) -> Vec<String> {
     let mut parts: Vec<String> = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
             "y once".into(),
@@ -2754,7 +2780,7 @@ fn footer_hint_parts(
     {
         // The composer names the keys that follow up or steer.
         let mut parts = vec!["Esc interrupt".into()];
-        parts.extend(panel.take());
+        parts.extend(std::mem::take(&mut panel));
         parts.push(browse_hint(state, bindings));
         parts
     } else {
@@ -2783,7 +2809,7 @@ fn render_footer(
     // measured on the conversation's column rather than beside a docked panel.
     let terminal_width = usize::from(column_width);
     // A docked side panel shows the workspace, queue, mode, context, and model, so
-    // the footer keeps only the status and hints beside it.
+    // the footer keeps only the status, YOLO, and hints beside it.
     let panel_docked = column_width < frame.area().width;
     let compaction_notice = state
         .context
@@ -2809,6 +2835,12 @@ fn render_footer(
     } else {
         (terminal_width / 2).max(19)
     };
+    // Without a framed composer the footer is YOLO's only home, so the status keeps
+    // room for it beside the label, at the expense of the notice and the hints.
+    let status_budget = match yolo_label(state).filter(|_| !identity_in_composer) {
+        Some(yolo) => status_budget.max(status_label(state).width() + 3 + yolo.width()),
+        None => status_budget,
+    };
 
     // Right: the status the footer always keeps, label first since it carries the
     // status colour, then the hints that still fit.
@@ -2818,6 +2850,9 @@ fn render_footer(
     if panel_docked {
         if !run_in_status_line(state) {
             status.push(status_label(state));
+            if !identity_in_composer {
+                status.extend(yolo_label(state).map(str::to_owned));
+            }
         }
     } else if !run_in_status_line(state) {
         let leading = footer_leading_parts(state, identity_in_composer);
@@ -2828,6 +2863,11 @@ fn render_footer(
         status = leading;
         status.push(crate::context_view::indicator(state, ctx_width));
         status.extend(footer_trailing_parts(state, identity_in_composer));
+    }
+    if run_in_status_line(state) && !identity_in_composer {
+        // The status line names the run but not the permission mode, and an
+        // unframed composer cannot show it.
+        status.extend(yolo_label(state).map(str::to_owned));
     }
     if state.history.tail_evicted && viewport.follows_tail() {
         status.push("more ↓".into());
@@ -2897,19 +2937,11 @@ fn render_footer(
         None => left,
     };
     let left_width = left.width().min(beside_status);
-    // Where the panel is not docked, offer it with what room the workspace and the
-    // other hints leave, so it is the first thing a narrow footer drops.
-    let hints = if panel_docked || hints.is_empty() || decision_pending(state) {
+    let hints = if hints.is_empty() || decision_pending(state) {
         hints
     } else {
         let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
-        let panel = format!("{} panel", primary_label(bindings, KeyAction::TogglePanel));
-        let offer = join_hints(footer_hint_parts(state, bindings, Some(panel)), usize::MAX);
-        if offer.width() + 3 <= hint_cap(room) {
-            offer
-        } else {
-            hints
-        }
+        with_panel_hints(state, bindings, panel_docked, hint_cap(room)).unwrap_or(hints)
     };
 
     let mut right = if status_line.is_empty() {
@@ -2941,6 +2973,36 @@ fn render_footer(
         },
     );
     notice_ticker.is_some()
+}
+
+/// The footer hints with the panel key, and beside a docked panel the tree key,
+/// when they fit in `room`. The tree key drops first, then the panel key, so they
+/// are the first things a narrow footer loses.
+fn with_panel_hints(
+    state: &UiState,
+    bindings: &Bindings,
+    panel_docked: bool,
+    room: usize,
+) -> Option<String> {
+    let mut panel = vec![format!(
+        "{} panel",
+        primary_label(bindings, KeyAction::TogglePanel)
+    )];
+    let tree = primary_label(bindings, KeyAction::SessionTree);
+    if panel_docked && tree != "Unbound" {
+        panel.push(format!("{tree} tree"));
+    }
+    while !panel.is_empty() {
+        let offer = join_hints(
+            footer_hint_parts(state, bindings, panel.clone()),
+            usize::MAX,
+        );
+        if offer.width() + 3 <= room {
+            return Some(offer);
+        }
+        panel.pop();
+    }
+    None
 }
 
 /// A footer notice and how long it has been on screen, which paces its ticker.
@@ -2995,28 +3057,33 @@ fn notice_ticker_window(text: &str, room: usize, shown_for: std::time::Duration)
 fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Span<'static>> {
     let muted = Style::default().fg(palette.muted);
     let label = status_label(state);
-    let Some(tail) = status_line.strip_prefix(&label) else {
-        return vec![Span::styled(status_line.to_owned(), muted)];
+    // During a run the status line names it, so the footer's status has no label.
+    let (mut spans, tail) = match status_line.strip_prefix(&label) {
+        Some(tail) => (
+            vec![Span::styled(
+                label,
+                Style::default().fg(status_color(state, palette)),
+            )],
+            tail,
+        ),
+        None => (Vec::new(), status_line),
     };
-    let mut spans = vec![Span::styled(
-        label,
-        Style::default().fg(status_color(state, palette)),
-    )];
     let pressured =
         crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
-    match tail.find("ctx ").filter(|_| pressured) {
-        Some(start) => {
-            let meter_end = tail[start..]
-                .find(" · ")
-                .map_or(tail.len(), |end| start + end);
-            spans.push(Span::styled(tail[..start].to_owned(), muted));
-            spans.push(Span::styled(
-                tail[start..meter_end].to_owned(),
-                Style::default().fg(palette.warning),
-            ));
-            spans.push(Span::styled(tail[meter_end..].to_owned(), muted));
+    let yolo = yolo_label(state);
+    // After a label the tail starts with a separator, so its first part is empty.
+    for (index, part) in tail.split(" · ").enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", muted));
         }
-        None => spans.push(Span::styled(tail.to_owned(), muted)),
+        let style = if Some(part) == yolo {
+            yolo_style(palette)
+        } else if pressured && part.starts_with("ctx ") {
+            Style::default().fg(palette.warning)
+        } else {
+            muted
+        };
+        spans.push(Span::styled(part.to_owned(), style));
     }
     spans
 }
@@ -7957,6 +8024,98 @@ mod tests {
             .unwrap();
         assert_eq!(effort.style.fg, Some(Palette::default().warning));
         assert!(effort.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    fn with_permissions(
+        state: &mut UiState,
+        mode: PermissionMode,
+        saved_mode: Option<PermissionMode>,
+        session_only_yolo: bool,
+    ) {
+        state.permissions.snapshot = Some(std::sync::Arc::new(
+            wisp_protocol::events::PermissionState {
+                mode,
+                saved_mode,
+                project_path: Some("/srv/wisp".into()),
+                session_only_yolo,
+            },
+        ));
+    }
+
+    #[test]
+    fn composer_names_yolo_only() {
+        use PermissionMode::{Ask, Yolo};
+        // Saved YOLO, an approval's session grant, and the home folder's session-only YOLO.
+        for (mode, saved, session_only, shown) in [
+            (Ask, Some(Ask), false, None),
+            (Yolo, Some(Yolo), false, Some("YOLO")),
+            (Yolo, Some(Ask), false, Some("YOLO (session)")),
+            (Yolo, None, true, Some("YOLO (session)")),
+        ] {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            state.mode_confirmed = true;
+            with_permissions(&mut state, mode, saved, session_only);
+            let line = composer_identity_line(&state, Palette::default());
+            let text = line.to_string();
+            match shown {
+                Some(label) => {
+                    assert_eq!(text, format!("Build · {label} · model-x fake"));
+                    let span = line
+                        .spans
+                        .iter()
+                        .find(|span| span.content == label)
+                        .unwrap();
+                    assert_eq!(span.style.fg, Some(Palette::default().warning));
+                }
+                None => assert_eq!(text, "Build · model-x fake"),
+            }
+        }
+    }
+
+    #[test]
+    fn yolo_survives_narrow_and_short_layouts() {
+        let draw = |width: u16, height: u16| {
+            let mut state = UiState::new(
+                "fake".into(),
+                Some("a-long-model-name".into()),
+                Some("high".into()),
+            );
+            state.mode_confirmed = true;
+            with_permissions(
+                &mut state,
+                PermissionMode::Yolo,
+                Some(PermissionMode::Yolo),
+                false,
+            );
+            render_to_string(width, height, &state, &PromptEditor::default())
+        };
+        // Framed: the identity row cuts the model and effort before YOLO.
+        let framed = draw(32, 20);
+        assert!(framed.contains("Build · YOLO"), "{framed}");
+        assert!(!framed.contains("high"), "{framed}");
+        // Too short to frame the composer: the footer names YOLO beside the mode.
+        let short = draw(100, 12);
+        assert!(short.contains("idle · YOLO · build"), "{short}");
+        // Short and narrow at once, even the longer session label keeps its room.
+        for (width, height) in [(40, 12), (30, 8)] {
+            let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+            state.mode_confirmed = true;
+            with_permissions(&mut state, PermissionMode::Yolo, None, true);
+            let screen = render_to_string(width, height, &state, &PromptEditor::default());
+            let footer = screen.lines().last().unwrap();
+            assert!(
+                footer.contains("YOLO (session)"),
+                "{width}x{height}\n{screen}"
+            );
+        }
+        // During a run the status line names the run, and the footer keeps YOLO.
+        let mut running = UiState::new("fake".into(), Some("model-x".into()), None);
+        with_permissions(&mut running, PermissionMode::Yolo, None, true);
+        running.view_status = ViewStatus::Running;
+        running.interaction_status = crate::reducer::InteractionStatus::Compacting;
+        let compacting = render_to_string(100, 12, &running, &PromptEditor::default());
+        let footer = compacting.lines().last().unwrap();
+        assert!(footer.contains("YOLO (session)"), "{compacting}");
     }
 
     #[test]

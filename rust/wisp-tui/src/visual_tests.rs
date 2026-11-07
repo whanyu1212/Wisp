@@ -1364,7 +1364,7 @@ fn showcase_capture_docks_panel() {
         "python-testing",
         "M src/demo_app/client.py",
         "Recent turns",
-        "Permissions",
+        "Ctrl+T tree",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
     }

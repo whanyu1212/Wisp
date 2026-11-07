@@ -22,7 +22,9 @@ impl UiState {
             || self.search_change.is_some()
             || self.model_configuration_active()
             || self.context.configuring()
-            || self.permissions.loading()
+            // A read of the mode, which the composer refreshes in the background,
+            // leaves the editor usable.
+            || self.permissions.changing()
     }
 
     pub(crate) fn command_catalog_loading(&self) -> bool {

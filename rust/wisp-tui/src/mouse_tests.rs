@@ -1317,7 +1317,8 @@ async fn sidebar_footer_owns_scroll_and_focused_border_still_resizes() {
         .collect();
     ui.state.skills.snapshot = Some(std::sync::Arc::new(skills));
     let screen = draw(&mut ui, 200, 30);
-    let (x, y) = cell_of(&screen, "Permissions");
+    // The panel's bottom row shows its scroll position.
+    let (x, y) = cell_of(&screen, " 1/");
     let viewport = ui.transcript_viewport.clone();
     ui.handle_input(
         Input::Scroll(mouse::Scroll {
