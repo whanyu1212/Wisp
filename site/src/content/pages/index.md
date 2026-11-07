@@ -35,11 +35,11 @@ wisp
 ```
 
 > [!TIP]
-> **Wisp 0.5 is available**
+> **Wisp 0.6 is available**
 >
-> 0.5 hardens the built-in tools: `bash` commands no longer see your provider API keys, `write` and
-> `edit` refuse files that changed since the model read them, commands stop when Wisp exits or you
-> switch sessions, and searches stop after 30 seconds with partial results. Read the [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and,
+> 0.6 is about long-running commands: the terminal UI shows a command's output while it runs, and
+> when a result has to cut output, `bash` saves all of it so the model can read an early error with
+> `read_output` instead of running the command again. Read the [release notes](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) and,
 > if you are coming from 0.2, the [0.3 upgrade guide](guide/upgrading-to-0.3.md).
 
 ## Start reading

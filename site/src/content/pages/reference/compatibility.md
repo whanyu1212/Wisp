@@ -116,6 +116,21 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.6 compatibility
+
+0.6.0 changes no command, handshake, session, settings, credential, or trust format, so 0.5.x and
+0.6.0 read each other's sessions. It adds one event, `tool.execution.progress`, which is never
+persisted. The backend and every frontend must be the same release: a 0.5 frontend rejects the new
+event. External RPC clients keep using the schema bundle of the installed release, and should
+ignore or render `tool.execution.progress`; each one replaces the previous one, so skipping any is
+safe.
+
+The supported Python API only gains optional parameters and fields: `CodingSession.run()` adds
+`live_event_sink`, and `ToolContext` adds `progress`. Tool behavior changes are listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md): truncated `bash` results
+name saved output that the new read-only `read_output` tool pages through, and a timed-out command's
+error names its saved output and shows its last lines.
+
 ## Wisp 0.5 compatibility
 
 0.5.0 changes no command, event, handshake, session, settings, credential, or trust format, so
