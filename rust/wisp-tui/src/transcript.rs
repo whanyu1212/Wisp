@@ -114,17 +114,21 @@ impl RunTotals {
     /// The line closing the run's last entry, such as
     /// `Build · gpt-6 · high · 6m 41s · 14 tools · 31 tok/s`; empty when the run
     /// reported nothing to total. The turn's rail draws the leading `╰`.
-    pub(crate) fn summary_line(&self) -> String {
-        let mut parts = Vec::new();
+    ///
+    /// Without `with_settings` the mode, model and effort are left out, unless
+    /// nothing else would show.
+    pub(crate) fn summary_line(&self, with_settings: bool) -> String {
+        let mut settings = Vec::new();
         if let Some(mode) = &self.mode {
-            parts.push(match mode.as_str() {
+            settings.push(match mode.as_str() {
                 "build" => "Build".to_owned(),
                 "plan" => "Plan".to_owned(),
                 other => other.to_owned(),
             });
         }
-        parts.extend(self.model.iter().cloned());
-        parts.extend(self.effort.iter().cloned());
+        settings.extend(self.model.iter().cloned());
+        settings.extend(self.effort.iter().cloned());
+        let mut parts = Vec::new();
         if let Some(duration_ms) = self.duration_ms {
             parts.push(crate::tool_cards::format_duration(duration_ms));
         }
@@ -143,8 +147,41 @@ impl RunTotals {
         if self.outcome != "completed" {
             parts.push(self.outcome.clone());
         }
+        if with_settings || parts.is_empty() {
+            settings.append(&mut parts);
+            parts = settings;
+        }
         parts.join(" · ")
     }
+
+    fn same_settings(&self, other: &Self) -> bool {
+        self.mode == other.mode && self.model == other.model && self.effort == other.effort
+    }
+}
+
+#[cfg(test)]
+impl RunTotals {
+    /// A completed run that took `duration_ms` and called `tool_calls` tools.
+    pub(crate) fn finished(duration_ms: u64, tool_calls: u64) -> Self {
+        Self {
+            outcome: "completed".into(),
+            duration_ms: Some(duration_ms),
+            tool_calls,
+            ..Self::default()
+        }
+    }
+}
+
+/// The row closing a finished run. It names the run's settings only when they differ
+/// from the previous summary row's, which [`Transcript::refresh_run_summaries`]
+/// decides again whenever entry order changes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RunSummary {
+    totals: RunTotals,
+    with_settings: bool,
+    /// `totals.summary_line(with_settings)`, kept so drawing the row does not
+    /// rebuild it.
+    line: String,
 }
 
 /// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
@@ -205,7 +242,7 @@ pub struct TranscriptEntry {
     searches: Vec<crate::web_search::WebSearch>,
     cost: Option<crate::web_search::MessageCost>,
     /// Display-only summary closing the last reply of a finished run.
-    run_summary: Option<String>,
+    run_summary: Option<RunSummary>,
     /// How the run this prompt started ended, for the side panel's turn list.
     run_result: Option<RunResult>,
     pub state: TranscriptEntryState,
@@ -255,7 +292,8 @@ impl TranscriptEntry {
     /// transcript view draws them as the row that ends the turn's rail.
     pub(crate) fn run_summary(&self) -> Option<&str> {
         self.run_summary
-            .as_deref()
+            .as_ref()
+            .map(|summary| summary.line.as_str())
             .filter(|_| self.unrevealed.is_empty())
     }
 
@@ -609,9 +647,13 @@ impl Transcript {
     }
 
     /// Close the run with its summary on the turn's last entry, whether a reply or a
-    /// card, as after a cancelled call. Returns false when the turn shows nothing to
-    /// close.
-    pub(crate) fn attach_run_summary(&mut self, summary: String) -> bool {
+    /// card, as after a cancelled call. Returns false when the run reported nothing to
+    /// total or the turn shows nothing to close.
+    pub(crate) fn attach_run_summary(&mut self, totals: RunTotals) -> bool {
+        let line = totals.summary_line(true);
+        if line.is_empty() {
+            return false;
+        }
         let prompt = self.latest_user_entry();
         let last = self
             .entries
@@ -631,10 +673,38 @@ impl Transcript {
             return false;
         };
         let entry = self.entry_mut(id);
-        entry.run_summary = Some(summary);
+        entry.run_summary = Some(RunSummary {
+            totals,
+            with_settings: true,
+            line,
+        });
         // The entry's last row now leads to the summary row, so cached rows rebuild.
         Self::bump_revision(entry);
+        self.refresh_run_summaries();
         true
+    }
+
+    /// Decide again which summary rows name their run's settings: the first does, and
+    /// each later one does when its settings differ from the previous row's. A row
+    /// whose text changes gets a new revision, so its cached layout rebuilds; when an
+    /// older history page arrives, only the first summary row after it can change.
+    fn refresh_run_summaries(&mut self) {
+        let mut previous: Option<RunTotals> = None;
+        for entry in &mut self.entries {
+            let Some(summary) = entry.run_summary.as_mut() else {
+                continue;
+            };
+            let with_settings = previous
+                .as_ref()
+                .is_none_or(|previous| !previous.same_settings(&summary.totals));
+            previous = Some(summary.totals.clone());
+            if summary.with_settings == with_settings {
+                continue;
+            }
+            summary.with_settings = with_settings;
+            summary.line = summary.totals.summary_line(with_settings);
+            Self::bump_revision(entry);
+        }
     }
 
     /// Record how the run that `prompt` started ended. Steers and follow-ups the run
@@ -2448,6 +2518,9 @@ impl Transcript {
         if self.active_response.is_none() {
             self.started_turn = None;
         }
+        // Every insertion, removal or move of entries lands here, and each can give a
+        // summary row a different predecessor.
+        self.refresh_run_summaries();
     }
 
     fn push_message(

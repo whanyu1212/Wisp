@@ -6614,7 +6614,13 @@ mod tests {
         assert!(
             state
                 .transcript
-                .attach_run_summary("Build · gpt_x · 4m 12s · 31 tok/s".into())
+                .attach_run_summary(crate::transcript::RunTotals {
+                    mode: Some("build".into()),
+                    model: Some("gpt_x".into()),
+                    output_tokens: Some(31),
+                    model_ms: Some(1000),
+                    ..crate::transcript::RunTotals::finished(252_000, 0)
+                })
         );
         let finished = draw(&state);
         let screen = finished.to_string();
@@ -6687,7 +6693,10 @@ mod tests {
         assert!(
             state
                 .transcript
-                .attach_run_summary("4.0s · 1 tool · cancelled".into())
+                .attach_run_summary(crate::transcript::RunTotals {
+                    outcome: "cancelled".into(),
+                    ..crate::transcript::RunTotals::finished(4_000, 1)
+                })
         );
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         let lines = screen.lines().collect::<Vec<_>>();
