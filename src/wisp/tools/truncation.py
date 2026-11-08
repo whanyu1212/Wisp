@@ -121,9 +121,11 @@ def truncate_text_middle(
     """Keep the start and the end of long output and replace the middle with a marker.
 
     Long command output often carries its first error near the start and its summary
-    or traceback at the end, with progress in between. Lines end at a newline, as in
-    `read_output`, so the marker's line count is an offset there. The head and the
-    tail keep whole lines where they can; a single line too long for its budget is cut.
+    or traceback at the end, with progress in between. The line budgets count every
+    line break, carriage returns included, as the final bounding of each tool result
+    does, so that bounding never cuts the tail kept here. The marker's line count is
+    of newline-ended lines instead, an offset for `read_output`. The head and the tail
+    keep whole lines where they can; a single line too long for its budget is cut.
 
     Args:
         start (str): Text from the output's first byte: all of the output, or a prefix.
@@ -168,37 +170,32 @@ def truncate_text_middle(
     return TruncatedText(text=f"{head}{separator}{marker}\n{tail}", truncated=True)
 
 
-def _lines(text: str) -> list[str]:
-    """Split ``text`` after each newline, keeping it; a final line may lack one."""
-
-    parts = text.split("\n")
-    lines = [f"{part}\n" for part in parts[:-1]]
-    return [*lines, parts[-1]] if parts[-1] else lines
+_LINE_BREAKS = (b"\n", b"\r")
 
 
 def _fits(text: str, max_bytes: int, max_lines: int) -> bool:
-    return len(text.encode("utf-8")) <= max_bytes and len(_lines(text)) <= max_lines
+    return len(text.encode("utf-8")) <= max_bytes and len(text.splitlines()) <= max_lines
 
 
 def _leading_lines(text: str, *, max_bytes: int, max_lines: int) -> str:
     """The first lines of ``text`` within both budgets, ending on a line break if it can."""
 
-    kept = "".join(_lines(text)[: max(0, max_lines)])
+    kept = "".join(text.splitlines(keepends=True)[: max(0, max_lines)])
     encoded = kept.encode("utf-8")
     if len(encoded) <= max_bytes:
         return kept
     limit = max(0, max_bytes)
     cut = encoded[:limit].decode("utf-8", errors="ignore")
-    if encoded[limit : limit + 1] == b"\n":
+    if encoded[limit : limit + 1] in _LINE_BREAKS:
         return cut  # The cut ends a complete line; only its line break is left out.
-    line_end = cut.rfind("\n")
+    line_end = max(cut.rfind("\n"), cut.rfind("\r"))
     return cut[: line_end + 1] if line_end >= 0 else cut
 
 
 def _trailing_lines(text: str, *, max_bytes: int, max_lines: int) -> str:
     """The last lines of ``text`` within both budgets, starting on a line if it can."""
 
-    lines = _lines(text)
+    lines = text.splitlines(keepends=True)
     kept = "".join(lines[-max_lines:]) if max_lines > 0 else ""
     encoded = kept.encode("utf-8")
     if len(encoded) <= max_bytes:
@@ -207,7 +204,8 @@ def _trailing_lines(text: str, *, max_bytes: int, max_lines: int) -> str:
     while start < len(encoded) and encoded[start] & 0xC0 == 0x80:
         start += 1
     cut = encoded[start:].decode("utf-8", errors="ignore")
-    if encoded[start - 1 : start] == b"\n":
+    if encoded[start - 1 : start] in _LINE_BREAKS:
         return cut  # The cut starts a line.
-    line_start = cut.find("\n")
+    breaks = [index for index in (cut.find("\n"), cut.find("\r")) if index >= 0]
+    line_start = min(breaks, default=-1)
     return cut[line_start + 1 :] if 0 <= line_start < len(cut) - 1 else cut

@@ -101,12 +101,13 @@ def test_middle_keeps_lines_cut_on_boundaries() -> None:
     )
 
 
-def test_middle_counts_newline_lines_only() -> None:
-    # A bare carriage return redraws a progress line; it does not end one.
-    progress = "".join(f"\r{percent}%" for percent in range(100)) + "\ndone\n"
+def test_middle_line_budget_counts_carriage_returns() -> None:
+    # Result bounding counts a bare carriage return as a line break, so the preview must
+    # too, or bounding would cut the tail; the marker still counts newline lines.
+    progress = "\r." * 3000 + "\nerror: final\n"
 
-    result = _middle(progress * 3, head_lines=1, tail_lines=1, head_bytes=5000, tail_bytes=5000)
+    result = _middle(progress, head_lines=64, tail_lines=192, head_bytes=4000, tail_bytes=8000)
 
+    assert result.text.endswith("error: final\n")
+    assert len(result.text.splitlines()) <= 64 + 192 + 1
     assert "omitted after the first 1 lines]" in result.text
-    assert result.text.endswith("[truncated: " + result.text.split("[truncated: ")[1])
-    assert result.text.splitlines()[-1] == "done"

@@ -20,7 +20,7 @@ from wisp.tools.shell.process import (
     _StreamTail,
     decode_stream_head,
 )
-from wisp.tools.truncation import TruncatedText
+from wisp.tools.truncation import TruncatedText, truncate_text
 
 _PREVIEW_LIMIT = PREVIEW_HEAD_BYTES + PREVIEW_TAIL_BYTES + 200
 
@@ -56,6 +56,18 @@ def test_output_within_preview_shown_whole() -> None:
 
     assert output.truncated is False
     assert output.text == f"Command exited with code 0: {log.rstrip()}"
+
+
+def test_progress_redraws_survive_result_bounding() -> None:
+    # Every tool result is bounded again, counting a bare carriage return as a line.
+    log = "\r." * 3000 + "\nerror: final\n"
+    notice = "[Full output saved: stdout output_id=abc. Read it with read_output.]"
+
+    output = _preview(ProcessResult(exit_code=1, stdout=log, stderr=""), notice)
+    bounded = truncate_text(output.text, max_bytes=50_000, max_lines=2_000)
+
+    assert bounded.truncated is False
+    assert bounded.text.endswith(f"error: final\n{notice}")
 
 
 def test_large_stderr_without_stdout() -> None:
