@@ -314,12 +314,38 @@ while healthy servers and built-in tools remain available. Wisp accepts at most 
 servers, 64 discovery pages per server, 256 MCP tools overall, 1 MiB of definitions per server,
 4 MiB overall, and 2 MiB per protocol frame before parsing. One server may bring any number of tools
 within those limits. Every tool's definition is sent with every model request, so a large catalog
-(Linear's 68 tools are about 100 KB) adds to each request's size and cost. Connection and discovery have a
+(Linear's 68 tools are about 100 KB) adds to each request's size and cost; see
+[Finding MCP tools on demand](#finding-mcp-tools-on-demand). Connection and discovery have a
 10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
 duplicate names, collisions, or limit violations expose none of that server's tools.
 
 Set `"enabled": false` on a server, or run `wisp mcp disable NAME`, to keep its settings without
 starting it.
+
+### Finding MCP tools on demand
+
+With `"mcp_tool_exposure": "on_demand"` in `~/.wisp/settings.json`, or `WISP_MCP_TOOL_EXPOSURE=on_demand`
+for one process, the model is not sent each MCP tool's definition. It gets three small tools instead:
+
+| Tool | What it does |
+|---|---|
+| `mcp_search` | Finds MCP tools by query and lists each match's server, summary and parameters |
+| `mcp_describe` | Returns one tool's full description and input schema |
+| `mcp_call` | Runs one of those tools by name, with its arguments |
+
+The system prompt names each server and how many tools it has, so the model knows what to search. The
+default, `"direct"`, sends every definition as before. The setting is user-only: a project cannot
+change what the model sees or what each request costs. It is off by default until evaluation shows
+task success holds while request size falls.
+
+`mcp_call` reaches only the MCP tools direct mode would have offered that run: tool selection
+(`--allow-tool`, `--all-tools`), plan mode and the run's own tool limits all apply, and built-in tools
+are refused. Wisp resolves each `mcp_call` to the tool it names before any check, so that tool's own
+safety decides: a `command` tool asks for approval exactly as a direct call does, the approval and
+"allow for this session" name that tool, and a grant applies to that tool alone. Arguments missing a
+required parameter or of the wrong basic type are rejected before you are asked; the server still
+validates them fully. Events for a proxied call keep `name: "mcp_call"` and add `target` with the
+tool that runs.
 
 Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and
 sanitized startup failures, and to add, remove, enable, disable, or reconnect servers without

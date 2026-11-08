@@ -338,3 +338,32 @@ def test_config_rejects_invalid_auto_compaction_env(
 
     with pytest.raises(ValueError, match="WISP_AUTO_COMPACTION must be one of"):
         WispConfig.from_env(session_dir=tmp_path)
+
+
+def test_config_resolves_mcp_tool_exposure(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    project = tmp_path / "project"
+    (project / ".wisp").mkdir(parents=True)
+    # A trusted project cannot switch it on: exposure is user-only.
+    (project / ".wisp" / "settings.json").write_text(
+        '{"mcp_tool_exposure": "on_demand"}', encoding="utf-8"
+    )
+
+    def exposure() -> str:
+        return WispConfig.from_env(
+            session_dir=tmp_path, project_dir=project, trusted=True
+        ).mcp_tool_exposure
+
+    assert exposure() == "direct"
+    (home / ".wisp" / "settings.json").write_text(
+        '{"mcp_tool_exposure": "on_demand"}', encoding="utf-8"
+    )
+    assert exposure() == "on_demand"
+    monkeypatch.setenv("WISP_MCP_TOOL_EXPOSURE", " Direct ")
+    assert exposure() == "direct"
+    monkeypatch.setenv("WISP_MCP_TOOL_EXPOSURE", "lazy")
+    with pytest.raises(
+        ValueError, match="WISP_MCP_TOOL_EXPOSURE must be one of: direct, on_demand"
+    ):
+        exposure()

@@ -23,7 +23,12 @@ from wisp.config.settings import (
     resolve_settings,
     user_settings_path,
 )
-from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.mcp.config import (
+    MAX_MCP_SERVERS,
+    MCP_TOOL_EXPOSURES,
+    McpServerConfig,
+    McpToolExposure,
+)
 from wisp.mcp.credentials import mcp_auth_path
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetryPolicy
@@ -58,6 +63,7 @@ class WispConfig(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
+    mcp_tool_exposure: McpToolExposure = "direct"
     openai_compatible: OpenAICompatibleSettings | None = None
 
     @model_validator(mode="wrap")
@@ -129,6 +135,7 @@ class WispConfig(BaseModel):
         auto_compaction_enabled: bool | None = None,
         web_search: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
+        mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
@@ -168,6 +175,10 @@ class WispConfig(BaseModel):
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
         this structured setting.
+
+        ``mcp_tool_exposure`` (``WISP_MCP_TOOL_EXPOSURE``) is user-only as well: it
+        decides whether the model gets every MCP tool's schema or finds tools on
+        demand, which changes what it sees and what each request costs.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
@@ -259,6 +270,13 @@ class WispConfig(BaseModel):
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
+            mcp_tool_exposure=(
+                mcp_tool_exposure
+                if mcp_tool_exposure is not None
+                else _resolve_mcp_tool_exposure(
+                    os.environ.get("WISP_MCP_TOOL_EXPOSURE"), settings.mcp_tool_exposure
+                )
+            ),
             openai_compatible=compatible_override or settings.openai_compatible,
         )
 
@@ -330,6 +348,18 @@ def _first_non_empty(*values: str | None, default: str | None = None) -> str | N
             if stripped:
                 return stripped
     return default
+
+
+def _resolve_mcp_tool_exposure(
+    env_value: str | None, saved_value: McpToolExposure | None
+) -> McpToolExposure:
+    if env_value is None:
+        return saved_value or "direct"
+    normalized = env_value.strip().casefold()
+    for exposure in MCP_TOOL_EXPOSURES:
+        if normalized == exposure:
+            return exposure
+    raise ValueError(f"WISP_MCP_TOOL_EXPOSURE must be one of: {', '.join(MCP_TOOL_EXPOSURES)}")
 
 
 def _resolve_bool(

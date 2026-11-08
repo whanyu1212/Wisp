@@ -118,12 +118,13 @@ def _print_event_line(event: WispEvent) -> str | None:
     if isinstance(event, ToolCallRequested):
         return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
     if isinstance(event, ToolApprovalRequested):
-        return f"? approval required for {event.name} ({event.safety})"
+        # A proxied MCP call asks to approve the tool it runs, so name that tool.
+        return f"? approval required for {event.target or event.name} ({event.safety})"
     if isinstance(event, ToolApprovalResolved):
         if event.approved:
-            return f"✓ approved {event.name}"
+            return f"✓ approved {event.target or event.name}"
         reason = f": {event.reason}" if event.reason else ""
-        return f"! denied {event.name}{reason}"
+        return f"! denied {event.target or event.name}{reason}"
     if isinstance(event, ToolResultReady):
         presentation_status = tool_result_status(
             event.is_error,

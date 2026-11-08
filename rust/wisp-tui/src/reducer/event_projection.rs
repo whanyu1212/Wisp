@@ -427,7 +427,11 @@ impl BackendEvent {
                 })
             }
             "tool.approval.requested" => {
-                let raw_name = string_field_ref(value, &event_type, "name")?;
+                // A proxied call (on-demand MCP's `mcp_call`) asks to approve the tool it
+                // runs; the panel and any session grant must name that tool, not the proxy.
+                let target = optional_string_field(value, &event_type, "target")?;
+                let name = string_field_ref(value, &event_type, "name")?;
+                let raw_name = target.as_deref().unwrap_or(name);
                 let arguments = object_field(value, &event_type, "arguments")?;
                 // Sessions saved before this field existed only hold grantable tools.
                 let grants_allowed = bool_field_or(value, &event_type, "grants_allowed", true)?;

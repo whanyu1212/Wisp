@@ -14,12 +14,26 @@ this policy.
 
 ### Events
 
+- `tool.execution.started`, `tool.approval.requested`, `tool.approval.resolved`,
+  `tool.execution.ended` and `tool.result` gain an optional `target`: for a proxied MCP call
+  (`mcp_call`, see MCP below) it names the MCP tool that runs, while `name` stays `mcp_call`. It is
+  `null` for every other call. The schema bundle and conformance fixture are regenerated; the
+  same-release rule applies.
+
 - `agent.started` gains an optional `setup` (`RunSetup`): the names of the tools offered to the
   model, in offered order, and SHA-256 hashes of the tool specs and of the system messages the run
   starts with. It lets an eval or a log reader confirm which setup a run actually had. The system
   messages include project context and Git status, so their hash also changes with the repository.
   `agent.started` is not saved in session files. The schema bundle and conformance fixture are
   regenerated; the same-release rule applies.
+
+### MCP
+
+- New user-only setting `mcp_tool_exposure` (`"direct"` by default, or `"on_demand"`) and
+  `WISP_MCP_TOOL_EXPOSURE`. On demand, the model gets `mcp_search`, `mcp_describe` and `mcp_call`
+  instead of every MCP tool's definition. `mcp_call` reaches only the MCP tools direct mode would
+  offer that run, and each call goes through that tool's own safety, approval and session grant.
+  The TUI and CLI approval prompts name the tool that runs.
 
 ### CLI
 

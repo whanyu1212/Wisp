@@ -6017,6 +6017,18 @@
           "title": "Session Only Yolo",
           "type": "boolean"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6034,6 +6046,7 @@
         "timestamp",
         "call_id",
         "name",
+        "target",
         "arguments",
         "safety",
         "grants_allowed",
@@ -6069,6 +6082,18 @@
           "default": null,
           "title": "Reason"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6086,6 +6111,7 @@
         "timestamp",
         "call_id",
         "name",
+        "target",
         "approved",
         "reason"
       ],
@@ -6476,6 +6502,18 @@
           "default": null,
           "title": "Summary"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6499,6 +6537,7 @@
         "message_entry_id",
         "call_id",
         "name",
+        "target",
         "output",
         "is_error",
         "failure_code",
@@ -6612,6 +6651,18 @@
           "title": "Name",
           "type": "string"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6629,7 +6680,8 @@
         "timestamp",
         "call_id",
         "name",
-        "arguments"
+        "arguments",
+        "target"
       ],
       "title": "ToolExecutionStarted",
       "type": "object"
@@ -6941,6 +6993,18 @@
           "default": null,
           "title": "Summary"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6964,6 +7028,7 @@
         "message_entry_id",
         "call_id",
         "name",
+        "target",
         "output",
         "is_error",
         "failure_code",
@@ -8353,6 +8418,7 @@
       "name": "read",
       "safety": "read",
       "session_only_yolo": false,
+      "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.approval.requested"
     },
@@ -8361,6 +8427,7 @@
       "call_id": "call-1",
       "name": "read",
       "reason": null,
+      "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.approval.resolved"
     },
@@ -8398,6 +8465,7 @@
       "stdout_dropped_bytes": 0,
       "stdout_truncated": false,
       "summary": null,
+      "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "truncated": false,
       "type": "tool.execution.ended"
@@ -8418,6 +8486,7 @@
       "arguments": {},
       "call_id": "call-1",
       "name": "read",
+      "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.execution.started"
     },
@@ -8448,6 +8517,7 @@
       "stdout_dropped_bytes": 0,
       "stdout_truncated": false,
       "summary": null,
+      "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "truncated": false,
       "type": "tool.result"

@@ -4289,6 +4289,14 @@
    "event": "tool.approval.requested",
    "operation": "remove",
    "path": [
+    "target"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
     "timestamp"
    ],
    "accepted": true
@@ -4336,6 +4344,14 @@
    "operation": "remove",
    "path": [
     "reason"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "target"
    ],
    "accepted": true
   },
@@ -4604,6 +4620,14 @@
    "operation": "remove",
    "path": [
     "summary"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "target"
    ],
    "accepted": true
   },
@@ -4735,6 +4759,14 @@
    "event": "tool.execution.started",
    "operation": "remove",
    "path": [
+    "target"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.started",
+   "operation": "remove",
+   "path": [
     "timestamp"
    ],
    "accepted": true
@@ -4958,6 +4990,14 @@
    "operation": "remove",
    "path": [
     "summary"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "target"
    ],
    "accepted": true
   },

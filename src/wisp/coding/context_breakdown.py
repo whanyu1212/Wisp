@@ -17,6 +17,7 @@ from wisp.events import (
     ContextTurnGrowth,
     ToolCallSnapshot,
 )
+from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.messages import Message
 from wisp.providers.base import ToolSpec
 from wisp.sessions.entries import MessageSessionEntry, SessionEntry
@@ -54,6 +55,7 @@ _SOURCE_COUNTS: dict[ContextSource, Literal["items", "children"]] = {
     "project_instructions": "children",
 }
 _MCP_PREFIX = "mcp__"
+_DISCOVERY_LABEL = "on-demand discovery"
 _LARGEST_ITEM_COUNT = 3
 _MAX_LABEL_CHARS = 60
 
@@ -159,6 +161,9 @@ def _raw_source_children(
         if tool.name.startswith(_MCP_PREFIX):
             server = tool.name[len(_MCP_PREFIX) :].split("__", 1)[0]
             child = raw["mcp_tools"].setdefault(server, _Child())
+        elif tool.name in DISCOVERY_TOOL_NAMES:
+            # On-demand MCP: the tools that stand in for every MCP tool's schema.
+            child = raw["mcp_tools"].setdefault(_DISCOVERY_LABEL, _Child())
         else:
             child = raw["built_in_tools"].setdefault(tool.name, _Child())
         child.tokens += tool_schema_tokens(tool)

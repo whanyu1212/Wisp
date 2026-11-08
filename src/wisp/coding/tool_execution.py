@@ -19,6 +19,7 @@ from wisp.events import (
     ToolApprovalResolved,
     ToolExecutionEnded,
 )
+from wisp.mcp.discovery import MCP_CALL, McpCatalog, check_proxied_arguments, resolve_target
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.tool_types import ToolFailureCode
@@ -170,12 +171,31 @@ class ConfiguredToolExecutor:
         policy: ToolPolicy,
         approval_policy: ToolApprovalPolicy,
         progress_sink: LiveEventSink | None = None,
+        mcp_catalog: McpCatalog | None = None,
     ) -> None:
         self._registry = registry
         self._context = context
         self._policy = policy
         self._approval_policy = approval_policy
         self._progress_sink = progress_sink
+        self._mcp_catalog = mcp_catalog
+
+    @property
+    def mcp_catalog(self) -> McpCatalog | None:
+        """The MCP tools `mcp_call` may name this run, or None when exposure is direct."""
+
+        return self._mcp_catalog
+
+    def resolve_target(self, tool_call: ToolCall) -> str | None:
+        """Return the MCP tool a proxied `mcp_call` names, or None; never raises.
+
+        The loop calls this before announcing a call, so every event of a proxied
+        call names the tool that will actually run.
+        """
+
+        if tool_call.name != MCP_CALL or tool_call.parse_error is not None:
+            return None
+        return resolve_target(self._mcp_catalog, tool_call.arguments)
 
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         prepared: PreparedToolExecution | None = None
@@ -191,24 +211,16 @@ class ConfiguredToolExecutor:
     async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
         """Resolve policy and approval while deferring all tool side effects."""
 
-        arguments = dict(tool_call.arguments)
         outcome: _ToolRunOutcome
-
-        if tool_call.parse_error is not None:
-            outcome = _failure_outcome(
-                tool_call.parse_error,
-                failure_code="invalid_arguments",
-                retryable=True,
-                recovery_hint="Retry with arguments that match the tool's input schema.",
-            )
-        elif self._registry is None:
-            outcome = _failure_outcome(
-                "Tool execution is not configured",
-                failure_code="internal_error",
-            )
+        resolved = self._resolve_call(tool_call)
+        if isinstance(resolved, _ToolRunOutcome):
+            outcome = resolved
         else:
+            # A proxied `mcp_call` continues as the MCP tool it names: from here on
+            # every check, the approval, and the run see that tool, not the proxy.
+            target, arguments = resolved.target, resolved.arguments
             try:
-                tool = self._registry.get(tool_call.name)
+                tool = resolved.registry.get(target or tool_call.name)
             except UnknownToolError as exc:
                 outcome = _failure_outcome(str(exc), failure_code="unknown_tool")
             else:
@@ -232,17 +244,21 @@ class ConfiguredToolExecutor:
                 elif self._approval_policy.requires_approval(
                     tool
                 ) and not self._approval_policy.approves(tool):
+                    # The approval shows the call exactly as the model made it; for a
+                    # proxied call that names the target, so the user sees what runs.
+                    approval_arguments = dict(tool_call.arguments)
                     self._approval_policy.prepare_approval(
                         tool,
                         call_id=tool_call.call_id,
-                        arguments=arguments,
+                        arguments=approval_arguments,
                     )
                     approval_resolved = False
                     try:
                         yield ToolApprovalRequested(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
-                            arguments=arguments,
+                            target=target,
+                            arguments=approval_arguments,
                             safety=tool.safety,
                             grants_allowed=not confirms_every_call(tool),
                             session_only_yolo=self._approval_policy.session_only_yolo,
@@ -250,12 +266,13 @@ class ConfiguredToolExecutor:
                         decision = await self._approval_policy.await_approval(
                             tool,
                             call_id=tool_call.call_id,
-                            arguments=arguments,
+                            arguments=approval_arguments,
                         )
                         approval_resolved = True
                         yield ToolApprovalResolved(
                             call_id=tool_call.call_id,
                             name=tool_call.name,
+                            target=target,
                             approved=decision.approved,
                             reason=decision.reason,
                         )
@@ -266,35 +283,88 @@ class ConfiguredToolExecutor:
                                 reason="Agent run cancelled",
                             )
                     if decision.approved:
-                        yield self._prepare_tool(tool_call, tool, arguments)
+                        yield self._prepare_tool(tool_call, tool, arguments, target=target)
                         return
                     outcome = _failure_outcome(
                         decision.reason or "Tool execution was not approved",
                         failure_code="approval_denied",
                     )
                 else:
-                    yield self._prepare_tool(tool_call, tool, arguments)
+                    yield self._prepare_tool(tool_call, tool, arguments, target=target)
                     return
 
-        yield self._prepare_outcome(tool_call, outcome)
+        yield self._prepare_outcome(tool_call, outcome, target=self.resolve_target(tool_call))
+
+    def _resolve_call(self, tool_call: ToolCall) -> _ResolvedCall | _ToolRunOutcome:
+        """Find what a call will run, or the failure decided before any check.
+
+        A proxied `mcp_call` resolves to the catalog tool it names, with that tool's
+        own arguments; every other call resolves to itself.
+        """
+
+        if tool_call.parse_error is not None:
+            return _failure_outcome(
+                tool_call.parse_error,
+                failure_code="invalid_arguments",
+                retryable=True,
+                recovery_hint="Retry with arguments that match the tool's input schema.",
+            )
+        if self._registry is None:
+            return _failure_outcome(
+                "Tool execution is not configured",
+                failure_code="internal_error",
+            )
+        arguments = dict(tool_call.arguments)
+        catalog = self._mcp_catalog
+        if tool_call.name != MCP_CALL or catalog is None:
+            return _ResolvedCall(self._registry, arguments)
+        name = arguments.get("name")
+        if not isinstance(name, str):
+            return _failure_outcome(
+                f"{MCP_CALL}.name must be a string",
+                failure_code="invalid_arguments",
+                retryable=True,
+            )
+        entry = catalog.get(name)
+        if entry is None:
+            registered = self._registry is not None and name in self._registry.names()
+            return _failure_outcome(
+                f"{name} is not an MCP tool available to {MCP_CALL} in this run"
+                if registered
+                else f"No MCP tool named {name} is available in this run",
+                failure_code="policy_denied" if registered else "unknown_tool",
+                retryable=not registered,
+                recovery_hint=None if registered else "Find the tool's name with mcp_search.",
+            )
+        tool_arguments = arguments.get("arguments")
+        problem = check_proxied_arguments(entry, tool_arguments)
+        if problem is not None:
+            return _failure_outcome(problem, failure_code="invalid_arguments", retryable=True)
+        return _ResolvedCall(
+            self._registry, dict(cast(Mapping[str, object], tool_arguments)), target=name
+        )
 
     def _prepare_tool(
         self,
         tool_call: ToolCall,
         tool: Tool,
         arguments: dict[str, object],
+        *,
+        target: str | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
             outcome = await self._run_tool(
                 tool,
                 arguments,
                 call_id=tool_call.call_id,
-                tool_name=tool_call.name,
+                tool_name=target or tool_call.name,
             )
-            return _execution_ended(tool_call, outcome)
+            return _execution_ended(tool_call, outcome, target=target)
 
+        # Scheduling follows the tool that runs: a proxied call is as parallel-safe
+        # as its target, never as the proxy.
         parallel_safe = (
-            self._registry.execution_metadata_for(tool_call.name).parallel_safe
+            self._registry.execution_metadata_for(target or tool_call.name).parallel_safe
             if self._registry is not None
             else False
         )
@@ -309,9 +379,11 @@ class ConfiguredToolExecutor:
     def _prepare_outcome(
         tool_call: ToolCall,
         outcome: _ToolRunOutcome,
+        *,
+        target: str | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
-            return _execution_ended(tool_call, outcome)
+            return _execution_ended(tool_call, outcome, target=target)
 
         # The runner only publishes an outcome decided during preparation and never
         # reaches the tool, so a rejected call must not force its batch to run serially.
@@ -428,10 +500,22 @@ class ConfiguredToolExecutor:
         return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
 
 
-def _execution_ended(tool_call: ToolCall, outcome: _ToolRunOutcome) -> ToolExecutionEnded:
+@dataclass(frozen=True, slots=True)
+class _ResolvedCall:
+    """What one call will run: its registry, arguments, and a proxy's target."""
+
+    registry: ToolRegistry
+    arguments: dict[str, object]
+    target: str | None = None
+
+
+def _execution_ended(
+    tool_call: ToolCall, outcome: _ToolRunOutcome, *, target: str | None = None
+) -> ToolExecutionEnded:
     return ToolExecutionEnded(
         call_id=tool_call.call_id,
         name=tool_call.name,
+        target=target,
         output=outcome.output,
         is_error=outcome.is_error,
         failure_code=outcome.failure_code,

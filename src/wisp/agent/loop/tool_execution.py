@@ -10,6 +10,7 @@ from wisp.agent.tool_contracts import (
     PreparedToolExecutor,
     ToolExecutionEvent,
     ToolExecutor,
+    resolved_target,
 )
 from wisp.events import ToolApprovalResolved, ToolExecutionEnded, ToolResultReady
 from wisp.providers.base import ToolCallResult
@@ -290,11 +291,12 @@ class ToolBatch:
             yield settlement.request(tool_call)
             if self._cancellation_requested():
                 return
-            yield tool_execution_started(tool_call)
+            target = resolved_target(self.tool_executor, tool_call)
+            yield tool_execution_started(tool_call, target=target)
             if self._cancellation_requested():
                 return
 
-            lifecycle = settlement.begin_lifecycle(tool_call)
+            lifecycle = settlement.begin_lifecycle(tool_call, target=target)
             with RequestedCancellation(self.is_cancelled) as cancellation:
                 async with closing_stream(
                     _execute_tool_call(self.tool_executor, lifecycle)

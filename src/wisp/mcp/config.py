@@ -25,6 +25,11 @@ from wisp.tool_types import ToolSafety
 from wisp.validation import redact_validation_error_inputs
 
 MAX_MCP_SERVERS = 16
+
+# How MCP tools reach the model: each tool's schema on every request ("direct"), or
+# found and called through mcp_search, mcp_describe and mcp_call ("on_demand").
+type McpToolExposure = Literal["direct", "on_demand"]
+MCP_TOOL_EXPOSURES: tuple[McpToolExposure, ...] = ("direct", "on_demand")
 MAX_MCP_ARGS = 64
 MAX_MCP_ENV_VARS = 64
 MAX_MCP_TOOL_OVERRIDES = 256

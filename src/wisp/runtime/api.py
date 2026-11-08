@@ -160,6 +160,11 @@ class WispRuntime:
         if not self._configured_names:
             self.capture_provider_configuration()
 
+    def mcp_server_connected(self, server_name: str) -> bool:
+        """Return whether an MCP server's connection is live, across server restarts."""
+
+        return self.mcp_runtime is not None and self.mcp_runtime.is_connected(server_name)
+
     def replace_mcp_state(
         self,
         mcp_runtime: McpRuntime | None,

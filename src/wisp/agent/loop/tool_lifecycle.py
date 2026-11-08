@@ -158,11 +158,14 @@ def _tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
     )
 
 
-def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
+def tool_execution_started(
+    tool_call: ToolCall, *, target: str | None = None
+) -> ToolExecutionStarted:
     """Build the public start event for a call about to reach its executor.
 
     Args:
         tool_call (ToolCall): Requested call to publish.
+        target (str | None): The tool a proxy call will run, from the executor.
 
     Returns:
         ToolExecutionStarted: Event whose arguments are detached from the provider's call.
@@ -170,6 +173,7 @@ def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
     return ToolExecutionStarted(
         call_id=tool_call.call_id,
         name=tool_call.name,
+        target=target,
         arguments=deepcopy(dict(tool_call.arguments)),
     )
 
@@ -195,6 +199,9 @@ class ToolExecutionLifecycle:
     """Validate one executor stream before its result reaches the provider."""
 
     tool_call: ToolCall
+    # The tool a proxy call runs, as announced in `tool.execution.started`; every
+    # later event of the call must name the same one.
+    target: str | None = None
     approval_requested: bool = False
     approval_resolved: bool = False
     approved: bool | None = None
@@ -229,6 +236,11 @@ class ToolExecutionLifecycle:
                 "Tool executor event does not match the requested call: "
                 f"expected {self.tool_call.name}/{self.tool_call.call_id}, "
                 f"got {event.name}/{event.call_id}"
+            )
+        if event.target != self.target:
+            raise ToolExecutionProtocolError(
+                f"Tool executor event for {self.tool_call.call_id} names target "
+                f"{event.target!r}, but the call was announced with {self.target!r}"
             )
 
         if isinstance(event, ToolApprovalRequested):
@@ -312,11 +324,14 @@ class ToolExecutionLifecycle:
         return self.terminal
 
 
-def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
+def _interrupted_tool_execution(
+    tool_call: ToolCall, *, target: str | None = None
+) -> ToolExecutionEnded:
     """Build a terminal record for an interrupted call whose effects may be uncertain.
 
     Args:
         tool_call (ToolCall): Requested call to settle.
+        target (str | None): The tool a proxy call was announced to run.
 
     Returns:
         ToolExecutionEnded: Cancelled error result advising retry only when effects
@@ -325,6 +340,7 @@ def _interrupted_tool_execution(tool_call: ToolCall) -> ToolExecutionEnded:
     return ToolExecutionEnded(
         call_id=tool_call.call_id,
         name=tool_call.name,
+        target=target,
         output=INTERRUPTED_TOOL_RESULT_TEXT,
         is_error=True,
         failure_code="internal_error",
@@ -366,16 +382,19 @@ class ToolBatchSettlement:
         self._requested.add(tool_call.call_id)
         return _tool_call_requested(tool_call)
 
-    def begin_lifecycle(self, tool_call: ToolCall) -> ToolExecutionLifecycle:
+    def begin_lifecycle(
+        self, tool_call: ToolCall, *, target: str | None = None
+    ) -> ToolExecutionLifecycle:
         """Start validating one occurrence of a call, visible to settlement.
 
         Args:
             tool_call (ToolCall): Call whose executor events will be validated.
+            target (str | None): The tool a proxy call was announced to run.
 
         Returns:
             ToolExecutionLifecycle: A new lifecycle that replaces any earlier occurrence's.
         """
-        lifecycle = ToolExecutionLifecycle(tool_call)
+        lifecycle = ToolExecutionLifecycle(tool_call, target=target)
         self._lifecycles[tool_call.call_id] = lifecycle
         return lifecycle
 
@@ -441,12 +460,15 @@ class ToolBatchSettlement:
                 approval = ToolApprovalResolved(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
+                    target=lifecycle.target,
                     approved=False,
                     reason="Agent run cancelled",
                 )
                 lifecycle.accept(approval)
                 yield approval
-            terminal = _interrupted_tool_execution(tool_call)
+            terminal = _interrupted_tool_execution(
+                tool_call, target=lifecycle.target if lifecycle is not None else None
+            )
             if lifecycle is not None:
                 lifecycle.accept(terminal)
                 terminal = lifecycle.finish()
