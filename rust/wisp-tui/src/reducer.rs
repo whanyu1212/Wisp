@@ -2744,10 +2744,17 @@ fn answer_approval(
     )?;
     state.pending_approval = None;
     restore_active_or_idle(state);
-    Ok(vec![
-        UiEffect::SendCommand(command),
-        UiEffect::RequestRender,
-    ])
+    let mut effects = vec![UiEffect::SendCommand(command)];
+    // Allowing every call switches the mode to YOLO; the backend applies the
+    // approval before it answers the read that follows it.
+    if matches!(
+        selected_scope,
+        Some(ApprovalScope::AllSession | ApprovalScope::AllProject)
+    ) {
+        effects.extend(discovery::permissions(state, None, ids)?);
+    }
+    effects.push(UiEffect::RequestRender);
+    Ok(effects)
 }
 
 fn answer_trust(
@@ -2903,15 +2910,18 @@ fn commit_session_and_hydrate(
         loaded: None,
         completion: None,
     });
-    Ok(vec![
+    let mut effects = vec![
         UiEffect::ReplaceTranscript,
         UiEffect::SendCommittedHydration {
             command,
             session_id: selected.session_id,
         },
         queue_state_effect(state, ids)?,
-        UiEffect::RequestRender,
-    ])
+    ];
+    // Leaving a session ends its grants, a session-only YOLO among them.
+    effects.extend(discovery::permissions(state, None, ids)?);
+    effects.push(UiEffect::RequestRender);
+    Ok(effects)
 }
 
 fn handle_session_backend_event(
@@ -4022,11 +4032,11 @@ fn finish_new_session(
             clear_queue_cache(state);
             state.history_request = None;
             state.input_ready = true;
-            Ok(vec![
-                UiEffect::ReplaceTranscript,
-                queue_state_effect(state, ids)?,
-                UiEffect::RequestRender,
-            ])
+            let mut effects = vec![UiEffect::ReplaceTranscript, queue_state_effect(state, ids)?];
+            // Leaving a session ends its grants, a session-only YOLO among them.
+            effects.extend(discovery::permissions(state, None, ids)?);
+            effects.push(UiEffect::RequestRender);
+            Ok(effects)
         }
         BackendEvent::CommandFinished { error, .. } => Ok(session_failure(
             state,
@@ -5214,7 +5224,8 @@ fn observe_backend_event(
     if let Some(effects) = state.project_files.observe(event) {
         return Ok(Some(effects));
     }
-    if let Some(effects) = discovery::observe(state, event) {
+    if let Some(mut effects) = discovery::observe(state, event) {
+        effects.extend(discovery::read_permissions_again(state, ids)?);
         return Ok(Some(effects));
     }
     if let Some(effects) = context::observe(state, event, ids)? {
@@ -6170,6 +6181,174 @@ mod tests {
                 assert_eq!(command["reason"], DEFAULT_DENIAL_REASON);
             }
         }
+    }
+
+    #[test]
+    fn yolo_grants_refresh_permissions() {
+        for (approved, scope, refreshes) in [
+            (true, ApprovalScope::AllSession, true),
+            (true, ApprovalScope::AllProject, true),
+            (true, ApprovalScope::ToolSession, false),
+            (true, ApprovalScope::Once, false),
+            (false, ApprovalScope::AllProject, false),
+        ] {
+            let mut state = UiState::new("fake".into(), None, None);
+            state.pending_approval = Some(PendingApproval {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: serde_json::json!({}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                safety: "command".into(),
+                grants_allowed: true,
+                session_only_yolo: false,
+            });
+            let effects = reduce(
+                &mut state,
+                UiAction::ApprovalDecision {
+                    call_id: "call-1".into(),
+                    approved,
+                    reason: None,
+                    scope: Some(scope),
+                },
+                &mut DeterministicIds::default(),
+            )
+            .unwrap();
+            let expected: &[&str] = if refreshes {
+                &["approval", "get_permissions"]
+            } else {
+                &["approval"]
+            };
+            assert_eq!(sent(&effects), expected, "{approved} {scope:?}");
+        }
+    }
+
+    #[test]
+    fn new_session_refreshes_permissions() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::NewSession, &mut ids).unwrap();
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("new_session-1", "new_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&effects).contains(&"get_permissions".to_owned()));
+    }
+
+    #[test]
+    fn grant_during_read_reads_again() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        });
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Permissions(None), &mut ids).unwrap();
+        let approval = reduce(
+            &mut state,
+            UiAction::ApprovalDecision {
+                call_id: "call-1".into(),
+                approved: true,
+                reason: None,
+                scope: Some(ApprovalScope::AllSession),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&approval), ["approval"]);
+        // The read in flight was answered before the grant, so another follows it.
+        let finished = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("permissions-1", "get_permissions", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&finished), ["get_permissions"]);
+        assert_eq!(sent_id(&finished, "get_permissions"), "permissions-2");
+    }
+
+    #[test]
+    fn change_during_read_explains_itself() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Permissions(None), &mut ids).unwrap();
+        let change = reduce(
+            &mut state,
+            UiAction::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&change).is_empty());
+        assert!(change.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("still loading"))
+        ));
+    }
+
+    #[test]
+    fn session_switch_refreshes_permissions() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.session = Some(session("source"));
+        state.history.active_leaf_id = Some("source-leaf".into());
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::ForkSession {
+                entry_id: "user-2".into(),
+            },
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("fork_session-1", "fork_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let mut forked = derivation("source", "fork");
+        forked.selected_entry_id = Some("user-2".into());
+        let committed = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SessionForked {
+                command_id: "fork_session-1".into(),
+                derived: forked,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&committed).contains(&"get_permissions".to_owned()));
+    }
+
+    #[test]
+    fn permission_read_leaves_editor_usable() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Permissions(None), &mut ids).unwrap();
+        assert!(state.permissions.loading());
+        assert!(state.editor_editable());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("permissions-1", "get_permissions", true)),
+            &mut ids,
+        )
+        .unwrap();
+        let change = reduce(
+            &mut state,
+            UiAction::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&change), ["set_permissions"]);
+        assert!(!state.editor_editable());
     }
 
     #[test]

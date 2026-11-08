@@ -5379,6 +5379,12 @@ where
             live_ui.dispatch(UiAction::LoadCommandCatalog, &writer_tx, max_client_frame).await?;
             live_ui.dispatch(UiAction::LoadInitialMode, &writer_tx, max_client_frame).await?;
             live_ui.dispatch(UiAction::LoadSkills, &writer_tx, max_client_frame).await?;
+            // The composer names YOLO, so the mode is read at startup, not only with the
+            // panel. It goes last: the context read waits for the connection catalog,
+            // and an earlier read would hold that wait open behind one more reply.
+            live_ui
+                .dispatch(UiAction::Permissions(None), &writer_tx, max_client_frame)
+                .await?;
             let exit = event_loop::run(
                 &mut live_ui,
                 terminal.terminal(),

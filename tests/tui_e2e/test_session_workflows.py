@@ -290,7 +290,7 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and context_redraw_offset is not None
-                and command_types[:7]
+                and command_types[:8]
                 == [
                     "get_messages",
                     "get_connection_catalog",
@@ -298,6 +298,7 @@ for line in sys.stdin:
                     "get_commands",
                     "get_state",
                     "get_skills",
+                    "get_permissions",
                     "get_queue_state",
                 ]
                 # A fresh welcome after the context result excludes the earlier

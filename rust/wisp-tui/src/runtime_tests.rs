@@ -370,6 +370,7 @@ async fn run_shutdown(send_completion: bool) -> Result<(), Error> {
             "get_commands",
             "get_state",
             "get_skills",
+            "get_permissions",
             "shutdown"
         ]
     );
