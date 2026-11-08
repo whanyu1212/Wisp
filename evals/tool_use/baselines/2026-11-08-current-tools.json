@@ -1872,9 +1872,6 @@
   }
  ],
  "suite": {
-  "credential_sources": {
-   "openai-codex": "stored"
-  },
   "finished_at": "2026-11-08T12:52:23.450407+00:00",
   "git_commit": "c421fcf88f56fc5c8f2b773f9ef2e5bb208deac4",
   "models": [

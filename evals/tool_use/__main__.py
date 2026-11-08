@@ -73,16 +73,20 @@ def main(argv: list[str] | None = None) -> int:
     baseline.add_argument("--label", required=True, help="what it measures, e.g. current-tools")
 
     args = parser.parse_args(argv)
-    if args.command == "report":
-        print(render_markdown(build_report(load_rows(args.runs), k=args.k)))
-        return 0
-    if args.command == "compare":
-        comparison = compare_runs(load_rows(args.before), load_rows(args.after))
-        print(render_comparison(comparison))
-        return 0
-    if args.command == "baseline":
+    if args.command == "run":
+        return _run(args)
+    try:
+        if args.command == "report":
+            print(render_markdown(build_report(load_rows(args.runs), k=args.k)))
+            return 0
+        if args.command == "compare":
+            comparison = compare_runs(load_rows(args.before), load_rows(args.after))
+            print(render_comparison(comparison))
+            return 0
         return _baseline(args.results, args.label)
-    return _run(args)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
 
 
 def _baseline(results: Path, label: str) -> int:
@@ -90,15 +94,23 @@ def _baseline(results: Path, label: str) -> int:
     if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", label) is None:
         print("error: --label must be lowercase words joined by hyphens", file=sys.stderr)
         return 2
+    # `run` writes suite.json last, so its absence means the suite did not finish.
     suite_path = results / "suite.json"
-    suite = json.loads(suite_path.read_text(encoding="utf-8")) if suite_path.is_file() else None
-    finished = str(suite["finished_at"]) if suite else datetime.now(UTC).isoformat()
+    if not suite_path.is_file():
+        print(
+            f"error: {results} has no suite.json; pass a finished results folder", file=sys.stderr
+        )
+        return 2
+    suite = json.loads(suite_path.read_text(encoding="utf-8"))
+    finished = suite.get("finished_at") if isinstance(suite, dict) else None
+    if not isinstance(finished, str):
+        print(f"error: {suite_path} has no finished_at time", file=sys.stderr)
+        return 2
     date = finished[:10]
     path = BASELINES_DIR / f"{date}-{label}.json"
+    document = baseline_document(load_rows(results), label=label, date=date, suite=suite)
     try:
-        write_baseline(
-            path, baseline_document(load_rows(results), label=label, date=date, suite=suite)
-        )
+        write_baseline(path, document)
     except FileExistsError:
         print(f"error: {path} already exists; choose another label", file=sys.stderr)
         return 2

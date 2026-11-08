@@ -103,9 +103,10 @@ def load_rows(path: Path) -> list[dict[str, object]]:
     if path.is_dir():
         path = path / "runs.jsonl"
     text = path.read_text(encoding="utf-8")
-    if path.suffix != ".json":
+    if path.suffix.lower() != ".json":
         return [json.loads(line) for line in text.splitlines() if line]
-    runs = json.loads(text).get("runs")
+    document = json.loads(text)
+    runs = document.get("runs") if isinstance(document, dict) else None
     if not isinstance(runs, list):
         raise ValueError(f"{path} is not a baseline: it has no runs list")
     return runs

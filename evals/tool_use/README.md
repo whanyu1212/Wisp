@@ -109,17 +109,25 @@ uv run python -m evals.tool_use baseline evals/tool_use/results/<timestamp> --la
 
 `compare BEFORE AFTER` pairs runs by task and model (each side a results folder, its
 `runs.jsonl`, or a baseline file) and prints, per pair, passes before and after and the change in
-mean tool calls, tool errors and tokens, with a 95% bootstrap interval for each change. A change
-whose interval excludes zero is marked `*`. Errored runs are left out on both sides. `(tools
-differ)` after a task says the two sides offered different tools, which is expected when the tools
-are what changed. The last lines state the noise floor: per metric, the median interval half-width
-as a share of the earlier mean. Treat changes smaller than that as no change. With three runs a
-side the bootstrap is optimistic, so treat a marked change near the floor as a lead to rerun with
-more repetitions, not a result.
+mean tool calls, tool errors and tokens, with a 95% Welch t-interval for each change. A change
+whose interval excludes zero is marked `*`. A t-interval rather than a bootstrap, because a
+bootstrap over two or three runs is far too narrow; the t distribution widens the interval for
+the few runs it rests on. A side needs at least two scored runs for an interval; with fewer the
+cell shows `—`. Errored runs are left out of the metrics and counted in the passes column.
+`(tools differ)` after a task says the two sides offered different tools, which is expected when
+the tools are what changed.
+
+Each interval is 95% on its own, so across one comparison's many cells about one in twenty is
+marked by chance; the output says how many to expect. Trust a change that is marked on several
+tasks or models, or that holds when rerun with more repetitions, not a single `*`. The noise floor
+line gives, for calls and tokens, the median interval half-width as a share of the earlier mean:
+changes smaller than that are within noise. With three runs a side it is about ±25%, so this suite
+detects large effects only; use more repetitions for smaller ones.
 
 `baseline` saves a results folder as `baselines/<date>-<label>.json`: the suite's settings and,
 for each run, its task, model, status, tool calls and errors, tokens, cost and setup hash. It
-leaves out folders and error text, and never overwrites an existing baseline. Baselines are
+leaves out folders, error text and credential sources, takes only a finished results folder (one
+with `suite.json`), and never overwrites an existing baseline. Baselines are
 committed so later changes to Wisp's tools are compared against the same numbers. Record one on
 the commit the change starts from, with the models the change will be measured on.
 
