@@ -102,9 +102,10 @@ small differences as no difference.
 ## Add a task
 
 Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve
-it, and a `task.toml`. `tests/evals/test_shipped_tasks.py` checks that every verifier rejects the
-untouched fixture and accepts the fixture with `solution/` copied over it. Ruff and mypy skip
-`tasks/`, so fixtures stay byte-exact.
+it, and a `task.toml`. If a solved run also leaves files in `HOME`, such as a log a verifier
+counts, put them in `solution-home/`. `tests/evals/test_shipped_tasks.py` checks that every
+verifier rejects the untouched fixture and accepts the fixture with `solution/` copied over it.
+Ruff and mypy skip `tasks/`, so fixtures stay byte-exact.
 
 ```toml
 id = "fix-failing-test"          # must match the folder name
