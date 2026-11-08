@@ -5350,7 +5350,7 @@ fn finish_run(state: &mut UiState, totals: crate::transcript::RunTotals) -> Vec<
         duration_ms: totals.duration_ms,
         outcome: crate::transcript::RunOutcome::parse(&totals.outcome),
     };
-    let summary = with_session_settings(state, totals).summary_line();
+    let totals = with_session_settings(state, totals);
     // Total the run while its prompt id still finds its replies, steers and
     // follow-ups included.
     state.finished_run_cost = state
@@ -5367,7 +5367,7 @@ fn finish_run(state: &mut UiState, totals: crate::transcript::RunTotals) -> Vec<
         .run_progress
         .is_some_and(|run| state.transcript.attach_run_result(run.prompt, result));
     // A run that reported nothing to total keeps no summary row.
-    let summarized = !summary.is_empty() && state.transcript.attach_run_summary(summary);
+    let summarized = state.transcript.attach_run_summary(totals);
     if recorded || summarized {
         vec![UiEffect::RequestRender]
     } else {
@@ -7366,6 +7366,35 @@ mod tests {
             Some("Build · gpt_x · high · 4m 12s · 3 tools · 31 tok/s")
         );
         assert_eq!(reply.display_content(), "Done.");
+    }
+
+    #[test]
+    fn live_summaries_name_switches() {
+        let mut state = UiState::new("fake".into(), Some("gpt_x".into()), None);
+        let mut ids = DeterministicIds::default();
+        let mut finish = |state: &mut UiState, prompt: &str| {
+            state.transcript.append_prompt(prompt.into());
+            state.transcript.complete_message(1, "Done.".into());
+            reduce(
+                state,
+                UiAction::BackendEvent(BackendEvent::RunCompleted(
+                    crate::transcript::RunTotals::finished(2_000, 0),
+                )),
+                &mut ids,
+            )
+            .unwrap();
+            state
+                .transcript
+                .entries()
+                .last()
+                .unwrap()
+                .run_summary()
+                .map(str::to_owned)
+        };
+        assert_eq!(finish(&mut state, "a").as_deref(), Some("gpt_x · 2.0s"));
+        assert_eq!(finish(&mut state, "b").as_deref(), Some("2.0s"));
+        state.model = Some("gpt_y".into());
+        assert_eq!(finish(&mut state, "c").as_deref(), Some("gpt_y · 2.0s"));
     }
 
     #[test]

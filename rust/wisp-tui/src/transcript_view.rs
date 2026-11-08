@@ -5107,6 +5107,7 @@ fn terminal_control_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transcript::RunTotals;
     use std::fmt::Write as _;
 
     fn prose_rows(source: &str, width: usize) -> Vec<TranscriptRow> {
@@ -5375,7 +5376,7 @@ mod tests {
         viewport.set_geometry(&transcript, &mut cache, 60, 20);
         // Rows cached before the run completes still lead to its summary after.
         viewport.visible_rows(&transcript, &mut cache);
-        assert!(transcript.attach_run_summary("4.0s · 1 tool".into()));
+        assert!(transcript.attach_run_summary(RunTotals::finished(4_000, 1)));
         viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
         // Following the tail, the summary is the last row.
         let rows = viewport.visible_rows(&transcript, &mut cache);
@@ -5415,7 +5416,11 @@ mod tests {
         let mut transcript = Transcript::default();
         transcript.append_prompt("first".into());
         transcript.complete_message(1, "done".into());
-        assert!(transcript.attach_run_summary(format!("evil\u{1b}[2J{}", "x".repeat(200))));
+        assert!(transcript.attach_run_summary(RunTotals {
+            outcome: "completed".into(),
+            model: Some(format!("evil\u{1b}[2J{}", "x".repeat(200))),
+            ..RunTotals::default()
+        }));
         let mut cache = TranscriptRowCache::default();
         let mut viewport = TranscriptViewport::default();
         viewport.set_geometry(&transcript, &mut cache, 40, 20);
@@ -5475,7 +5480,7 @@ mod tests {
         let oversized = "word ".repeat(MARKDOWN_SOURCE_MAX_BYTES / 4);
         for text in ["**done**", oversized.as_str()] {
             let mut transcript = searched_reply(text, Some("0.02"), &[]);
-            assert!(transcript.attach_run_summary("4.0s".into()));
+            assert!(transcript.attach_run_summary(RunTotals::finished(4_000, 0)));
             // The cost still feeds the side panel's totals.
             assert!(transcript.entries()[1].cost().is_some());
             let rows = tail_rows(&transcript);
@@ -5610,7 +5615,7 @@ mod tests {
     #[test]
     fn search_only_reply_ends_cleanly() {
         let mut transcript = searched_reply("", None, &[docs_search()]);
-        assert!(transcript.attach_run_summary("4.0s".into()));
+        assert!(transcript.attach_run_summary(RunTotals::finished(4_000, 0)));
         let text = row_text(&tail_rows(&transcript));
         assert_eq!(
             text[text.len() - 2..],

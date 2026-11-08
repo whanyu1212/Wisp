@@ -135,10 +135,7 @@ pub(crate) fn project_chronological_history<'a>(
         // The run this message closed: rebuild the summary line its live turn ended with,
         // on the same entry the live run chose.
         if let Some(totals) = run_totals(message, index)? {
-            let summary = totals.summary_line();
-            if !summary.is_empty() {
-                transcript.attach_run_summary(summary);
-            }
+            transcript.attach_run_summary(totals);
         }
         durable_entry_ids.push(durable_entry_id.to_owned());
     }
@@ -1557,7 +1554,100 @@ mod tests {
         else {
             panic!("expected a finished run");
         };
-        assert_eq!(live.summary_line(), line);
+        assert_eq!(live.summary_line(true), line);
+    }
+
+    /// The totals line of [`finished_run`] without its settings.
+    const RUN_STATS: &str = "6m 41s · 14 tools · 31 tok/s";
+
+    /// A prompt and the reply that closed its run on `model`.
+    fn finished_turn(prompt: &str, model: &str) -> [Value; 2] {
+        let mut run = finished_run();
+        run["model"] = json!(model);
+        let mut reply = message("assistant", "Done.");
+        reply["run_completed"] = run;
+        [message("user", prompt), reply]
+    }
+
+    fn summaries(transcript: &crate::transcript::Transcript) -> Vec<&str> {
+        transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.run_summary())
+            .collect()
+    }
+
+    #[test]
+    fn summaries_name_switches_only() {
+        let mut turns = [
+            finished_turn("a", "gpt-6-astra"),
+            finished_turn("b", "gpt-6-astra"),
+            finished_turn("c", "gpt-6-mini"),
+            finished_turn("d", "gpt-6-mini"),
+            finished_turn("e", "gpt-6-mini"),
+        ]
+        .concat();
+        // Effort alone switches on the last turn.
+        turns[9]["run_completed"]["effort"] = json!("low");
+        let restored = project_rpc_messages(&turns).unwrap();
+        // Each row compares with the one before it, not with the first.
+        assert_eq!(
+            summaries(&restored),
+            [
+                format!("Build · gpt-6-astra · high · {RUN_STATS}"),
+                RUN_STATS.to_owned(),
+                format!("Build · gpt-6-mini · high · {RUN_STATS}"),
+                RUN_STATS.to_owned(),
+                format!("Build · gpt-6-mini · low · {RUN_STATS}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn older_page_trims_first_summary() {
+        let older = project_rpc_messages(&finished_turn("a", "gpt-6-astra")).unwrap();
+        let mut newer = project_rpc_messages(
+            &[
+                finished_turn("b", "gpt-6-astra"),
+                finished_turn("c", "gpt-6-astra"),
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let revisions = |transcript: &crate::transcript::Transcript| {
+            transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.run_summary().is_some())
+                .map(|entry| entry.revision())
+                .collect::<Vec<_>>()
+        };
+        let before = revisions(&newer);
+        assert!(newer.prepend_history_page(&older));
+        let named = format!("Build · gpt-6-astra · high · {RUN_STATS}");
+        assert_eq!(summaries(&newer), [named.as_str(), RUN_STATS, RUN_STATS]);
+        // Only the newer page's first row changed, so only its cached layout rebuilds.
+        let after = revisions(&newer);
+        assert_ne!(after[1], before[0]);
+        assert_eq!(after[2], before[1]);
+
+        // An older page on another model leaves the newer page's rows as they were.
+        let older = project_rpc_messages(&finished_turn("a", "gpt-6-mini")).unwrap();
+        let mut newer = project_rpc_messages(&finished_turn("b", "gpt-6-astra")).unwrap();
+        let before = revisions(&newer);
+        assert!(newer.prepend_history_page(&older));
+        assert_eq!(summaries(&newer)[1], named);
+        assert_eq!(revisions(&newer)[1], before[0]);
+    }
+
+    #[test]
+    fn bare_summary_keeps_settings() {
+        let totals = crate::transcript::RunTotals {
+            outcome: "completed".into(),
+            model: Some("gpt-6-astra".into()),
+            ..Default::default()
+        };
+        assert_eq!(totals.summary_line(false), "gpt-6-astra");
     }
 
     #[test]
