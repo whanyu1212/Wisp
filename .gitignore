@@ -13,6 +13,7 @@ __pycache__/
 build/
 dist/
 /profiles/
+/evals/tool_use/results/
 /test-results/
 
 # Rust

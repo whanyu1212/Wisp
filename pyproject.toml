@@ -101,6 +101,8 @@ markers = [
 
 [tool.ruff]
 line-length = 100
+# Eval task fixtures are byte-exact inputs, such as a file with a byte-order mark.
+extend-exclude = ["evals/tool_use/tasks"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -108,8 +110,11 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+# Eval task fixtures and solutions are test data, not part of the package.
+exclude = ["^evals/tool_use/tasks/"]
 files = [
     "src/wisp",
+    "evals",
     "examples/crafting_agents",
     "examples/sdk/common.py",
     "examples/sdk/control_requests.py",

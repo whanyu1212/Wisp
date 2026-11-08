@@ -1,0 +1,8 @@
+id = "early-build-error"
+title = "Fix a build whose only error is printed before thousands of lines of output"
+tags = ["long-output"]
+prompt = "Run `bash build.sh`. It fails. Find the cause and fix it without changing build.sh."
+verify = "cmp -s {task}/repo/build.sh build.sh && bash build.sh >/dev/null 2>&1"
+timeout_seconds = 300
+max_tool_iterations = 30
+tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]
