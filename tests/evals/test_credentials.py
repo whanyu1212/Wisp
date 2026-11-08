@@ -28,6 +28,34 @@ def test_env_file_passes_only_provider_keys(tmp_path: Path) -> None:
     assert read_provider_keys(tmp_path / "missing") == {}
 
 
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("OPENAI_API_KEY=sk-a # note\n", "sk-a"),
+        ('OPENAI_API_KEY="sk-b" # note\n', "sk-b"),
+        ("\ufeffOPENAI_API_KEY=sk-c\n", "sk-c"),
+        ("export\tOPENAI_API_KEY=sk-d\n", "sk-d"),
+        ("OPENAI_API_KEY=sk#e\n", "sk#e"),
+        ('OPENAI_API_KEY="unclosed\n', None),
+        ("OPENAI_API_KEY=\n", None),
+    ],
+    ids=["comment", "quoted-comment", "bom", "tab", "hash-in-value", "unclosed", "empty"],
+)
+def test_env_file_values(tmp_path: Path, text: str, expected: str | None) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(text, encoding="utf-8")
+
+    assert read_provider_keys(env_file).get("OPENAI_API_KEY") == expected
+
+
+def test_binary_env_file_rejected(tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_bytes(b"OPENAI_API_KEY=\xff\xfe\n")
+
+    with pytest.raises(CredentialError, match="not UTF-8"):
+        read_provider_keys(env_file)
+
+
 @pytest.fixture
 def auth_file(tmp_path: Path) -> Path:
     path = tmp_path / "auth.json"
@@ -56,7 +84,10 @@ def test_sources_follow_wisp_order(tmp_path: Path, auth_file: Path) -> None:
 
 
 def test_missing_credential_stops(tmp_path: Path, auth_file: Path) -> None:
-    with pytest.raises(CredentialError, match="no credential for openai") as raised:
-        resolve_credentials(["openai"], env_file=tmp_path / "none", auth_file=auth_file, environ={})
+    env_file = tmp_path / ".env"
+    env_file.write_text("ANTHROPIC_API_KEY=sk-other\n", encoding="utf-8")
 
-    assert "sk-" not in str(raised.value)
+    with pytest.raises(CredentialError, match="no credential for openai: "):
+        resolve_credentials(
+            ["openai", "openai-codex"], env_file=env_file, auth_file=auth_file, environ={}
+        )

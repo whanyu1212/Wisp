@@ -15,6 +15,8 @@ from evals.tool_use.runner import (
     ModelSpec,
     RunContext,
     RunRow,
+    classify,
+    command_environment,
     detect_build,
     evaluate_checks,
     run_environment,
@@ -22,6 +24,7 @@ from evals.tool_use.runner import (
     run_suite,
 )
 from evals.tool_use.task_definitions import Task, TaskChecks, load_task
+from wisp.events import RunOutcome
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,21 +35,88 @@ def test_model_spec_parses() -> None:
         ModelSpec.parse("gpt-6.1-sol")
 
 
-def test_environment_drops_settings(tmp_path: Path) -> None:
+def test_environment_passes_only_allowlist(tmp_path: Path) -> None:
     credentials = Credentials(
         auth_file=tmp_path / "auth.json", environment={"OPENAI_API_KEY": "sk-run"}
     )
-    base = {"PATH": "/bin", "WISP_MODEL": "other", "OPENAI_API_KEY": "sk-shell", "HOME": "/u"}
+    base = {
+        "PATH": "/bin",
+        "LC_ALL": "C",
+        "HOME": "/u",
+        "WISP_MODEL": "other",
+        "OPENAI_API_KEY": "sk-shell",
+        "OPENAI_BASE_URL": "https://elsewhere",
+        "GITHUB_TOKEN": "ghp",
+        "XDG_CONFIG_HOME": "/u/.config",
+    }
 
     environment = run_environment(tmp_path / "home", credentials, base)
 
     assert environment == {
         "PATH": "/bin",
+        "LC_ALL": "C",
         "OPENAI_API_KEY": "sk-run",
         "HOME": str(tmp_path / "home"),
         "WISP_TRUST": "1",
         "WISP_AUTH_FILE": str(tmp_path / "auth.json"),
     }
+    assert command_environment(tmp_path / "home", base) == {
+        "PATH": "/bin",
+        "LC_ALL": "C",
+        "HOME": str(tmp_path / "home"),
+    }
+
+
+def _metrics(outcome: RunOutcome | None, *errors: str, overflow: bool = False) -> RunMetrics:
+    return RunMetrics(outcome=outcome, errors=list(errors), context_overflowed=overflow)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "metrics", "verify_exit", "failed_checks", "status"),
+    [
+        (0, _metrics("completed"), 0, [], "passed"),
+        (0, _metrics("completed"), 1, [], "failed"),
+        (0, _metrics("completed"), 0, ["never called read_output"], "failed"),
+        (124, _metrics("cancelled", "Agent run cancelled"), 0, [], "failed"),
+        (124, _metrics("failed", "Provider error"), 0, [], "failed"),
+        (124, _metrics(None), 0, [], "failed"),
+        (1, _metrics("failed", "Maximum tool iterations exceeded: 30"), 0, [], "failed"),
+        (1, _metrics("failed", "Context window exceeded", overflow=True), 0, [], "failed"),
+        (1, _metrics("failed", "429 Too Many Requests"), 0, [], "errored"),
+        (1, _metrics("completed"), 0, [], "errored"),
+        (1, _metrics(None, "auth failed"), 0, [], "errored"),
+    ],
+    ids=[
+        "passed",
+        "verify-failed",
+        "check-failed",
+        "deadline",
+        "deadline-after-error",
+        "deadline-forced",
+        "iteration-limit",
+        "context-overflow",
+        "provider-error",
+        "crash-after-success",
+        "crash",
+    ],
+)
+def test_classifies_runs(
+    exit_code: int,
+    metrics: RunMetrics,
+    verify_exit: int,
+    failed_checks: list[str],
+    status: str,
+) -> None:
+    assert (
+        classify(
+            exit_code=exit_code,
+            runner_error=None,
+            metrics=metrics,
+            verify_exit=verify_exit,
+            failed_checks=failed_checks,
+        )
+        == status
+    )
 
 
 def test_checks_report_breaks() -> None:
@@ -106,6 +176,28 @@ def test_budget_stops_between_rounds(tmp_path: Path) -> None:
     assert (result.stopped_for_budget, result.skipped_runs) == (True, 6)
 
 
+def test_broken_run_recorded(tmp_path: Path) -> None:
+    def execute(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunRow:
+        if model.model == "a":
+            raise OSError("disk full")
+        return _row(task.id, model, rep, usd="0")
+
+    rows: list[RunRow] = []
+    models = [ModelSpec("openai", "a"), ModelSpec("openai", "b")]
+
+    result = run_suite(
+        [_task(tmp_path)], models, 1, _context(tmp_path), execute=execute, on_row=rows.append
+    )
+
+    assert sorted((row.model, row.status) for row in result.rows) == [
+        ("a", "errored"),
+        ("b", "passed"),
+    ]
+    assert rows == result.rows
+    broken = next(row for row in rows if row.model == "a")
+    assert broken.error == "runner failed: OSError: disk full"
+
+
 def _row(task: str, model: ModelSpec, rep: int, *, usd: str) -> RunRow:
     return RunRow(
         task=task,
@@ -159,6 +251,7 @@ def test_fake_run_scored(tmp_path: Path, verify: str, status: str) -> None:
     assert row.tools_sha256 is not None and len(row.tools_sha256) == 64
     assert row.credential_source == "none"
     assert (context.results_dir / row.run_dir / "events.jsonl").stat().st_size > 0
+    assert (context.results_dir / row.run_dir / "verify.txt").exists()
 
 
 @pytest.mark.process

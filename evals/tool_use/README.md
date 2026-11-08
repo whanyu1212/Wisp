@@ -9,9 +9,10 @@ The suite is run by hand or on a schedule, never in CI: it calls paid models. CI
 runner itself (`tests/evals/`), with the `fake` provider.
 
 > [!WARNING]
-> Runs execute real shell commands on this machine. Each run gets a fresh temporary folder and a
-> private `HOME`, but that confines files, not commands. Tasks are synthetic and benign, and each
-> exposes only the tools it needs.
+> Runs execute real shell commands on this machine. Each run gets a fresh temporary folder, a
+> private `HOME`, an allowlisted environment, and its own process group that is killed when the
+> run ends, but that confines files and leftovers, not commands. Tasks are synthetic and benign,
+> and each exposes only the tools it needs.
 
 ## Run
 
@@ -47,7 +48,10 @@ The runner follows Wisp's own resolution:
 
 Wisp itself does not read `.env` files. The runner reads only an allowlist of provider key names
 from it, because a `.env` may also set `WISP_*` variables that would silently change the setup
-under test; for the same reason every run starts without the runner's own `WISP_*` variables.
+under test. For the same reason, and to keep other services' tokens out of the model's commands,
+a run inherits only a short allowlist of the runner's variables (`PATH`, locale, temp folders,
+proxies and certificate paths); setup and verify commands get the same environment without any
+credentials.
 Each result row records whether the credential came from the `environment` or was `stored`, never
 the value. The runner stops before any run if a requested provider has no credential.
 
@@ -59,16 +63,19 @@ the value. The runner stops before any run if a requested provider has no creden
    `wisp -p PROMPT --mode json --provider P --model M --yes --timeout T --max-tool-iterations N`
    with only the task's tools allowed, a private `HOME` and `WISP_TRUST=1`.
 3. Runs the task's `verify` command in the folder and checks the run's events.
-4. Appends one row to `runs.jsonl`. The run's `events.jsonl`, `stderr.txt` and session are kept
-   next to it under `results/<task>/<provider>__<model>/rep<n>/`.
+4. Appends one row to `runs.jsonl`. The run's `events.jsonl`, `stderr.txt`, `verify.txt` (and
+   `setup.txt`) and session are kept under `results/<task>/<provider>__<model>/rep<n>/`.
+
+Each command runs in its own process group, which is killed when the command ends or overruns, so
+a stuck build or a background process the model started does not outlive the run.
 
 A row's `status` is:
 
 | Status | Meaning |
 |---|---|
 | `passed` | `verify` exited 0, every check held, and the run finished before its deadline |
-| `failed` | The run finished or hit its deadline (`timed_out`), and `verify` or a check failed |
-| `errored` | The run says nothing about the task: Wisp crashed, could not sign in, ended on a provider error, or setup failed |
+| `failed` | `verify` or a check failed; or the run hit its deadline (`timed_out`), its tool-iteration limit, or its context window |
+| `errored` | The run says nothing about the task: Wisp crashed or exited badly, could not sign in, ended on a provider error, or setup failed |
 
 Reports leave errored runs out of pass rates and count them on their own, so a rate limit does not
 read as a task failure. Rows also record tool calls by name, tool errors by `failure_code`,
@@ -92,7 +99,10 @@ small differences as no difference.
 
 ## Add a task
 
-Create `tasks/<id>/` with a `repo/` fixture and a `task.toml`:
+Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve
+it, and a `task.toml`. `tests/evals/test_shipped_tasks.py` checks that every verifier rejects the
+untouched fixture and accepts the fixture with `solution/` copied over it. Ruff and mypy skip
+`tasks/`, so fixtures stay byte-exact.
 
 ```toml
 id = "fix-failing-test"          # must match the folder name
@@ -113,5 +123,7 @@ max_tool_errors = 2
 
 Commands run with `bash -c` in the run's folder. `{python}` becomes the runner's interpreter and
 `{task}` the task's own folder, so a verifier script can live beside `task.toml`, out of the
-model's reach. Keep fixtures standard-library only so runs need no installs, and make `verify`
-reject plausible wrong fixes, not only accept the right one.
+model's reach. To check that the model left a file alone, compare it with the fixture
+(`cmp -s {task}/repo/FILE FILE`), not with `HEAD`, which the model can move by committing. Keep
+fixtures standard-library only so runs need no installs, and make `verify` reject plausible wrong
+fixes, not only accept the right one.

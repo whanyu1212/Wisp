@@ -8,10 +8,12 @@ for the budget leaves every pairing with the same number of runs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,9 +23,9 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import IO, Literal
 
-from evals.tool_use.credentials import PROVIDER_KEY_VARIABLES, Credentials
+from evals.tool_use.credentials import Credentials
 from evals.tool_use.metrics import RunMetrics, measure, parse_events
 from evals.tool_use.task_definitions import Task, TaskChecks
 
@@ -34,7 +36,43 @@ DEADLINE_EXIT_CODE = 124
 # before exiting outright; the runner kills it only after that and a margin.
 _KILL_MARGIN_SECONDS = 60
 _VERIFY_TIMEOUT_SECONDS = 120
-_GIT_IDENTITY = ("-c", "user.name=wisp-eval", "-c", "user.email=wisp-eval@example.invalid")
+_GIT_OPTIONS = (
+    "-c",
+    "user.name=wisp-eval",
+    "-c",
+    "user.email=wisp-eval@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
+)
+# The only runner variables a run inherits. Everything else, including tokens for
+# other services and settings such as OPENAI_BASE_URL, stays out of the commands
+# the model runs and out of the setup under test.
+_PASSTHROUGH_VARIABLES = frozenset(
+    {
+        "PATH",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TZ",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+    }
+)
+# Wisp reports reaching --max-tool-iterations only as an error with this text.
+_ITERATION_LIMIT_ERROR = "Maximum tool iterations exceeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,10 +202,26 @@ def detect_build(repo_root: Path) -> Build:
     return Build(wisp=wisp, version=version, git_commit=commit + ("-dirty" if dirty else ""))
 
 
+def command_environment(home: Path, base: Mapping[str, str]) -> dict[str, str]:
+    """Build the environment for a run's setup and verify commands.
+
+    Only allowlisted variables pass from the runner, and `HOME` is the run's
+    private folder, so nothing reads the user's own configuration.
+    """
+
+    environment = {
+        name: value
+        for name, value in base.items()
+        if name in _PASSTHROUGH_VARIABLES or name.startswith("LC_")
+    }
+    environment["HOME"] = str(home)
+    return environment
+
+
 def run_environment(
     home: Path, credentials: Credentials, base: Mapping[str, str]
 ) -> dict[str, str]:
-    """Build a run's environment: no `WISP_*` settings and no stray provider keys.
+    """Build Wisp's environment: the command environment plus credentials.
 
     Args:
         home (Path): The run's private `HOME`.
@@ -178,23 +232,49 @@ def run_environment(
         dict[str, str]: The environment Wisp runs with.
     """
 
-    key_names = set(PROVIDER_KEY_VARIABLES.values())
-    environment = {
-        name: value
-        for name, value in base.items()
-        if not name.startswith("WISP_") and name not in key_names
-    }
+    environment = command_environment(home, base)
     environment.update(credentials.environment)
-    environment["HOME"] = str(home)
     environment["WISP_TRUST"] = "1"
     environment["WISP_AUTH_FILE"] = str(credentials.auth_file)
     return environment
 
 
+def classify(
+    *,
+    exit_code: int | None,
+    runner_error: str | None,
+    metrics: RunMetrics,
+    verify_exit: int | None,
+    failed_checks: Sequence[str],
+) -> RunStatus:
+    """Decide whether a run passed, failed the task, or says nothing about it.
+
+    A deadline is a task failure whatever outcome the stopped run reports. A run
+    that fails because the model hit its tool-iteration limit or outgrew its
+    context is a task failure too. Any other failure, a crash, or a run that
+    exits badly after reporting success, is `errored`.
+    """
+
+    if runner_error is not None:
+        return "errored"
+    if exit_code == DEADLINE_EXIT_CODE:
+        return "failed"
+    if metrics.outcome == "failed":
+        hit_limit = metrics.context_overflowed or any(
+            error.startswith(_ITERATION_LIMIT_ERROR) for error in metrics.errors
+        )
+        return "failed" if hit_limit else "errored"
+    if metrics.outcome != "completed" or exit_code != 0:
+        return "errored"
+    if verify_exit != 0 or failed_checks:
+        return "failed"
+    return "passed"
+
+
 def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunRow:
     """Run one task once and score it."""
 
-    run_dir = context.results_dir / task.id / f"{model.provider}__{model.model}" / f"rep{rep}"
+    run_dir = _run_dir(context, task, model, rep)
     run_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="wisp-eval-") as scratch:
@@ -202,12 +282,13 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         home = Path(scratch) / "home"
         home.mkdir()
         shutil.copytree(task.fixture, work)
-        setup_error = _prepare(task, work, context.python)
+        commands = command_environment(home, os.environ)
+        setup_error = _prepare(task, work, run_dir, commands, context.python)
         if setup_error is not None:
             return _row(
                 task, model, rep, context, run_dir, started, status="errored", error=setup_error
             )
-        exit_code, wisp_error = _run_wisp(task, model, work, home, run_dir, context)
+        exit_code, runner_error = _run_wisp(task, model, work, home, run_dir, context)
         events_text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
         try:
             metrics = measure(parse_events(events_text.splitlines()))
@@ -224,20 +305,21 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
                 error=f"unreadable events: {err}",
             )
         verify_exit = _run_command(
-            task.definition.verify, work, context.python, task.folder, _VERIFY_TIMEOUT_SECONDS
+            task.definition.verify,
+            work,
+            commands,
+            context.python,
+            task.folder,
+            run_dir / "verify.txt",
         )
     failed_checks = evaluate_checks(task.definition.checks, metrics)
-    timed_out = exit_code == DEADLINE_EXIT_CODE
-    if (
-        wisp_error is not None
-        or (metrics.outcome is None and not timed_out)
-        or (metrics.outcome == "failed")
-    ):
-        status: RunStatus = "errored"
-    elif timed_out or verify_exit != 0 or failed_checks:
-        status = "failed"
-    else:
-        status = "passed"
+    status = classify(
+        exit_code=exit_code,
+        runner_error=runner_error,
+        metrics=metrics,
+        verify_exit=verify_exit,
+        failed_checks=failed_checks,
+    )
     return _row(
         task,
         model,
@@ -250,8 +332,8 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         verify_exit=verify_exit,
         failed_checks=failed_checks,
         metrics=metrics,
-        timed_out=timed_out,
-        error=wisp_error or metrics.last_error,
+        timed_out=exit_code == DEADLINE_EXIT_CODE,
+        error=runner_error or metrics.last_error,
     )
 
 
@@ -307,13 +389,28 @@ def run_suite(
                 result.stopped_for_budget = True
                 result.skipped_runs = len(pairs) * (reps - rep + 1)
                 break
-            futures: set[Future[RunRow]] = {
-                pool.submit(execute, task, model, rep, context) for task, model in pairs
+            runs: dict[Future[RunRow], tuple[Task, ModelSpec]] = {
+                pool.submit(execute, task, model, rep, context): (task, model)
+                for task, model in pairs
             }
-            while futures:
-                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+            pending = set(runs)
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
                 for future in done:
-                    row = future.result()
+                    try:
+                        row = future.result()
+                    except Exception as exc:  # noqa: BLE001 - one broken run must not end the suite
+                        task, model = runs[future]
+                        row = _row(
+                            task,
+                            model,
+                            rep,
+                            context,
+                            _run_dir(context, task, model, rep),
+                            time.monotonic(),
+                            status="errored",
+                            error=f"runner failed: {type(exc).__name__}: {exc}",
+                        )
                     result.rows.append(row)
                     on_row(row)
     return result
@@ -334,22 +431,30 @@ def _over_budget(rows: Sequence[RunRow], budget: Budget) -> bool:
     )
 
 
-def _prepare(task: Task, work: Path, python: str) -> str | None:
+def _run_dir(context: RunContext, task: Task, model: ModelSpec, rep: int) -> Path:
+    return context.results_dir / task.id / f"{model.provider}__{model.model}" / f"rep{rep}"
+
+
+def _prepare(
+    task: Task, work: Path, run_dir: Path, environment: Mapping[str, str], python: str
+) -> str | None:
     """Commit the fixture and run the task's setup; return an error, if any."""
 
     for command in (
         ["git", "init", "-q"],
-        ["git", *_GIT_IDENTITY, "add", "-A"],
-        ["git", *_GIT_IDENTITY, "commit", "-q", "-m", "fixture"],
+        ["git", *_GIT_OPTIONS, "add", "-A"],
+        ["git", *_GIT_OPTIONS, "commit", "-q", "-m", "fixture"],
     ):
-        completed = subprocess.run(command, cwd=work, capture_output=True, check=False)
+        completed = subprocess.run(
+            command, cwd=work, env=environment, capture_output=True, check=False
+        )
         if completed.returncode != 0:
             return (
                 f"fixture {' '.join(command)} failed: {completed.stderr.decode(errors='replace')}"
             )
     if task.definition.setup is not None:
         exit_code = _run_command(
-            task.definition.setup, work, python, task.folder, _VERIFY_TIMEOUT_SECONDS
+            task.definition.setup, work, environment, python, task.folder, run_dir / "setup.txt"
         )
         if exit_code != 0:
             return f"setup exited with {exit_code}"
@@ -387,36 +492,82 @@ def _run_wisp(
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
         (run_dir / "stderr.txt").open("w", encoding="utf-8") as stderr,
     ):
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=work,
-                env=environment,
-                stdout=events,
-                stderr=stderr,
-                timeout=definition.timeout_seconds + _KILL_MARGIN_SECONDS,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return None, "wisp did not exit after its --timeout; the runner killed it"
-    return completed.returncode, None
+        exit_code = _run_in_own_group(
+            command,
+            cwd=work,
+            environment=environment,
+            stdout=events,
+            stderr=stderr,
+            timeout=definition.timeout_seconds + _KILL_MARGIN_SECONDS,
+        )
+    if exit_code is None:
+        return None, "wisp did not exit after its --timeout; the runner killed it"
+    return exit_code, None
 
 
 def _run_command(
-    command: str, work: Path, python: str, task_dir: Path, timeout: float
+    command: str,
+    work: Path,
+    environment: Mapping[str, str],
+    python: str,
+    task_dir: Path,
+    log: Path,
 ) -> int | None:
-    """Run a task command with `bash -c`; return its exit status, or None on timeout."""
+    """Run a task command with `bash -c`, logging its output.
+
+    Returns:
+        int | None: Its exit status, or None when it ran past its time limit.
+    """
 
     script = command.replace("{python}", shlex.quote(python)).replace(
         "{task}", shlex.quote(str(task_dir))
     )
-    try:
-        completed = subprocess.run(
-            ["bash", "-c", script], cwd=work, capture_output=True, timeout=timeout, check=False
+    with log.open("w", encoding="utf-8") as output:
+        return _run_in_own_group(
+            ["bash", "-c", script],
+            cwd=work,
+            environment=environment,
+            stdout=output,
+            stderr=output,
+            timeout=_VERIFY_TIMEOUT_SECONDS,
         )
+
+
+def _run_in_own_group(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    environment: Mapping[str, str],
+    stdout: IO[str],
+    stderr: IO[str],
+    timeout: float,
+) -> int | None:
+    """Run a command in a new process group, and kill the group when it ends.
+
+    Killing the group also stops whatever the command left running, such as a
+    stuck build or a background process the model started, so nothing outlives
+    the run. A process that started its own session escapes this.
+
+    Returns:
+        int | None: The exit status, or None when ``timeout`` passed first.
+    """
+
+    process = subprocess.Popen(
+        list(command),
+        cwd=cwd,
+        env=dict(environment),
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
+    )
+    try:
+        return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         return None
-    return completed.returncode
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
 
 
 def _output(command: list[str], *, cwd: Path) -> str:

@@ -51,32 +51,50 @@ class Credentials:
 def read_provider_keys(path: Path) -> dict[str, str]:
     """Read only the provider key variables from a `.env` file.
 
-    Lines are `NAME=value`, optionally prefixed with `export` and with the
-    value in single or double quotes. Blank lines and `#` comments are skipped.
+    Lines are `NAME=value`, optionally prefixed with `export`. A value may be
+    quoted with single or double quotes; an unquoted value ends at ` #`, which
+    starts a comment. Blank lines and `#` comment lines are skipped.
 
     Args:
         path (Path): The `.env` file; a missing file yields no keys.
 
     Returns:
         dict[str, str]: Allowlisted names with non-empty values.
+
+    Raises:
+        CredentialError: When the file is not UTF-8 text.
     """
 
     if not path.is_file():
         return {}
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as err:
+        raise CredentialError(f"{path} is not UTF-8 text") from err
     allowed = set(PROVIDER_KEY_VARIABLES.values())
     keys: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
-        name, _, value = line.removeprefix("export ").partition("=")
-        name = name.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if name in allowed and value:
-            keys[name] = value
+        name, _, value = line.partition("=")
+        words = name.split()
+        if len(words) == 2 and words[0] == "export":
+            words = words[1:]
+        if len(words) != 1 or words[0] not in allowed:
+            continue
+        parsed = _dotenv_value(value.strip())
+        if parsed:
+            keys[words[0]] = parsed
     return keys
+
+
+def _dotenv_value(value: str) -> str:
+    if value[:1] in {"'", '"'}:
+        closing = value.find(value[0], 1)
+        return value[1:closing] if closing > 0 else ""
+    comment = value.find(" #")
+    return (value[:comment] if comment >= 0 else value).strip()
 
 
 def resolve_credentials(

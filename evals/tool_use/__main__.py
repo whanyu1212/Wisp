@@ -80,6 +80,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 2
     results_dir = args.results or RESULTS_DIR / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    if (results_dir / "runs.jsonl").exists():
+        print(f"error: {results_dir} already holds runs; choose a new folder", file=sys.stderr)
+        return 2
     results_dir.mkdir(parents=True, exist_ok=True)
     context = RunContext(
         build=detect_build(REPO_ROOT), credentials=credentials, results_dir=results_dir

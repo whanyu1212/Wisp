@@ -10,6 +10,7 @@ from decimal import Decimal
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
+    ContextOverflow,
     ErrorEvent,
     KnownWispEvent,
     MessageCompleted,
@@ -41,7 +42,9 @@ class RunMetrics:
         known_usd (Decimal): Estimated cost of the priced responses.
         unpriced_responses (int): Responses without a cost estimate.
         retries (int): Provider retries (rate limits, transient errors).
-        last_error (str | None): The last `error` event's message.
+        context_overflowed (bool): Whether the conversation outgrew the model's
+            context window.
+        errors (list[str]): Every `error` event's message, in order.
     """
 
     setup: RunSetup | None = None
@@ -56,7 +59,12 @@ class RunMetrics:
     known_usd: Decimal = Decimal(0)
     unpriced_responses: int = 0
     retries: int = 0
-    last_error: str | None = None
+    context_overflowed: bool = False
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def last_error(self) -> str | None:
+        return self.errors[-1] if self.errors else None
 
     @property
     def total_tokens(self) -> int:
@@ -110,8 +118,10 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             _add_usage(metrics, event)
         elif isinstance(event, ProviderRetrying):
             metrics.retries += 1
+        elif isinstance(event, ContextOverflow):
+            metrics.context_overflowed = True
         elif isinstance(event, ErrorEvent):
-            metrics.last_error = event.message
+            metrics.errors.append(event.message)
     return metrics
 
 

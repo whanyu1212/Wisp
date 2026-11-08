@@ -1,2 +1,2 @@
-GREETING = "Hello"
+﻿GREETING = "Hello"
 FAREWELL = "Goodbye"
