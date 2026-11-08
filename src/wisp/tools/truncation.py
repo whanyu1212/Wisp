@@ -104,3 +104,91 @@ def truncate_text_tail(
 def _suffix_for(text: str, suffix: str) -> str:
     separator = "" if not text or text.endswith("\n") else "\n"
     return f"{separator}{suffix}"
+
+
+def truncate_text_middle(
+    start: str,
+    end: str,
+    *,
+    total_bytes: int,
+    head_bytes: int,
+    head_lines: int,
+    tail_bytes: int,
+    tail_lines: int,
+) -> TruncatedText:
+    """Keep the start and the end of long output and replace the middle with a marker.
+
+    Long command output often carries its first error near the start and its summary
+    or traceback at the end, with progress in between. The head and the tail each
+    keep whole lines where they can: a single line too long for its budget is cut.
+
+    Args:
+        start (str): The output from its first byte: all of it, or a prefix.
+        end (str): The output up to its last byte: all of it, or a suffix. Pass
+            the same text as ``start`` when the whole output is known.
+        total_bytes (int): The whole output's UTF-8 size, for the marker's count.
+        head_bytes (int): UTF-8 budget for the start.
+        head_lines (int): Line budget for the start.
+        tail_bytes (int): UTF-8 budget for the end.
+        tail_lines (int): Line budget for the end.
+
+    Returns:
+        TruncatedText: The whole output when it is known and fits both budgets
+        together; otherwise its head, a `[truncated: ...]` line saying how many
+        bytes were left out after how many lines, and its tail.
+
+    Examples:
+        >>> text = "".join(f"{n}\\n" for n in range(1, 11))
+        >>> print(truncate_text_middle(text, text, total_bytes=len(text),
+        ...       head_bytes=99, head_lines=2, tail_bytes=99, tail_lines=2).text)
+        1
+        2
+        [truncated: 12 bytes omitted after the first 2 lines]
+        9
+        10
+        <BLANKLINE>
+    """
+
+    whole = start == end and len(start.encode("utf-8")) == total_bytes
+    if whole and _fits(start, head_bytes + tail_bytes, head_lines + tail_lines):
+        return TruncatedText(text=start, truncated=False)
+    head = _leading_lines(start, max_bytes=head_bytes, max_lines=head_lines)
+    tail = _trailing_lines(end, max_bytes=tail_bytes, max_lines=tail_lines)
+    omitted = max(0, total_bytes - len(head.encode("utf-8")) - len(tail.encode("utf-8")))
+    shown = head.count("\n") + (1 if head and not head.endswith("\n") else 0)
+    separator = "\n" if head and not head.endswith("\n") else ""
+    marker = f"[truncated: {omitted:,} bytes omitted after the first {shown} lines]"
+    return TruncatedText(text=f"{head}{separator}{marker}\n{tail}", truncated=True)
+
+
+def _fits(text: str, max_bytes: int, max_lines: int) -> bool:
+    return len(text.encode("utf-8")) <= max_bytes and len(text.splitlines()) <= max_lines
+
+
+def _leading_lines(text: str, *, max_bytes: int, max_lines: int) -> str:
+    """The first lines of ``text`` within both budgets, ending on a line break if it can."""
+
+    lines = text.splitlines(keepends=True)[: max(0, max_lines)]
+    kept = "".join(lines)
+    encoded = kept.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return kept
+    cut = encoded[: max(0, max_bytes)].decode("utf-8", errors="ignore")
+    line_end = cut.rfind("\n")
+    return cut[: line_end + 1] if line_end >= 0 else cut
+
+
+def _trailing_lines(text: str, *, max_bytes: int, max_lines: int) -> str:
+    """The last lines of ``text`` within both budgets, starting on a line if it can."""
+
+    lines = text.splitlines(keepends=True)
+    kept = "".join(lines[-max_lines:]) if max_lines > 0 else ""
+    encoded = kept.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return kept
+    start = len(encoded) - max(0, max_bytes)
+    while start < len(encoded) and encoded[start] & 0xC0 == 0x80:
+        start += 1
+    cut = encoded[start:].decode("utf-8", errors="ignore")
+    line_start = cut.find("\n")
+    return cut[line_start + 1 :] if 0 <= line_start < len(cut) - 1 else cut

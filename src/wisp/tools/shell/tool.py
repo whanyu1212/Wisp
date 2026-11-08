@@ -15,7 +15,7 @@ from wisp.tools.common import _optional_int, _required_string
 from wisp.tools.context import ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
-from wisp.tools.shell.process import _format_process_output_bounded, _run_shell
+from wisp.tools.shell.process import _format_process_output_preview, _run_shell
 from wisp.tools.shell.supervisor import ProcessSupervisor, ProcessUpdate
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
@@ -181,14 +181,11 @@ class BashTool:
 
         def format_output(notice: str | None) -> TruncatedText:
             # Format from the captured streams rather than the per-stream bounded copies
-            # so the text carries one truncation marker, ahead of the combined tail.
-            return _format_process_output_bounded(
-                result.exit_code,
-                result.stdout,
-                result.stderr,
+            # so the text carries one truncation marker, between its start and its end.
+            return _format_process_output_preview(
+                result,
                 max_bytes=context.max_output_bytes,
                 max_lines=context.max_output_lines,
-                capture_truncated=result.stdout_truncated or result.stderr_truncated,
                 notice=notice,
             )
 

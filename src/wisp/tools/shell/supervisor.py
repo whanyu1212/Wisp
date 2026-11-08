@@ -28,6 +28,7 @@ from wisp.tools.shell.process import (
     _StreamTail,
     _terminate_process_tree,
     _wait_for_exit,
+    decode_stream_head,
     stopped_detached_processes,
 )
 from wisp.tools.truncation import truncate_text_tail
@@ -554,6 +555,8 @@ class ProcessSupervisor:
                 stderr_retained_bytes=len(stderr_result.output),
                 stdout_source_byte_lengths=stdout_source_byte_lengths,
                 stderr_source_byte_lengths=stderr_source_byte_lengths,
+                stdout_head=decode_stream_head(stdout_result.head),
+                stderr_head=decode_stream_head(stderr_result.head),
                 background_stopped=(
                     captured.pipes_held_after_exit or stopped_detached_processes(process)
                 ),

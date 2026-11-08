@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import ctypes
 import errno
 import functools
@@ -27,7 +28,7 @@ import anyio
 
 from wisp.tools.result import ToolError
 from wisp.tools.shell.watchdog import WatchedCommand, release_command, watch_command
-from wisp.tools.truncation import TruncatedText, truncate_text_tail
+from wisp.tools.truncation import TruncatedText, truncate_text_middle, truncate_text_tail
 from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
 
 if TYPE_CHECKING:
@@ -140,6 +141,10 @@ class ProcessResult:
     stderr_retained_bytes: int | None = None
     stdout_source_byte_lengths: tuple[int, ...] | None = None
     stderr_source_byte_lengths: tuple[int, ...] | None = None
+    stdout_head: str = ""
+    """The start of stdout when capture dropped its middle; empty when nothing was dropped."""
+    stderr_head: str = ""
+    """The start of stderr when capture dropped its middle; empty when nothing was dropped."""
     background_stopped: bool = False
     """Whether processes still holding the output, or detached from the command, were stopped."""
     stdout_saved: SavedStream | None = None
@@ -191,6 +196,13 @@ class _LimitedStreamResult:
     output: bytes
     truncated: bool = False
     dropped_bytes: int = 0
+    head: bytes = b""
+    """The stream's first bytes, set only when bytes between them and ``output`` were dropped."""
+
+
+# A stream's first bytes are kept as well as its tail: builds and test runners often
+# print the first error early, then pages of progress. Room for a preview's head.
+STREAM_HEAD_BYTES = 16_384
 
 
 @dataclass(frozen=True)
@@ -205,17 +217,22 @@ class _StreamTail:
     """The last ``max_bytes`` bytes of one output stream, plus how many were dropped.
 
     Command output is kept from the end because failures, tracebacks, and summaries
-    are printed last. When ``saved`` is set, the reader also feeds every byte to it,
-    so output the tail drops can still be saved in full.
+    are printed last. The first `STREAM_HEAD_BYTES` are kept too, since a first error
+    is often printed early, and reported only when the middle was dropped. When
+    ``saved`` is set, the reader also feeds every byte to it, so output the tail
+    drops can still be saved in full.
     """
 
     def __init__(self, max_bytes: int, saved: SavedStream | None = None) -> None:
         self._max_bytes = max(0, max_bytes)
         self._retained = bytearray()
+        self._head = bytearray()
         self._dropped_bytes = 0
         self.saved = saved
 
     def append(self, chunk: bytes) -> None:
+        if room := STREAM_HEAD_BYTES - len(self._head):
+            self._head += chunk[:room]
         self._retained += chunk
         excess = len(self._retained) - self._max_bytes
         if excess <= 0:
@@ -245,7 +262,14 @@ class _StreamTail:
             output=bytes(self._retained),
             truncated=self._dropped_bytes > 0,
             dropped_bytes=self._dropped_bytes,
+            head=bytes(self._head) if self._dropped_bytes else b"",
         )
+
+
+def decode_stream_head(head: bytes) -> str:
+    """Decode a stream's first bytes, leaving out a character cut off at the end."""
+
+    return codecs.getincrementaldecoder("utf-8")(errors="replace").decode(head, final=False)
 
 
 async def _run_shell(
@@ -311,6 +335,8 @@ async def _run_shell(
         stderr_retained_bytes=len(stderr_result.output),
         stdout_source_byte_lengths=stdout_source_byte_lengths,
         stderr_source_byte_lengths=stderr_source_byte_lengths,
+        stdout_head=decode_stream_head(stdout_result.head),
+        stderr_head=decode_stream_head(stderr_result.head),
         background_stopped=captured.pipes_held_after_exit or stopped_detached_processes(process),
     )
 
@@ -1868,6 +1894,98 @@ def _format_process_output_bounded(
         text=f"{prefix}{bounded_body.text}{notice_line}",
         truncated=bounded_body.truncated,
     )
+
+
+# A finished command's long output is shown as its start and its end: a build's
+# first error is often near the start and its summary at the end, with progress
+# between. The rest stays readable with read_output. Tail keeps the larger share.
+PREVIEW_HEAD_BYTES = 4_000
+PREVIEW_HEAD_LINES = 64
+PREVIEW_TAIL_BYTES = 8_000
+PREVIEW_TAIL_LINES = 192
+# Below these budgets a preview has no room for both ends, so output keeps its tail.
+_PREVIEW_MIN_BYTES = 1_000
+_PREVIEW_MIN_LINES = 8
+_PREVIEW_MARKER_BYTES = 96
+
+
+def _format_process_output_preview(
+    result: ProcessResult,
+    *,
+    max_bytes: int,
+    max_lines: int,
+    notice: str | None = None,
+) -> TruncatedText:
+    """Format a finished command's output as its start and end within the budget.
+
+    Output that fits the preview budgets is shown whole. Longer output keeps its
+    first lines and its last lines with a marker between them; the start comes
+    from the captured head of each stream when capture dropped its middle. A
+    budget too small for both ends falls back to `_format_process_output_bounded`.
+
+    Args:
+        result (ProcessResult): The finished command's captured output.
+        max_bytes (int): UTF-8 byte budget for the output body.
+        max_lines (int): Line budget for the output body.
+        notice (str | None): A line for the model after the output; it takes its
+            room from the body budget and is left out when it does not fit.
+
+    Returns:
+        TruncatedText: The status prefix, the output's start and end, and any notice.
+    """
+
+    capture_truncated = result.stdout_truncated or result.stderr_truncated
+    notice_bytes = len(notice.encode("utf-8")) + 1 if notice is not None else 0
+    body_bytes = max_bytes - notice_bytes if notice is not None else max_bytes
+    body_lines = max_lines - 1 if notice is not None else max_lines
+    if body_bytes < _PREVIEW_MIN_BYTES or body_lines < _PREVIEW_MIN_LINES:
+        return _format_process_output_bounded(
+            result.exit_code,
+            result.stdout,
+            result.stderr,
+            max_bytes=max_bytes,
+            max_lines=max_lines,
+            capture_truncated=capture_truncated,
+            notice=notice,
+        )
+    status = f"Command exited with code {result.exit_code}"
+    parts = _process_output_parts(result.stdout, result.stderr)
+    if not parts:
+        return TruncatedText(text=f"{status}: {notice}" if notice else status, truncated=False)
+    end = "\n".join(parts)
+    head_bytes = min(PREVIEW_HEAD_BYTES, body_bytes // 3)
+    head_lines = min(PREVIEW_HEAD_LINES, body_lines // 4)
+    body = truncate_text_middle(
+        _output_start(result, end),
+        end,
+        total_bytes=len(end.encode("utf-8"))
+        + result.stdout_dropped_bytes
+        + result.stderr_dropped_bytes,
+        head_bytes=head_bytes,
+        head_lines=head_lines,
+        tail_bytes=min(PREVIEW_TAIL_BYTES, body_bytes - head_bytes - _PREVIEW_MARKER_BYTES),
+        tail_lines=min(PREVIEW_TAIL_LINES, body_lines - head_lines - 1),
+    )
+    notice_line = f"\n{notice}" if notice else ""
+    return TruncatedText(
+        text=f"{status}: {body.text.rstrip('\n')}{notice_line}", truncated=body.truncated
+    )
+
+
+def _output_start(result: ProcessResult, combined: str) -> str:
+    """The combined output from its first byte, as far as capture kept it.
+
+    Combined output is stdout then stderr. When capture dropped the middle of
+    stdout, the start is stdout's captured head; when only stderr lost its middle,
+    it is all of stdout followed by stderr's head.
+    """
+
+    if result.stdout_truncated:
+        return result.stdout_head
+    if not result.stderr_truncated:
+        return combined
+    stdout = result.stdout.rstrip("\n")
+    return f"{stdout}\n{result.stderr_head}" if stdout else result.stderr_head
 
 
 def _process_output_parts(stdout: str, stderr: str) -> list[str]:

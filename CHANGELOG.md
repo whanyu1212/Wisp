@@ -39,6 +39,16 @@ this policy.
   went looking for `AGENTS.md` in the parent folder, outside the working directory, and hit a
   tool error in about half of the tool-use eval runs.
 
+### Tools
+
+- A finished `bash` command's long output is now shown as its first 64 lines (up to 4,000 bytes)
+  and its last 192 lines (up to 8,000 bytes), with a `[truncated: N bytes omitted after the first
+  K lines]` line between them, instead of its last 50,000 bytes. A build's first error, often
+  printed early, is now visible without `read_output`, and a long result costs about a quarter of
+  the context it did. The full output is still saved for `read_output` whenever anything is left
+  out. Polls of started processes and timeouts keep showing the end. The `ToolResultReady` event
+  is unchanged.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 
