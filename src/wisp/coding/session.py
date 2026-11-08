@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -84,6 +86,7 @@ from wisp.events import (
     QueueMode,
     QueueUpdated,
     RunOutcome,
+    RunSetup,
     SessionSaved,
     SessionStats,
     SkillInvoked,
@@ -780,7 +783,11 @@ class CodingSession:
             created_at=user_message.created_at,
         )
         yield await emit(
-            AgentStarted(session_id=session.session_id, message_entry_id=user_entry.id)
+            AgentStarted(
+                session_id=session.session_id,
+                message_entry_id=user_entry.id,
+                setup=_run_setup(effective_tools, prompt_messages),
+            )
         )
 
         await self._persist_run_prompt(
@@ -2694,6 +2701,38 @@ class _RunCompaction:
                 active_from=replacement_active_from,
             )
         )
+
+
+def _run_setup(tools: Sequence[ToolSpec], instructions: Sequence[Message]) -> RunSetup:
+    """Fingerprint the tools and system messages a run offers the model.
+
+    Args:
+        tools (Sequence[ToolSpec]): The tools offered to the model, in offered order.
+        instructions (Sequence[Message]): The system messages the run starts with.
+
+    Returns:
+        RunSetup: The tool names and SHA-256 hashes of the canonical tool specs
+        and of the system messages. Offered order is part of the tools hash
+        because it changes the prompt.
+    """
+
+    tool_specs = [
+        {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+        for tool in tools
+    ]
+    system_messages = [message.content for message in instructions if message.role == "system"]
+    return RunSetup(
+        tool_names=tuple(tool.name for tool in tools),
+        tools_sha256=_canonical_sha256(tool_specs),
+        instructions_sha256=_canonical_sha256(system_messages),
+    )
+
+
+def _canonical_sha256(value: object) -> str:
+    """Hash a JSON value so equal content always gives the same digest."""
+
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _prompt_cache_key(session_id: str) -> str:

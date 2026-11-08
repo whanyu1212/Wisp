@@ -10,6 +10,17 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Events
+
+- `agent.started` gains an optional `setup` (`RunSetup`): the names of the tools offered to the
+  model, in offered order, and SHA-256 hashes of the tool specs and of the system messages the run
+  starts with. It lets an eval or a log reader confirm which setup a run actually had. The system
+  messages include project context and Git status, so their hash also changes with the repository.
+  `agent.started` is not saved in session files. The schema bundle and conformance fixture are
+  regenerated; the same-release rule applies.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 

@@ -34,6 +34,9 @@ def test_json_mode_outputs_events_as_jsonl(tmp_path: Path) -> None:
     assert all("schema_version" not in record for record in records)
     assert "timestamp" in records[0]
     assert "session_id" in records[0]
+    setup = records[0]["setup"]
+    assert set(setup) == {"tool_names", "tools_sha256", "instructions_sha256"}
+    assert all(len(setup[key]) == 64 for key in ("tools_sha256", "instructions_sha256"))
     assert "fake response to: hello" == "".join(
         str(record["delta"]) for record in records if record["type"] == "message.delta"
     )
@@ -118,6 +121,8 @@ def test_json_mode_includes_tool_progress_between_start_and_end(
     assert types.index("tool.execution.started") < progress < types.index("tool.execution.ended")
     assert records[progress]["stdout_tail"] == "working\n"
     assert records[progress]["sequence"] == 1
+    started = next(record for record in records if record["type"] == "agent.started")
+    assert "danger" in started["setup"]["tool_names"]
 
 
 def test_json_mode_validation_errors_are_jsonl(tmp_path: Path) -> None:

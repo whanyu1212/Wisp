@@ -157,6 +157,17 @@
           "title": "Session Id",
           "type": "string"
         },
+        "setup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunSetup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -173,7 +184,8 @@
         "type",
         "timestamp",
         "message_entry_id",
-        "session_id"
+        "session_id",
+        "setup"
       ],
       "title": "AgentStarted",
       "type": "object"
@@ -5454,6 +5466,38 @@
       "title": "RpcWorkspaceReported",
       "type": "object"
     },
+    "RunSetup": {
+      "additionalProperties": false,
+      "description": "What the model was offered when a run started, so runs can be compared.\n\nMCP tools are named ``mcp__<server>__<tool>``, so a server that failed to\nconnect shows up as missing tool names; its error arrives as a startup event.\n\nAttributes:\n    tool_names (tuple[str, ...]): The tools offered to the model, in the order\n        they were offered.\n    tools_sha256 (str): SHA-256 of the offered tools' names, descriptions and\n        input schemas, as canonical JSON in offered order. Reordering or\n        rewording a tool changes it.\n    instructions_sha256 (str): SHA-256 of the system messages the run starts\n        with. They include project context and Git status, so this also\n        changes when the repository does.",
+      "properties": {
+        "instructions_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Instructions Sha256",
+          "type": "string"
+        },
+        "tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096,
+          "title": "Tool Names",
+          "type": "array"
+        },
+        "tools_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Tools Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_names",
+        "tools_sha256",
+        "instructions_sha256"
+      ],
+      "title": "RunSetup",
+      "type": "object"
+    },
     "SessionBranchSummary": {
       "additionalProperties": false,
       "description": "Where the active path sits in the session tree.\n\nAt each node with several children, the first child appended is the original\nline and the later ones are branches. ``branched_from_turn`` is set when the\nactive path takes a branch: it counts the user turns shared with the original\nline at the deepest such point, and ``siblings`` counts the other children\nthere. On the original line ``branched_from_turn`` is ``None`` and\n``branches`` counts every branch that splits off the active path.",
@@ -7702,6 +7746,7 @@
     "agent.started": {
       "message_entry_id": null,
       "session_id": "session-1",
+      "setup": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "agent.started"
     },

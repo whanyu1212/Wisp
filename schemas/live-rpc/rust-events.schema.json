@@ -158,6 +158,18 @@
           "title": "AgentStartedSessionId",
           "type": "string"
         },
+        "setup": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunSetup"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "AgentStartedSetup"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "AgentStartedTimestamp",
@@ -174,7 +186,8 @@
         "type",
         "timestamp",
         "message_entry_id",
-        "session_id"
+        "session_id",
+        "setup"
       ],
       "title": "AgentStarted",
       "type": "object"
@@ -5043,6 +5056,38 @@
         "git_branch"
       ],
       "title": "RpcWorkspaceReported",
+      "type": "object"
+    },
+    "RunSetup": {
+      "additionalProperties": false,
+      "description": "What the model was offered when a run started, so runs can be compared.\n\nMCP tools are named ``mcp__<server>__<tool>``, so a server that failed to\nconnect shows up as missing tool names; its error arrives as a startup event.\n\nAttributes:\n    tool_names (tuple[str, ...]): The tools offered to the model, in the order\n        they were offered.\n    tools_sha256 (str): SHA-256 of the offered tools' names, descriptions and\n        input schemas, as canonical JSON in offered order. Reordering or\n        rewording a tool changes it.\n    instructions_sha256 (str): SHA-256 of the system messages the run starts\n        with. They include project context and Git status, so this also\n        changes when the repository does.",
+      "properties": {
+        "instructions_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "RunSetupInstructionsSha256",
+          "type": "string"
+        },
+        "tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4096,
+          "title": "RunSetupToolNames",
+          "type": "array"
+        },
+        "tools_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "RunSetupToolsSha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_names",
+        "tools_sha256",
+        "instructions_sha256"
+      ],
+      "title": "RunSetup",
       "type": "object"
     },
     "SessionBranchSummary": {

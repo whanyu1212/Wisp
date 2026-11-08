@@ -19,9 +19,34 @@ from wisp.events.rpc import AgentMode
 from wisp.events.usage import ContextObservation, TokenUsage, UsageCost
 
 
+class RunSetup(BaseModel):
+    """What the model was offered when a run started, so runs can be compared.
+
+    MCP tools are named ``mcp__<server>__<tool>``, so a server that failed to
+    connect shows up as missing tool names; its error arrives as a startup event.
+
+    Attributes:
+        tool_names (tuple[str, ...]): The tools offered to the model, in the order
+            they were offered.
+        tools_sha256 (str): SHA-256 of the offered tools' names, descriptions and
+            input schemas, as canonical JSON in offered order. Reordering or
+            rewording a tool changes it.
+        instructions_sha256 (str): SHA-256 of the system messages the run starts
+            with. They include project context and Git status, so this also
+            changes when the repository does.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool_names: tuple[str, ...] = Field(default=(), max_length=4096)
+    tools_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    instructions_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class AgentStarted(_MessageOriginEvent):
     type: Literal["agent.started"] = "agent.started"
     session_id: str
+    setup: RunSetup | None = None
 
 
 class TurnStarted(WispEvent):
