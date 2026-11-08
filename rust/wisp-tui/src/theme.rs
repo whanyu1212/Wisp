@@ -254,6 +254,17 @@ impl Palette {
         mix(self.secondary, self.background, 0.55)
     }
 
+    /// `color` breathing on the composer surface: full strength at frame 0, easing to
+    /// 40% strength halfway through a 16-frame cycle (2 s at the activity tick) and back.
+    /// Starting at full strength keeps a still frame identical to the solid colour, and a
+    /// cycle that divides 256 keeps the `u8` frame counter's wrap seamless.
+    pub fn breathing(self, color: Color, frame: u8) -> Color {
+        const CYCLE: u8 = 16;
+        let phase = f64::from(frame % CYCLE) / f64::from(CYCLE);
+        let level = (1.0 + (std::f64::consts::TAU * phase).cos()) / 2.0;
+        mix(color, self.surface, 0.4 + 0.6 * level)
+    }
+
     pub fn composer(self) -> Style {
         self.base().bg(self.surface)
     }

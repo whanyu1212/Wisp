@@ -1,5 +1,7 @@
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+};
 use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
     disable_raw_mode, enable_raw_mode,
@@ -25,6 +27,9 @@ pub(crate) trait FrameBackend: Backend {
     fn end_frame(&mut self) -> io::Result<()>;
     /// Converts a draw failure into the I/O error the TUI reports.
     fn into_io_error(error: Self::Error) -> io::Error;
+    /// Writes terminal control output that is not part of a frame, such as the window
+    /// title or a notification.
+    fn write_control(&mut self, bytes: &[u8]) -> io::Result<()>;
 }
 
 impl<W: Write> FrameBackend for CrosstermBackend<W> {
@@ -34,6 +39,11 @@ impl<W: Write> FrameBackend for CrosstermBackend<W> {
 
     fn end_frame(&mut self) -> io::Result<()> {
         self.execute(EndSynchronizedUpdate).map(drop)
+    }
+
+    fn write_control(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write_all(bytes)?;
+        Write::flush(self)
     }
 
     fn into_io_error(error: io::Error) -> io::Error {
@@ -52,6 +62,10 @@ impl FrameBackend for ratatui::backend::TestBackend {
 
     fn into_io_error(error: Infallible) -> io::Error {
         match error {}
+    }
+
+    fn write_control(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -78,7 +92,15 @@ pub(crate) fn draw_frame<B: FrameBackend>(
 // A panic may occur between requesting capture and constructing the terminal guard.
 // Both restoration paths must observe ownership of that partially applied request.
 static MOUSE_CAPTURE: MouseCapture = MouseCapture::new();
-static KEYBOARD_PROTOCOL: KeyboardProtocol = KeyboardProtocol::new();
+/// The kitty keyboard protocol's first level, which reports keys a legacy terminal
+/// sends alike apart (Shift+Enter from Enter, Esc from an Alt chord) while printable
+/// keys still arrive as text. Terminals without the protocol ignore the request.
+/// Kitty keeps one setting per screen, so it is pushed on the alternate screen and
+/// popped before leaving it.
+static KEYBOARD_PROTOCOL: PushedSetting = PushedSetting::new(b"\x1b[>1u", b"\x1b[<1u");
+/// The window title, saved with XTWINOPS so the one Wisp sets is undone on exit.
+/// Terminals without the title stack ignore both; there the shell prompt resets it.
+static TITLE_STACK: PushedSetting = PushedSetting::new(b"\x1b[22;0t", b"\x1b[23;0t");
 
 struct MouseCapture {
     requested: AtomicBool,
@@ -110,18 +132,18 @@ impl MouseCapture {
     }
 }
 
-/// The kitty keyboard protocol's first level, which reports keys a legacy terminal
-/// sends alike apart (Shift+Enter from Enter, Esc from an Alt chord) while printable
-/// keys still arrive as text. Terminals without the protocol ignore the request.
-/// Kitty keeps one setting per screen, so it is pushed on the alternate screen and
-/// popped before leaving it.
-struct KeyboardProtocol {
+/// A terminal setting kept on a stack: pushed on entry and popped exactly once on exit.
+struct PushedSetting {
+    push: &'static [u8],
+    pop: &'static [u8],
     requested: AtomicBool,
 }
 
-impl KeyboardProtocol {
-    const fn new() -> Self {
+impl PushedSetting {
+    const fn new(push: &'static [u8], pop: &'static [u8]) -> Self {
         Self {
+            push,
+            pop,
             requested: AtomicBool::new(false),
         }
     }
@@ -129,7 +151,7 @@ impl KeyboardProtocol {
     /// Unlike mouse capture, ownership is taken only once the push is written: a pop
     /// without its push would remove a setting the program around Wisp pushed.
     fn enable(&self, output: &mut impl Write) -> io::Result<()> {
-        output.write_all(b"\x1b[>1u")?;
+        output.write_all(self.push)?;
         output.flush()?;
         self.requested.store(true, Ordering::SeqCst);
         Ok(())
@@ -137,7 +159,7 @@ impl KeyboardProtocol {
 
     fn restore(&self, output: &mut impl Write) -> io::Result<()> {
         if self.requested.load(Ordering::SeqCst) {
-            output.write_all(b"\x1b[<1u")?;
+            output.write_all(self.pop)?;
             output.flush()?;
             // Keep ownership after an I/O failure so another cleanup path can retry.
             self.requested.store(false, Ordering::SeqCst);
@@ -161,13 +183,21 @@ impl TerminalGuard {
         crossterm::style::force_color_output(true);
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide) {
+        if let Err(error) = execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableFocusChange,
+            Hide
+        ) {
             restore_terminal();
             return Err(Error::Io(error));
         }
-        if let Err(error) = KEYBOARD_PROTOCOL.enable(&mut stdout) {
-            restore_terminal();
-            return Err(Error::Io(error));
+        for setting in [&KEYBOARD_PROTOCOL, &TITLE_STACK] {
+            if let Err(error) = setting.enable(&mut stdout) {
+                restore_terminal();
+                return Err(Error::Io(error));
+            }
         }
         if mouse_enabled {
             if let Err(error) = MOUSE_CAPTURE.enable(&mut stdout) {
@@ -226,11 +256,13 @@ fn restore_terminal() {
     let _ = disable_raw_mode();
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
     let _ = KEYBOARD_PROTOCOL.restore(&mut io::stdout());
+    let _ = TITLE_STACK.restore(&mut io::stdout());
     let _ = execute!(
         io::stdout(),
         EndSynchronizedUpdate,
         Show,
         DisableBracketedPaste,
+        DisableFocusChange,
         LeaveAlternateScreen
     );
 }
@@ -282,8 +314,21 @@ mod tests {
     }
 
     #[test]
+    fn control_output_reaches_terminal() {
+        let control = b"\x1b]0;Wisp \xc2\xb7 working\x07\x1b]9;Wisp finished\x07";
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi16] {
+            let mut output = Vec::new();
+            {
+                let mut backend = CrosstermBackend::new(BasicColorWriter::new(&mut output, depth));
+                backend.write_control(control).unwrap();
+            }
+            assert_eq!(output, control, "{depth:?}");
+        }
+    }
+
+    #[test]
     fn keyboard_protocol_pops_once() {
-        let protocol = KeyboardProtocol::new();
+        let protocol = PushedSetting::new(b"\x1b[>1u", b"\x1b[<1u");
         let mut output = Vec::new();
         protocol.restore(&mut output).unwrap();
         assert!(output.is_empty(), "nothing to pop before a push");
@@ -298,7 +343,7 @@ mod tests {
         protocol.restore(&mut output).unwrap();
         assert!(output.is_empty());
         // A push that never reached the terminal leaves nothing to pop.
-        let failed = KeyboardProtocol::new();
+        let failed = PushedSetting::new(b"\x1b[>1u", b"\x1b[<1u");
         assert!(failed.enable(&mut Broken).is_err());
         failed.restore(&mut output).unwrap();
         assert!(output.is_empty());

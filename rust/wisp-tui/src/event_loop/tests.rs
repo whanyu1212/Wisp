@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     PendingApproval, ViewStatus,
+    color_depth::ColorDepth,
     reducer::{ActiveCommand, ActiveCommandType, InteractionStatus, MessageContentKind},
     tool_detail::ToolDetailSource,
 };
@@ -276,6 +277,23 @@ async fn replacement_approval_cannot_use_a_key_captured_before_redraw() {
         serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["call_id"],
         "replacement"
     );
+}
+
+#[tokio::test]
+async fn focus_survives_queued_events() {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.dispatch(approval("old"), &writer, 8192).await.unwrap();
+    draw(&mut ui);
+    // An event dispatched between capture and apply replaces the decision, which drops
+    // stale keys; a focus change is not tied to any view and must still be recorded.
+    let pending = PendingInput::capture(Input::Focus(false), &ui, 16);
+    ui.dispatch(approval("replacement"), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui);
+    pending.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert!(ui.attention.focus_lost());
 }
 
 #[tokio::test]
@@ -1250,10 +1268,30 @@ async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
     assert_eq!(ui.activity_frame, stopped_frame);
     assert!(!ui.render_pending);
 
-    // An approval waits without animating, unless the side panel is timing it.
+    // With motion off, an approval waits without animating unless the side panel is
+    // timing it.
+    ui.motion_allowed = false;
     ui.state.view_status = ViewStatus::WaitingForApproval;
     assert!(!ui.advance_activity_animation());
     ui.state.side_panel_visible = true;
     assert!(ui.advance_activity_animation());
     assert!(ui.render_pending);
+
+    // With motion on, its border breathes, so a pending decision animates on its own.
+    ui.state.side_panel_visible = false;
+    ui.motion_allowed = true;
+    for status in [ViewStatus::WaitingForApproval, ViewStatus::WaitingForTrust] {
+        ui.state.view_status = status;
+        assert!(ui.advance_activity_animation(), "{status:?}");
+    }
+    // In the background, without truecolor or under NO_COLOR the border stays solid, so
+    // nothing animates.
+    ui.attention.set_focus(false);
+    assert!(!ui.advance_activity_animation());
+    ui.attention.set_focus(true);
+    ui.color_depth = ColorDepth::Ansi256;
+    assert!(!ui.advance_activity_animation());
+    ui.color_depth = ColorDepth::TrueColor;
+    ui.no_color = true;
+    assert!(!ui.advance_activity_animation());
 }

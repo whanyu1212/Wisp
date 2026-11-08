@@ -174,6 +174,9 @@ def reap(child_pid: int, terminal_fd: int, *, timeout: float = 10.0) -> None:
 
 
 _CSI = re.compile(rb"\x1b\[([0-?]*)[ -/]*([@-~])")
+# An operating system command, such as the window title or a notification, ends with
+# BEL or ST. A terminal never paints it.
+_OSC = re.compile(rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
 
 def screen_rows(output: bytes | bytearray) -> list[str]:
@@ -183,7 +186,8 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
     similar text, such as ``idle`` after ``working``, may never appear whole in the
     byte stream. Replaying cursor moves and text recovers what the screen shows.
     Only the sequences the TUI paints with matter: cursor position, clearing the
-    screen or the rest of a line, and text; styles and modes are skipped.
+    screen or the rest of a line, and text; styles, modes, operating system commands
+    (title, notifications) and other control characters such as BEL are skipped.
 
     Args:
         output (bytes | bytearray): Raw PTY output.
@@ -195,6 +199,10 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
     row = column = 1
     position = 0
     while position < len(output):
+        osc = _OSC.match(output, position)
+        if osc is not None:
+            position = osc.end()
+            continue
         match = _CSI.match(output, position)
         if match is not None:
             params, final = match.group(1), match.group(2)
@@ -216,7 +224,7 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
             end += 1
         character = bytes(output[position:end]).decode("utf-8", errors="replace")
         position = end
-        if character in ("\r", "\n"):
+        if character < " " or character == "\x7f":
             continue
         grid[(row, column)] = character
         column += display_width(character) or 1

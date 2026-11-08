@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attention;
 mod cli;
 mod clipboard;
 mod color_depth;
@@ -72,6 +73,7 @@ mod ui;
 mod visual_tests;
 mod web_search;
 
+use attention::{Attention, NotifyMode, RunState};
 use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
@@ -565,6 +567,10 @@ struct LiveUi {
     no_color: bool,
     /// The terminal's colour depth; frames are downconverted to it after rendering.
     color_depth: ColorDepth,
+    /// The terminal title and notifications that follow the run state.
+    attention: Attention,
+    /// Whether motion such as the decision pulse may play (`WISP_TUI_MOTION`).
+    motion_allowed: bool,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
     /// A drag selection over the transcript and the last frame painted while it was active,
@@ -631,6 +637,8 @@ impl Default for LiveUi {
             logo_picker: None,
             no_color: false,
             color_depth: ColorDepth::default(),
+            attention: Attention::default(),
+            motion_allowed: true,
             mouse_enabled: false,
             mouse_frame: None,
             transcript_selection: None,
@@ -1680,6 +1688,7 @@ impl LiveUi {
         }
         let activity_elapsed = self.activity_elapsed();
         let notice_shown_for = self.notice_shown_for();
+        let decision_pulse = self.decision_pulse();
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
@@ -1713,6 +1722,7 @@ impl LiveUi {
                 &self.bindings,
                 self.startup_logo,
                 self.decision_choice,
+                decision_pulse,
                 activity_elapsed,
                 Some(&self.side_panel),
             );
@@ -1970,6 +1980,15 @@ impl LiveUi {
             };
             rendered_overlay = Some(kind);
         })?;
+        // After the frame's synchronized update, so the title and any notification are
+        // not held back with it.
+        let attention = self.attention.observe(
+            RunState::of(&self.state),
+            self.state.workspace_cwd.as_deref(),
+        );
+        if !attention.is_empty() {
+            terminal.backend_mut().write_control(&attention)?;
+        }
         self.rendered_decision_context = rendered_decision_context;
         self.rendered_decision_choice = rendered_decision_choice;
         self.rendered_model_picker = rendered_model_picker;
@@ -1995,12 +2014,28 @@ impl LiveUi {
     }
 
     fn activity_animation_active(&self) -> bool {
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
         !self.state.configuration_active()
             && (self.state.view_status == ViewStatus::Running
                 || self.state.interaction_status == InteractionStatus::Compacting
                 // The side panel times how long an approval has waited.
                 || (self.state.view_status == ViewStatus::WaitingForApproval
-                    && self.state.side_panel_visible))
+                    && self.state.side_panel_visible)
+                || (decision_pending && self.decision_pulse()))
+    }
+
+    /// Whether a pending decision's border breathes. It needs truecolor for a smooth
+    /// blend, colour at all, and motion left on; otherwise the border stays solid. It
+    /// rests while the terminal is in the background, where nobody sees it and its
+    /// redraws would only stream output.
+    fn decision_pulse(&self) -> bool {
+        self.motion_allowed
+            && !self.no_color
+            && self.color_depth == ColorDepth::TrueColor
+            && !self.attention.focus_lost()
     }
 
     /// How long the current command has run, for the working row. The clock restarts
@@ -4020,6 +4055,11 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        // Focus only decides whether to notify; it never reaches a view.
+        if let Input::Focus(focused) = input {
+            self.attention.set_focus(focused);
+            return Ok(LoopControl::Continue);
+        }
         if let Input::Mouse(event) = &input {
             if matches!(
                 event.kind,
@@ -4325,7 +4365,7 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             Input::Error(error) => Err(Error::Io(error)),
-            Input::Mouse(_) | Input::Scroll(_) => Ok(LoopControl::Continue),
+            Input::Mouse(_) | Input::Scroll(_) | Input::Focus(_) => Ok(LoopControl::Continue),
         }
     }
 
@@ -5343,6 +5383,12 @@ where
             };
             let no_color = std::env::var_os("NO_COLOR").is_some();
             let color_depth = ColorDepth::from_environment(|name| std::env::var(name).ok());
+            let attention = Attention::new(NotifyMode::from_value(
+                std::env::var(attention::NOTIFY_VARIABLE).ok().as_deref(),
+            ));
+            let motion_allowed = attention::motion_allowed(
+                std::env::var(attention::MOTION_VARIABLE).ok().as_deref(),
+            );
             let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
             let (mut terminal, input_source) = open_terminal(mouse_enabled, color_depth)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
@@ -5360,6 +5406,8 @@ where
                 startup_logo,
                 no_color,
                 color_depth,
+                attention,
+                motion_allowed,
                 mouse_enabled,
                 ..LiveUi::default()
             };
@@ -5757,6 +5805,8 @@ enum Input {
     Scroll(mouse::Scroll),
     Paste(String),
     Redraw,
+    /// The terminal gained (`true`) or lost focus.
+    Focus(bool),
     Error(io::Error),
 }
 
@@ -5821,6 +5871,12 @@ fn input_task(
             }
             Ok(Event::Resize(_, _)) => {
                 if sender.blocking_send(Input::Redraw).is_err() {
+                    return Ok(());
+                }
+            }
+            Ok(event @ (Event::FocusGained | Event::FocusLost)) => {
+                let focused = matches!(event, Event::FocusGained);
+                if sender.blocking_send(Input::Focus(focused)).is_err() {
                     return Ok(());
                 }
             }
@@ -8735,6 +8791,58 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn approval_border_breathes() {
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let corner_colours = |frame: u8, motion_allowed: bool| {
+            let mut state = UiState::unconfigured();
+            state.view_status = ViewStatus::WaitingForApproval;
+            state.current_command = Some(ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: ActiveCommandType::Prompt,
+            });
+            state.pending_approval = Some(proposal("call-1", json!(["-y"])));
+            let mut live_ui = LiveUi {
+                state,
+                activity_frame: frame,
+                motion_allowed,
+                ..LiveUi::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            live_ui.draw(&mut terminal, &connection).unwrap();
+            let buffer = terminal.backend().buffer();
+            let corners: Vec<_> = buffer
+                .content
+                .iter()
+                .filter(|cell| cell.symbol() == "╭")
+                .map(|cell| cell.fg)
+                .collect();
+            // The question in the title keeps the solid colour while the border breathes.
+            let title = screen(&terminal)
+                .lines()
+                .enumerate()
+                .find_map(|(y, line)| {
+                    let x = line.chars().position(|c| c == '?')?;
+                    Some(buffer[(x as u16, y as u16)].fg)
+                })
+                .expect("the approval title");
+            (corners, title, live_ui.palette())
+        };
+
+        let (still, _, palette) = corner_colours(0, true);
+        assert!(still.contains(&palette.warning), "{still:?}");
+        let (quiet, title, _) = corner_colours(8, true);
+        let breathing = palette.breathing(palette.warning, 8);
+        assert!(quiet.contains(&breathing), "{quiet:?}");
+        assert!(!quiet.contains(&palette.warning), "{quiet:?}");
+        assert_eq!(title, palette.warning);
+        let (solid, _, _) = corner_colours(8, false);
+        assert!(solid.contains(&palette.warning), "{solid:?}");
+        assert!(!solid.contains(&breathing), "{solid:?}");
     }
 
     #[test]
