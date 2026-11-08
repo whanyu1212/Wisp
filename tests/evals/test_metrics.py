@@ -11,6 +11,7 @@ from wisp.events import (
     AgentCompleted,
     AgentStarted,
     BillableTokenUsage,
+    CompactionCompleted,
     ErrorEvent,
     MessageCompleted,
     ProviderRetrying,
@@ -106,3 +107,20 @@ def test_unended_run_has_no_outcome() -> None:
 def test_corrupt_line_rejected() -> None:
     with pytest.raises(ValueError):
         parse_events(['{"type": "agent.started"}'])
+
+
+def test_counts_compaction_usage() -> None:
+    compaction = CompactionCompleted(
+        session_id="s",
+        reason="threshold",
+        outcome="completed",
+        replaced_entry_count=4,
+        retained_entry_count=1,
+        usage=TokenUsage(input_tokens=1000, output_tokens=100, total_tokens=1100),
+        cost=_cost("0.5"),
+    )
+
+    metrics = measure(parse_events(_lines([_reply(100, None), compaction])))
+
+    assert (metrics.input_tokens, metrics.output_tokens) == (1100, 110)
+    assert (metrics.known_usd, metrics.unpriced_responses) == (Decimal("0.5"), 1)

@@ -10,6 +10,7 @@ from decimal import Decimal
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
+    CompactionCompleted,
     ContextOverflow,
     ErrorEvent,
     KnownWispEvent,
@@ -114,7 +115,8 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
                 metrics.commands.append(command)
         elif isinstance(event, ToolResultReady) and event.is_error:
             metrics.tool_errors[event.failure_code or "unknown"] += 1
-        elif isinstance(event, MessageCompleted):
+        elif isinstance(event, MessageCompleted | CompactionCompleted):
+            # Compaction summarizes the conversation with its own paid request.
             _add_usage(metrics, event)
         elif isinstance(event, ProviderRetrying):
             metrics.retries += 1
@@ -125,7 +127,7 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
     return metrics
 
 
-def _add_usage(metrics: RunMetrics, event: MessageCompleted) -> None:
+def _add_usage(metrics: RunMetrics, event: MessageCompleted | CompactionCompleted) -> None:
     if event.usage is not None:
         metrics.input_tokens += event.usage.input_tokens
         metrics.output_tokens += event.usage.output_tokens

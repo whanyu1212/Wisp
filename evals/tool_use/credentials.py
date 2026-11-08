@@ -150,7 +150,10 @@ def resolve_credentials(
                 else ""
             )
         )
-    return Credentials(auth_file=auth_file, environment=environment, sources=sources)
+    # Wisp runs in each task's own folder, so a relative path would point elsewhere.
+    return Credentials(
+        auth_file=auth_file.expanduser().resolve(), environment=environment, sources=sources
+    )
 
 
 def _stored_providers(auth_file: Path) -> frozenset[str]:

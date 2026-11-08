@@ -483,7 +483,8 @@ def _run_wisp(
         "--max-tool-iterations",
         str(definition.max_tool_iterations),
         "--session-dir",
-        str(run_dir / "sessions"),
+        # Wisp runs in the task folder, so a relative path would land there and be deleted.
+        str((run_dir / "sessions").resolve()),
     ]
     for tool in definition.tools:
         command += ["--allow-tool", tool]

@@ -91,3 +91,15 @@ def test_missing_credential_stops(tmp_path: Path, auth_file: Path) -> None:
         resolve_credentials(
             ["openai", "openai-codex"], env_file=env_file, auth_file=auth_file, environ={}
         )
+
+
+def test_auth_file_made_absolute(
+    tmp_path: Path, auth_file: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(auth_file.parent)
+
+    credentials = resolve_credentials(
+        ["openai-codex"], env_file=tmp_path / "none", auth_file=Path("auth.json"), environ={}
+    )
+
+    assert credentials.auth_file == auth_file.resolve()

@@ -263,3 +263,17 @@ def test_setup_failure_errors(tmp_path: Path) -> None:
     row = run_one(load_task(task.folder), ModelSpec("fake", "fake"), 1, _context(tmp_path))
 
     assert (row.status, row.error) == ("errored", "setup exited with 3")
+
+
+@pytest.mark.process
+def test_relative_results_keep_sessions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    context = RunContext(
+        build=detect_build(_REPO_ROOT),
+        credentials=Credentials(auth_file=tmp_path / "auth.json", sources={"fake": "none"}),
+        results_dir=Path("results"),
+    )
+
+    row = run_one(_task(tmp_path), ModelSpec("fake", "fake"), 1, context)
+
+    assert list((tmp_path / "results" / row.run_dir / "sessions").glob("*.jsonl"))
