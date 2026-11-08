@@ -308,6 +308,8 @@ class CodingSession:
         self._repository_status_snapshots: dict[tuple[str, Path], str] = {}
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
+        # The run harness that accepted `cancel_run`, so its run reports as cancelled.
+        self._cancelled_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
         self._active_persistence: RunPersistence | None = None
         self._last_session_id: str | None = None
@@ -476,9 +478,11 @@ class CodingSession:
         """Ask the active run to stop at its next cancellation point.
 
         The run then ends the way a requested cancellation does: running tools
-        are settled, the open turn closes as cancelled, and the run still saves
-        and publishes `AgentCompleted` with its totals. Cancelling the caller's
-        task or scope instead skips that ending.
+        are settled, an open turn closes as cancelled, and the run still saves
+        and publishes `AgentCompleted` with outcome "cancelled" and its totals.
+        Cancelling the caller's task or scope instead skips that ending. This
+        stops whichever run the session has active; runs on one session do not
+        overlap, so a caller targets its own run by asking while it is running.
 
         Returns:
             bool: True when an active run accepted the request. False before the
@@ -487,7 +491,10 @@ class CodingSession:
         """
 
         harness = self._active_harness
-        return harness is not None and harness.cancel()
+        if harness is None or not harness.cancel():
+            return False
+        self._cancelled_harness = harness
+        return True
 
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
         """Return the current or retained queue state without requiring an active run."""
@@ -706,6 +713,7 @@ class CodingSession:
                         else:
                             self._retained_queues.pop(self._active_session_id, None)
                     self._active_harness = None
+                    self._cancelled_harness = None
                     self._active_session_id = None
                     self._active_persistence = None
                     self._operation_active = False
@@ -911,6 +919,10 @@ class CodingSession:
                         operation_id=operation_id,
                     )
 
+        if self._cancelled_harness is harness and loop.outcome == "completed":
+            # A cancel accepted between turns closes no turn, so the last turn
+            # still reads as completed although the run stopped early.
+            loop.outcome = "cancelled"
         if loop.overflow_error is not None:
             # The primary loop's overflow hook already made the sole retry
             # decision. The loop publishes the overflow's error and closes its

@@ -85,9 +85,22 @@ def test_same_setup_same_hashes(tmp_path: Path) -> None:
             "instructions",
             id="new-instructions",
         ),
+        pytest.param(
+            [
+                ToolSpec(
+                    _READ.name,
+                    _READ.description,
+                    {"properties": {"path": {"type": "string"}}, "type": "object"},
+                ),
+                _GREP,
+            ],
+            _INSTRUCTIONS,
+            "nothing",
+            id="schema-keys-reordered",
+        ),
     ],
 )
-def test_change_moves_one_hash(
+def test_hashes_track_changes(
     tmp_path: Path,
     tools: list[ToolSpec],
     instructions: tuple[Message, ...],

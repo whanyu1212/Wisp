@@ -358,7 +358,7 @@ def cli_callback(
                     deadline=deadline,
                 )
             )
-            if deadline is not None and deadline.reached:
+            if deadline is not None and deadline.stopped:
                 raise typer.Exit(DEADLINE_EXIT_CODE)
     except RpcOutputAlreadyReportedError as exc:
         raise typer.Exit(1) from exc
@@ -737,7 +737,7 @@ async def _run_print_with_runtime(
     if wrote_tokens and not stdout_line_terminated:
         sys.stdout.write("\n")
     # A run stopped by its deadline ends as cancelled; the deadline message says why.
-    if failure_message is not None and not (deadline is not None and deadline.reached):
+    if failure_message is not None and not (deadline is not None and deadline.stopped):
         if failure_was_rendered:
             raise _RenderedPrintError(failure_message)
         raise ProviderError(failure_message)

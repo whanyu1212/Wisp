@@ -50,7 +50,7 @@ def test_stop_retried_until_accepted() -> None:
 
     anyio.run(deadline.run, work)
 
-    assert (deadline.reached, deadline.forced) == (True, False)
+    assert (deadline.stopped, deadline.forced) == (True, False)
     assert run.requests == 3
     assert reports == ["Run stopped: it reached its 0.01 s time limit (--timeout)."]
 
@@ -71,8 +71,24 @@ def test_unstopped_run_is_forced() -> None:
 
     anyio.run(deadline.run, work)
 
-    assert (deadline.reached, deadline.forced, cancelled) == (True, True, True)
+    assert (deadline.stopped, deadline.forced, cancelled) == (True, True, True)
     assert run.requests >= 1
+
+
+def test_finishing_run_not_stopped() -> None:
+    reports: list[str] = []
+    deadline = _deadline(reports)
+    run = _Run(refusals=None)
+
+    async def work() -> None:
+        # Past its last turn, the run refuses the stop and finishes by itself.
+        deadline.attach(run)
+        while run.requests < 2:
+            await anyio.sleep(0.01)
+
+    anyio.run(deadline.run, work)
+
+    assert (deadline.stopped, deadline.forced, reports) == (False, False, [])
 
 
 def test_early_finish_keeps_errors() -> None:
@@ -84,7 +100,7 @@ def test_early_finish_keeps_errors() -> None:
 
     with pytest.raises(ValueError, match="provider failed"):
         anyio.run(deadline.run, work)
-    assert (deadline.reached, reports) == (False, [])
+    assert (deadline.stopped, reports) == (False, [])
 
 
 def _timed_run(args: list[str], provider: str, tmp_path: Path) -> tuple[int, list[dict]]:

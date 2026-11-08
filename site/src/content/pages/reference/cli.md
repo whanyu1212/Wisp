@@ -197,9 +197,11 @@ External termination may produce a shell-specific signal status; that is not a v
 code. JSON mode emits an `error` event before status 1 when its typed output contract can still be
 honored.
 
-At its `--timeout`, a run reports `Run stopped: it reached its N s time limit (--timeout).` (an
-`error` event in JSON mode, a line on stderr in text mode) and is asked to stop the way a
-cancellation does: running tools and commands are stopped, the turn closes as cancelled, and the
-run saves its session and still emits `agent.completed` with outcome `cancelled` and its totals.
-A run that has not finished 10 seconds later is stopped outright, without `agent.completed`.
-Either way Wisp exits with status 124.
+At its `--timeout`, a run is asked to stop the way a cancellation does: running tools and
+commands are stopped, and the run saves its session and still emits `agent.completed` with outcome
+`cancelled` and its totals. It first reports `Run stopped: it reached its N s time limit
+(--timeout).` (an `error` event in JSON mode, a line on stderr in text mode), and Wisp exits with
+status 124. A run that is already finishing after its last turn completes normally instead. A run
+that neither stops nor finishes 10 seconds after the deadline is stopped outright, without
+`agent.completed`, and also exits with status 124. The limit counts from when the run starts, after
+Wisp's own startup; MCP servers have their own connection limit.

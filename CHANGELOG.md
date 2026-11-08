@@ -23,12 +23,13 @@ this policy.
 
 ### CLI
 
-- `wisp -p` gains `--timeout SECONDS`. At the deadline the run reports why it stopped, is asked to
-  stop as a cancellation does (running tools and commands are stopped, the turn closes as
-  cancelled), saves its session, and still emits `agent.completed` with its totals; Wisp then exits
-  with status 124. A run that has not finished 10 seconds later is stopped outright. No event or
-  session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run
-  to stop like this.
+- `wisp -p` gains `--timeout SECONDS`. At the deadline the run is asked to stop as a cancellation
+  does: running tools and commands are stopped, and the run saves its session and still emits
+  `agent.completed` with outcome `cancelled` and its totals. It reports why it stopped, and Wisp
+  exits with status 124. A run already finishing after its last turn completes normally; one that
+  neither stops nor finishes 10 seconds later is stopped outright. No event or session format
+  changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
+  this; a run it stops between turns reports `cancelled`, not the last turn's `completed`.
 
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>

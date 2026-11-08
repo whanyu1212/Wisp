@@ -28,23 +28,27 @@ class RunDeadline:
 
     At the deadline the run is asked to stop through `CodingSession.cancel_run`,
     which settles running tools and still publishes `AgentCompleted` with the
-    run's totals. A run that has not reached its loop yet does not accept the
-    request, so it is retried. If the run has not finished `grace_seconds` after
-    the deadline, the work is cancelled outright, and no `AgentCompleted` follows.
+    run's totals. Outside its loop, while it prepares its prompt or finishes
+    after its last turn, a run does not accept the request, so it is retried:
+    a run that was finishing anyway completes normally and is not reported as
+    stopped. If the run neither accepts nor finishes within `grace_seconds`
+    after the deadline, the work is cancelled outright and no `AgentCompleted`
+    follows.
 
     Attributes:
         seconds (float): Time from the start of `run` until the deadline.
-        report (Callable[[str], None]): Shows the deadline message once, when it
-            is reached, before the run's own cancellation events.
-        grace_seconds (float): How long a stopping run may take to finish.
-        reached (bool): Whether the deadline was reached.
+        report (Callable[[str], None]): Shows the deadline message once, when the
+            deadline stops the run, before the run's own cancellation events.
+        grace_seconds (float): How long after the deadline a run may take to
+            accept the stop or finish.
+        stopped (bool): Whether the deadline stopped the run.
         forced (bool): Whether the run had to be cancelled outright.
     """
 
     seconds: float
     report: Callable[[str], None]
     grace_seconds: float = 10.0
-    reached: bool = False
+    stopped: bool = False
     forced: bool = False
     _agent: StoppableRun | None = field(default=None, init=False)
 
@@ -61,9 +65,9 @@ class RunDeadline:
                 `attach`, and consumes its run.
 
         Raises:
-            Exception: Whatever ``work`` raised, unless the deadline was reached.
-                A run stopped by its deadline is expected to end as cancelled or
-                with an error, and the deadline message already explains why.
+            Exception: Whatever ``work`` raised, unless the deadline stopped the
+                run. A stopped run is expected to end as cancelled or with an
+                error, and the deadline message already explains why.
         """
 
         failure: Exception | None = None
@@ -76,17 +80,22 @@ class RunDeadline:
             finally:
                 # The work is over, so the watchdog has nothing left to stop.
                 task_group.cancel_scope.cancel()
-        if failure is not None and not self.reached:
+        if failure is not None and not self.stopped:
             raise failure
 
     async def _enforce(self, scope: anyio.CancelScope) -> None:
         await anyio.sleep(self.seconds)
-        self.reached = True
-        self.report(f"Run stopped: it reached its {self.seconds:g} s time limit (--timeout).")
         with anyio.move_on_after(self.grace_seconds):
             while self._agent is None or not self._agent.cancel_run():
                 await anyio.sleep(_RETRY_SECONDS)
+            self._stop()
             # The accepted run winds down; finishing the work cancels this task.
             await anyio.sleep_forever()
+        self._stop()
         self.forced = True
         scope.cancel()
+
+    def _stop(self) -> None:
+        if not self.stopped:
+            self.stopped = True
+            self.report(f"Run stopped: it reached its {self.seconds:g} s time limit (--timeout).")
