@@ -132,6 +132,17 @@ def test_proxied_arguments_checked_lightly(arguments: object, problem: str | Non
     assert found == problem if problem is None else problem in (found or "")
 
 
+@pytest.mark.parametrize(
+    "declared", [["string", {"type": "integer"}], ["string", "any"]], ids=["schema-branch", "any"]
+)
+def test_unknown_union_branch_left_to_server(declared: list[object]) -> None:
+    tool = _Tool("count", "Count.")
+    tool.input_schema = {"type": "object", "properties": {"n": {"type": declared}}}
+    entry = McpCatalog.from_tools([tool]).entries[0]
+
+    assert check_proxied_arguments(entry, {"n": 3}) is None
+
+
 def test_guidance_names_servers() -> None:
     assert catalog_guidance(_catalog()) == (
         "MCP servers, found with mcp_search and run with mcp_call: "

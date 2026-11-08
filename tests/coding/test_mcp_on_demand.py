@@ -435,3 +435,16 @@ def test_older_draft_types_do_not_crash(tmp_path: Path) -> None:
 
     (result,) = _results(events)
     assert (result.is_error, tools.query.calls) == (False, [{"table": "t"}])
+
+
+def test_registered_tool_named_like_discovery_keeps_its_safety(tmp_path: Path) -> None:
+    tools = _Tools()
+    tools.bash.name = MCP_CALL  # a user's own command tool, so the run stays direct
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=tools.registry(),
+    )
+
+    assert session._tool_is_unsafe(MCP_CALL) is True  # noqa: SLF001
+    assert session._tool_is_unsafe(MCP_SEARCH) is False  # noqa: SLF001

@@ -231,15 +231,15 @@ def check_proxied_arguments(entry: CatalogEntry, arguments: object) -> str | Non
             expected = properties.get(name)
             declared = expected.get("type") if isinstance(expected, dict) else None
             types = [declared] if isinstance(declared, str) else declared
-            if not isinstance(types, list):
+            # Only a union of plain type names is checked. Older drafts allow schemas
+            # or names like "any" in a `type` list; a value may match such a branch,
+            # so that property is left for the server to validate.
+            if not isinstance(types, list) or not all(
+                isinstance(kind, str) and kind in _JSON_TYPES for kind in types
+            ):
                 continue
-            # Older drafts allow schemas inside a `type` list; only names are checked.
-            checks = [
-                _JSON_TYPES[kind] for kind in types if isinstance(kind, str) and kind in _JSON_TYPES
-            ]
-            if checks and not any(check(value) for check in checks):
-                named = [kind for kind in types if isinstance(kind, str)]
-                return f"{entry.name}.{name} must be {' or '.join(named)}"
+            if types and not any(_JSON_TYPES[kind](value) for kind in types):
+                return f"{entry.name}.{name} must be {' or '.join(types)}"
     return None
 
 

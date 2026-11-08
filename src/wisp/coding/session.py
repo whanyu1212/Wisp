@@ -2045,16 +2045,16 @@ class CodingSession:
     def _tool_is_unsafe(self, name: str) -> bool:
         """Return whether a replayed tool turn could repeat side effects on recovery."""
 
-        if name in DISCOVERY_TOOL_NAMES:
-            # They read the run's catalog, and `mcp_call` never runs anything itself:
-            # a proxied call that ran a tool is judged by its `target` instead.
-            return False
         if self.tool_registry is None:
             return True
         try:
             return self.tool_registry.get(name).safety != "read"
         except UnknownToolError:
-            return True
+            # The discovery tools exist only in a run's own registry, never in the
+            # session's: they read the catalog, and `mcp_call` never runs anything
+            # itself (a proxied call that ran a tool is judged by its `target`). A
+            # registered tool that shares their name is judged above by its safety.
+            return name not in DISCOVERY_TOOL_NAMES
 
     def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
         """Return the startup-authorized tools available in the current mode."""
