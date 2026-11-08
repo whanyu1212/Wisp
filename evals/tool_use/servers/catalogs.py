@@ -63,8 +63,14 @@ REORDER_WAREHOUSE = "lisbon"
 REORDER_POINT = 140
 
 
+def _place(arguments: Arguments) -> tuple[str, str]:
+    """The SKU and warehouse, spelled the way the catalog stores them."""
+
+    return arguments["sku"].strip().upper(), arguments["warehouse"].strip().lower()
+
+
 def _reorder_policy(arguments: Arguments) -> str:
-    sku, warehouse = arguments["sku"], arguments["warehouse"].strip().lower()
+    sku, warehouse = _place(arguments)
     if (sku, warehouse) == (REORDER_SKU, REORDER_WAREHOUSE):
         point = REORDER_POINT
     else:
@@ -74,7 +80,7 @@ def _reorder_policy(arguments: Arguments) -> str:
 
 def _measure(label: str, unit: str, *, low: int, high: int) -> Callable[[Arguments], str]:
     def respond(arguments: Arguments) -> str:
-        sku, warehouse = arguments["sku"], arguments["warehouse"].strip().lower()
+        sku, warehouse = _place(arguments)
         value = _number(label, sku, warehouse, low=low, high=high)
         return f"{sku} at {warehouse}: {label} {value} {unit}"
 

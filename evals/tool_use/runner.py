@@ -344,9 +344,12 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
                 error=f"unreadable events: {err}",
             )
         # A server that failed to start drops its tools; that says nothing about the model.
-        missing = _missing_tools(mcp_tool_names(task), metrics)
-        if missing and runner_error is None:
-            runner_error = f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
+        # Without `agent.started` Wisp failed earlier, and its own error explains why.
+        if metrics.setup is not None and runner_error is None:
+            offered = set(metrics.setup.tool_names)
+            missing = [name for name in mcp_tool_names(task) if name not in offered]
+            if missing:
+                runner_error = f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
         verify_exit = _run_command(
             task.definition.verify,
             work,
@@ -555,11 +558,6 @@ def _run_wisp(
     if exit_code is None:
         return None, "wisp did not exit after its --timeout; the runner killed it"
     return exit_code, None
-
-
-def _missing_tools(expected: Sequence[str], metrics: RunMetrics) -> list[str]:
-    offered = set(metrics.setup.tool_names) if metrics.setup is not None else set()
-    return [name for name in expected if name not in offered]
 
 
 def _run_command(

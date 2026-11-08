@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Nightly reconciliation report. It replays the ledger, which takes a while.
 set -u
+echo "$(date +%s)" >> "$HOME/.reconcile-runs"
 echo "reconciling ledger (this takes about 20 seconds)..."
 sleep 20
 python3 - <<'PY'

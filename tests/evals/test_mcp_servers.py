@@ -20,6 +20,7 @@ from evals.tool_use.servers.catalogs import (
 from evals.tool_use.task_definitions import Task, select_tasks
 from wisp.config.settings import WispSettings
 from wisp.runtime.extensions import build_runtime
+from wisp.tools.context import ToolContext
 
 _MCP_TASKS = select_tasks(tags=["mcp"])
 
@@ -50,6 +51,34 @@ def test_inventory_decoys_differ() -> None:
     decoys = {tool.name: tool.respond(target) for tool in CATALOGS["inventory"].tools[1:]}
 
     assert not [name for name, text in decoys.items() if f" {REORDER_POINT} " in text]
+
+
+@pytest.mark.parametrize("sku", [REORDER_SKU, " a-1172 "])
+def test_reorder_point_ignores_spelling(sku: str) -> None:
+    policy = CATALOGS["inventory"].tools[0]
+
+    assert f"reorder point {REORDER_POINT} units" in policy.respond(
+        {"sku": sku, "warehouse": " Lisbon"}
+    )
+
+
+@pytest.mark.process
+def test_tool_call_through_wisp(tmp_path: Path) -> None:
+    task = next(task for task in _MCP_TASKS if task.id == "mcp-pick-tool")
+    servers = WispSettings.model_validate(mcp_settings(task, sys.executable)).mcp_servers
+
+    async def call() -> str:
+        runtime = await build_runtime(mcp_servers=servers or ())
+        try:
+            tool = runtime.tools.get("mcp__inventory__get_reorder_policy")
+            result = await tool.run(
+                {"sku": REORDER_SKU, "warehouse": "Lisbon"}, ToolContext(cwd=tmp_path)
+            )
+            return result.text
+        finally:
+            await runtime.aclose()
+
+    assert f"reorder point {REORDER_POINT} units" in anyio.run(call)
 
 
 def test_inventory_has_fifty_tools() -> None:

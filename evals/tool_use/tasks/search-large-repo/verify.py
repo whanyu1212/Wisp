@@ -1,4 +1,4 @@
-"""Pass only when the catalog message is fixed and no other file changed, frozen legacy included."""
+"""Pass only when the catalog message is fixed and nothing else changed or was added."""
 
 import filecmp
 import sys
@@ -15,6 +15,9 @@ for original in fixture.rglob("*"):
         current = original.relative_to(fixture)
         if current != catalog and not (current.is_file() and filecmp.cmp(original, current, shallow=False)):
             changed.append(str(current))
+for added in Path().rglob("*"):
+    if added.is_file() and ".git" not in added.parts and not (fixture / added).exists():
+        changed.append(f"{added} (new)")
 fixed = catalog.is_file() and filecmp.cmp(expected, catalog, shallow=False)
 print("changed:", ", ".join(changed) or "nothing else")
 sys.exit(0 if fixed and not changed else 1)
