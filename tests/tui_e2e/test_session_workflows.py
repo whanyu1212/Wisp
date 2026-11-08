@@ -293,12 +293,12 @@ for line in sys.stdin:
                 and command_types[:8]
                 == [
                     "get_messages",
-                    "get_permissions",
                     "get_connection_catalog",
                     "get_model_catalog",
                     "get_commands",
                     "get_state",
                     "get_skills",
+                    "get_permissions",
                     "get_queue_state",
                 ]
                 # A fresh welcome after the context result excludes the earlier

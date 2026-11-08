@@ -2035,11 +2035,10 @@ fn start_startup_hydration(
         loaded: None,
         completion: None,
     });
-    let mut effects = vec![UiEffect::SendCommand(command)];
-    // The composer names YOLO, so the mode is read at startup, not only with the panel.
-    effects.extend(discovery::permissions(state, None, ids)?);
-    effects.push(UiEffect::RequestRender);
-    Ok(effects)
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
 }
 
 fn connection_busy() -> Vec<UiEffect> {
