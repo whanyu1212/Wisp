@@ -16,6 +16,7 @@ from evals.tool_use.runner import (
     ModelSpec,
     RunContext,
     RunRow,
+    _mcp_setup_problem,
     classify,
     command_environment,
     detect_build,
@@ -26,7 +27,7 @@ from evals.tool_use.runner import (
     run_suite,
 )
 from evals.tool_use.task_definitions import Task, TaskChecks, load_task
-from wisp.events import RunOutcome
+from wisp.events import RunOutcome, RunSetup
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -338,3 +339,37 @@ def test_mcp_settings_carry_exposure(tmp_path: Path) -> None:
 
     assert settings["mcp_tool_exposure"] == "on_demand"
     assert list(settings["mcp_servers"]) == ["billing"]  # type: ignore[call-overload]
+
+
+_BILLING_TOOLS = ("mcp__billing__get_invoice", "mcp__billing__get_invoice_customer")
+_DISCOVERY = ("mcp_search", "mcp_describe", "mcp_call")
+_UNAVAILABLE = "MCP server billing is unavailable: startup or tool discovery timed out"
+
+
+@pytest.mark.parametrize(
+    ("exposure", "offered", "errors", "problem"),
+    [
+        ("direct", ("read", *_BILLING_TOOLS), (), None),
+        ("direct", ("read", _BILLING_TOOLS[0]), (), "not offered 1 MCP tools"),
+        ("on_demand", ("read", *_DISCOVERY), (), None),
+        ("on_demand", ("read",), (), "not offered 3 MCP tools, such as mcp_search"),
+        ("on_demand", ("read", *_DISCOVERY), (_UNAVAILABLE,), "MCP server billing is unavailable"),
+    ],
+    ids=["direct-ok", "direct-missing", "on-demand-ok", "on-demand-missing", "server-failed"],
+)  # fmt: skip
+def test_mcp_setup_problem(
+    tmp_path: Path,
+    exposure: str,
+    offered: tuple[str, ...],
+    errors: tuple[str, ...],
+    problem: str | None,
+) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    metrics = RunMetrics(
+        setup=RunSetup(tool_names=offered, tools_sha256="0" * 64, instructions_sha256="1" * 64),
+        errors=list(errors),
+    )
+
+    found = _mcp_setup_problem(task, metrics, exposure)  # type: ignore[arg-type]
+
+    assert found is None if problem is None else problem in (found or "")

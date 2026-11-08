@@ -45,11 +45,14 @@ def _tool_function(tool: CatalogTool, parameters: tuple[Parameter, ...]) -> Call
 def _signature_parameter(tool_name: str, parameter: Parameter) -> inspect.Parameter:
     # Built at run time from catalog data, so the types are opaque to the type checker.
     kind: Any = _annotation(tool_name, parameter)
-    annotation: Any = Annotated[kind, Field(description=parameter.description)]
+    # The description wraps the whole type, so an optional one is not hidden in a branch.
+    annotation: Any = Annotated[
+        kind if parameter.required else kind | None, Field(description=parameter.description)
+    ]
     return inspect.Parameter(
         parameter.name,
         inspect.Parameter.KEYWORD_ONLY,
-        annotation=annotation if parameter.required else annotation | None,
+        annotation=annotation,
         default=inspect.Parameter.empty if parameter.required else None,
     )
 

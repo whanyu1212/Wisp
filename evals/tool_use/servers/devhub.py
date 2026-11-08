@@ -75,15 +75,25 @@ def _is_triage_repo(arguments: Arguments) -> bool:
 
 def _list_issues(arguments: Arguments) -> str:
     if not _is_triage_repo(arguments):
-        return "No issues match."
+        return _missing_repo(arguments)
     state = str(arguments.get("state") or "open").lower()
     raw_labels = arguments.get("labels")
     labels = {str(label).lower() for label in raw_labels} if isinstance(raw_labels, list) else set()
+    matches = [
+        issue
+        for issue in _ISSUES
+        if (state == "all" or issue[1] == state) and labels <= set(issue[2])
+    ]
+    by = (
+        (lambda issue: issue[3])
+        if arguments.get("sort") == "comments"
+        else (lambda issue: issue[0])
+    )
+    matches.sort(key=by, reverse=arguments.get("direction") != "asc")
     rows = [
         f"#{number} [{issue_state}] {title} — labels: {', '.join(issue_labels)}; "
         f"{comments} comments"
-        for number, issue_state, issue_labels, comments, title in _ISSUES
-        if (state == "all" or issue_state == state) and labels <= set(issue_labels)
+        for number, issue_state, issue_labels, comments, title in _page(matches, arguments)
     ]
     return "\n".join(rows) or "No issues match."
 
@@ -101,12 +111,16 @@ def _get_issue(arguments: Arguments) -> str:
 
 def _list_pulls(arguments: Arguments) -> str:
     if not _is_triage_repo(arguments):
-        return "No pull requests match."
+        return _missing_repo(arguments)
     state = str(arguments.get("state") or "open").lower()
+    matches = sorted(
+        (pull for pull in _PULLS if state == "all" or pull[1] == state),
+        key=lambda pull: pull[0],
+        reverse=arguments.get("direction") != "asc",
+    )
     rows = [
         f"#{number} [{pull_state}] {title}"
-        for number, pull_state, title, _body in _PULLS
-        if state == "all" or pull_state == state
+        for number, pull_state, title, _body in _page(matches, arguments)
     ]
     return "\n".join(rows) or "No pull requests match."
 
@@ -147,15 +161,24 @@ def _check_runs(arguments: Arguments) -> str:
 
 
 def _int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    if isinstance(value, str) and value.strip().lstrip("#").isdigit():
-        return int(value.strip().lstrip("#"))
-    return None
+    # The server's schema has already turned numeric strings into integers.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _page[T](items: list[T], arguments: Arguments) -> list[T]:
+    """The page of ``items`` that `page` and `per_page` select, as a real API pages."""
+
+    per_page = _int(arguments.get("per_page")) or 30
+    page = _int(arguments.get("page")) or 1
+    start = (max(page, 1) - 1) * max(min(per_page, 100), 1)
+    return items[start : start + max(min(per_page, 100), 1)]
+
+
+def _missing_repo(arguments: Arguments) -> str:
+    owner, repo = _repo(arguments)
+    return (
+        f"Repository {owner}/{repo} not found. Pass the owner and the repository name separately."
+    )
 
 
 def _decoy(tool: str, noun: str) -> Callable[[Arguments], str]:

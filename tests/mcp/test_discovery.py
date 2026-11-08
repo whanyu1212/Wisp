@@ -105,24 +105,12 @@ def test_describe_returns_schema(tmp_path: Path) -> None:
     ("arguments", "problem"),
     [
         ({"sku": "A-1"}, None),
-        ({"sku": "A-1", "count": None}, None),
-        ({"sku": "A-1", "count": 2.0}, None),
+        ({"sku": 1172, "count": "3"}, None),
         ({"sku": "A-1", "extra": object()}, None),
         ({}, "needs sku"),
-        ({"sku": 1}, "sku must be string"),
-        ({"sku": "A", "count": True}, "count must be integer or null"),
         (["A-1"], "must be an object"),
     ],
-    ids=[
-        "ok",
-        "nullable",
-        "whole-float",
-        "unknown-key",
-        "missing",
-        "wrong-type",
-        "bool-not-int",
-        "not-object",
-    ],
+    ids=["ok", "types-left-to-server", "unknown-key", "missing", "not-object"],
 )
 def test_proxied_arguments_checked_lightly(arguments: object, problem: str | None) -> None:
     entry = _catalog().entries[0]
@@ -130,17 +118,6 @@ def test_proxied_arguments_checked_lightly(arguments: object, problem: str | Non
     found = check_proxied_arguments(entry, arguments)
 
     assert found == problem if problem is None else problem in (found or "")
-
-
-@pytest.mark.parametrize(
-    "declared", [["string", {"type": "integer"}], ["string", "any"]], ids=["schema-branch", "any"]
-)
-def test_unknown_union_branch_left_to_server(declared: list[object]) -> None:
-    tool = _Tool("count", "Count.")
-    tool.input_schema = {"type": "object", "properties": {"n": {"type": declared}}}
-    entry = McpCatalog.from_tools([tool]).entries[0]
-
-    assert check_proxied_arguments(entry, {"n": 3}) is None
 
 
 def test_guidance_names_servers() -> None:

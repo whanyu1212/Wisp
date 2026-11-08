@@ -266,9 +266,7 @@ def test_grants_follow_target(tmp_path: Path, granted: str, ran: bool) -> None:
     assert bool(tools.drop.calls) is ran
 
 
-@pytest.mark.parametrize(
-    "arguments", [{}, {"table": 3}, "users"], ids=["missing", "wrong-type", "not-object"]
-)
+@pytest.mark.parametrize("arguments", [{}, "users"], ids=["missing", "not-object"])
 def test_bad_arguments_fail_before_approval(tmp_path: Path, arguments: object) -> None:
     tools = _Tools()
 

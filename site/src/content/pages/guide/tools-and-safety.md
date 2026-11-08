@@ -342,9 +342,9 @@ task success holds while request size falls.
 (`--allow-tool`, `--all-tools`), plan mode and the run's own tool limits all apply, and built-in tools
 are refused. Wisp resolves each `mcp_call` to the tool it names before any check, so that tool's own
 safety decides: a `command` tool asks for approval exactly as a direct call does, the approval and
-"allow for this session" name that tool, and a grant applies to that tool alone. Arguments missing a
-required parameter or of the wrong basic type are rejected before you are asked; the server still
-validates them fully. Events for a proxied call keep `name: "mcp_call"` and add `target` with the
+"allow for this session" name that tool, and a grant applies to that tool alone. A call missing a
+required parameter is rejected before you are asked; everything else, including types, is left to
+the server to validate, exactly as for a direct call. Events for a proxied call keep `name: "mcp_call"` and add `target` with the
 tool that runs.
 
 Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and

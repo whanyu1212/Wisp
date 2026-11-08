@@ -45,6 +45,7 @@ BASELINE_FIELDS = (
     "git_commit",
     "mcp_tool_exposure",
     "proxied_calls",
+    "proxied_errors",
     "proxied_argument_errors",
 )
 SUITE_FIELDS = (

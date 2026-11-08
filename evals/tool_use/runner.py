@@ -194,6 +194,7 @@ class RunRow:
     run_dir: str
     mcp_tool_exposure: McpToolExposure = "direct"
     proxied_calls: int = 0
+    proxied_errors: int = 0
     proxied_argument_errors: int = 0
 
 
@@ -726,5 +727,6 @@ def _row(
         run_dir=str(run_dir.relative_to(context.results_dir)),
         mcp_tool_exposure=context.mcp_tool_exposure,
         proxied_calls=measured.proxied_calls,
+        proxied_errors=measured.proxied_errors,
         proxied_argument_errors=measured.proxied_argument_errors,
     )

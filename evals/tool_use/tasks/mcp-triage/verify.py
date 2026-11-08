@@ -9,7 +9,8 @@ try:
     for line in Path("TRIAGE.md").read_text(encoding="utf-8").splitlines():
         key, separator, value = line.partition(":")
         if separator:
-            found[key.strip().lower()] = value.strip().lstrip("#")
+            # Formatting is not the task: allow backticks, a leading `#`, and any case.
+            found[key.strip().strip("`*- ").lower()] = value.strip().strip("`").lstrip("#").lower()
 except OSError:
     found = {}
 missing = {key: value for key, value in expected.items() if found.get(key) != value}

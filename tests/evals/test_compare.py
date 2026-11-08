@@ -49,6 +49,7 @@ def _run(
         "git_commit": "abc",
         "mcp_tool_exposure": "direct",
         "proxied_calls": 0,
+        "proxied_errors": 0,
         "proxied_argument_errors": 0,
         "run_dir": "a/b/rep1",
         "error": None,
@@ -192,3 +193,18 @@ def test_compare_command(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert "| a | openai-codex::m | 2/2 → 2/2 |" in capsys.readouterr().out
     assert cli.main(["compare", str(tmp_path / "missing"), str(runs)]) == 2
     assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_baseline_tolerates_older_rows() -> None:
+    row = _run("a", 4)
+    for newer in (
+        "mcp_tool_exposure",
+        "proxied_calls",
+        "proxied_errors",
+        "proxied_argument_errors",
+    ):
+        row.pop(newer, None)
+
+    (run,) = baseline_document([row], label="old", date="2026-11-08", suite={})["runs"]  # type: ignore[misc]
+
+    assert "proxied_calls" not in run and run["task"] == "a"

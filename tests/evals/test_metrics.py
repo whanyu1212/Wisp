@@ -143,4 +143,8 @@ def test_counts_proxied_calls_by_target() -> None:
     metrics = measure(parse_events(_lines(events)))
 
     assert dict(metrics.tool_calls) == {"mcp_search": 1, "mcp__db__q": 1, "mcp_call": 1}
-    assert (metrics.proxied_calls, metrics.proxied_argument_errors) == (2, 1)
+    assert (metrics.proxied_calls, metrics.proxied_errors, metrics.proxied_argument_errors) == (
+        2,
+        1,
+        1,
+    )

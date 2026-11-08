@@ -83,6 +83,8 @@ class Report:
     task_scores: list[TaskScore] = field(default_factory=list)
     model_scores: list[ModelScore] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Per model, for on-demand MCP runs: proxied calls and how many of them failed.
+    proxied: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 def pass_hat_k(passed: int, scored: int, k: int) -> float | None:
@@ -139,6 +141,13 @@ def build_report(rows: Sequence[dict[str, object]], *, k: int = 3, seed: int = 0
         ]
         report.model_scores.append(_score_model(model, scored, rng))
     report.warnings.extend(_setup_warnings(rows))
+    for row in rows:
+        calls = int(str(row.get("proxied_calls", 0)))
+        if calls:
+            model = f"{row['provider']}::{row['model']}"
+            seen_calls, seen_errors = report.proxied.get(model, (0, 0))
+            errors = int(str(row.get("proxied_errors", 0)))
+            report.proxied[model] = (seen_calls + calls, seen_errors + errors)
     return report
 
 
@@ -171,6 +180,10 @@ def render_markdown(report: Report) -> str:
             f"| {model.model} | {model.tasks} | {_number(model.mean_calls, 1)} "
             f"| {_number(model.mean_tokens)} | {_percent(model.pass_1)} | {interval} |"
         )
+    if report.proxied:
+        lines += ["", "| Model | Proxied MCP calls | Failed |", "|---|---|---|"]
+        for label, (calls, errors) in sorted(report.proxied.items()):
+            lines.append(f"| {label} | {calls} | {errors} ({errors / calls:.0%}) |")
     if report.warnings:
         lines += ["", "Warnings:", *(f"- {warning}" for warning in report.warnings)]
     return "\n".join(lines)

@@ -47,10 +47,14 @@ class RunMetrics:
         context_overflowed (bool): Whether the conversation outgrew the model's
             context window.
         errors (list[str]): Every `error` event's message, in order.
-        proxied_calls (int): On-demand `mcp_call` calls; each also counts in
-            ``tool_calls`` under the tool it named.
-        proxied_argument_errors (int): `mcp_call` calls rejected for their
-            arguments, the measure of whether proxied calls are harder to get right.
+        proxied_calls (int): On-demand `mcp_call` calls. Each also counts in
+            ``tool_calls`` under the tool it resolved to, or as `mcp_call` when
+            the name it gave matched no catalog tool.
+        proxied_errors (int): `mcp_call` calls that failed for any reason: Wisp's
+            pre-check, an unknown name, or the server rejecting them. The measure
+            of whether proxied calls are harder to get right than direct ones.
+        proxied_argument_errors (int): The subset Wisp's pre-check rejected
+            because a required parameter was missing or arguments were not an object.
     """
 
     setup: RunSetup | None = None
@@ -68,6 +72,7 @@ class RunMetrics:
     context_overflowed: bool = False
     errors: list[str] = field(default_factory=list)
     proxied_calls: int = 0
+    proxied_errors: int = 0
     proxied_argument_errors: int = 0
 
     @property
@@ -124,6 +129,7 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
                 metrics.commands.append(command)
         elif isinstance(event, ToolResultReady) and event.is_error:
             metrics.tool_errors[event.failure_code or "unknown"] += 1
+            metrics.proxied_errors += event.name == MCP_CALL
             metrics.proxied_argument_errors += (
                 event.name == MCP_CALL and event.failure_code == "invalid_arguments"
             )

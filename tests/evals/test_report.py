@@ -75,3 +75,13 @@ def test_differing_tools_warned() -> None:
     rows = [_row("a", "passed", rep=1), _row("a", "passed", rep=2, tools="u")]
 
     assert build_report(rows).warnings == ["a with openai::m: runs offered 2 different tool sets"]
+
+
+def test_reports_proxied_calls() -> None:
+    rows = [_row("a", "passed", rep=1), _row("a", "passed", rep=2)]
+    rows[0].update(proxied_calls=4, proxied_errors=1)
+
+    table = render_markdown(build_report(rows))
+
+    assert "| openai::m | 4 | 1 (25%) |" in table
+    assert "Proxied" not in render_markdown(build_report([_row("a", "passed", rep=1)]))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -69,3 +70,26 @@ def test_typographic_fixture_keeps_bytes() -> None:
 def test_bom_fixture_keeps_mark() -> None:
     fixture = next(task for task in _TASKS if task.id == "edit-bom-file").fixture
     assert (fixture / "messages.py").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+@pytest.mark.parametrize(
+    ("answer", "passes"),
+    [
+        ("issue: 412\npr: 418\ncheck: e2e-safari\n", True),
+        ("- issue: `#412`\n- pr: #418\n- check: `E2E-Safari`\n", True),
+        ("issue: 405\npr: 418\ncheck: e2e-safari\n", False),
+        ("issue: 420\npr: 418\ncheck: e2e-safari\n", False),
+        ("issue: 412\npr: 421\ncheck: e2e-chrome\n", False),
+        ("issue: 412\npr: 409\ncheck: e2e-safari\n", False),
+    ],
+    ids=["exact", "formatted", "closed-issue", "not-regression", "wrong-pr", "closed-pr"],
+)
+def test_triage_verifier(tmp_path: Path, answer: str, passes: bool) -> None:
+    task = next(task for task in _TASKS if task.id == "mcp-triage")
+    (tmp_path / "TRIAGE.md").write_text(answer, encoding="utf-8")
+
+    exit_code = subprocess.run(
+        [sys.executable, str(task.folder / "verify.py")], cwd=tmp_path, check=False
+    ).returncode
+
+    assert (exit_code == 0) is passes
