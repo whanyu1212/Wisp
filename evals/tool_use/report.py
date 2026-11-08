@@ -94,9 +94,21 @@ def pass_hat_k(passed: int, scored: int, k: int) -> float | None:
 
 
 def load_rows(path: Path) -> list[dict[str, object]]:
-    """Read the rows of a `runs.jsonl` file."""
+    """Read runs from a results folder, its `runs.jsonl`, or a baseline JSON file.
 
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    Raises:
+        ValueError: When a baseline file holds no `runs` list.
+    """
+
+    if path.is_dir():
+        path = path / "runs.jsonl"
+    text = path.read_text(encoding="utf-8")
+    if path.suffix != ".json":
+        return [json.loads(line) for line in text.splitlines() if line]
+    runs = json.loads(text).get("runs")
+    if not isinstance(runs, list):
+        raise ValueError(f"{path} is not a baseline: it has no runs list")
+    return runs
 
 
 def build_report(rows: Sequence[dict[str, object]], *, k: int = 3, seed: int = 0) -> Report:
@@ -167,8 +179,8 @@ def _score_task(task: str, model: str, runs: Sequence[dict[str, object]], k: int
     scored = [run for run in runs if run["status"] != "errored"]
     passed = sum(1 for run in scored if run["status"] == "passed")
     tokens = [int(str(run["input_tokens"])) + int(str(run["output_tokens"])) for run in scored]
-    calls = [_count_sum(run["tool_calls"]) for run in scored]
-    tool_errors = [_count_sum(run["tool_errors"]) for run in scored]
+    calls = [count_sum(run["tool_calls"]) for run in scored]
+    tool_errors = [count_sum(run["tool_errors"]) for run in scored]
     return TaskScore(
         task=task,
         model=model,
@@ -238,7 +250,7 @@ def _number(value: float | None, digits: int = 0) -> str:
     return "—" if value is None else f"{value:,.{digits}f}"
 
 
-def _count_sum(counts: object) -> int:
+def count_sum(counts: object) -> int:
     """Sum a row's per-name counts, such as `tool_calls`."""
 
     if not isinstance(counts, dict):

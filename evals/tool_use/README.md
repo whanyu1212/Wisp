@@ -99,6 +99,30 @@ covers project context, which names each run's own temporary folder.
 With about a dozen tasks and three repetitions, only large differences stand out from noise. Read
 small differences as no difference.
 
+## Compare and baselines
+
+```bash
+uv run python -m evals.tool_use compare evals/tool_use/baselines/<date>-current-tools.json \
+  evals/tool_use/results/<timestamp>
+uv run python -m evals.tool_use baseline evals/tool_use/results/<timestamp> --label current-tools
+```
+
+`compare BEFORE AFTER` pairs runs by task and model (each side a results folder, its
+`runs.jsonl`, or a baseline file) and prints, per pair, passes before and after and the change in
+mean tool calls, tool errors and tokens, with a 95% bootstrap interval for each change. A change
+whose interval excludes zero is marked `*`. Errored runs are left out on both sides. `(tools
+differ)` after a task says the two sides offered different tools, which is expected when the tools
+are what changed. The last lines state the noise floor: per metric, the median interval half-width
+as a share of the earlier mean. Treat changes smaller than that as no change. With three runs a
+side the bootstrap is optimistic, so treat a marked change near the floor as a lead to rerun with
+more repetitions, not a result.
+
+`baseline` saves a results folder as `baselines/<date>-<label>.json`: the suite's settings and,
+for each run, its task, model, status, tool calls and errors, tokens, cost and setup hash. It
+leaves out folders and error text, and never overwrites an existing baseline. Baselines are
+committed so later changes to Wisp's tools are compared against the same numbers. Record one on
+the commit the change starts from, with the models the change will be measured on.
+
 ## Add a task
 
 Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve
