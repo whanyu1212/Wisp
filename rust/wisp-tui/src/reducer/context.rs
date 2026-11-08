@@ -706,6 +706,11 @@ mod tests {
                 .contains("backend failure")
         );
         assert!(state.context.compaction_notice_is_warning);
+        // The title and any notification report the failure, not a finished run.
+        assert_eq!(
+            crate::attention::RunState::of(&state),
+            crate::attention::RunState::Failed
+        );
         let mut state = super::tests::state();
         let mut ids = Ids::default();
         reduce(&mut state, UiAction::Compact(None), &mut ids).unwrap();

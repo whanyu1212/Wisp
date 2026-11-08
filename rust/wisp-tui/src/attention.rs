@@ -22,8 +22,9 @@ pub(crate) enum RunState {
 }
 
 impl RunState {
-    /// A failed prompt leaves the TUI idle with the error kept until the next submit, so
-    /// that error, not only the transport-closed `Error` status, makes the state failed.
+    /// A failed command (prompt, `/compact` or `/init`) leaves the TUI idle with the
+    /// failure kept until the next command starts, so that, not only the
+    /// transport-closed `Error` status, makes the state failed.
     pub(crate) fn of(state: &UiState) -> Self {
         match state.view_status {
             ViewStatus::WaitingForApproval => Self::NeedsApproval,
@@ -33,7 +34,7 @@ impl RunState {
             ViewStatus::Idle if state.interaction_status == InteractionStatus::Compacting => {
                 Self::Working
             }
-            ViewStatus::Idle if state.last_command_error.is_some() => Self::Failed,
+            ViewStatus::Idle if state.last_command_failed => Self::Failed,
             ViewStatus::Idle => Self::Ready,
         }
     }
@@ -259,9 +260,9 @@ mod tests {
         assert_eq!(RunState::of(&state), RunState::Working);
         // A failed prompt goes back to idle but keeps its error until the next submit.
         state.view_status = ViewStatus::Idle;
-        state.last_command_error = Some("provider error".into());
+        state.last_command_failed = true;
         assert_eq!(RunState::of(&state), RunState::Failed);
-        state.last_command_error = None;
+        state.last_command_failed = false;
         assert_eq!(RunState::of(&state), RunState::Ready);
         state.interaction_status = InteractionStatus::Compacting;
         assert_eq!(RunState::of(&state), RunState::Working);

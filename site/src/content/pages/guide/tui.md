@@ -306,7 +306,7 @@ to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for de
 values are ignored.
 
 The terminal title follows the run: `Wisp · working · <folder>`, `needs approval`, `needs trust`, or
-`error` (until the next prompt after a failure), and just `Wisp · <folder>` when ready. Wisp saves
+`error` (after a failed prompt, `/compact`, or `/init`, until the next command), and just `Wisp · <folder>` when ready. Wisp saves
 the previous title when it starts and restores it on exit. Terminals and multiplexers without that
 title stack, tmux among them, keep Wisp's last title until something else sets one, such as a shell
 prompt that sets the title. When a run finishes, fails, or stops for an approval or trust decision
