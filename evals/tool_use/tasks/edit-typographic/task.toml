@@ -1,0 +1,8 @@
+id = "edit-typographic"
+title = "Change two strings that contain typographic quotes and non-breaking spaces"
+tags = ["edit"]
+prompt = "In notices.py, change the year in the trial notice from 2025 to 2026, and rename “Acme Cloud” to “Acme Platform” in the welcome notice. Keep every other character exactly as it is, including the typographic quotes, dashes and non-breaking spaces."
+verify = "cmp -s {task}/solution/notices.py notices.py"
+timeout_seconds = 180
+max_tool_iterations = 15
+tools = ["read", "edit", "write", "ls"]

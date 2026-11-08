@@ -75,7 +75,7 @@ A row's `status` is:
 |---|---|
 | `passed` | `verify` exited 0, every check held, and the run finished before its deadline |
 | `failed` | `verify` or a check failed; or the run hit its deadline (`timed_out`), its tool-iteration limit, or its context window |
-| `errored` | The run says nothing about the task: Wisp crashed or exited badly, could not sign in, ended on a provider error, or setup failed |
+| `errored` | The run says nothing about the task: Wisp crashed or exited badly, could not sign in, ended on a provider error, setup failed, or an MCP server did not start |
 
 Reports leave errored runs out of pass rates and count them on their own, so a rate limit does not
 read as a task failure. Rows also record tool calls by name, tool errors by `failure_code`,
@@ -84,9 +84,11 @@ cost, provider retries, the setup hashes from `agent.started`, the Wisp version,
 
 ## Report
 
-`report` prints, per task and model, passes, pass^1, pass^k, errored and timed-out runs, mean
-tokens and known cost; and per model, the mean pass^1 across tasks with a 95% bootstrap interval
-over tasks. pass^k (from tau-bench) is the chance that k runs of a task all pass, so it shows
+Current models pass most tasks, so `report` leads with how much work a run took: per task and
+model, mean tool calls, mean tool errors and mean tokens, then passes, pass^1, pass^k, errored and
+timed-out runs and known cost. Per model it prints mean calls and tokens across tasks, and the mean
+pass^1 with a 95% bootstrap interval over tasks. Compare calls and tokens only over the same
+tasks. pass^k (from tau-bench) is the chance that k runs of a task all pass, so it shows
 reliability that a plain pass rate hides.
 
 It also warns when one task and model's runs offered different tools (`tools_sha256`, from
@@ -107,19 +109,26 @@ untouched fixture and accepts the fixture with `solution/` copied over it. Ruff 
 ```toml
 id = "fix-failing-test"          # must match the folder name
 title = "One line saying what the task asks for"
-tags = ["general"]               # general, long-output, edit, mcp, multi-read
+tags = ["general"]               # general, long-output, edit, mcp, multi-read, scale
 prompt = "What the user types"
 setup = "optional command run after the fixture is committed"
 verify = "{python} -m unittest -q"   # exit 0 means passed
 timeout_seconds = 300
 max_tool_iterations = 30
 tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]
+mcp_servers = ["inventory"]      # optional; synthetic servers from servers/catalogs.py
 
 [checks]                         # optional; a passing run must also meet these
 no_rerun = "make build"          # a bash command containing this may run only once
 uses_tool = "read_output"
 max_tool_errors = 2
 ```
+
+A task's `mcp_servers` start for each run from the run's private `HOME`, and all their tools are
+exposed with the built-in `tools`. `servers/catalogs.py` defines each server's tools and answers;
+decoy tools return plausible wrong values rather than errors, so a model cannot find the right
+tool by trying them all. A run whose servers did not offer every catalog tool is `errored`, since
+a server that failed to start says nothing about the model.
 
 Commands run with `bash -c` in the run's folder. `{python}` becomes the runner's interpreter and
 `{task}` the task's own folder, so a verifier script can live beside `task.toml`, out of the

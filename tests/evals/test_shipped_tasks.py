@@ -42,6 +42,13 @@ def test_verifier_separates_solution(task: Task, tmp_path: Path) -> None:
     assert _verify(task, tmp_path / "solved", solved=True) == 0
 
 
+def test_typographic_fixture_keeps_bytes() -> None:
+    fixture = next(task for task in _TASKS if task.id == "edit-typographic").fixture
+    text = (fixture / "notices.py").read_bytes()
+
+    assert b"\xc2\xa0" in text and b"\xe2\x80\x9c" in text
+
+
 def test_bom_fixture_keeps_mark() -> None:
     fixture = next(task for task in _TASKS if task.id == "edit-bom-file").fixture
     assert (fixture / "messages.py").read_bytes().startswith(b"\xef\xbb\xbf")

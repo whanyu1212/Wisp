@@ -1,0 +1,8 @@
+id = "edit-repeated-blocks"
+title = "Change one handler in a file of near-identical handlers"
+tags = ["scale", "edit"]
+prompt = "In handlers.py, raise both upstream timeouts in `handle_refund` from 30 to 90 seconds. Leave every other handler exactly as it is."
+verify = "cmp -s {task}/solution/handlers.py handlers.py"
+timeout_seconds = 180
+max_tool_iterations = 15
+tools = ["read", "edit", "write", "grep", "ls"]

@@ -1,0 +1,2 @@
+# Eval fixtures and reference solutions are compared byte for byte.
+/evals/tool_use/tasks/** -text
