@@ -305,6 +305,19 @@ terminal lacks truecolor, set `WISP_TUI_COLORS=256` so Wisp converts instead. Se
 to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for detection; other
 values are ignored.
 
+The terminal title follows the run: `Wisp · working · <folder>`, `needs approval`, `needs trust`, or
+`error` (after a failed prompt, `/compact`, or `/init`, until the next command), and just `Wisp · <folder>` when ready. Wisp saves
+the previous title when it starts and restores it on exit. Terminals and multiplexers without that
+title stack, tmux among them, keep Wisp's last title until something else sets one, such as a shell
+prompt that sets the title. When a run finishes, fails, or stops for an approval or trust decision
+while the terminal is in the background, Wisp sends a desktop notification (OSC 9, shown by terminals such as iTerm2, Ghostty, and
+WezTerm). It notifies only after the terminal has reported losing focus, so in tmux turn on
+`focus-events`; tmux also drops OSC 9 unless passthrough is allowed. Set `WISP_TUI_NOTIFY=bell` to
+ring the terminal bell instead, which macOS Terminal.app and tmux turn into a badge or an alert, or
+`WISP_TUI_NOTIFY=off` to stop notifications. While an approval or trust decision waits, its border
+breathes slowly on truecolor terminals; it stays solid in the background, under `NO_COLOR`, at lower
+colour depths, or with `WISP_TUI_MOTION=off`.
+
 ## Modes {#modes}
 
 **Plan mode** applies to future prompts in the current process. It exposes only read-only tools that

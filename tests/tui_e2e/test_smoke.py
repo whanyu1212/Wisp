@@ -46,6 +46,15 @@ def test_run_settled_ignores_partial_frame() -> None:
     assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
 
 
+def test_screen_rows_skip_terminal_control_output() -> None:
+    # The title, a notification and the bell are written between frames; a terminal
+    # shows none of them on the screen, even at the cursor the frame left on the footer.
+    control = b"\x1b]0;Wisp \xc2\xb7 working \xc2\xb7 app\x07\x1b]9;Wisp finished\x1b\\\x07"
+    output = _frame(b"\x1b[2;1Hidle") + control + _frame(b"")
+    assert screen_rows(output) == ["", "idle"]
+    assert run_settled(output, 0)
+
+
 def test_screen_rows_join_partial_repaints() -> None:
     # The second frame rewrites only the cells that differ, as Ratatui does.
     output = _frame(b"\x1b[2;3Hworking") + _frame(b"\x1b[2;3Hidle\x1b[2;7H\x1b[K")

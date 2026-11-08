@@ -878,3 +878,32 @@ fn every_theme_keeps_diff_text_and_changed_words_readable() {
         }
     }
 }
+
+#[test]
+fn breathing_cycle() {
+    let palette = theme::default_theme().palette(false);
+    let warning = palette.warning;
+    // A still frame is the solid colour, so captures and snapshots do not move.
+    assert_eq!(palette.breathing(warning, 0), warning);
+    assert_eq!(palette.breathing(warning, 16), warning);
+    assert_eq!(
+        palette.breathing(warning, 255),
+        palette.breathing(warning, 15)
+    );
+    // Halfway through the cycle it is at its quietest, still distinct from the surface.
+    let quietest = palette.breathing(warning, 8);
+    assert_ne!(quietest, warning);
+    assert_ne!(quietest, palette.surface);
+    assert_eq!(
+        palette.breathing(warning, 4),
+        palette.breathing(warning, 12)
+    );
+    let distance = |color| match (color, palette.surface) {
+        (Color::Rgb(r, g, b), Color::Rgb(sr, sg, sb)) => {
+            u32::from(r.abs_diff(sr)) + u32::from(g.abs_diff(sg)) + u32::from(b.abs_diff(sb))
+        }
+        _ => panic!("RGB palette"),
+    };
+    assert!(distance(palette.breathing(warning, 4)) > distance(quietest));
+    assert!(distance(warning) > distance(palette.breathing(warning, 4)));
+}

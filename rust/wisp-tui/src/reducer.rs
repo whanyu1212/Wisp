@@ -765,6 +765,10 @@ pub struct UiState {
     /// starts. A failed prompt returns to `Idle` so the user can fix the cause (for
     /// example with `/connect`) and retry; only a closed transport is terminal.
     pub(crate) last_command_error: Option<String>,
+    /// Whether the last command of any kind ended in failure (not cancellation), kept as
+    /// long as `last_command_error`. Compaction and init failures report through their own
+    /// notices and set no error, so this is what tells them apart from success.
+    pub(crate) last_command_failed: bool,
     pub(crate) context: context::ContextState,
     pub(crate) skills: discovery::Inspection<wisp_protocol::events::SkillCatalogSnapshot>,
     pub(crate) mcp: discovery::Inspection<wisp_protocol::events::McpStatusSnapshot>,
@@ -852,6 +856,7 @@ impl UiState {
             history_request: None,
             post_prompt_session_sync_pending: false,
             last_command_error: None,
+            last_command_failed: false,
             context: context::ContextState::default(),
             skills: discovery::Inspection::default(),
             mcp: discovery::Inspection::default(),
@@ -1695,6 +1700,7 @@ fn submit(
     let id = ids.next_id(CommandKind::Prompt);
     let command = WispTypedClientRpcCommands::prompt(&id, &content)?;
     state.last_command_error = None;
+    state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
     state.interaction_status = InteractionStatus::Running;
     state.current_command = Some(ActiveCommand {
@@ -1751,6 +1757,7 @@ fn init_project(
     let id = ids.next_id(CommandKind::Init);
     let command = WispTypedClientRpcCommands::init(&id)?;
     state.last_command_error = None;
+    state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
     state.interaction_status = InteractionStatus::Running;
     state.current_command = Some(ActiveCommand {
@@ -2896,6 +2903,7 @@ fn commit_session_and_hydrate(
     // Committing to another session (resume, clone, fork, tree navigation) drops the
     // previous session's failure; same-session history syncs keep it.
     state.last_command_error = None;
+    state.last_command_failed = false;
     state.transcript = SharedTranscript::default();
     state.finished_run_cost = None;
     state.history = HistoryWindow::default();
@@ -3307,6 +3315,7 @@ fn finish_startup_hydration(
                 .map(|session| session.session_id.clone());
             clear_queue_cache(state);
             state.last_command_error = None;
+            state.last_command_failed = false;
             install_history_snapshot(state, report);
             state.context.invalidate();
             state.input_ready = true;
@@ -4024,6 +4033,7 @@ fn finish_new_session(
             state.context.invalidate();
             // A failure belongs to the session that produced it.
             state.last_command_error = None;
+            state.last_command_failed = false;
             state.transcript = SharedTranscript::default();
             state.finished_run_cost = None;
             state.selected_session = None;
@@ -5537,6 +5547,7 @@ fn finish_current_command(
     // A failed prompt is recoverable: keep the composer usable and show why it
     // failed. Compaction and init report through their own notices.
     state.view_status = ViewStatus::Idle;
+    state.last_command_failed = !ok && !was_cancelled;
     if !ok && !was_cancelled && !matches!(command_type, "compact" | "init") {
         state.last_command_error = Some(bounded_session_text(
             error.unwrap_or("The prompt failed."),

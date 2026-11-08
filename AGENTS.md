@@ -183,7 +183,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   runs the bounded loop over transport events, input, and paints; `transport.rs` admits backend
   events and writes commands; `terminal.rs` owns raw mode, the alternate screen, the panic hook, and
   the `FrameBackend` that wraps each frame in a synchronized update. `color_depth.rs` detects the
-  terminal's colour depth and downconverts each rendered frame to it.
+  terminal's colour depth and downconverts each rendered frame to it. `attention.rs` turns the run
+  state and terminal focus into the window title and notifications written after each frame.
 - `reducer.rs` and `reducer/` hold the deterministic, terminal-independent state transitions
   (`UiState`, `UiAction`). `ui.rs` lays out and paints a frame (`render_interactive`).
   `transcript.rs` holds transcript state and `transcript_view.rs` projects it into styled rows and
