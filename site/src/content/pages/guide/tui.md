@@ -296,6 +296,15 @@ marker; status labels, approval action words, shape-coded tool markers, and diff
 remain visible without hue. The theme choice can still be changed and remembered while monochrome is
 active.
 
+Themes are drawn in 24-bit colour. Wisp switches to the nearest 256-colour palette in macOS
+Terminal.app (unless `COLORTERM` advertises truecolor), and to the 16 ANSI colours when `TERM` names
+a 16- or 8-colour terminal such as the Linux console. Text that would fall below 4.5:1 contrast
+after the switch moves to the nearest colour that keeps it readable. Inside tmux, Wisp keeps sending
+24-bit colour and tmux converts it for its outer terminal, without that contrast step; if that
+terminal lacks truecolor, set `WISP_TUI_COLORS=256` so Wisp converts instead. Set `WISP_TUI_COLORS`
+to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for detection; other
+values are ignored.
+
 ## Modes {#modes}
 
 **Plan mode** applies to future prompts in the current process. It exposes only read-only tools that

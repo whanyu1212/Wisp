@@ -45,7 +45,7 @@ pub(super) trait TerminalSession {
 }
 
 impl TerminalSession for TerminalGuard {
-    type Backend = ratatui::backend::CrosstermBackend<io::Stdout>;
+    type Backend = crate::terminal::LiveBackend;
 
     fn terminal(&mut self) -> &mut Terminal<Self::Backend> {
         self.terminal()
