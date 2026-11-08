@@ -27,6 +27,16 @@ _ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
 # abbreviated count instead. Counts below 1k are not matched: a bare number is too
 # ambiguous, and the system prompt alone exceeds 1k tokens.
 _CONTEXT_READING = re.compile(rb"[0-9]%|[0-9](?:\.[0-9])?[km](?![A-Za-z])")
+# A wide welcome screen lists its actions; a narrow one shows a one-line hint, which
+# names /connect when no provider is set. Frames move the cursor between words, so
+# match the painted text with escapes and spacing removed.
+_WELCOME_MARKERS = (b"Browsecommands", b"Typeapromptor/forcommands.", b"/connecttoaddaprovider")
+
+
+def _welcome_ready(output: bytes | bytearray) -> bool:
+    """Return whether the welcome screen of a fresh session has painted."""
+    painted = re.sub(rb"\s+", b"", _ESCAPE_SEQUENCE.sub(b"", output))
+    return any(marker in painted for marker in _WELCOME_MARKERS)
 
 
 def _full_repaint_after(output: bytearray, offset: int) -> bytes | None:
@@ -173,8 +183,11 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
             if (
                 not prompt_sent
                 and startup_redraw_offset is not None
-                and (_HISTORY_READY if history_messages else b"Type a prompt or / for commands.")
-                in output[startup_redraw_offset:]
+                and (
+                    _HISTORY_READY in output[startup_redraw_offset:]
+                    if history_messages
+                    else _welcome_ready(output[startup_redraw_offset:])
+                )
             ):
                 ready_seconds = time.monotonic() - started
                 os.write(terminal_fd, b"installed wheel smoke\r")

@@ -9,11 +9,23 @@ import pytest
 from scripts import smoke_installed_rust_tui as smoke
 
 
+# A fresh session is ready at the welcome screen's action list, which paints its
+# words in separate cells; a continued one at its saved history.
+@pytest.mark.parametrize(
+    ("history_messages", "ready_text", "reported_messages"),
+    [
+        (10_000, smoke._HISTORY_READY + b" idle", 10_001),
+        (0, b"Browse\x1b[14;26Hcommands idle", 0),
+    ],
+)
 @pytest.mark.parametrize("working_repaints", [0, 2])
 @pytest.mark.parametrize("premature_exit", [False, True])
 def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    history_messages: int,
+    ready_text: bytes,
+    reported_messages: int,
     working_repaints: int,
     premature_exit: bool,
 ) -> None:
@@ -33,7 +45,7 @@ def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
         if width == 81:
             packets.append(frame(b"ctx ~42%"))
         elif not sent:
-            packets.append(frame(smoke._HISTORY_READY + b" idle"))
+            packets.append(frame(ready_text))
         else:
             repaints += 1
             state = b"working" if repaints <= working_repaints else b"idle"
@@ -72,13 +84,13 @@ def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
 
     if premature_exit:
         with pytest.raises(RuntimeError, match="smoke failed"):
-            smoke.run(tmp_path / "wisp", tmp_path / "history", 10_000)
+            smoke.run(tmp_path / "wisp", tmp_path / "history", history_messages)
         assert b"\x03" not in sent
         return
 
-    result = smoke.run(tmp_path / "wisp", tmp_path / "history", 10_000)
+    result = smoke.run(tmp_path / "wisp", tmp_path / "history", history_messages)
 
     assert sent == [b"installed wheel smoke\r", b"\x03"]
     assert repaints > working_repaints
-    assert result["history_messages"] == 10_001
+    assert result["history_messages"] == reported_messages
     assert result["total_seconds"] < 10
