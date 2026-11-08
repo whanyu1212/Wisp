@@ -118,6 +118,7 @@ def test_running_bash_card_shows_progress_until_its_result_arrives(tmp_path: Pat
     output = bytearray()
     status: int | None = None
     prompt_sent = False
+    last_submit = 0.0
     progress_seen = False
     result_seen = False
     quit_sent = False
@@ -134,6 +135,17 @@ def test_running_bash_card_shows_progress_until_its_result_arrives(tmp_path: Pat
             if not prompt_sent and welcome_ready(output):
                 os.write(terminal_fd, b"build\r")
                 prompt_sent = True
+                last_submit = time.monotonic()
+            # A session-stats read still in flight refuses the prompt with this notice
+            # and keeps it in the composer, so submit it again until the run starts.
+            if (
+                prompt_sent
+                and not progress_seen
+                and time.monotonic() - last_submit > 0.5
+                and screen_shows(output, "metadata refresh to finish")
+            ):
+                os.write(terminal_fd, b"\r")
+                last_submit = time.monotonic()
             if prompt_sent and not progress_seen and screen_shows(output, "LIVEPROGRESS"):
                 progress_seen = True
             # The completed card collapses to its checked action row; the live line
