@@ -7,6 +7,7 @@ use crossterm::terminal::{
 use crossterm::{ExecutableCommand, QueueableCommand, execute};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
+use std::convert::Infallible;
 use std::io::{self, Stdout, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::{
@@ -21,6 +22,8 @@ type Hook = dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Send + Sync + 'static;
 pub(crate) trait FrameBackend: Backend {
     fn begin_frame(&mut self) -> io::Result<()>;
     fn end_frame(&mut self) -> io::Result<()>;
+    /// Converts a draw failure into the I/O error the TUI reports.
+    fn into_io_error(error: Self::Error) -> io::Error;
 }
 
 impl<W: Write> FrameBackend for CrosstermBackend<W> {
@@ -30,6 +33,10 @@ impl<W: Write> FrameBackend for CrosstermBackend<W> {
 
     fn end_frame(&mut self) -> io::Result<()> {
         self.execute(EndSynchronizedUpdate).map(drop)
+    }
+
+    fn into_io_error(error: io::Error) -> io::Error {
+        error
     }
 }
 
@@ -41,6 +48,10 @@ impl FrameBackend for ratatui::backend::TestBackend {
     fn end_frame(&mut self) -> io::Result<()> {
         Ok(())
     }
+
+    fn into_io_error(error: Infallible) -> io::Error {
+        match error {}
+    }
 }
 
 pub(crate) fn draw_frame<B: FrameBackend>(
@@ -48,7 +59,7 @@ pub(crate) fn draw_frame<B: FrameBackend>(
     render: impl FnOnce(&mut ratatui::Frame<'_>),
 ) -> io::Result<()> {
     terminal.backend_mut().begin_frame()?;
-    let draw_result = terminal.draw(render).map(drop);
+    let draw_result = terminal.draw(render).map(drop).map_err(B::into_io_error);
     let end_result = terminal.backend_mut().end_frame();
     draw_result?;
     end_result

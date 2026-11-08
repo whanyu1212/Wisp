@@ -15,7 +15,7 @@ cd Wisp
 uv sync --locked
 ```
 
-Rust work uses the toolchain pinned in `rust-toolchain.toml` (1.85.0), which rustup selects
+Rust work uses the toolchain pinned in `rust-toolchain.toml` (1.88.0), which rustup selects
 automatically.
 
 ## Before you open a pull request

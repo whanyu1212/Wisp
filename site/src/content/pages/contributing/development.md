@@ -40,7 +40,7 @@ The Rust frontend is a Cargo workspace member and is the sole interactive termin
 Native wheels on macOS arm64 and Linux glibc 2.28+ x86_64 bundle it. Pure/source installs retain the
 Python backend but require a matching source-built binary for interactive use. See the
 [frontend boundary](../architecture/rust-tui-boundary.md). The repository pins Rust
-1.85.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.85"` through
+1.88.0 in `rust-toolchain.toml`, and every workspace crate declares `rust-version = "1.88"` through
 the workspace package settings.
 
 Build and launch it with an absolute binary override:

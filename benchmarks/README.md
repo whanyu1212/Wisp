@@ -60,7 +60,7 @@ Build the Rust frontend, then run the source CLI through a real POSIX PTY with a
 fake-provider prompt:
 
 ```bash
-cargo +1.85.0 build --release -p wisp-tui
+cargo +1.88.0 build --release -p wisp-tui
 uv run python -m benchmarks.rust_tui_e2e \
   --rust-binary "$PWD/target/release/wisp-tui" \
   --runs 3 --output profiles/rust-tui-e2e.json
@@ -110,7 +110,7 @@ and Ratatui draw paths without terminal I/O:
 
 ```bash
 mkdir -p profiles
-cargo +1.85.0 run --release -p wisp-tui \
+cargo +1.88.0 run --release -p wisp-tui \
   --features transcript-benchmark --example transcript_benchmark -- \
   --entries 1000,10000,100000 --runs 5 \
   --output profiles/rust-tui-transcript.json
@@ -136,7 +136,7 @@ For a macOS sampling profile, build once and repeat the unchanged 100k workload 
 `sample` to observe it:
 
 ```bash
-cargo +1.85.0 build --release -p wisp-tui \
+cargo +1.88.0 build --release -p wisp-tui \
   --features transcript-benchmark --example transcript_benchmark
 target/release/examples/transcript_benchmark \
   --entries 100000 --runs 500 --output /tmp/rust-tui-profile.json >/dev/null &
