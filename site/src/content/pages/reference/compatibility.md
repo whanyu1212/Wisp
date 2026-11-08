@@ -131,6 +131,12 @@ The supported Python API only gains optional parameters and fields: `CodingSessi
 name saved output that the new read-only `read_output` tool pages through, and a timed-out command's
 error names its saved output and shows its last lines.
 
+0.6.1 changes no command, handshake, session, settings, credential, or trust format, so 0.6.0 and
+0.6.1 read each other's sessions. It adds one optional field, `default_effort`, to the model catalog
+entries of the `rpc.model_catalog` event. A 0.6.0 reader rejects that field, so the backend and
+every frontend must still be the same release, and external RPC clients should use the 0.6.1 schema
+bundle. The supported Python API is unchanged.
+
 ## Wisp 0.5 compatibility
 
 0.5.0 changes no command, event, handshake, session, settings, credential, or trust format, so
