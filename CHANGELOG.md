@@ -10,7 +10,50 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.6.0 — Unreleased
+## 0.6.1 — Unreleased
+
+0.6.1 is a patch release on 0.6.0 for the terminal UI. It shows the effort level a model uses by
+default, scrolls footer notices that do not fit, and gives each fact one place on screen instead of
+repeating it in the main column and the side panel. It adds one optional field to the model catalog
+report and changes no command, handshake, session, settings, credential, or trust format, so 0.6.0
+and 0.6.1 read each other's sessions. The backend and frontend must come from the same release.
+
+### Events
+
+- `RpcModelCatalogEntry` (in the `rpc.model_catalog` event) gains an optional `default_effort`: the
+  effort level the provider applies when a request names none, for models whose documentation states
+  it. Wisp still sends no effort unless one is chosen. The schema bundle and conformance fixture are
+  regenerated; the same-release rule applies, and a 0.6.0 reader rejects the new field. (#908)
+
+### Providers
+
+- The provider catalog gains an optional per-model `[providers.default_effort]` table, filled from
+  each provider's documentation and checked against the model's `effort_levels` when the catalog
+  loads. (#908)
+
+### Terminal UI
+
+- With no effort chosen, the composer and footer show the model's documented default effort,
+  muted, or `default` when the model has effort levels but no documented default. (#908)
+- A footer notice wider than its row, such as the warning that YOLO and trust are not saved in the
+  home folder, scrolls as a ticker instead of being cut off. (#908)
+- The docked side panel no longer repeats what the main column shows: its "Now" section and
+  idle/running label are gone, and the run status line leaves out `ctx` while the panel shows
+  context, unless context is running low. The welcome screen drops two lines that repeated the
+  composer placeholder and the command hint. (#909)
+- YOLO shows on the composer line, so it stays visible when the panel is hidden, and the panel's
+  key hints join the main footer's single row. (#910)
+- The side panel folds healthy MCP servers and skills to their heading. MCP opens by itself when a
+  server disconnects or the list can't be read, and skills open once one is used or the catalog
+  reports diagnostics. Recent turns leaves out the latest prompt, which the transcript pins above
+  its reply. (#911)
+- A turn's summary row names the mode, model, and effort only on the first turn and when they
+  change, instead of repeating the composer line on every turn. (#912)
+
+<!-- Keeps links to the pre-release "0.6.0 — Unreleased" heading working. -->
+<a id="060--unreleased"></a>
+
+## 0.6.0 — 2026-11-07
 
 0.6.0 is a minor release about long-running commands: `bash` now saves the output its result has
 to cut, so the model can read an early error instead of running the command again, and the
