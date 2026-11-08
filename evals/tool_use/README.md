@@ -138,6 +138,18 @@ with `suite.json`), and never overwrites an existing baseline. Baselines are
 committed so later changes to Wisp's tools are compared against the same numbers. Record one on
 the commit the change starts from, with the models the change will be measured on.
 
+## Recorded results
+
+| Baseline | What it measures |
+|---|---|
+| `2026-11-08-current-tools.json` | All 12 tasks before the `bash` head-and-tail preview (#921) |
+| `2026-11-08-bash-preview.json` | All 12 tasks after it; compare tool changes against this |
+| `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
+
+On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
+`mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
+passing in both modes; see [the tools guide](../../site/src/content/pages/guide/tools-and-safety.md#what-on-demand-discovery-saves).
+
 ## Add a task
 
 Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve

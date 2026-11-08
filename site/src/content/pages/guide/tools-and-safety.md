@@ -335,8 +335,8 @@ for one process, the model is not sent each MCP tool's definition. It gets three
 
 The system prompt names each server and how many tools it has, so the model knows what to search. The
 default, `"direct"`, sends every definition as before. The setting is user-only: a project cannot
-change what the model sees or what each request costs. It is off by default until evaluation shows
-task success holds while request size falls.
+change what the model sees or what each request costs. It is off by default while the default is
+decided; the measurements below suggest when to turn it on.
 
 `mcp_call` reaches only the MCP tools direct mode would have offered that run: tool selection
 (`--allow-tool`, `--all-tools`), plan mode and the run's own tool limits all apply, and built-in tools
@@ -344,8 +344,31 @@ are refused. Wisp resolves each `mcp_call` to the tool it names before any check
 safety decides: a `command` tool asks for approval exactly as a direct call does, the approval and
 "allow for this session" name that tool, and a grant applies to that tool alone. A call missing a
 required parameter is rejected before you are asked; everything else, including types, is left to
-the server to validate, exactly as for a direct call. Events for a proxied call keep `name: "mcp_call"` and add `target` with the
-tool that runs.
+the server to validate, exactly as for a direct call. Events for a proxied call keep `name: "mcp_call"`
+and add `target` with the tool that runs.
+
+#### What on-demand discovery saves
+
+Measured with Wisp's tool-use evals (`evals/tool_use/`), 5 runs of each task in each mode on
+`gpt-6.1-sol` and `gpt-5.6-luna` through Codex. Every run passed in both modes, and 1 of 68 proxied
+calls failed, on an argument the model then corrected.
+
+| Catalog | Task | Tokens per run, direct → on demand | Tool calls |
+|---|---|---|---|
+| 102 tools, real-server-sized definitions (about 25k tokens) | multi-step triage | 124k → 28k (−77%), 153k → 37k (−76%) | about double |
+| 50 small tools (about 3k tokens) | pick one tool | 16k → 12k (−28%), 17k → 9k (−46%) | 2 → 3–4 |
+| 6 tools | pick one tool | 7k → 10k (+34%), 8k → 9k (+20%) | 2 → 3–4 |
+
+The two figures in each row are `gpt-5.6-luna` and `gpt-6.1-sol`. Counting only input not served
+from the provider's prompt cache, the triage task still fell 60–72%. Runs took 10–35% longer, from
+the extra search and describe turns.
+
+So on-demand discovery pays off with large catalogs, such as a code-hosting or project-tracker
+server with dozens of tools, and over tasks of several steps, where each request would otherwise
+resend every definition. With a handful of small tools it costs more than it saves: keep `direct`.
+The committed baselines `evals/tool_use/baselines/2026-11-08-mcp-direct.json` and
+`2026-11-08-mcp-on-demand.json` hold every run; compare them with
+`uv run python -m evals.tool_use compare`.
 
 Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and
 sanitized startup failures, and to add, remove, enable, disable, or reconnect servers without
