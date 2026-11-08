@@ -34,8 +34,8 @@ PROJECT_CONTEXT_HEADER = "[WISP PROJECT CONTEXT]"
 
 NO_PROJECT_INSTRUCTIONS_NOTICE = (
     "project instructions: none. Wisp already checked the project root and each folder down "
-    "to cwd for AGENTS.md and CLAUDE.md; files above the project root do not apply, so do not "
-    "search for instruction files."
+    "to cwd for AGENTS.md and CLAUDE.md, and files above the project root do not apply, so do "
+    "not search those folders. A subfolder below cwd may still have its own instruction file."
 )
 
 

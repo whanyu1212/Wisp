@@ -33,10 +33,11 @@ this policy.
 
 ### Prompt
 
-- When a project has no `AGENTS.md` or `CLAUDE.md`, the project context now says so and tells
-  the model not to search for instruction files. Without it, models went looking for `AGENTS.md`
-  in the parent folder, outside the working directory, and hit a tool error in about half of the
-  tool-use eval runs.
+- When neither the project root nor any folder down to the working directory has an `AGENTS.md`
+  or `CLAUDE.md`, the project context now says so and tells the model not to search those folders
+  or any above the project root; a subfolder below may still have its own. Without it, models
+  went looking for `AGENTS.md` in the parent folder, outside the working directory, and hit a
+  tool error in about half of the tool-use eval runs.
 
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
