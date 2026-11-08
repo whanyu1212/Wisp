@@ -5,8 +5,11 @@ compare Wisp *setups* with the model held fixed, for example every MCP tool show
 discovery, or an edit-recovery behavior on versus off. They are not a model leaderboard. Design and
 decisions: [HY-443](https://linear.app/queryverse/issue/HY-443).
 
-The suite is run by hand or on a schedule, never in CI: it calls paid models. CI only tests the
-runner itself (`tests/evals/`), with the `fake` provider.
+The suite is run by hand or on a schedule, never in CI: it calls paid models. CI tests the runner
+itself (`tests/evals/`) with the `fake` provider, and runs the scripted layer,
+`tests/evals/test_scripted_sequences.py`: fixed tool-call sequences on Wisp's real tools that
+pin the recovery paths these tasks exercise (reading cut output with `read_output`, retrying an
+ambiguous edit, finding and calling an MCP tool).
 
 > [!WARNING]
 > Runs execute real shell commands on this machine. Each run gets a fresh temporary folder, a
