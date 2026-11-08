@@ -13,6 +13,7 @@ from rich.console import Console
 
 from wisp import __version__
 from wisp.cli.auth import auth_app
+from wisp.cli.deadline import DEADLINE_EXIT_CODE, RunDeadline
 from wisp.cli.mcp import mcp_app
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.coding.prompt import resolve_project_context_root
@@ -179,6 +180,16 @@ def cli_callback(
             help="Optional cap on model/tool rounds. Defaults to uncapped.",
         ),
     ] = None,
+    timeout: Annotated[
+        float | None,
+        typer.Option(
+            "--timeout",
+            help=(
+                "Stop a --prompt run after this many seconds; it still reports its "
+                "totals and exits with status 124."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run Wisp through its selected or interactive-default interface."""
 
@@ -244,6 +255,15 @@ def cli_callback(
         mode=resolved_mode,
         console=console,
     )
+    if timeout is not None:
+        if resolved_mode in {OutputMode.rpc, OutputMode.tui}:
+            _exit_with_error(
+                "--timeout applies only to --prompt runs",
+                mode=resolved_mode,
+                console=console,
+            )
+        if not timeout > 0:
+            _exit_with_error("--timeout must be positive", mode=resolved_mode, console=console)
 
     # Resolve project trust and gate project-local config (the .wisp/settings.json
     # layer) on it: an untrusted repo must not be able to redirect the credential
@@ -312,21 +332,34 @@ def cli_callback(
             )
         else:
             assert prompt is not None
-            anyio.run(
-                _run_print,
-                prompt,
-                config,
-                resolved_all_tools,
-                allow_read_tools,
-                tuple(allow_tool or ()),
-                resume,
-                continue_latest,
-                approve_unsafe_tools,
-                max_tool_iterations,
-                resolved_mode,
-                trusted,
-                project_context_root,
+            deadline = (
+                RunDeadline(
+                    timeout,
+                    report=partial(_report_deadline, mode=resolved_mode, console=console),
+                )
+                if timeout is not None
+                else None
             )
+            anyio.run(
+                partial(
+                    _run_print,
+                    prompt,
+                    config,
+                    resolved_all_tools,
+                    allow_read_tools,
+                    tuple(allow_tool or ()),
+                    resume,
+                    continue_latest,
+                    approve_unsafe_tools,
+                    max_tool_iterations,
+                    resolved_mode,
+                    trusted,
+                    project_context_root,
+                    deadline=deadline,
+                )
+            )
+            if deadline is not None and deadline.stopped:
+                raise typer.Exit(DEADLINE_EXIT_CODE)
     except RpcOutputAlreadyReportedError as exc:
         raise typer.Exit(1) from exc
     except (ProviderError, SessionError, ToolError, UnknownProviderError, UnknownToolError) as exc:
@@ -533,10 +566,13 @@ async def _run_print(
     mode: OutputMode = OutputMode.text,
     trusted: bool = False,
     project_context_root: Path | None = None,
+    *,
+    deadline: RunDeadline | None = None,
 ) -> None:
     runtime = await build_runtime_for_config(config)
     try:
-        await _run_print_with_runtime(
+        work = partial(
+            _run_print_with_runtime,
             prompt,
             config,
             runtime,
@@ -550,9 +586,21 @@ async def _run_print(
             mode=mode,
             trusted=trusted,
             project_context_root=project_context_root,
+            deadline=deadline,
         )
+        if deadline is None:
+            await work()
+        else:
+            await deadline.run(work)
     finally:
         await runtime.aclose()
+
+
+def _report_deadline(message: str, *, mode: OutputMode, console: Console) -> None:
+    if _writes_json_events(mode):
+        _write_json_event(ErrorEvent(message=message))
+    else:
+        console.print(f"error: {message}", markup=False)
 
 
 async def _run_print_with_runtime(
@@ -570,6 +618,7 @@ async def _run_print_with_runtime(
     mode: OutputMode = OutputMode.text,
     trusted: bool = False,
     project_context_root: Path | None = None,
+    deadline: RunDeadline | None = None,
 ) -> None:
     sessions = JsonlSessionStore(config.session_dir)
     session = select_session(sessions, resume=resume, continue_latest=continue_latest)
@@ -601,6 +650,8 @@ async def _run_print_with_runtime(
         max_tool_iterations=max_tool_iterations,
         project_context_root=project_context_root,
     )
+    if deadline is not None:
+        deadline.attach(agent)
 
     async def write_live_event(event: WispEvent) -> None:
         _write_json_event(event)
@@ -685,7 +736,8 @@ async def _run_print_with_runtime(
 
     if wrote_tokens and not stdout_line_terminated:
         sys.stdout.write("\n")
-    if failure_message is not None:
+    # A run stopped by its deadline ends as cancelled; the deadline message says why.
+    if failure_message is not None and not (deadline is not None and deadline.stopped):
         if failure_was_rendered:
             raise _RenderedPrintError(failure_message)
         raise ProviderError(failure_message)

@@ -81,6 +81,28 @@ class _TuiProcess:
                 break
         pytest.fail(f"{failure}; terminal tail={bytes(self.output[-8000:])!r}")
 
+    def submit(self, predicate: Callable[[bytes], bool], *, failure: str) -> None:
+        """Press Enter until ``predicate`` holds, again while a refresh refuses it.
+
+        After a run the TUI refreshes session metadata, and a submit made during
+        that refresh is refused with a notice and stays in the composer.
+        """
+        self.send(b"\r")
+        last_submit = time.monotonic()
+
+        def settled(output: bytes) -> bool:
+            nonlocal last_submit
+            if predicate(output):
+                return True
+            if time.monotonic() - last_submit > 0.5 and screen_shows(
+                output, "metadata refresh to finish"
+            ):
+                self.send(b"\r")
+                last_submit = time.monotonic()
+            return False
+
+        self.wait_until(settled, failure=failure)
+
     def wait_for(self, *markers: bytes, since: int = 0, failure: str) -> bytes:
         return self.wait_until(
             lambda output: all(marker in output[since:] for marker in markers),
@@ -295,8 +317,8 @@ def test_ctrl_r_restores_prompt_without_submitting(tmp_path: Path) -> None:
             failure="history did not restore the prompt into the composer",
         )
         offset = len(tui.output)
-        tui.send(b"\r")
-        tui.wait_until(
+        # The first run's metadata refresh may still be running.
+        tui.submit(
             lambda output: run_settled(output, offset, b"fake", b"response", b"to:"),
             failure="restored prompt did not complete",
         )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -84,6 +86,7 @@ from wisp.events import (
     QueueMode,
     QueueUpdated,
     RunOutcome,
+    RunSetup,
     SessionSaved,
     SessionStats,
     SkillInvoked,
@@ -305,6 +308,8 @@ class CodingSession:
         self._repository_status_snapshots: dict[tuple[str, Path], str] = {}
         self._operation_active = False
         self._active_harness: AgentHarness | None = None
+        # The run harness that accepted `cancel_run`, so its run reports as cancelled.
+        self._cancelled_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
         self._active_persistence: RunPersistence | None = None
         self._last_session_id: str | None = None
@@ -468,6 +473,28 @@ class CodingSession:
         if queued_messages >= DEFAULT_MAX_PENDING_QUEUE_MESSAGES:
             return queue_full_message(DEFAULT_MAX_PENDING_QUEUE_MESSAGES)
         return None
+
+    def cancel_run(self) -> bool:
+        """Ask the active run to stop at its next cancellation point.
+
+        The run then ends the way a requested cancellation does: running tools
+        are settled, an open turn closes as cancelled, and the run still saves
+        and publishes `AgentCompleted` with outcome "cancelled" and its totals.
+        Cancelling the caller's task or scope instead skips that ending. This
+        stops whichever run the session has active; runs on one session do not
+        overlap, so a caller targets its own run by asking while it is running.
+
+        Returns:
+            bool: True when an active run accepted the request. False before the
+            run's loop starts, while it prepares its prompt, or after it ends, so
+            a caller that must stop a run retries until it is accepted.
+        """
+
+        harness = self._active_harness
+        if harness is None or not harness.cancel():
+            return False
+        self._cancelled_harness = harness
+        return True
 
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
         """Return the current or retained queue state without requiring an active run."""
@@ -686,6 +713,7 @@ class CodingSession:
                         else:
                             self._retained_queues.pop(self._active_session_id, None)
                     self._active_harness = None
+                    self._cancelled_harness = None
                     self._active_session_id = None
                     self._active_persistence = None
                     self._operation_active = False
@@ -780,7 +808,11 @@ class CodingSession:
             created_at=user_message.created_at,
         )
         yield await emit(
-            AgentStarted(session_id=session.session_id, message_entry_id=user_entry.id)
+            AgentStarted(
+                session_id=session.session_id,
+                message_entry_id=user_entry.id,
+                setup=_run_setup(effective_tools, prompt_messages),
+            )
         )
 
         await self._persist_run_prompt(
@@ -887,6 +919,10 @@ class CodingSession:
                         operation_id=operation_id,
                     )
 
+        if self._cancelled_harness is harness and loop.outcome == "completed":
+            # A cancel accepted between turns closes no turn, so the last turn
+            # still reads as completed although the run stopped early.
+            loop.outcome = "cancelled"
         if loop.overflow_error is not None:
             # The primary loop's overflow hook already made the sole retry
             # decision. The loop publishes the overflow's error and closes its
@@ -2694,6 +2730,38 @@ class _RunCompaction:
                 active_from=replacement_active_from,
             )
         )
+
+
+def _run_setup(tools: Sequence[ToolSpec], instructions: Sequence[Message]) -> RunSetup:
+    """Fingerprint the tools and system messages a run offers the model.
+
+    Args:
+        tools (Sequence[ToolSpec]): The tools offered to the model, in offered order.
+        instructions (Sequence[Message]): The system messages the run starts with.
+
+    Returns:
+        RunSetup: The tool names and SHA-256 hashes of the canonical tool specs
+        and of the system messages. Offered order is part of the tools hash
+        because it changes the prompt.
+    """
+
+    tool_specs = [
+        {"name": tool.name, "description": tool.description, "input_schema": tool.input_schema}
+        for tool in tools
+    ]
+    system_messages = [message.content for message in instructions if message.role == "system"]
+    return RunSetup(
+        tool_names=tuple(tool.name for tool in tools),
+        tools_sha256=_canonical_sha256(tool_specs),
+        instructions_sha256=_canonical_sha256(system_messages),
+    )
+
+
+def _canonical_sha256(value: object) -> str:
+    """Hash a JSON value so equal content always gives the same digest."""
+
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _prompt_cache_key(session_id: str) -> str:

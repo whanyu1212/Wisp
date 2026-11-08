@@ -116,6 +116,14 @@
    "event": "agent.started",
    "operation": "remove",
    "path": [
+    "setup"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "agent.started",
+   "operation": "remove",
+   "path": [
     "timestamp"
    ],
    "accepted": true

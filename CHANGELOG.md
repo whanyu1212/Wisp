@@ -10,6 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Events
+
+- `agent.started` gains an optional `setup` (`RunSetup`): the names of the tools offered to the
+  model, in offered order, and SHA-256 hashes of the tool specs and of the system messages the run
+  starts with. It lets an eval or a log reader confirm which setup a run actually had. The system
+  messages include project context and Git status, so their hash also changes with the repository.
+  `agent.started` is not saved in session files. The schema bundle and conformance fixture are
+  regenerated; the same-release rule applies.
+
+### CLI
+
+- `wisp -p` gains `--timeout SECONDS`. At the deadline the run is asked to stop as a cancellation
+  does: running tools and commands are stopped, and the run saves its session and still emits
+  `agent.completed` with outcome `cancelled` and its totals. It reports why it stopped, and Wisp
+  exits with status 124. A run already finishing after its last turn completes normally; one that
+  neither stops nor finishes 10 seconds later is stopped outright, and if cleanup still holds it
+  open 10 seconds after that, Wisp exits at once. No event or session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
+  this; a run it stops between turns reports `cancelled`, not the last turn's `completed`.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 
