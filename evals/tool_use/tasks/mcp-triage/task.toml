@@ -1,0 +1,9 @@
+id = "mcp-triage"
+title = "Triage a regression across several steps on a 100-tool code-hosting server"
+tags = ["mcp"]
+prompt = "In the acme/web repository, find the open issue labelled `regression` that has the most comments. Then find the open pull request that fixes it, and the name of that pull request's failing check. Write TRIAGE.md with exactly three lines: `issue: N`, `pr: M` and `check: NAME`."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 300
+max_tool_iterations = 30
+tools = ["write", "read", "ls"]
+mcp_servers = ["devhub"]

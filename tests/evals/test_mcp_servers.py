@@ -100,3 +100,29 @@ def test_servers_start_through_wisp(task: Task, tmp_path: Path) -> None:
             await runtime.aclose()
 
     assert set(mcp_tool_names(task)) <= set(anyio.run(offered))
+
+
+def test_triage_answer_comes_from_devhub() -> None:
+    from evals.tool_use.servers.devhub import TRIAGE_CHECK, TRIAGE_ISSUE, TRIAGE_PR
+
+    task = next(task for task in _MCP_TASKS if task.id == "mcp-triage")
+    lines = (task.folder / "solution" / "TRIAGE.md").read_text(encoding="utf-8").splitlines()
+
+    assert lines == [f"issue: {TRIAGE_ISSUE}", f"pr: {TRIAGE_PR}", f"check: {TRIAGE_CHECK}"]
+    tools = {tool.name: tool for tool in CATALOGS["devhub"].tools}
+    issues = tools["list_issues"].respond(
+        {"owner": "acme", "repo": "web", "labels": ["regression"]}
+    )
+    assert issues.splitlines()[0].startswith(f"#{TRIAGE_ISSUE} [open]")
+    fixes = tools["search_issues_and_pull_requests"].respond({"query": f"#{TRIAGE_ISSUE}"})
+    assert f"#{TRIAGE_PR} [open]" in fixes
+    checks = tools["list_check_runs_for_pull_request"].respond(
+        {"owner": "acme", "repo": "web", "pull_number": TRIAGE_PR}
+    )
+    assert f"{TRIAGE_CHECK}: failure" in checks
+
+
+def test_devhub_is_a_large_catalog() -> None:
+    names = CATALOGS["devhub"].tool_names
+
+    assert len(names) == len(set(names)) >= 90

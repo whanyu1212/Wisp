@@ -20,6 +20,7 @@ from evals.tool_use.runner import (
     command_environment,
     detect_build,
     evaluate_checks,
+    mcp_settings,
     run_environment,
     run_one,
     run_suite,
@@ -314,4 +315,26 @@ def test_missing_mcp_tools_error(tmp_path: Path) -> None:
     row = run_one(task, ModelSpec("fake", "fake"), 1, context)
 
     assert row.status == "errored"
-    assert row.error == "run was not offered 2 MCP tools, such as mcp__billing__get_invoice"
+    # Wisp's own startup error names the server, in either exposure mode.
+    assert row.error is not None and row.error.startswith("MCP server billing is unavailable")
+
+
+@pytest.mark.process
+def test_on_demand_run_offered_discovery(tmp_path: Path) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    context = dataclasses.replace(
+        _context(tmp_path, build=detect_build(_REPO_ROOT)), mcp_tool_exposure="on_demand"
+    )
+
+    row = run_one(task, ModelSpec("fake", "fake"), 1, context)
+
+    assert (row.status, row.error, row.mcp_tool_exposure) == ("passed", None, "on_demand")
+
+
+def test_mcp_settings_carry_exposure(tmp_path: Path) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+
+    settings = mcp_settings(task, "python", "on_demand")
+
+    assert settings["mcp_tool_exposure"] == "on_demand"
+    assert list(settings["mcp_servers"]) == ["billing"]  # type: ignore[call-overload]

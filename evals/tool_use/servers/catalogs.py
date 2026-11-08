@@ -13,41 +13,11 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 
-type Arguments = Mapping[str, str]
+from evals.tool_use.servers.devhub import DEVHUB
+from evals.tool_use.servers.model import Arguments, Catalog, CatalogTool, Parameter
 
-
-@dataclass(frozen=True, slots=True)
-class CatalogTool:
-    """One tool a synthetic server offers.
-
-    Attributes:
-        name (str): The tool's name on its server.
-        description (str): What the model reads to choose it.
-        respond (Callable[[Arguments], str]): The tool's answer for its arguments.
-    """
-
-    name: str
-    description: str
-    respond: Callable[[Arguments], str]
-
-
-@dataclass(frozen=True, slots=True)
-class Catalog:
-    """A server's tools, all taking the same string parameters.
-
-    Attributes:
-        parameters (tuple[str, ...]): Parameter names every tool takes.
-        tools (tuple[CatalogTool, ...]): The tools, in the order the server lists them.
-    """
-
-    parameters: tuple[str, ...]
-    tools: tuple[CatalogTool, ...]
-
-    @property
-    def tool_names(self) -> tuple[str, ...]:
-        return tuple(tool.name for tool in self.tools)
+__all__ = ["CATALOGS", "Arguments", "Catalog", "CatalogTool", "Parameter"]
 
 
 def _number(*parts: str, low: int, high: int) -> int:
@@ -66,7 +36,7 @@ REORDER_POINT = 140
 def _place(arguments: Arguments) -> tuple[str, str]:
     """The SKU and warehouse, spelled the way the catalog stores them."""
 
-    return arguments["sku"].strip().upper(), arguments["warehouse"].strip().lower()
+    return str(arguments["sku"]).strip().upper(), str(arguments["warehouse"]).strip().lower()
 
 
 def _reorder_policy(arguments: Arguments) -> str:
@@ -308,7 +278,7 @@ LIVE_TOTAL = "1880.40"
 
 def _billing(system: str, total: str, note: str) -> Catalog:
     def invoice(arguments: Arguments) -> str:
-        if arguments["invoice_id"].strip().upper() != INVOICE_ID:
+        if str(arguments["invoice_id"]).strip().upper() != INVOICE_ID:
             return f"{system}: no invoice {arguments['invoice_id']}"
         return f"{system}: invoice {INVOICE_ID} for Northwind Traders, total {total} EUR"
 
@@ -328,6 +298,7 @@ def _billing(system: str, total: str, note: str) -> Catalog:
 
 CATALOGS: Mapping[str, Catalog] = {
     "inventory": INVENTORY,
+    "devhub": DEVHUB,
     "billing": _billing("billing", LIVE_TOTAL, "Live production billing system."),
     "billing-legacy": _billing(
         "billing-legacy",

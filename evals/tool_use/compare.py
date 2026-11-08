@@ -43,6 +43,9 @@ BASELINE_FIELDS = (
     "tools_sha256",
     "wisp_version",
     "git_commit",
+    "mcp_tool_exposure",
+    "proxied_calls",
+    "proxied_argument_errors",
 )
 SUITE_FIELDS = (
     "models",
@@ -53,6 +56,7 @@ SUITE_FIELDS = (
     "stopped_for_budget",
     "skipped_runs",
     "finished_at",
+    "mcp_tool_exposure",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.
@@ -296,7 +300,8 @@ def baseline_document(
         "label": label,
         "date": date,
         "suite": {field: suite[field] for field in SUITE_FIELDS if field in suite},
-        "runs": [{field: row[field] for field in BASELINE_FIELDS} for row in rows],
+        # Rows from before a field existed simply lack it.
+        "runs": [{field: row[field] for field in BASELINE_FIELDS if field in row} for row in rows],
     }
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -29,6 +30,8 @@ from evals.tool_use.credentials import REPO_ROOT, Credentials
 from evals.tool_use.metrics import RunMetrics, measure, parse_events
 from evals.tool_use.servers.catalogs import CATALOGS
 from evals.tool_use.task_definitions import Task, TaskChecks
+from wisp.mcp.config import McpToolExposure
+from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.mcp.tool import mcp_tool_name
 
 type RunStatus = Literal["passed", "failed", "errored"]
@@ -73,6 +76,8 @@ _PASSTHROUGH_VARIABLES = frozenset(
         "no_proxy",
     }
 )
+# Wisp reports an MCP server that failed to start as an error event like this.
+_MCP_UNAVAILABLE = re.compile(r"^MCP server \S+ is unavailable")
 # Wisp reports reaching --max-tool-iterations only as an error with this text.
 _ITERATION_LIMIT_ERROR = "Maximum tool iterations exceeded"
 
@@ -131,12 +136,22 @@ UNLIMITED = Budget()
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """What every run in a suite shares."""
+    """What every run in a suite shares.
+
+    Attributes:
+        build (Build): The Wisp under test.
+        credentials (Credentials): How runs sign in.
+        results_dir (Path): Where rows and run folders go.
+        python (str): The interpreter for task commands and synthetic servers.
+        mcp_tool_exposure (McpToolExposure): How MCP tasks' tools reach the
+            model: every definition (`direct`) or found on demand (`on_demand`).
+    """
 
     build: Build
     credentials: Credentials
     results_dir: Path
     python: str = sys.executable
+    mcp_tool_exposure: McpToolExposure = "direct"
 
 
 @dataclass(slots=True)
@@ -177,6 +192,9 @@ class RunRow:
     wisp_version: str
     git_commit: str
     run_dir: str
+    mcp_tool_exposure: McpToolExposure = "direct"
+    proxied_calls: int = 0
+    proxied_argument_errors: int = 0
 
 
 @dataclass(slots=True)
@@ -241,21 +259,26 @@ def run_environment(
     return environment
 
 
-def mcp_settings(task: Task, python: str) -> dict[str, object]:
+def mcp_settings(
+    task: Task, python: str, exposure: McpToolExposure = "direct"
+) -> dict[str, object]:
     """Return the user settings that start a task's synthetic MCP servers.
 
-    MCP servers are user-only settings, so they go in the run's private `HOME`.
-    Every catalog tool is marked read-only, so no run waits for an approval.
+    MCP servers and their exposure are user-only settings, so they go in the run's
+    private `HOME`. Every catalog tool is marked read-only, so no run waits for an
+    approval.
 
     Args:
         task (Task): The task whose `mcp_servers` to start.
         python (str): The interpreter that runs each server; it needs the MCP SDK.
+        exposure (McpToolExposure): How the servers' tools reach the model.
 
     Returns:
         dict[str, object]: The contents of `~/.wisp/settings.json`.
     """
 
     return {
+        "mcp_tool_exposure": exposure,
         "mcp_servers": {
             name: {
                 "command": python,
@@ -264,7 +287,7 @@ def mcp_settings(task: Task, python: str) -> dict[str, object]:
                 "tool_safety": dict.fromkeys(CATALOGS[name].tool_names, "read"),
             }
             for name in task.definition.mcp_servers
-        }
+        },
     }
 
 
@@ -346,10 +369,7 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         # A server that failed to start drops its tools; that says nothing about the model.
         # Without `agent.started` Wisp failed earlier, and its own error explains why.
         if metrics.setup is not None and runner_error is None:
-            offered = set(metrics.setup.tool_names)
-            missing = [name for name in mcp_tool_names(task) if name not in offered]
-            if missing:
-                runner_error = f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
+            runner_error = _mcp_setup_problem(task, metrics, context.mcp_tool_exposure)
         verify_exit = _run_command(
             task.definition.verify,
             work,
@@ -536,12 +556,17 @@ def _run_wisp(
         # Wisp runs in the task folder, so a relative path would land there and be deleted.
         str((run_dir / "sessions").resolve()),
     ]
+    # MCP tools are selected the same way in both modes; on demand, Wisp offers them
+    # through the discovery tools, which exist per run and are never selected by name.
     for tool in (*definition.tools, *mcp_tool_names(task)):
         command += ["--allow-tool", tool]
     if definition.mcp_servers:
         settings = home / ".wisp" / "settings.json"
         settings.parent.mkdir(parents=True, exist_ok=True)
-        settings.write_text(json.dumps(mcp_settings(task, context.python)), encoding="utf-8")
+        settings.write_text(
+            json.dumps(mcp_settings(task, context.python, context.mcp_tool_exposure)),
+            encoding="utf-8",
+        )
     environment = run_environment(home, context.credentials, os.environ)
     with (
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
@@ -558,6 +583,26 @@ def _run_wisp(
     if exit_code is None:
         return None, "wisp did not exit after its --timeout; the runner killed it"
     return exit_code, None
+
+
+def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposure) -> str | None:
+    """Say why a run did not get the MCP setup its task needs, or None.
+
+    In direct mode every catalog tool must be offered. On demand only the discovery
+    tools are offered, so a server that failed shows as Wisp's startup error.
+    """
+
+    if not task.definition.mcp_servers:
+        return None
+    failed = [error for error in metrics.errors if _MCP_UNAVAILABLE.search(error)]
+    if failed:
+        return failed[0]
+    offered = set(metrics.setup.tool_names) if metrics.setup is not None else set()
+    expected = DISCOVERY_TOOL_NAMES if exposure == "on_demand" else mcp_tool_names(task)
+    missing = [name for name in expected if name not in offered]
+    if missing:
+        return f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
+    return None
 
 
 def _run_command(
@@ -679,4 +724,7 @@ def _row(
         wisp_version=context.build.version,
         git_commit=context.build.git_commit,
         run_dir=str(run_dir.relative_to(context.results_dir)),
+        mcp_tool_exposure=context.mcp_tool_exposure,
+        proxied_calls=measured.proxied_calls,
+        proxied_argument_errors=measured.proxied_argument_errors,
     )
