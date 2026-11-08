@@ -106,13 +106,23 @@ def test_describe_returns_schema(tmp_path: Path) -> None:
     [
         ({"sku": "A-1"}, None),
         ({"sku": "A-1", "count": None}, None),
+        ({"sku": "A-1", "count": 2.0}, None),
         ({"sku": "A-1", "extra": object()}, None),
         ({}, "needs sku"),
         ({"sku": 1}, "sku must be string"),
         ({"sku": "A", "count": True}, "count must be integer or null"),
         (["A-1"], "must be an object"),
     ],
-    ids=["ok", "nullable", "unknown-key", "missing", "wrong-type", "bool-not-int", "not-object"],
+    ids=[
+        "ok",
+        "nullable",
+        "whole-float",
+        "unknown-key",
+        "missing",
+        "wrong-type",
+        "bool-not-int",
+        "not-object",
+    ],
 )
 def test_proxied_arguments_checked_lightly(arguments: object, problem: str | None) -> None:
     entry = _catalog().entries[0]
@@ -128,3 +138,15 @@ def test_guidance_names_servers() -> None:
         "inventory (2 tools), billing (1 tool)."
     )
     assert catalog_guidance(McpCatalog()) == ""
+
+
+def test_search_matches_hyphenated_server(tmp_path: Path) -> None:
+    catalog = McpCatalog.from_tools(
+        [_Tool("list", "List rows.", server_name="my-db"), _Tool("list", "List items.")]
+    )
+
+    assert (
+        _search(catalog, tmp_path, query="db list")
+        .splitlines()[1]
+        .startswith("- mcp__my-db__list (my-db)")
+    )

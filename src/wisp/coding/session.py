@@ -1402,11 +1402,10 @@ class CodingSession:
         )
         offered_tools, catalog = self._apply_mcp_exposure(effective_tools, registry)
         if catalog is not None:
-            # The catalog's tools stay allowed for resolved calls; the discovery tools
-            # are allowed on top of whatever the run's policy already allows.
+            # Only the discovery tools are added. Built-ins keep exactly the policy they
+            # had, and catalog tools are checked against it when `mcp_call` resolves.
             policy = replace(
-                policy,
-                allowed_tools=policy.allowed_tools | {tool.name for tool in offered_tools},
+                policy, allowed_tools=policy.allowed_tools | frozenset(DISCOVERY_TOOL_NAMES)
             )
         executor = ConfiguredToolExecutor(
             registry=registry,
@@ -2046,6 +2045,10 @@ class CodingSession:
     def _tool_is_unsafe(self, name: str) -> bool:
         """Return whether a replayed tool turn could repeat side effects on recovery."""
 
+        if name in DISCOVERY_TOOL_NAMES:
+            # They read the run's catalog, and `mcp_call` never runs anything itself:
+            # a proxied call that ran a tool is judged by its `target` instead.
+            return False
         if self.tool_registry is None:
             return True
         try:

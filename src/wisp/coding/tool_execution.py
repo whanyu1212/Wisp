@@ -211,33 +211,16 @@ class ConfiguredToolExecutor:
     async def prepare(self, tool_call: ToolCall) -> AsyncIterator[ToolPreparationEvent]:
         """Resolve policy and approval while deferring all tool side effects."""
 
-        arguments = dict(tool_call.arguments)
         outcome: _ToolRunOutcome
-
-        if tool_call.parse_error is not None:
-            outcome = _failure_outcome(
-                tool_call.parse_error,
-                failure_code="invalid_arguments",
-                retryable=True,
-                recovery_hint="Retry with arguments that match the tool's input schema.",
-            )
-        elif self._registry is None:
-            outcome = _failure_outcome(
-                "Tool execution is not configured",
-                failure_code="internal_error",
-            )
-        elif (proxied := self._resolve_proxied_call(tool_call, arguments)) is not None and (
-            isinstance(proxied, _ToolRunOutcome)
-        ):
-            outcome = proxied
+        resolved = self._resolve_call(tool_call)
+        if isinstance(resolved, _ToolRunOutcome):
+            outcome = resolved
         else:
             # A proxied `mcp_call` continues as the MCP tool it names: from here on
             # every check, the approval, and the run see that tool, not the proxy.
-            target = proxied[0] if proxied is not None else None
-            if proxied is not None:
-                arguments = proxied[1]
+            target, arguments = resolved.target, resolved.arguments
             try:
-                tool = self._registry.get(target or tool_call.name)
+                tool = resolved.registry.get(target or tool_call.name)
             except UnknownToolError as exc:
                 outcome = _failure_outcome(str(exc), failure_code="unknown_tool")
             else:
@@ -312,20 +295,29 @@ class ConfiguredToolExecutor:
 
         yield self._prepare_outcome(tool_call, outcome, target=self.resolve_target(tool_call))
 
-    def _resolve_proxied_call(
-        self, tool_call: ToolCall, arguments: Mapping[str, object]
-    ) -> tuple[str, dict[str, object]] | _ToolRunOutcome | None:
-        """Resolve an `mcp_call` to the catalog tool it names and that tool's arguments.
+    def _resolve_call(self, tool_call: ToolCall) -> _ResolvedCall | _ToolRunOutcome:
+        """Find what a call will run, or the failure decided before any check.
 
-        Returns:
-            tuple[str, dict[str, object]] | _ToolRunOutcome | None: The target and
-            its arguments; a failure decided before any approval; or None when the
-            call is not a proxied call this run resolves.
+        A proxied `mcp_call` resolves to the catalog tool it names, with that tool's
+        own arguments; every other call resolves to itself.
         """
 
+        if tool_call.parse_error is not None:
+            return _failure_outcome(
+                tool_call.parse_error,
+                failure_code="invalid_arguments",
+                retryable=True,
+                recovery_hint="Retry with arguments that match the tool's input schema.",
+            )
+        if self._registry is None:
+            return _failure_outcome(
+                "Tool execution is not configured",
+                failure_code="internal_error",
+            )
+        arguments = dict(tool_call.arguments)
         catalog = self._mcp_catalog
         if tool_call.name != MCP_CALL or catalog is None:
-            return None
+            return _ResolvedCall(self._registry, arguments)
         name = arguments.get("name")
         if not isinstance(name, str):
             return _failure_outcome(
@@ -348,7 +340,9 @@ class ConfiguredToolExecutor:
         problem = check_proxied_arguments(entry, tool_arguments)
         if problem is not None:
             return _failure_outcome(problem, failure_code="invalid_arguments", retryable=True)
-        return name, dict(cast(Mapping[str, object], tool_arguments))
+        return _ResolvedCall(
+            self._registry, dict(cast(Mapping[str, object], tool_arguments)), target=name
+        )
 
     def _prepare_tool(
         self,
@@ -504,6 +498,15 @@ class ConfiguredToolExecutor:
             return await tool.run(arguments, replace(self._context, progress=progress))
 
         return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedCall:
+    """What one call will run: its registry, arguments, and a proxy's target."""
+
+    registry: ToolRegistry
+    arguments: dict[str, object]
+    target: str | None = None
 
 
 def _execution_ended(

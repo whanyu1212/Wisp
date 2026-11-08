@@ -38,7 +38,11 @@ _WORD = re.compile(r"[a-z0-9]+")
 _JSON_TYPES: Mapping[str, Callable[[object], bool]] = {
     "string": lambda value: isinstance(value, str),
     "boolean": lambda value: isinstance(value, bool),
-    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    # JSON has one number type, so 2.0 is a valid integer.
+    "integer": lambda value: (
+        (isinstance(value, int) and not isinstance(value, bool))
+        or (isinstance(value, float) and value.is_integer())
+    ),
     "number": lambda value: isinstance(value, int | float) and not isinstance(value, bool),
     "array": lambda value: isinstance(value, list),
     "object": lambda value: isinstance(value, dict),
@@ -97,7 +101,11 @@ class CatalogEntry:
 
         properties = self.tool.input_schema.get("properties")
         required = self.tool.input_schema.get("required")
-        required_names = set(required) if isinstance(required, list) else set()
+        required_names = (
+            {name for name in required if isinstance(name, str)}
+            if isinstance(required, list)
+            else set()
+        )
         if not isinstance(properties, dict):
             return ()
         return tuple((str(name), name in required_names) for name in properties)
@@ -157,11 +165,12 @@ class McpCatalog:
         scored: list[tuple[int, int, CatalogEntry]] = []
         for position, entry in enumerate(self.entries):
             name_words = set(_WORD.findall(entry.tool.remote_name.lower()))
+            server_words = set(_WORD.findall(entry.server))
             summary_words = set(_WORD.findall(entry.summary.lower()))
             score = sum(
                 3 * (word in name_words)
                 + (word in entry.tool.remote_name.lower())
-                + 2 * (word == entry.server)
+                + 2 * (word in server_words)
                 + (word in summary_words)
                 for word in words
             )
@@ -213,7 +222,7 @@ def check_proxied_arguments(entry: CatalogEntry, arguments: object) -> str | Non
     schema = entry.tool.input_schema
     required = schema.get("required")
     if isinstance(required, list):
-        missing = [str(name) for name in required if name not in arguments]
+        missing = [name for name in required if isinstance(name, str) and name not in arguments]
         if missing:
             return f"{entry.name} needs {', '.join(missing)}; see {MCP_DESCRIBE} for its schema"
     properties = schema.get("properties")
@@ -224,9 +233,13 @@ def check_proxied_arguments(entry: CatalogEntry, arguments: object) -> str | Non
             types = [declared] if isinstance(declared, str) else declared
             if not isinstance(types, list):
                 continue
-            checks = [_JSON_TYPES[kind] for kind in types if kind in _JSON_TYPES]
+            # Older drafts allow schemas inside a `type` list; only names are checked.
+            checks = [
+                _JSON_TYPES[kind] for kind in types if isinstance(kind, str) and kind in _JSON_TYPES
+            ]
             if checks and not any(check(value) for check in checks):
-                return f"{entry.name}.{name} must be {' or '.join(map(str, types))}"
+                named = [kind for kind in types if isinstance(kind, str)]
+                return f"{entry.name}.{name} must be {' or '.join(named)}"
     return None
 
 

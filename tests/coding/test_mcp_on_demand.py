@@ -21,6 +21,7 @@ from wisp.events import (
     AgentMode,
     AgentStarted,
     ToolApprovalRequested,
+    ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
     WispEvent,
@@ -117,21 +118,29 @@ def _run(
     approval: ToolApprovalPolicy | None = None,
     mode: AgentMode = "build",
     exposure: str = "on_demand",
+    policy: ToolPolicy | None = None,
+    explicit_tools: bool = False,
+    operation_tool_names: frozenset[str] | None = None,
 ) -> tuple[list[WispEvent], ScriptedProvider]:
     provider = ScriptedProvider([*streams, _done()])
+    registry = tools.registry()
     session = CodingSession(
         provider=provider,
         sessions=JsonlSessionStore(tmp_path / "sessions"),
-        tool_registry=tools.registry(),
+        # Explicit specs are not filtered by the session policy; the executor is.
+        tools=registry.specs() if explicit_tools else None,
+        tool_registry=registry,
         tool_context=ToolContext(cwd=tmp_path),
-        tool_policy=ToolPolicy.allow_all_tools(),
+        tool_policy=policy or ToolPolicy.allow_all_tools(),
         tool_approval_policy=approval or ToolApprovalPolicy.require_approval(),
         mcp_tool_exposure=exposure,  # type: ignore[arg-type]
         mode=mode,
     )
 
     async def collect() -> list[WispEvent]:
-        return [event async for event in session.run("go")]
+        return [
+            event async for event in session.run("go", operation_tool_names=operation_tool_names)
+        ]
 
     return anyio.run(collect), provider
 
@@ -315,10 +324,19 @@ def test_scheduling_follows_target(parallel_safe: bool, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("target", "unsafe"), [("mcp__db__drop_table", True), ("mcp__db__query", False)]
+    ("name", "target", "unsafe"),
+    [
+        (MCP_CALL, "mcp__db__drop_table", True),
+        (MCP_CALL, "mcp__db__query", False),
+        (MCP_CALL, None, False),
+        (MCP_SEARCH, None, False),
+        (MCP_DESCRIBE, None, False),
+    ],
+    ids=["command-target", "read-target", "unresolved", "search", "describe"],
 )
-def test_overflow_retry_judges_target(tmp_path: Path, target: str, unsafe: bool) -> None:
-    from wisp.events import ToolExecutionEnded
+def test_overflow_retry_judges_target(
+    tmp_path: Path, name: str, target: str | None, unsafe: bool
+) -> None:
 
     tools = _Tools()
     session = CodingSession(
@@ -336,8 +354,8 @@ def test_overflow_retry_judges_target(tmp_path: Path, target: str, unsafe: bool)
 
     state = _HarnessLoopState()
     for event in (
-        ToolExecutionStarted(call_id="c", name=MCP_CALL, target=target, arguments={}),
-        ToolExecutionEnded(call_id="c", name=MCP_CALL, target=target, output="", is_error=False),
+        ToolExecutionStarted(call_id="c", name=name, target=target, arguments={}),
+        ToolExecutionEnded(call_id="c", name=name, target=target, output="", is_error=False),
     ):
         state.observe(
             event,
@@ -346,3 +364,74 @@ def test_overflow_retry_judges_target(tmp_path: Path, target: str, unsafe: bool)
         )
 
     assert bool(marked) is unsafe
+
+
+def test_policy_still_blocks_explicit_builtins(tmp_path: Path) -> None:
+    tools = _Tools()
+
+    events, _ = _run(
+        tmp_path,
+        tools,
+        [_call("bash", command="rm -rf /")],
+        policy=ToolPolicy.allow_read_tools(),
+        explicit_tools=True,
+    )
+
+    (result,) = _results(events)
+    assert (result.failure_code, tools.bash.calls) == ("policy_denied", 0)
+
+
+def test_tool_selection_limits_catalog(tmp_path: Path) -> None:
+    tools = _Tools()
+    streams = [
+        _call(MCP_SEARCH, query="table"),
+        _call(MCP_CALL, name="mcp__db__drop_table", arguments={"table": "users"}),
+    ]
+
+    events, _ = _run(
+        tmp_path,
+        tools,
+        streams,
+        policy=ToolPolicy.allow_tool_names({"bash", "mcp__db__query"}),
+        approval=ToolApprovalPolicy.approve_all(),
+    )
+
+    search, refused = _results(events)
+    assert "mcp__db__query" in search.output and "drop_table" not in search.output
+    assert (refused.failure_code, tools.drop.calls) == ("policy_denied", [])
+
+
+def test_operation_limit_leaves_out_discovery(tmp_path: Path) -> None:
+    _events, provider = _run(tmp_path, _Tools(), [], operation_tool_names=frozenset({"bash"}))
+
+    assert [tool.name for tool in provider.calls[0].tools] == ["bash"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "ran"), [("mcp__db__query", True), ("mcp__db__drop_table", False)]
+)
+def test_direct_calls_keep_gates(tmp_path: Path, tool: str, ran: bool) -> None:
+    tools = _Tools()
+    target = tools.query if ran else tools.drop
+
+    events, _ = _run(tmp_path, tools, [_call(tool, table="users")])
+
+    (result,) = _results(events)
+    assert bool(target.calls) is ran and result.target is None
+    assert result.failure_code == (None if ran else "approval_denied")
+
+
+def test_older_draft_types_do_not_crash(tmp_path: Path) -> None:
+    tools = _Tools()
+    tools.query.input_schema = {
+        "$schema": "http://json-schema.org/draft-03/schema#",
+        "properties": {"table": {"type": [{"type": "string"}, "string"]}},
+        "required": [["table"], "table"],
+    }
+
+    events, _ = _run(
+        tmp_path, tools, [_call(MCP_CALL, name="mcp__db__query", arguments={"table": "t"})]
+    )
+
+    (result,) = _results(events)
+    assert (result.is_error, tools.query.calls) == (False, [{"table": "t"}])
