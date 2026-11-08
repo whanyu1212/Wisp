@@ -66,7 +66,7 @@ def with_shell[T](tmp_path: Path, scenario: Callable[[Shell], Awaitable[T]]) -> 
     return anyio.run(run)
 
 
-def test_truncated_run_saves_the_early_error_it_cut(tmp_path: Path) -> None:
+def test_tail_only_run_saves_the_early_error_it_cut(tmp_path: Path) -> None:
     async def scenario(shell: Shell) -> tuple[ToolResult, str, str]:
         result = await shell.run({"command": _NOISY_COMMAND})
         stdout_id = output_ids(result.text)["stdout"]

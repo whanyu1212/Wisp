@@ -76,31 +76,71 @@ def test_dropped_middle_uses_captured_head() -> None:
         stdout_truncated=True,
         stdout_dropped_bytes=90_000,
         stdout_head="head 1\nerror: first\n",
+        stdout_retained_bytes=14,
     )
 
     output = _preview(result)
 
     assert output.text == (
         "Command exited with code 1: head 1\nerror: first\n"
-        "[truncated: 89,980 bytes omitted after the first 2 lines]\n"
+        "[truncated: 89,981 bytes omitted after the first 2 lines of stdout]\n"
         "tail 1\ntail 2\nTraceback: boom"
     )
 
 
-def test_stderr_head_follows_whole_stdout() -> None:
+def test_head_stays_in_first_stream() -> None:
+    # The marker's line count must be an offset into one saved stream.
+    stderr_tail = "".join(f"warning {n}\n" for n in range(5000, 10000))
     result = ProcessResult(
         exit_code=1,
         stdout="configured\n",
-        stderr="last warning\n",
+        stderr=stderr_tail,
         stderr_truncated=True,
-        stderr_dropped_bytes=70_000,
+        stderr_dropped_bytes=50_000,
         stderr_head="warning 1\n",
     )
 
     output = _preview(result)
 
-    assert output.text.startswith("Command exited with code 1: configured\nwarning 1\n[truncated: ")
-    assert output.text.endswith("configured\nlast warning")
+    head, _, rest = output.text.partition("\n[truncated: ")
+    assert head == "Command exited with code 1: configured"
+    assert "omitted after the first 1 lines of stdout]\n" in rest
+    assert "configured" not in rest and rest.endswith("warning 9999")
+
+
+def test_both_streams_dropped() -> None:
+    result = ProcessResult(
+        exit_code=1,
+        stdout="out tail\n",
+        stderr="err tail\n",
+        stdout_truncated=True,
+        stderr_truncated=True,
+        stdout_dropped_bytes=60_000,
+        stderr_dropped_bytes=60_000,
+        stdout_head="out head\n",
+        stderr_head="err head\n",
+    )
+
+    output = _preview(result)
+
+    assert output.text.startswith("Command exited with code 1: out head\n[truncated: 1")
+    assert "first 1 lines of stdout]" in output.text
+    assert output.text.endswith("out tail\nerr tail") and "err head" not in output.text
+
+
+@pytest.mark.parametrize(("max_bytes", "max_lines"), [(1_000, 8), (1_000, 40), (2_500, 8)])
+def test_preview_within_small_budget(max_bytes: int, max_lines: int) -> None:
+    notice = "[Full output saved: stdout output_id=abc. Read it with read_output.]"
+    result = ProcessResult(exit_code=1, stdout=_build_log(3000), stderr="")
+
+    output = _format_process_output_preview(
+        result, max_bytes=max_bytes + len(notice) + 1, max_lines=max_lines + 1, notice=notice
+    )
+
+    body = output.text.removeprefix("Command exited with code 1: ")
+    assert "[truncated: " in body and body.endswith(notice)
+    assert len(body.encode()) <= max_bytes + len(notice) + 1
+    assert len(body.split("\n")) <= max_lines + 1
 
 
 def test_notice_kept_after_preview() -> None:
@@ -124,7 +164,10 @@ def test_small_budget_keeps_tail() -> None:
 def test_head_captured_only_when_middle_dropped() -> None:
     whole, cut = _StreamTail(100), _StreamTail(100)
     whole.append(b"x" * 100)
-    cut.append(b"a" * STREAM_HEAD_BYTES + "é".encode() + b"b" * 5000)
+    # The reader appends 8 KB chunks; the head must fill across them.
+    data = b"a" * STREAM_HEAD_BYTES + "é".encode() + b"b" * 5000
+    for offset in range(0, len(data), 8192):
+        cut.append(data[offset : offset + 8192])
 
     assert whole.result().head == b""
     head = cut.result().head
@@ -151,3 +194,18 @@ def test_bash_shows_both_ends(tmp_path: Path) -> None:
     assert "error: first failure" in result.text and "build failed" in result.text
     assert "progress line 02500" not in result.text
     assert len(result.text.encode()) < _PREVIEW_LIMIT + 300
+    assert result.text.endswith("Read it with read_output.]")
+    assert result.data["stdout_output_id"] in result.text
+
+
+@pytest.mark.process
+def test_bash_saves_output_capture_kept(tmp_path: Path) -> None:
+    # About 20 KB: capture keeps all of it, but the preview leaves out the middle.
+    code = "for n in range(800):\n    print(f'line {n:04d} ' + 'y' * 15)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+    result = run_tool(BashTool(), {"command": command}, ToolContext(cwd=tmp_path))
+
+    assert result.data["stdout_truncated"] is False and result.truncated is True
+    assert "line 0400" not in result.text
+    assert result.data["stdout_output_id"] in result.text

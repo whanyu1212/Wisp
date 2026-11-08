@@ -63,9 +63,12 @@ instead of slowing the command down. SDK clients receive the same updates as
 A finished `bash` command's result shows long output as its start and its end: the first 64 lines
 (up to 4,000 bytes) and the last 192 lines (up to 8,000 bytes), with a line such as
 `[truncated: 81,204 bytes omitted after the first 64 lines]` between them. A build's first error is
-often near the start and its summary at the end. Output that fits is shown whole; a tool output
-budget set below that (50,000 bytes and 2,000 lines by default) keeps only the end. When a result
-leaves anything out, Wisp saves the full stdout and stderr and ends the result with a line such as
+often near the start and its summary at the end. The start comes from stdout, or from stderr when
+stdout is empty, and the marker's line count is an offset into that stream (it names the stream
+when both have output). Output that fits is shown whole. A smaller tool output budget (50,000 bytes
+and 2,000 lines by default) scales both parts down, and below about 1,000 bytes or 8 lines a
+result keeps only the end. When a result leaves anything out, Wisp saves the full stdout and
+stderr and ends the result with a line such as
 `[Full output saved: stdout output_id=3f9c0a1b2c3d4e5f (2481533 bytes, 31007 lines). Read it with read_output.]`.
 The model pages through a saved stream with `read_output`, using the same `offset` and `limit` as
 `read`, instead of running the command again. This also applies to a poll of a started process

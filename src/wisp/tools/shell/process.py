@@ -1955,12 +1955,13 @@ def _format_process_output_preview(
     end = "\n".join(parts)
     head_bytes = min(PREVIEW_HEAD_BYTES, body_bytes // 3)
     head_lines = min(PREVIEW_HEAD_LINES, body_lines // 4)
+    label, start = _output_start(result)
     body = truncate_text_middle(
-        _output_start(result, end),
+        start,
         end,
-        total_bytes=len(end.encode("utf-8"))
-        + result.stdout_dropped_bytes
-        + result.stderr_dropped_bytes,
+        whole=not capture_truncated,
+        total_bytes=_output_bytes(result, end),
+        start_label=label if result.stdout and result.stderr else "",
         head_bytes=head_bytes,
         head_lines=head_lines,
         tail_bytes=min(PREVIEW_TAIL_BYTES, body_bytes - head_bytes - _PREVIEW_MARKER_BYTES),
@@ -1972,20 +1973,31 @@ def _format_process_output_preview(
     )
 
 
-def _output_start(result: ProcessResult, combined: str) -> str:
-    """The combined output from its first byte, as far as capture kept it.
+def _output_start(result: ProcessResult) -> tuple[str, str]:
+    """Name the stream the output starts with, and its start as far as capture kept it.
 
-    Combined output is stdout then stderr. When capture dropped the middle of
-    stdout, the start is stdout's captured head; when only stderr lost its middle,
-    it is all of stdout followed by stderr's head.
+    Combined output is stdout then stderr. A preview's head stays within the first
+    non-empty stream, so its line count is an offset into that stream's saved output.
     """
 
-    if result.stdout_truncated:
-        return result.stdout_head
-    if not result.stderr_truncated:
-        return combined
-    stdout = result.stdout.rstrip("\n")
-    return f"{stdout}\n{result.stderr_head}" if stdout else result.stderr_head
+    if result.stdout:
+        return "stdout", result.stdout_head if result.stdout_truncated else result.stdout
+    return "stderr", result.stderr_head if result.stderr_truncated else result.stderr
+
+
+def _output_bytes(result: ProcessResult, combined: str) -> int:
+    """The combined output's size: exact when nothing was dropped, else from stream sizes."""
+
+    if not (result.stdout_truncated or result.stderr_truncated):
+        return len(combined.encode("utf-8"))
+    streams = (
+        (result.stdout, result.stdout_retained_bytes, result.stdout_dropped_bytes),
+        (result.stderr, result.stderr_retained_bytes, result.stderr_dropped_bytes),
+    )
+    return sum(
+        (len(text.encode("utf-8")) if retained is None else retained) + dropped
+        for text, retained, dropped in streams
+    )
 
 
 def _process_output_parts(stdout: str, stderr: str) -> list[str]:
