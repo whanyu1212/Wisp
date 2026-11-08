@@ -1,16 +1,23 @@
-"""`uv run python -m evals.tool_use run|report ...`; see `README.md` here."""
+"""`uv run python -m evals.tool_use run|report|compare|baseline ...`; see `README.md` here."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from evals.tool_use.compare import (
+    baseline_document,
+    compare_runs,
+    render_comparison,
+    write_baseline,
+)
 from evals.tool_use.credentials import (
     DEFAULT_AUTH_FILE,
     DEFAULT_ENV_FILE,
@@ -31,6 +38,7 @@ from evals.tool_use.runner import (
 from evals.tool_use.task_definitions import TaskError, select_tasks
 
 RESULTS_DIR = Path(__file__).parent / "results"
+BASELINES_DIR = Path(__file__).parent / "baselines"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,16 +59,63 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--auth-file", type=Path, default=DEFAULT_AUTH_FILE)
     run.add_argument("--results", type=Path, help="output folder (default: a new timestamped one)")
 
-    report = commands.add_parser("report", help="summarize a runs.jsonl file")
-    report.add_argument("runs", type=Path, help="a runs.jsonl file or the folder holding it")
+    runs_help = "a results folder, its runs.jsonl, or a baseline .json file"
+    report = commands.add_parser("report", help="summarize one set of runs")
+    report.add_argument("runs", type=Path, help=runs_help)
     report.add_argument("--k", type=int, default=3, help="the k in pass^k")
 
+    compare = commands.add_parser("compare", help="compare two sets of runs task by task")
+    compare.add_argument("before", type=Path, help=runs_help)
+    compare.add_argument("after", type=Path, help=runs_help)
+
+    baseline = commands.add_parser("baseline", help="save a results folder as a baseline")
+    baseline.add_argument("results", type=Path, help="a results folder from `run`")
+    baseline.add_argument("--label", required=True, help="what it measures, e.g. current-tools")
+
     args = parser.parse_args(argv)
-    if args.command == "report":
-        path = args.runs / "runs.jsonl" if args.runs.is_dir() else args.runs
-        print(render_markdown(build_report(load_rows(path), k=args.k)))
-        return 0
-    return _run(args)
+    if args.command == "run":
+        return _run(args)
+    try:
+        if args.command == "report":
+            print(render_markdown(build_report(load_rows(args.runs), k=args.k)))
+            return 0
+        if args.command == "compare":
+            comparison = compare_runs(load_rows(args.before), load_rows(args.after))
+            print(render_comparison(comparison))
+            return 0
+        return _baseline(args.results, args.label)
+    except (OSError, ValueError) as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
+
+def _baseline(results: Path, label: str) -> int:
+    # The label becomes part of a committed file name.
+    if re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", label) is None:
+        print("error: --label must be lowercase words joined by hyphens", file=sys.stderr)
+        return 2
+    # `run` writes suite.json last, so its absence means the suite did not finish.
+    suite_path = results / "suite.json"
+    if not suite_path.is_file():
+        print(
+            f"error: {results} has no suite.json; pass a finished results folder", file=sys.stderr
+        )
+        return 2
+    suite = json.loads(suite_path.read_text(encoding="utf-8"))
+    finished = suite.get("finished_at") if isinstance(suite, dict) else None
+    if not isinstance(finished, str):
+        print(f"error: {suite_path} has no finished_at time", file=sys.stderr)
+        return 2
+    date = finished[:10]
+    path = BASELINES_DIR / f"{date}-{label}.json"
+    document = baseline_document(load_rows(results), label=label, date=date, suite=suite)
+    try:
+        write_baseline(path, document)
+    except FileExistsError:
+        print(f"error: {path} already exists; choose another label", file=sys.stderr)
+        return 2
+    print(path)
+    return 0
 
 
 def _run(args: argparse.Namespace) -> int:
