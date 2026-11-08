@@ -20,6 +20,7 @@ from wisp.coding.prompt import project_context as project_context_module
 from wisp.coding.prompt import project_root as project_root_module
 from wisp.coding.prompt import repository_status as repository_status_module
 from wisp.coding.prompt.builder import DEFAULT_TOOL_GUIDANCE_MAX_CHARS
+from wisp.coding.prompt.project_context import NO_PROJECT_INSTRUCTIONS_NOTICE
 from wisp.providers.base import ToolSpec
 from wisp.tools.base import ToolPromptMetadata
 
@@ -207,8 +208,22 @@ def test_prompt_orders_guidance_before_boundary_and_mode(
 def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:
     context = build_project_context(cwd=tmp_path, tools=[])
 
-    assert "project instructions:" not in context
     assert "allowed tools: none exposed to the model" in context
+
+
+def test_project_context_says_no_instructions(tmp_path: Path) -> None:
+    context = build_project_context(cwd=tmp_path)
+
+    assert context.endswith(NO_PROJECT_INSTRUCTIONS_NOTICE)
+    assert "project instructions:\n" not in context
+
+
+def test_unfitting_instructions_skip_notice(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Prefer small typed modules.\n", encoding="utf-8")
+
+    context = build_project_context(cwd=tmp_path, max_context_file_chars=10)
+
+    assert "project instructions:" not in context
 
 
 def test_project_context_picks_root_context_file_by_precedence(tmp_path: Path) -> None:
