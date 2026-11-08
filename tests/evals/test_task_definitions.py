@@ -42,9 +42,10 @@ def test_shipped_tasks_load() -> None:
         (_VALID.format(id="other"), "must match its folder name"),
         (_VALID.format(id="demo") + 'surprise = "x"\n', "Extra inputs"),
         (_VALID.format(id="demo").replace('["read"]', '["shell"]'), "tools"),
+        (_VALID.format(id="demo") + 'mcp_servers = ["nope"]\n', "unknown MCP servers nope"),
         ("id = ", "invalid"),
     ],
-    ids=["id-mismatch", "unknown-key", "unknown-tool", "bad-toml"],
+    ids=["id-mismatch", "unknown-key", "unknown-tool", "unknown-server", "bad-toml"],
 )
 def test_bad_task_rejected(tmp_path: Path, text: str, message: str) -> None:
     folder = _task(tmp_path, "demo", text)

@@ -1,0 +1,8 @@
+id = "rename-function"
+title = "Rename a function everywhere it is used, without touching a similarly named one"
+tags = ["general"]
+prompt = "Rename the function `get_user_name` to `display_name` throughout this project, including the tests, and do not keep the old name. `get_user_name_parts` is a different function: leave its name as it is."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 300
+max_tool_iterations = 40
+tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]

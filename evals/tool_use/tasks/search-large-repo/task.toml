@@ -1,0 +1,8 @@
+id = "search-large-repo"
+title = "Fix a typo in a user-facing message somewhere in a 300-file project"
+tags = ["scale", "general"]
+prompt = "Users who hit error E4127 see the message \"Quota exeeded for this project.\" Fix the spelling of that message. Change nothing else."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 240
+max_tool_iterations = 25
+tools = ["read", "edit", "write", "grep", "find", "ls"]

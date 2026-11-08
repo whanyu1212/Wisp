@@ -8,11 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+
+from evals.tool_use.servers.catalogs import CATALOGS
 
 TASKS_DIR = Path(__file__).parent / "tasks"
 
-type Tag = Literal["general", "long-output", "edit", "mcp", "multi-read"]
+type Tag = Literal["general", "long-output", "edit", "mcp", "multi-read", "scale"]
 type ToolName = Literal["read", "write", "edit", "bash", "grep", "find", "ls", "read_output"]
 
 
@@ -49,8 +51,11 @@ class TaskDefinition(BaseModel):
         checks (TaskChecks): Event assertions a passing run must also meet.
         timeout_seconds (float): Wisp's `--timeout` for the run.
         max_tool_iterations (int): Wisp's `--max-tool-iterations` for the run.
-        tools (tuple[ToolName, ...]): The only tools Wisp exposes. Keep the list
-            small: runs execute real commands on the host.
+        tools (tuple[ToolName, ...]): The only built-in tools Wisp exposes. Keep
+            the list small: runs execute real commands on the host.
+        mcp_servers (tuple[str, ...]): Synthetic servers from
+            `servers/catalogs.py` to start for the run. Every tool they offer is
+            exposed as well.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -65,6 +70,15 @@ class TaskDefinition(BaseModel):
     timeout_seconds: float = Field(default=300, gt=0)
     max_tool_iterations: int = Field(default=40, gt=0)
     tools: tuple[ToolName, ...] = Field(min_length=1)
+    mcp_servers: tuple[str, ...] = ()
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _known_servers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        unknown = sorted(set(value) - set(CATALOGS))
+        if unknown:
+            raise ValueError(f"unknown MCP servers {', '.join(unknown)}; see servers/catalogs.py")
+        return value
 
 
 class TaskError(ValueError):

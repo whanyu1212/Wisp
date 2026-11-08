@@ -1,9 +1,12 @@
 """Summarize `runs.jsonl` into pass rates, cost, and setup-consistency warnings.
 
-pass^k is the chance that k runs of a task all pass (from tau-bench): with c
-passes in n scored runs, C(c, k) / C(n, k). It shows reliability, which pass^1,
-the plain pass rate, hides. Errored runs are not scored: a rate limit or a crash
-says nothing about the task, so they are counted on their own.
+Current models pass most tasks, so the report leads with how much work a run
+took (tool calls, tool errors, tokens), which is what separates two setups; pass
+rates guard against a setup that breaks tasks. pass^k is the chance that k runs
+of a task all pass (from tau-bench): with c passes in n scored runs,
+C(c, k) / C(n, k). It shows reliability, which pass^1, the plain pass rate,
+hides. Errored runs are not scored: a rate limit or a crash says nothing about
+the task, so they are counted on their own.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ class TaskScore:
         timed_out (int): Scored runs stopped by their deadline.
         pass_1 (float | None): Pass rate over scored runs.
         pass_k (float | None): pass^k, or None with fewer than k scored runs.
+        mean_calls (float | None): Mean tool calls per scored run.
+        mean_tool_errors (float | None): Mean failed tool calls per scored run.
         mean_tokens (float | None): Mean input plus output tokens per scored run.
         known_usd (Decimal): Cost of the priced runs.
     """
@@ -46,16 +51,19 @@ class TaskScore:
     timed_out: int
     pass_1: float | None
     pass_k: float | None
+    mean_calls: float | None
+    mean_tool_errors: float | None
     mean_tokens: float | None
     known_usd: Decimal
 
 
 @dataclass(frozen=True, slots=True)
 class ModelScore:
-    """One model across tasks: the mean of per-task pass^1, with a 95% interval.
+    """One model across tasks: means of the per-task scores.
 
-    The interval resamples tasks, so it reflects how much the result depends on
-    which tasks happened to be in the suite.
+    The 95% interval on pass^1 resamples tasks, so it reflects how much the
+    result depends on which tasks happened to be in the suite. Mean calls and
+    tokens weigh each task equally; compare them only across the same tasks.
     """
 
     model: str
@@ -63,6 +71,8 @@ class ModelScore:
     pass_1: float | None
     low: float | None
     high: float | None
+    mean_calls: float | None
+    mean_tokens: float | None
 
 
 @dataclass(slots=True)
@@ -109,12 +119,12 @@ def build_report(rows: Sequence[dict[str, object]], *, k: int = 3, seed: int = 0
         report.task_scores.append(_score_task(task, model, runs, k))
     rng = random.Random(seed)
     for model in sorted({score.model for score in report.task_scores}):
-        rates = [
-            score.pass_1
+        scored = [
+            score
             for score in report.task_scores
             if score.model == model and score.pass_1 is not None
         ]
-        report.model_scores.append(_score_model(model, rates, rng))
+        report.model_scores.append(_score_model(model, scored, rng))
     report.warnings.extend(_setup_warnings(rows))
     return report
 
@@ -123,22 +133,31 @@ def render_markdown(report: Report) -> str:
     """Render a report as Markdown tables."""
 
     lines = [
-        f"| Task | Model | Passed | pass^1 | pass^{report.k} | Errored | Timed out "
-        "| Mean tokens | Known USD |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| Task | Model | Mean calls | Tool errors | Mean tokens | Passed | pass^1 "
+        f"| pass^{report.k} | Errored | Timed out | Known USD |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for score in report.task_scores:
         lines.append(
-            f"| {score.task} | {score.model} | {score.passed}/{score.scored} "
-            f"| {_percent(score.pass_1)} | {_percent(score.pass_k)} | {score.errored} "
-            f"| {score.timed_out} | {_number(score.mean_tokens)} | {score.known_usd} |"
+            f"| {score.task} | {score.model} | {_number(score.mean_calls, 1)} "
+            f"| {_number(score.mean_tool_errors, 1)} | {_number(score.mean_tokens)} "
+            f"| {score.passed}/{score.scored} | {_percent(score.pass_1)} "
+            f"| {_percent(score.pass_k)} | {score.errored} | {score.timed_out} "
+            f"| {score.known_usd} |"
         )
-    lines += ["", "| Model | Tasks | Mean pass^1 | 95% interval |", "|---|---|---|---|"]
+    lines += [
+        "",
+        "| Model | Tasks | Mean calls | Mean tokens | Mean pass^1 | 95% interval |",
+        "|---|---|---|---|---|---|",
+    ]
     for model in report.model_scores:
         interval = (
             f"{_percent(model.low)} – {_percent(model.high)}" if model.low is not None else "—"
         )
-        lines.append(f"| {model.model} | {model.tasks} | {_percent(model.pass_1)} | {interval} |")
+        lines.append(
+            f"| {model.model} | {model.tasks} | {_number(model.mean_calls, 1)} "
+            f"| {_number(model.mean_tokens)} | {_percent(model.pass_1)} | {interval} |"
+        )
     if report.warnings:
         lines += ["", "Warnings:", *(f"- {warning}" for warning in report.warnings)]
     return "\n".join(lines)
@@ -148,6 +167,8 @@ def _score_task(task: str, model: str, runs: Sequence[dict[str, object]], k: int
     scored = [run for run in runs if run["status"] != "errored"]
     passed = sum(1 for run in scored if run["status"] == "passed")
     tokens = [int(str(run["input_tokens"])) + int(str(run["output_tokens"])) for run in scored]
+    calls = [_count_sum(run["tool_calls"]) for run in scored]
+    tool_errors = [_count_sum(run["tool_errors"]) for run in scored]
     return TaskScore(
         task=task,
         model=model,
@@ -157,21 +178,36 @@ def _score_task(task: str, model: str, runs: Sequence[dict[str, object]], k: int
         timed_out=sum(1 for run in scored if run["timed_out"]),
         pass_1=passed / len(scored) if scored else None,
         pass_k=pass_hat_k(passed, len(scored), k),
+        mean_calls=fmean(calls) if calls else None,
+        mean_tool_errors=fmean(tool_errors) if tool_errors else None,
         mean_tokens=fmean(tokens) if tokens else None,
         known_usd=sum((Decimal(str(run["known_usd"])) for run in runs), Decimal(0)),
     )
 
 
-def _score_model(model: str, rates: Sequence[float], rng: random.Random) -> ModelScore:
-    if not rates:
-        return ModelScore(model=model, tasks=0, pass_1=None, low=None, high=None)
+def _score_model(model: str, scores: Sequence[TaskScore], rng: random.Random) -> ModelScore:
+    """Average one model's task scores; ``scores`` holds only tasks with scored runs."""
+
+    if not scores:
+        return ModelScore(
+            model=model,
+            tasks=0,
+            pass_1=None,
+            low=None,
+            high=None,
+            mean_calls=None,
+            mean_tokens=None,
+        )
+    rates = [score.pass_1 for score in scores if score.pass_1 is not None]
     means = sorted(fmean(rng.choices(rates, k=len(rates))) for _ in range(_BOOTSTRAP_SAMPLES))
     return ModelScore(
         model=model,
-        tasks=len(rates),
+        tasks=len(scores),
         pass_1=fmean(rates),
         low=means[int(0.025 * len(means))],
         high=means[int(0.975 * len(means)) - 1],
+        mean_calls=fmean(score.mean_calls for score in scores if score.mean_calls is not None),
+        mean_tokens=fmean(score.mean_tokens for score in scores if score.mean_tokens is not None),
     )
 
 
@@ -198,5 +234,13 @@ def _percent(value: float | None) -> str:
     return "—" if value is None else f"{value:.0%}"
 
 
-def _number(value: float | None) -> str:
-    return "—" if value is None else f"{value:,.0f}"
+def _number(value: float | None, digits: int = 0) -> str:
+    return "—" if value is None else f"{value:,.{digits}f}"
+
+
+def _count_sum(counts: object) -> int:
+    """Sum a row's per-name counts, such as `tool_calls`."""
+
+    if not isinstance(counts, dict):
+        raise ValueError(f"expected a mapping of counts, got {counts!r}")
+    return sum(int(count) for count in counts.values())

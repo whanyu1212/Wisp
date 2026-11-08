@@ -1,0 +1,9 @@
+id = "mcp-similar-servers"
+title = "Choose the live server among three billing servers with the same tools"
+tags = ["mcp"]
+prompt = "What is the current total of invoice INV-2207? Look it up in the billing system, and write just the amount to ANSWER.txt, for example 1234.56."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 180
+max_tool_iterations = 20
+tools = ["write", "ls"]
+mcp_servers = ["billing", "billing-legacy", "billing-sandbox"]

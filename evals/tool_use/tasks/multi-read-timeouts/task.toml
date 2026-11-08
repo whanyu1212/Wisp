@@ -1,0 +1,8 @@
+id = "multi-read-timeouts"
+title = "Work out the shortest effective timeout from rules spread across a dozen config files"
+tags = ["multi-read"]
+prompt = "Which service that runs in production has the shortest effective request timeout in the eu-west region? config/README.md explains how timeouts are worked out. Write the answer to ANSWER.txt as `service=seconds`, for example `billing=2.5`."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 240
+max_tool_iterations = 30
+tools = ["read", "grep", "find", "ls", "write"]

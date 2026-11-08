@@ -1,0 +1,8 @@
+id = "large-file-lookup"
+title = "Answer a question whose pieces sit thousands of lines apart in one large file"
+tags = ["scale", "multi-read"]
+prompt = "In ledger/engine.py, what retry delay, in seconds, does `sync_ledger` use when it runs in strict mode? Write just the number to ANSWER.txt."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 240
+max_tool_iterations = 25
+tools = ["read", "grep", "find", "ls", "write"]

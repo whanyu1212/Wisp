@@ -1,0 +1,10 @@
+id = "costly-rerun"
+title = "Act on one line in the middle of a slow command's long output without running it twice"
+tags = ["long-output", "scale"]
+prompt = "Run `bash report.sh` once: it takes about 20 seconds, so do not run it again. It reports one account whose balance in data/accounts.csv does not match its entries in data/entries.csv. Correct that balance; the entries are right. `bash check.sh` is a fast check you can run as often as you like."
+# report.sh logs each run in $HOME, so the verifier sees how often it ran however it
+# was spelled. Exactly once: the task measures acting on output the preview cut.
+verify = "cmp -s {task}/repo/data/entries.csv data/entries.csv && cmp -s {task}/solution/data/accounts.csv data/accounts.csv && [ \"$(cat \"$HOME/.reconcile-runs\" 2>/dev/null | wc -l)\" -eq 1 ]"
+timeout_seconds = 300
+max_tool_iterations = 25
+tools = ["read", "edit", "write", "bash", "grep", "ls", "read_output"]
