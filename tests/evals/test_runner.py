@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from decimal import Decimal
 from pathlib import Path
 
@@ -132,6 +133,20 @@ def test_checks_report_breaks() -> None:
     assert evaluate_checks(TaskChecks(), metrics) == []
 
 
+@pytest.mark.parametrize(
+    ("commands", "broken"),
+    [
+        (["bash report.sh", "bash report.sh 2>&1 | tail -n 5"], True),
+        (["bash report.sh", "cat report.sh", "bash check.sh"], False),
+    ],
+    ids=["wrapped-rerun", "single-run"],
+)
+def test_no_rerun_counts_wrapped(commands: list[str], broken: bool) -> None:
+    failed = evaluate_checks(TaskChecks(no_rerun="bash report.sh"), RunMetrics(commands=commands))
+
+    assert bool(failed) is broken
+
+
 def _context(tmp_path: Path, *, build: Build | None = None) -> RunContext:
     return RunContext(
         build=build or Build(wisp=Path("wisp"), version="wisp 0", git_commit="abc"),
@@ -140,13 +155,13 @@ def _context(tmp_path: Path, *, build: Build | None = None) -> RunContext:
     )
 
 
-def _task(tmp_path: Path, verify: str = "true") -> Task:
+def _task(tmp_path: Path, verify: str = "true", *, extra: str = "") -> Task:
     folder = tmp_path / "tasks" / "demo"
     (folder / "repo").mkdir(parents=True)
     (folder / "repo" / "notes.txt").write_text("hello\n", encoding="utf-8")
     (folder / "task.toml").write_text(
         f'id = "demo"\ntitle = "Demo"\ntags = ["general"]\nprompt = "hi"\n'
-        f'verify = "{verify}"\ntools = ["read"]\ntimeout_seconds = 60\n',
+        f'verify = "{verify}"\ntools = ["read"]\ntimeout_seconds = 60\n{extra}',
         encoding="utf-8",
     )
     return load_task(folder)
@@ -277,3 +292,26 @@ def test_relative_results_keep_sessions(tmp_path: Path, monkeypatch: pytest.Monk
     row = run_one(_task(tmp_path), ModelSpec("fake", "fake"), 1, context)
 
     assert list((tmp_path / "results" / row.run_dir / "sessions").glob("*.jsonl"))
+
+
+@pytest.mark.process
+def test_mcp_tools_offered(tmp_path: Path) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    context = _context(tmp_path, build=detect_build(_REPO_ROOT))
+
+    row = run_one(task, ModelSpec("fake", "fake"), 1, context)
+
+    assert (row.status, row.error) == ("passed", None)
+
+
+@pytest.mark.process
+def test_missing_mcp_tools_error(tmp_path: Path) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    context = dataclasses.replace(
+        _context(tmp_path, build=detect_build(_REPO_ROOT)), python=str(tmp_path / "no-python")
+    )
+
+    row = run_one(task, ModelSpec("fake", "fake"), 1, context)
+
+    assert row.status == "errored"
+    assert row.error == "run was not offered 2 MCP tools, such as mcp__billing__get_invoice"

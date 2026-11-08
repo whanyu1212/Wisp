@@ -25,9 +25,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import IO, Literal
 
-from evals.tool_use.credentials import Credentials
+from evals.tool_use.credentials import REPO_ROOT, Credentials
 from evals.tool_use.metrics import RunMetrics, measure, parse_events
+from evals.tool_use.servers.catalogs import CATALOGS
 from evals.tool_use.task_definitions import Task, TaskChecks
+from wisp.mcp.tool import mcp_tool_name
 
 type RunStatus = Literal["passed", "failed", "errored"]
 
@@ -239,6 +241,43 @@ def run_environment(
     return environment
 
 
+def mcp_settings(task: Task, python: str) -> dict[str, object]:
+    """Return the user settings that start a task's synthetic MCP servers.
+
+    MCP servers are user-only settings, so they go in the run's private `HOME`.
+    Every catalog tool is marked read-only, so no run waits for an approval.
+
+    Args:
+        task (Task): The task whose `mcp_servers` to start.
+        python (str): The interpreter that runs each server; it needs the MCP SDK.
+
+    Returns:
+        dict[str, object]: The contents of `~/.wisp/settings.json`.
+    """
+
+    return {
+        "mcp_servers": {
+            name: {
+                "command": python,
+                "args": ["-m", "evals.tool_use.servers.serve", name],
+                "env": {"PYTHONPATH": str(REPO_ROOT)},
+                "tool_safety": dict.fromkeys(CATALOGS[name].tool_names, "read"),
+            }
+            for name in task.definition.mcp_servers
+        }
+    }
+
+
+def mcp_tool_names(task: Task) -> tuple[str, ...]:
+    """Return the Wisp names of every tool a task's MCP servers offer."""
+
+    return tuple(
+        mcp_tool_name(server, tool)
+        for server in task.definition.mcp_servers
+        for tool in CATALOGS[server].tool_names
+    )
+
+
 def classify(
     *,
     exit_code: int | None,
@@ -304,6 +343,10 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
                 exit_code=exit_code,
                 error=f"unreadable events: {err}",
             )
+        # A server that failed to start drops its tools; that says nothing about the model.
+        missing = _missing_tools(mcp_tool_names(task), metrics)
+        if missing and runner_error is None:
+            runner_error = f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
         verify_exit = _run_command(
             task.definition.verify,
             work,
@@ -341,7 +384,11 @@ def evaluate_checks(checks: TaskChecks, metrics: RunMetrics) -> list[str]:
     """Return a description of each event check the run broke."""
 
     failed: list[str] = []
-    if checks.no_rerun is not None and metrics.reruns(checks.no_rerun):
+    # Any second command containing the text counts, also one wrapped differently,
+    # such as `bash report.sh | tail`: that is still a second costly run.
+    if checks.no_rerun is not None and (
+        sum(checks.no_rerun in command for command in metrics.commands) > 1
+    ):
         failed.append(f"reran a command containing {checks.no_rerun!r}")
     if checks.uses_tool is not None and not metrics.tool_calls[checks.uses_tool]:
         failed.append(f"never called {checks.uses_tool}")
@@ -486,8 +533,12 @@ def _run_wisp(
         # Wisp runs in the task folder, so a relative path would land there and be deleted.
         str((run_dir / "sessions").resolve()),
     ]
-    for tool in definition.tools:
+    for tool in (*definition.tools, *mcp_tool_names(task)):
         command += ["--allow-tool", tool]
+    if definition.mcp_servers:
+        settings = home / ".wisp" / "settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps(mcp_settings(task, context.python)), encoding="utf-8")
     environment = run_environment(home, context.credentials, os.environ)
     with (
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
@@ -504,6 +555,11 @@ def _run_wisp(
     if exit_code is None:
         return None, "wisp did not exit after its --timeout; the runner killed it"
     return exit_code, None
+
+
+def _missing_tools(expected: Sequence[str], metrics: RunMetrics) -> list[str]:
+    offered = set(metrics.setup.tool_names) if metrics.setup is not None else set()
+    return [name for name in expected if name not in offered]
 
 
 def _run_command(
