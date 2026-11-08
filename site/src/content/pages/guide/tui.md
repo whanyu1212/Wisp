@@ -223,18 +223,22 @@ historical replay displays raw content. Markers are never written into session h
 ### Side panel {#side-panel}
 
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
-folder and branch, compact context usage, named MCP servers, skills, changed files, and the three
-most recent turns. The latest turn is highlighted. Model, effort, and YOLO remain in the composer,
+folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
+earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
+session with one turn has no turn list. Model, effort, and YOLO remain in the composer,
 and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens
 full details.
 
-**MCP servers** and **Skills** start expanded. MCP rows show connection status and expand to tool
-counts, errors, and `/mcp` management. Skill rows show **available** or **used**, and expand to their
-description and source. Used means a skill was successfully loaded by the skill tool or an explicit
-`/skill:name` invocation on the current session branch. Usage refreshes with session statistics after
-an operation, survives resume and compaction, and excludes failed calls and sibling-only usage.
-Project skills remain subject to trust. Empty, loading, and unavailable inventories are distinguished.
-Click either section heading to collapse it, or a member row to expand its details.
+**MCP servers** and **Skills** fold to their heading row while healthy. MCP expands by itself when a
+server disconnects or the server list can't be read; Skills expands once a skill has been used, or
+when the catalog reports diagnostics or can't be read. Clicking a heading overrides this until the
+state changes again, so a new failure still expands a section you folded. MCP rows show connection
+status and expand to tool counts, errors, and `/mcp` management. Skill rows show **available** or
+**used**, and expand to their description and source. Used means a skill was successfully loaded by
+the skill tool or an explicit `/skill:name` invocation on the current session branch. Usage
+refreshes with session statistics after an operation, survives resume and compaction, and excludes
+failed calls and sibling-only usage. Project skills remain subject to trust. Empty, loading, and
+unavailable inventories are distinguished. Click a member row to expand its details.
 
 The panel starts at 44 columns and grows to at most 52 automatically. Drag its left border to resize
 it while leaving at least 104 columns for the conversation; double-click the border to restore the

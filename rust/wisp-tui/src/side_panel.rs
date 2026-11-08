@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use crate::context_split::{Split, abbreviated};
 use crate::git_diff_view::EditCard;
 use crate::keybindings::{Action as KeyAction, Bindings};
+use crate::reducer::UiState;
 use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
-use crate::reducer::{UiState, ViewStatus};
 use crate::theme::Palette;
-use crate::transcript::{RunOutcome, TranscriptRole};
+use crate::transcript::{RunOutcome, TranscriptEntry, TranscriptRole};
 use crate::ui::{self, sanitize_for_terminal};
 use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::Frame;
@@ -50,8 +50,6 @@ const MIN_TRANSCRIPT_WIDTH: u16 = 104;
 /// Changed files listed before the rest are counted on one line.
 const MAX_FILE_ROWS: usize = 8;
 
-const SPINNER_OUTCOME: &str = "…";
-
 /// Whether a terminal this wide docks the panel beside the transcript.
 pub(crate) fn docks(width: u16) -> bool {
     width >= PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH
@@ -83,8 +81,8 @@ pub(crate) struct SidePanel {
     painted: RefCell<Painted>,
     scroll: Cell<usize>,
     context_expanded: bool,
-    mcp_collapsed: bool,
-    skills_collapsed: bool,
+    mcp: Fold,
+    skills: Fold,
     server_details: BTreeSet<String>,
     skill_details: BTreeSet<String>,
 }
@@ -310,8 +308,8 @@ impl SidePanel {
             PanelAction::Toggle(disclosure) => {
                 match disclosure {
                     Disclosure::Context => self.context_expanded = !self.context_expanded,
-                    Disclosure::Mcp => self.mcp_collapsed = !self.mcp_collapsed,
-                    Disclosure::Skills => self.skills_collapsed = !self.skills_collapsed,
+                    Disclosure::Mcp => self.mcp.toggle(),
+                    Disclosure::Skills => self.skills.toggle(),
                     Disclosure::Server(name) => toggle_member(&mut self.server_details, name),
                     Disclosure::Skill(name) => toggle_member(&mut self.skill_details, name),
                 }
@@ -658,8 +656,8 @@ impl Focus {
 /// Draw the panel into `area`. A docked panel has a rule on its left; an overlay is
 /// boxed so it reads as lying over the transcript.
 ///
-/// The Reading layout keeps context compact and named inventories open by default.
-/// A running operation or pending decision leads.
+/// The Reading layout keeps context compact and folds healthy inventories to their
+/// heading. A pending decision or the run's queue leads.
 /// Overflow scrolls independently, including while sections are expanded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
@@ -1257,66 +1255,59 @@ fn clip_path(path: &str, width: usize) -> String {
     format!("…{kept}")
 }
 
-/// The session's prompts, newest last, with how long each run took and how it
-/// ended. Prompts loaded from history have no timing.
+/// The session's prompts, oldest first.
+fn prompts(state: &UiState) -> Vec<&TranscriptEntry> {
+    state
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| entry.role == TranscriptRole::User)
+        .collect()
+}
+
+/// The prompts before the latest one, newest last, marked when their run failed or
+/// was cancelled. The latest prompt is left out because the transcript pins it
+/// above its reply, so a session with one turn has no list.
 fn turn_lines(state: &UiState, width: usize, rows: usize, palette: Palette) -> Vec<Line<'static>> {
     if rows < 2 {
         return Vec::new();
     }
     let muted = Style::default().fg(palette.muted);
-    let prompts: Vec<_> = state
-        .transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.role == TranscriptRole::User)
-        .collect();
-    if prompts.is_empty() {
+    let prompts = prompts(state);
+    let Some((_, earlier)) = prompts.split_last() else {
+        return Vec::new();
+    };
+    if earlier.is_empty() {
         return Vec::new();
     }
-    let running = matches!(
-        state.view_status,
-        ViewStatus::Running | ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-    );
-    let shown = prompts.len().min(rows - 1);
-    let first = prompts.len() - shown;
-    let number_width = prompts.len().to_string().len();
+    let shown = earlier.len().min(rows - 1);
+    let first = earlier.len() - shown;
+    let number_width = earlier.len().to_string().len();
     let mut lines = vec![spread(
         vec![heading("Recent turns", palette)],
         vec![Span::styled(format!("{} · /tree", prompts.len()), muted)],
         width,
     )];
-    for (index, prompt) in prompts.iter().enumerate().skip(first) {
-        let latest = index + 1 == prompts.len();
+    for (index, prompt) in earlier.iter().enumerate().skip(first) {
         let outcome = match prompt.run_result().map(|result| result.outcome) {
             Some(RunOutcome::Failed) => vec![Span::styled("✗", Style::default().fg(palette.error))],
             Some(RunOutcome::Cancelled) => vec![Span::styled("⊘", muted)],
-            None if latest && running => vec![Span::styled(SPINNER_OUTCOME, muted)],
             _ => Vec::new(),
         };
-        let mut line = spread(
+        lines.push(spread(
             vec![
-                Span::styled(
-                    if latest { "│" } else { " " },
-                    Style::default().fg(palette.primary),
-                ),
                 Span::styled(format!("{:>number_width$} ", index + 1), muted),
-                Span::styled(
-                    first_line(prompt.display_content()),
-                    if latest { Style::default() } else { muted },
-                ),
+                Span::raw(first_line(prompt.display_content())),
             ],
             outcome,
             width,
-        );
-        if latest {
-            line = line.patch_style(Style::default().bg(palette.panel));
-        }
-        lines.push(line);
+        ));
     }
     lines
 }
 
-/// The turn list folded to one row while a run or a decision leads the panel.
+/// The turn list folded to one row while a run or a decision leads the panel. Like
+/// the unfolded list, it needs a turn before the latest.
 fn folded_turn_lines(
     state: &UiState,
     focus: Focus,
@@ -1324,13 +1315,8 @@ fn folded_turn_lines(
     palette: Palette,
 ) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
-    let prompts = state
-        .transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.role == TranscriptRole::User)
-        .count();
-    if prompts == 0 {
+    let prompts = prompts(state).len();
+    if prompts < 2 {
         return Vec::new();
     }
     vec![spread(
@@ -1352,7 +1338,7 @@ fn folded_turn_lines(
 }
 
 mod reading;
-use reading::{inventory_rows, reading_context};
+use reading::{Fold, inventory_rows, reading_context};
 
 fn toggle_member(expanded: &mut BTreeSet<String>, name: String) {
     if !expanded.remove(&name) {
@@ -1397,6 +1383,7 @@ mod tests {
     use super::*;
     use crate::keybindings::Bindings;
     use crate::prompt_editor::PromptEditor;
+    use crate::reducer::ViewStatus;
     use crate::reducer::git_diff::GitDiffFile;
     use crate::startup_logo::LogoChoice;
     use crate::transcript::RunResult;
@@ -1597,13 +1584,14 @@ mod tests {
             "+2 −1",
             "? notes.md",
             "Recent turns",
-            "add a read timeout setting",
+            "1 why does codex time out",
             "2/2 connected",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
-        // The composer names YOLO and the main footer carries the panel's keys.
-        for moved in ["Permissions", "Ctrl+B panel"] {
+        // The composer names YOLO, the main footer carries the panel's keys, and the
+        // transcript pins the latest prompt.
+        for moved in ["Permissions", "Ctrl+B panel", "add a read timeout setting"] {
             assert!(!panel.contains(moved), "{moved}\n{panel}");
         }
         assert!(
@@ -1656,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn reading_layout_keeps_named_inventories_visible_and_details_collapsed() {
+    fn reading_layout_folds_healthy_inventories() {
         let state = reading_session();
         let mut panel = SidePanel::default();
         let text = panel_text(&screen(&state, &mut panel, 200), 200);
@@ -1664,10 +1652,8 @@ mod tests {
         for label in [
             "Context",
             "Breakdown",
-            "MCP servers",
-            "● docs",
-            "● linear",
-            "Skills",
+            "▸ MCP servers",
+            "▾ Skills",
             "◆ wisp-development",
             "◇ playwright",
             "◇ frontend-design",
@@ -1686,6 +1672,7 @@ mod tests {
             text.lines()
                 .any(|line| line.contains("playwright") && line.contains("available"))
         );
+        assert!(!text.contains("● docs"), "{text}");
         assert!(!text.contains("Instructions for"));
         assert!(!text.contains("Model"));
         assert!(!text.contains("Messages"));
@@ -1698,8 +1685,76 @@ mod tests {
         assert!(text.contains("Instructions for wisp-development"), "{text}");
         panel.activate(PanelAction::Toggle(Disclosure::Mcp));
         let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        assert!(!text.contains("● docs"));
-        assert!(text.contains("docs · linear"), "{text}");
+        for server in ["▾ MCP servers", "● docs", "● linear"] {
+            assert!(text.contains(server), "{server}\n{text}");
+        }
+    }
+
+    #[test]
+    fn unused_skills_fold() {
+        let mut state = reading_session();
+        state
+            .context
+            .stats
+            .as_mut()
+            .unwrap()
+            .used_skill_names
+            .clear();
+        let text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(text.contains("▸ Skills"), "{text}");
+        assert!(text.contains("3 available"), "{text}");
+        assert!(!text.contains("playwright"), "{text}");
+    }
+
+    fn mcp_open(state: &UiState, panel: &mut SidePanel) -> bool {
+        panel_text(&screen(state, panel, 200), 200).contains("● docs")
+    }
+
+    fn set_linear(state: &mut UiState, status: McpServerStatus) {
+        let snapshot = Arc::make_mut(state.mcp.snapshot.as_mut().unwrap());
+        snapshot.servers[1].status = status;
+    }
+
+    #[test]
+    fn mcp_fold_follows_failures() {
+        let mut state = reading_session();
+        let mut panel = SidePanel::default();
+        assert!(!mcp_open(&state, &mut panel));
+        // A toggle holds across paints while the servers stay healthy.
+        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
+        assert!(mcp_open(&state, &mut panel));
+        assert!(mcp_open(&state, &mut panel));
+        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
+        assert!(!mcp_open(&state, &mut panel));
+        // A failure opens the list, and folding it holds until the failure clears.
+        set_linear(&mut state, McpServerStatus::Disconnected);
+        assert!(mcp_open(&state, &mut panel));
+        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
+        assert!(!mcp_open(&state, &mut panel));
+        set_linear(&mut state, McpServerStatus::Connected);
+        assert!(!mcp_open(&state, &mut panel));
+        // The next failure opens it again.
+        set_linear(&mut state, McpServerStatus::Unavailable);
+        assert!(mcp_open(&state, &mut panel));
+        // A disabled server is the user's choice, not a failure.
+        let mut panel = SidePanel::default();
+        set_linear(&mut state, McpServerStatus::Disabled);
+        assert!(!mcp_open(&state, &mut panel));
+    }
+
+    #[test]
+    fn lone_turn_hides_list() {
+        let mut lone = UiState::new("openai-codex".into(), None, None);
+        let prompt = lone
+            .transcript
+            .append_prompt("why does codex time out".into());
+        let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
+        assert!(text.contains("Changed files"), "{text}");
+        assert!(!text.contains("Recent turns"), "{text}");
+        lone.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 1 });
+        lone.view_status = ViewStatus::Running;
+        let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
+        assert!(!text.contains("Recent turns"), "{text}");
     }
 
     #[test]
