@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.6.1 — Unreleased
+<!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
+<a id="061--unreleased"></a>
+
+## 0.6.1 — 2026-11-08
 
 0.6.1 is a patch release on 0.6.0 for the terminal UI. It shows the effort level a model uses by
 default, scrolls footer notices that do not fit, and gives each fact one place on screen instead of
