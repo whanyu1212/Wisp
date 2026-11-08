@@ -243,7 +243,8 @@ impl PendingInput {
             && self.target.overlay == current.overlay;
         if recovery
             || same_catalog
-            || matches!(self.input, Input::Redraw | Input::Error(_))
+            // Focus belongs to no view, so no event between capture and apply makes it stale.
+            || matches!(self.input, Input::Redraw | Input::Focus(_) | Input::Error(_))
             || same_editor
             || self.wheel_input
             || self.selection_input

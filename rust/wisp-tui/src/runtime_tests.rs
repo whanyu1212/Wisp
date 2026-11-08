@@ -62,7 +62,7 @@ fn wheel(kind: MouseEventKind) -> Event {
 }
 
 #[test]
-fn input_preserves_supported_events_and_ignores_releases_and_focus() {
+fn input_forwards_focus_ignores_releases() {
     let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
     let repeat = KeyEvent {
         kind: KeyEventKind::Repeat,
@@ -87,7 +87,7 @@ fn input_preserves_supported_events_and_ignores_releases_and_focus() {
     );
     result.unwrap();
     assert!(
-        matches!(&received[..], [Input::Key(a), Input::Key(b), Input::Paste(text), Input::Redraw]
+        matches!(&received[..], [Input::Focus(true), Input::Key(a), Input::Key(b), Input::Paste(text), Input::Redraw, Input::Focus(false)]
         if *a == key && *b == repeat && text == "paste\ntext")
     );
 }

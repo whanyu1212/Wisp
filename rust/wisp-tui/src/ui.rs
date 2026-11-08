@@ -226,6 +226,7 @@ pub fn render(
         &Bindings::default(),
         LogoChoice::AdalBraille,
         None,
+        false,
         None,
         None,
     );
@@ -249,6 +250,7 @@ pub fn render_interactive(
     bindings: &Bindings,
     startup_logo: LogoChoice,
     decision_choice: Option<usize>,
+    decision_pulse: bool,
     activity_elapsed: Option<std::time::Duration>,
     side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
@@ -286,6 +288,7 @@ pub fn render_interactive(
                 state,
                 notice.map(|notice| notice.text),
                 decision_choice,
+                decision_pulse.then_some(activity_frame),
                 palette,
             );
             return mouse::Conversation::default();
@@ -318,6 +321,7 @@ pub fn render_interactive(
             state,
             notice.map(|notice| notice.text),
             decision_choice,
+            decision_pulse.then_some(activity_frame),
             palette,
         );
         let notice_scrolls = render_footer(
@@ -3571,12 +3575,14 @@ pub(crate) fn choice_line(
 /// detail row and the choices always, then a separator, further detail rows,
 /// and the footnote. A pending exit or skipped-response warning replaces the
 /// choices so it is never hidden.
+/// `pulse_frame` makes the border breathe at that activity frame; `None` keeps it solid.
 fn render_decision_panel(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     notice: Option<&str>,
     choice: Option<usize>,
+    pulse_frame: Option<u8>,
     palette: Palette,
 ) {
     let width = decision_panel_width(area);
@@ -3593,11 +3599,21 @@ fn render_decision_panel(
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(palette.warning))
+        .border_style(
+            Style::default().fg(pulse_frame.map_or(palette.warning, |frame| {
+                palette.breathing(palette.warning, frame)
+            })),
+        )
         .padding(Padding::horizontal(1))
         .style(palette.composer())
+        // The title keeps the solid colour: a block draws titles in its border style,
+        // which breathes, and the question must stay readable.
         .title(
-            Line::from(format!(" {title} ")).style(Style::default().add_modifier(Modifier::BOLD)),
+            Line::from(format!(" {title} ")).style(
+                Style::default()
+                    .fg(palette.warning)
+                    .add_modifier(Modifier::BOLD),
+            ),
         );
     if let Some(tag) = &panel.tag {
         block = block.title_top(
@@ -3955,6 +3971,7 @@ mod tests {
                     bindings,
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -3993,6 +4010,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -4287,6 +4305,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -4655,6 +4674,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -5254,7 +5274,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
         terminal
             .draw(|frame| {
-                render_decision_panel(frame, frame.area(), &state, None, Some(1), palette);
+                render_decision_panel(frame, frame.area(), &state, None, Some(1), None, palette);
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -5292,7 +5312,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 11)).unwrap();
         terminal
             .draw(|frame| {
-                render_decision_panel(frame, frame.area(), &state, None, None, palette);
+                render_decision_panel(frame, frame.area(), &state, None, None, None, palette);
             })
             .unwrap();
 
@@ -5444,6 +5464,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -5694,6 +5715,7 @@ mod tests {
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
                         None,
+                        false,
                         None,
                         None,
                     );
@@ -5772,6 +5794,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -7028,6 +7051,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -7255,6 +7279,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -7313,6 +7338,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -7902,6 +7928,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
+                    false,
                     None,
                     None,
                 );
@@ -8223,6 +8250,7 @@ mod tests {
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
                         None,
+                        false,
                         None,
                         None,
                     );
