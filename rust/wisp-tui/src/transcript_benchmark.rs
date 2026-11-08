@@ -263,7 +263,8 @@ fn run_sample(
         detail_entry,
     } = fixture(entry_count)?;
     let connection = benchmark_connection();
-    let mut terminal = Terminal::new(TestBackend::new(config.width, config.height))?;
+    // `TestBackend` operations return `Result<_, Infallible>`.
+    let Ok(mut terminal) = Terminal::new(TestBackend::new(config.width, config.height));
 
     ui.transcript_row_cache.reset_work();
     let cold_started = Instant::now();
@@ -660,7 +661,7 @@ fn timed_resize(
 ) -> Result<f64, BenchmarkError> {
     terminal.backend_mut().resize(width, height);
     let started = Instant::now();
-    terminal.resize(Rect::new(0, 0, width, height))?;
+    let Ok(()) = terminal.resize(Rect::new(0, 0, width, height));
     ui.draw(terminal, connection)?;
     Ok(elapsed_ms(started))
 }

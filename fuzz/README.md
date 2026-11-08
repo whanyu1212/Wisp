@@ -3,7 +3,7 @@
 This harness advances #468 with coverage-guided protocol decoding and stable
 framing properties. It does not cover terminal rendering, Unicode layout, secret
 cleanup, lifecycle races, dependency auditing, or whole-session memory retention.
-The production workspace continues to use Rust 1.85; this nested workspace has
+The production workspace continues to use Rust 1.88; this nested workspace has
 its own lockfile and uses a pinned nightly for AddressSanitizer instrumentation.
 
 ## Targets and corpus

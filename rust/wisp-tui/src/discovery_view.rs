@@ -21,6 +21,9 @@ use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
 use wisp_protocol::events::SkillCatalogSnapshot;
 
+// Returned once per key event and consumed immediately, so its size does not matter;
+// boxing `UiAction` would only complicate the nested patterns callers match on.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum DiscoveryAction {
     None,

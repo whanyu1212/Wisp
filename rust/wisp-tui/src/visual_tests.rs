@@ -325,8 +325,7 @@ fn fixture(scenario: &str) -> LiveUi {
             output
         });
         completed.stdout = Some(format!(
-            "{}✓ mobile navigation\n✓ system theme changes\n✓ keyboard focus\n✓ diagram layout\n✓ search navigation\n✓ theme persistence\n\n36 passed (8.1s)",
-            earlier
+            "{earlier}✓ mobile navigation\n✓ system theme changes\n✓ keyboard focus\n✓ diagram layout\n✓ search navigation\n✓ theme persistence\n\n36 passed (8.1s)"
         ));
         ui.state.transcript.observe_tool_result(completed);
         ui.transcript_row_cache.fold_mut().expand(process);
