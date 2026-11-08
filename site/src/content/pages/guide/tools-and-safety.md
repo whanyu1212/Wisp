@@ -149,7 +149,8 @@ unless you pass `--yes` (alias `--allow-unsafe-tool-execution`). Without it the 
 clear tool error instead of Wisp executing the operation.
 
 Wisp does not cap model/tool rounds by default. Pass `--max-tool-iterations <n>` for a
-non-interactive fuse.
+non-interactive fuse, and `--timeout <seconds>` to bound a run's wall-clock time, including a
+single tool call that hangs. See [Exit status](../reference/cli.md#exit-status).
 
 ## Tool prompt metadata
 

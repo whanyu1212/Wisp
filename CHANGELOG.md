@@ -21,6 +21,15 @@ this policy.
   `agent.started` is not saved in session files. The schema bundle and conformance fixture are
   regenerated; the same-release rule applies.
 
+### CLI
+
+- `wisp -p` gains `--timeout SECONDS`. At the deadline the run reports why it stopped, is asked to
+  stop as a cancellation does (running tools and commands are stopped, the turn closes as
+  cancelled), saves its session, and still emits `agent.completed` with its totals; Wisp then exits
+  with status 124. A run that has not finished 10 seconds later is stopped outright. No event or
+  session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run
+  to stop like this.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 

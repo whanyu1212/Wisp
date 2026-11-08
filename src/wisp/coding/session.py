@@ -472,6 +472,23 @@ class CodingSession:
             return queue_full_message(DEFAULT_MAX_PENDING_QUEUE_MESSAGES)
         return None
 
+    def cancel_run(self) -> bool:
+        """Ask the active run to stop at its next cancellation point.
+
+        The run then ends the way a requested cancellation does: running tools
+        are settled, the open turn closes as cancelled, and the run still saves
+        and publishes `AgentCompleted` with its totals. Cancelling the caller's
+        task or scope instead skips that ending.
+
+        Returns:
+            bool: True when an active run accepted the request. False before the
+            run's loop starts, while it prepares its prompt, or after it ends, so
+            a caller that must stop a run retries until it is accepted.
+        """
+
+        harness = self._active_harness
+        return harness is not None and harness.cancel()
+
     def queue_state(self, session: JsonlSession | None = None) -> QueueUpdated:
         """Return the current or retained queue state without requiring an active run."""
 

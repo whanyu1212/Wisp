@@ -49,6 +49,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--continue` | Continue the newest session in the selected session directory | — |
 | `--yes`, `--allow-unsafe-tool-execution` | Pre-approve mutating and command tools | — |
 | `--max-tool-iterations N` | Cap model/tool rounds; omitted means uncapped | — |
+| `--timeout SECONDS` | Stop a `-p` run after this many seconds; see [Exit status](#exit-status) | — |
 | `--help` | Show generated help and exit | — |
 
 `WISP_MODE` supplies a default only when the invocation has neither an explicit `--mode` nor
@@ -57,6 +58,7 @@ example, `WISP_MODE=json wisp -p "hello"` does not select JSON output.
 
 Explicit command-line values override their environment and settings-file equivalents. `--resume`
 and `--continue` are mutually exclusive, and `--max-tool-iterations` must be zero or greater.
+`--timeout` must be positive and applies only to `-p` runs.
 
 Tool exposure and tool approval are separate. Exposing a mutating or command tool does not approve
 it; without `--yes`, Wisp asks in interactive modes and blocks unsafe execution in non-interactive
@@ -189,7 +191,15 @@ integration contracts.
 | `0` | Normal completion, help/version output, user-declined update, or graceful TUI/RPC shutdown |
 | `1` | Configuration, provider, session, tool, update, or runtime failure |
 | `2` | Command-line syntax or type error reported by Typer/Click |
+| `124` | A `-p` run reached its `--timeout`, as coreutils `timeout` reports it |
 
 External termination may produce a shell-specific signal status; that is not a versioned Wisp exit
 code. JSON mode emits an `error` event before status 1 when its typed output contract can still be
 honored.
+
+At its `--timeout`, a run reports `Run stopped: it reached its N s time limit (--timeout).` (an
+`error` event in JSON mode, a line on stderr in text mode) and is asked to stop the way a
+cancellation does: running tools and commands are stopped, the turn closes as cancelled, and the
+run saves its session and still emits `agent.completed` with outcome `cancelled` and its totals.
+A run that has not finished 10 seconds later is stopped outright, without `agent.completed`.
+Either way Wisp exits with status 124.
