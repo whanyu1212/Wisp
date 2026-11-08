@@ -1,0 +1,8 @@
+id = "fix-failing-test"
+title = "Fix the bug that makes a small test suite fail"
+tags = ["general"]
+prompt = "The tests in this project fail. Find and fix the bug in the code. Do not change the tests."
+verify = "git diff --quiet HEAD -- test_pricing.py && {python} -m unittest -q"
+timeout_seconds = 300
+max_tool_iterations = 30
+tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]

@@ -1,0 +1,172 @@
+"""Running eval tasks (`evals.tool_use.runner`)."""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+
+from evals.tool_use.credentials import Credentials
+from evals.tool_use.metrics import RunMetrics
+from evals.tool_use.runner import (
+    Budget,
+    Build,
+    ModelSpec,
+    RunContext,
+    RunRow,
+    detect_build,
+    evaluate_checks,
+    run_environment,
+    run_one,
+    run_suite,
+)
+from evals.tool_use.task_definitions import Task, TaskChecks, load_task
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_model_spec_parses() -> None:
+    assert ModelSpec.parse("openai::gpt-6.1-sol") == ModelSpec("openai", "gpt-6.1-sol")
+    with pytest.raises(ValueError, match="provider::model"):
+        ModelSpec.parse("gpt-6.1-sol")
+
+
+def test_environment_drops_settings(tmp_path: Path) -> None:
+    credentials = Credentials(
+        auth_file=tmp_path / "auth.json", environment={"OPENAI_API_KEY": "sk-run"}
+    )
+    base = {"PATH": "/bin", "WISP_MODEL": "other", "OPENAI_API_KEY": "sk-shell", "HOME": "/u"}
+
+    environment = run_environment(tmp_path / "home", credentials, base)
+
+    assert environment == {
+        "PATH": "/bin",
+        "OPENAI_API_KEY": "sk-run",
+        "HOME": str(tmp_path / "home"),
+        "WISP_TRUST": "1",
+        "WISP_AUTH_FILE": str(tmp_path / "auth.json"),
+    }
+
+
+def test_checks_report_breaks() -> None:
+    metrics = RunMetrics(commands=["make build", "make build"])
+    metrics.tool_errors["timeout"] = 3
+    checks = TaskChecks(no_rerun="make", uses_tool="read_output", max_tool_errors=2)
+
+    assert evaluate_checks(checks, metrics) == [
+        "reran a command containing 'make'",
+        "never called read_output",
+        "3 tool errors, more than 2",
+    ]
+    assert evaluate_checks(TaskChecks(), metrics) == []
+
+
+def _context(tmp_path: Path, *, build: Build | None = None) -> RunContext:
+    return RunContext(
+        build=build or Build(wisp=Path("wisp"), version="wisp 0", git_commit="abc"),
+        credentials=Credentials(auth_file=tmp_path / "auth.json", sources={"fake": "none"}),
+        results_dir=tmp_path / "results",
+    )
+
+
+def _task(tmp_path: Path, verify: str = "true") -> Task:
+    folder = tmp_path / "tasks" / "demo"
+    (folder / "repo").mkdir(parents=True)
+    (folder / "repo" / "notes.txt").write_text("hello\n", encoding="utf-8")
+    (folder / "task.toml").write_text(
+        f'id = "demo"\ntitle = "Demo"\ntags = ["general"]\nprompt = "hi"\n'
+        f'verify = "{verify}"\ntools = ["read"]\ntimeout_seconds = 60\n',
+        encoding="utf-8",
+    )
+    return load_task(folder)
+
+
+def test_budget_stops_between_rounds(tmp_path: Path) -> None:
+    started: list[int] = []
+
+    def execute(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunRow:
+        started.append(rep)
+        return _row(task.id, model, rep, usd="4")
+
+    tasks = [_task(tmp_path)]
+    models = [ModelSpec("openai", "a"), ModelSpec("openai", "b")]
+
+    result = run_suite(
+        tasks,
+        models,
+        5,
+        _context(tmp_path),
+        budget=Budget(max_usd=Decimal("10")),
+        execute=execute,
+    )
+
+    # Round 1 spends 8 of 10, so round 2 starts; it spends 16, so round 3 does not.
+    assert sorted(started) == [1, 1, 2, 2]
+    assert (result.stopped_for_budget, result.skipped_runs) == (True, 6)
+
+
+def _row(task: str, model: ModelSpec, rep: int, *, usd: str) -> RunRow:
+    return RunRow(
+        task=task,
+        provider=model.provider,
+        model=model.model,
+        rep=rep,
+        status="passed",
+        timed_out=False,
+        exit_code=0,
+        verify_exit=0,
+        failed_checks=[],
+        seconds=1.0,
+        outcome="completed",
+        turns=1,
+        tool_calls={},
+        tool_errors={},
+        reruns=0,
+        used_read_output=False,
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=0,
+        known_usd=usd,
+        unpriced_responses=0,
+        retries=0,
+        error=None,
+        tools_sha256=None,
+        instructions_sha256=None,
+        credential_source="environment",
+        wisp_version="wisp 0",
+        git_commit="abc",
+        run_dir="x",
+    )
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("verify", "status"),
+    [("grep -q hello notes.txt", "passed"), ("grep -q missing notes.txt", "failed")],
+)
+def test_fake_run_scored(tmp_path: Path, verify: str, status: str) -> None:
+    context = _context(tmp_path, build=detect_build(_REPO_ROOT))
+
+    row = run_one(_task(tmp_path, verify), ModelSpec("fake", "fake"), 1, context)
+
+    assert (row.status, row.exit_code, row.outcome, row.verify_exit == 0) == (
+        status,
+        0,
+        "completed",
+        status == "passed",
+    )
+    assert row.tools_sha256 is not None and len(row.tools_sha256) == 64
+    assert row.credential_source == "none"
+    assert (context.results_dir / row.run_dir / "events.jsonl").stat().st_size > 0
+
+
+@pytest.mark.process
+def test_setup_failure_errors(tmp_path: Path) -> None:
+    task = _task(tmp_path)
+    toml = task.folder / "task.toml"
+    toml.write_text(toml.read_text(encoding="utf-8") + 'setup = "exit 3"\n', encoding="utf-8")
+
+    row = run_one(load_task(task.folder), ModelSpec("fake", "fake"), 1, _context(tmp_path))
+
+    assert (row.status, row.error) == ("errored", "setup exited with 3")

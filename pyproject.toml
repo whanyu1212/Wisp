@@ -110,6 +110,7 @@ python_version = "3.12"
 strict = true
 files = [
     "src/wisp",
+    "evals",
     "examples/crafting_agents",
     "examples/sdk/common.py",
     "examples/sdk/control_requests.py",

@@ -1,0 +1,8 @@
+id = "edit-bom-file"
+title = "Change one line in a file that starts with a UTF-8 byte-order mark"
+tags = ["edit"]
+prompt = 'In messages.py, change the value of FAREWELL to "See you soon". Leave everything else in the file exactly as it is.'
+verify = "{python} {task}/verify.py"
+timeout_seconds = 180
+max_tool_iterations = 15
+tools = ["read", "edit", "write", "ls"]
