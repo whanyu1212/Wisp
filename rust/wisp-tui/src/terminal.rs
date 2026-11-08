@@ -16,6 +16,7 @@ use std::sync::{
 };
 
 use crate::Error;
+use crate::color_depth::ColorDepth;
 
 type Hook = dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Send + Sync + 'static;
 
@@ -54,12 +55,21 @@ impl FrameBackend for ratatui::backend::TestBackend {
     }
 }
 
+/// Draws one frame inside a synchronized update, downconverting its colours to `depth`
+/// after `render` fills the buffer and before ratatui diffs and flushes it.
 pub(crate) fn draw_frame<B: FrameBackend>(
     terminal: &mut Terminal<B>,
+    depth: ColorDepth,
     render: impl FnOnce(&mut ratatui::Frame<'_>),
 ) -> io::Result<()> {
     terminal.backend_mut().begin_frame()?;
-    let draw_result = terminal.draw(render).map(drop).map_err(B::into_io_error);
+    let draw_result = terminal
+        .draw(|frame| {
+            render(frame);
+            depth.downconvert_buffer(frame.buffer_mut());
+        })
+        .map(drop)
+        .map_err(B::into_io_error);
     let end_result = terminal.backend_mut().end_frame();
     draw_result?;
     end_result

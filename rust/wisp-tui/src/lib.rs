@@ -4,6 +4,7 @@
 
 mod cli;
 mod clipboard;
+mod color_depth;
 #[cfg(test)]
 mod command_tests;
 mod commands;
@@ -75,6 +76,7 @@ use bytes::Bytes;
 use clap::Parser;
 use cli::Cli;
 use clipboard::{ClipboardAction, ClipboardBackend, SystemClipboard};
+use color_depth::ColorDepth;
 #[cfg(test)]
 use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
@@ -561,6 +563,8 @@ struct LiveUi {
     startup_logo: LogoChoice,
     logo_picker: Option<LogoPicker>,
     no_color: bool,
+    /// The terminal's colour depth; frames are downconverted to it after rendering.
+    color_depth: ColorDepth,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
     /// A drag selection over the transcript and the last frame painted while it was active,
@@ -626,6 +630,7 @@ impl Default for LiveUi {
             startup_logo: LogoChoice::AdalBraille,
             logo_picker: None,
             no_color: false,
+            color_depth: ColorDepth::default(),
             mouse_enabled: false,
             mouse_frame: None,
             transcript_selection: None,
@@ -1678,7 +1683,7 @@ impl LiveUi {
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
-        terminal::draw_frame(terminal, |frame| {
+        terminal::draw_frame(terminal, self.color_depth, |frame| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
                     self.completion.view(
@@ -5337,6 +5342,7 @@ where
                 selected => selected,
             };
             let no_color = std::env::var_os("NO_COLOR").is_some();
+            let color_depth = ColorDepth::from_environment(|name| std::env::var(name).ok());
             let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
             let (mut terminal, input_source) = open_terminal(mouse_enabled)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
@@ -5353,6 +5359,7 @@ where
                 logo_choice,
                 startup_logo,
                 no_color,
+                color_depth,
                 mouse_enabled,
                 ..LiveUi::default()
             };
@@ -8728,6 +8735,55 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn frames_use_only_supported_colours() {
+        use ratatui::style::Color;
+        let connection = ConnectionInfo {
+            backend_version: "0.1.0".into(),
+        };
+        let colours = |depth: ColorDepth, no_color: bool| {
+            let mut live_ui = LiveUi {
+                color_depth: depth,
+                no_color,
+                ..LiveUi::default()
+            };
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            live_ui.draw(&mut terminal, &connection).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .flat_map(|cell| [cell.fg, cell.bg, cell.underline_color])
+                .filter(|color| *color != Color::Reset)
+                .collect::<std::collections::HashSet<_>>()
+        };
+        for no_color in [false, true] {
+            let truecolor = colours(ColorDepth::TrueColor, no_color);
+            assert!(
+                truecolor
+                    .iter()
+                    .all(|color| matches!(color, Color::Rgb(..)))
+            );
+
+            let indexed = colours(ColorDepth::Ansi256, no_color);
+            assert!(
+                indexed
+                    .iter()
+                    .all(|color| matches!(color, Color::Indexed(16..)))
+            );
+            assert!(indexed.len() > 2, "{indexed:?}");
+
+            let named = colours(ColorDepth::Ansi16, no_color);
+            assert!(
+                named
+                    .iter()
+                    .all(|color| !matches!(color, Color::Rgb(..) | Color::Indexed(..)))
+            );
+            assert!(named.len() > 1, "{named:?}");
+        }
     }
 
     #[tokio::test]

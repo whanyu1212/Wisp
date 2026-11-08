@@ -182,7 +182,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   startup and shutdown, and `LiveUi` holds the frontend state and draws each frame. `event_loop.rs`
   runs the bounded loop over transport events, input, and paints; `transport.rs` admits backend
   events and writes commands; `terminal.rs` owns raw mode, the alternate screen, the panic hook, and
-  the `FrameBackend` that wraps each frame in a synchronized update.
+  the `FrameBackend` that wraps each frame in a synchronized update. `color_depth.rs` detects the
+  terminal's colour depth and downconverts each rendered frame to it.
 - `reducer.rs` and `reducer/` hold the deterministic, terminal-independent state transitions
   (`UiState`, `UiAction`). `ui.rs` lays out and paints a frame (`render_interactive`).
   `transcript.rs` holds transcript state and `transcript_view.rs` projects it into styled rows and
@@ -195,7 +196,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 - Keep these invariants. The transcript draws no scrollbar (`visual_tests.rs` asserts it).
   `ui::sanitize_for_terminal` replaces every control and bidi character in untrusted text, which
   neutralizes OSC 0/8/52, CSI, and bidi overrides. Colours come from `theme.rs` palette tokens,
-  mostly loaded from `theme_catalog.json`; no other non-test module writes a `Color` value.
+  mostly loaded from `theme_catalog.json`, and stay RGB while a frame is drawn; only
+  `color_depth.rs` maps them to 256 or 16 colours, after rendering.
 - Rendering tests draw `LiveUi` into ratatui's `TestBackend` and assert on the buffer:
   `visual_tests.rs` for screens and `overlay_tests.rs` for overlays, with more beside each view.
 - For ratatui APIs, read the pinned crate source rather than ratatui.rs, its repository examples,
