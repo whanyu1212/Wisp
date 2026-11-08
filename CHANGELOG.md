@@ -39,6 +39,18 @@ this policy.
   went looking for `AGENTS.md` in the parent folder, outside the working directory, and hit a
   tool error in about half of the tool-use eval runs.
 
+### Tools
+
+- A finished `bash` command's long output is now shown as its first 64 lines (up to 4,000 bytes)
+  and its last 192 lines (up to 8,000 bytes), with a `[truncated: N bytes omitted after the first
+  K lines]` line between them, instead of its last 50,000 bytes. A build's first error, often
+  printed early, is now visible without `read_output`. In the tool-use evals this cut tokens per
+  run by 46–75% on the two long-output tasks, with every run still passing. Wisp's sessions save
+  the full output for `read_output` whenever a result leaves anything out, which now happens from
+  about 12 KB; an embedding that builds `BashTool` without an output store has no saved copy.
+  Polls of started processes and timeouts keep showing the end. The result's `stdout` and `stderr`
+  data fields and the `ToolResultReady` event are unchanged.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 
