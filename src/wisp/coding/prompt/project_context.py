@@ -32,6 +32,12 @@ MAX_PROJECT_FILES = 16
 # First line of the project-context system message.
 PROJECT_CONTEXT_HEADER = "[WISP PROJECT CONTEXT]"
 
+NO_PROJECT_INSTRUCTIONS_NOTICE = (
+    "project instructions: none. Wisp already checked the project root and each folder down "
+    "to cwd for AGENTS.md and CLAUDE.md, and files above the project root do not apply, so do "
+    "not search those folders. A subfolder below cwd may still have its own instruction file."
+)
+
 
 def build_project_context(
     *,
@@ -93,7 +99,7 @@ def assemble_project_context(
         tuple[str, tuple[PromptPart, ...]]: The block `build_project_context` returns,
         and its parts in order: working directory, Git status, project files, and tool
         summary as project context, then one project-instructions part per trusted
-        instruction file.
+        instruction file, or a project-context notice that the project has none.
     """
 
     with git_deadline():
@@ -213,6 +219,7 @@ def _project_context_files_section(
     section_prefix = "project instructions:\n"
     blocks: list[str] = []
     parts: list[PromptPart] = []
+    found_file = False
     for directory in _project_directory_chain(
         project_root=project_root,
         cwd=cwd,
@@ -225,6 +232,7 @@ def _project_context_files_section(
         )
         if path is None:
             continue
+        found_file = True
         relative_path = _relative_project_path(path, project_root)
         separator = "\n\n" if blocks else ""
         block_header = f"--- {relative_path} ---\n"
@@ -236,6 +244,11 @@ def _project_context_files_section(
         blocks.append(block)
         parts.append(PromptPart("project_instructions", relative_path, block))
 
+    if not blocks and not found_file:
+        # Without this, models trained on agents that read instruction files up the
+        # tree go looking for them, often outside the working directory.
+        notice = _truncate_context(NO_PROJECT_INSTRUCTIONS_NOTICE, max_chars)
+        return notice, (PromptPart("project_context", "project instructions", notice),)
     if not blocks:
         return "", ()
     return _truncate_context(section_prefix + "\n\n".join(blocks), max_chars), tuple(parts)

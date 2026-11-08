@@ -31,6 +31,14 @@ this policy.
   open 10 seconds after that, Wisp exits at once. No event or session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
   this; a run it stops between turns reports `cancelled`, not the last turn's `completed`.
 
+### Prompt
+
+- When neither the project root nor any folder down to the working directory has an `AGENTS.md`
+  or `CLAUDE.md`, the project context now says so and tells the model not to search those folders
+  or any above the project root; a subfolder below may still have its own. Without it, models
+  went looking for `AGENTS.md` in the parent folder, outside the working directory, and hit a
+  tool error in about half of the tool-use eval runs.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 
