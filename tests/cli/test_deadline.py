@@ -34,8 +34,14 @@ class _Run:
         return True
 
 
+def _no_exit(status: int) -> None:
+    pytest.fail(f"the deadline ended the process with {status}")
+
+
 def _deadline(reports: list[str], *, grace_seconds: float = 5.0) -> RunDeadline:
-    return RunDeadline(0.01, report=reports.append, grace_seconds=grace_seconds)
+    return RunDeadline(
+        0.01, report=reports.append, grace_seconds=grace_seconds, exit_process=_no_exit
+    )
 
 
 def test_stop_retried_until_accepted() -> None:
@@ -73,6 +79,35 @@ def test_unstopped_run_is_forced() -> None:
 
     assert (deadline.stopped, deadline.forced, cancelled) == (True, True, True)
     assert run.requests >= 1
+
+
+def test_stuck_cleanup_exits_process() -> None:
+    reports: list[str] = []
+    exits: list[int] = []
+    process_ended = anyio.Event()
+
+    def exit_process(status: int) -> None:
+        exits.append(status)
+        process_ended.set()
+
+    deadline = RunDeadline(
+        0.01, report=reports.append, grace_seconds=0.05, exit_process=exit_process
+    )
+
+    async def work() -> None:
+        deadline.attach(_Run(refusals=None))
+        try:
+            await anyio.sleep_forever()
+        finally:
+            # Shielded cleanup that hangs, as a stalled stream's aclose would.
+            with anyio.CancelScope(shield=True):
+                await process_ended.wait()
+
+    anyio.run(deadline.run, work)
+
+    assert (deadline.stopped, deadline.forced) == (True, True)
+    assert exits == [DEADLINE_EXIT_CODE]
+    assert len(reports) == 2
 
 
 def test_finishing_run_not_stopped() -> None:

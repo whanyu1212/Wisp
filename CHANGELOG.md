@@ -27,8 +27,8 @@ this policy.
   does: running tools and commands are stopped, and the run saves its session and still emits
   `agent.completed` with outcome `cancelled` and its totals. It reports why it stopped, and Wisp
   exits with status 124. A run already finishing after its last turn completes normally; one that
-  neither stops nor finishes 10 seconds later is stopped outright. No event or session format
-  changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
+  neither stops nor finishes 10 seconds later is stopped outright, and if cleanup still holds it
+  open 10 seconds after that, Wisp exits at once. No event or session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
   this; a run it stops between turns reports `cancelled`, not the last turn's `completed`.
 
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->

@@ -203,5 +203,7 @@ commands are stopped, and the run saves its session and still emits `agent.compl
 (--timeout).` (an `error` event in JSON mode, a line on stderr in text mode), and Wisp exits with
 status 124. A run that is already finishing after its last turn completes normally instead. A run
 that neither stops nor finishes 10 seconds after the deadline is stopped outright, without
-`agent.completed`, and also exits with status 124. The limit counts from when the run starts, after
+`agent.completed`, and also exits with status 124. If cleanup still holds it open 10 seconds after
+that, Wisp reports `Run did not stop after it was cancelled; exiting.` and exits at once with
+status 124; commands it started may then outlive it. The limit counts from when the run starts, after
 Wisp's own startup; MCP servers have their own connection limit.
