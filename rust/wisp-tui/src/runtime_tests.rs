@@ -350,7 +350,7 @@ async fn run_shutdown(send_completion: bool) -> Result<(), Error> {
             stdout,
             stderr: tokio::io::empty(),
         },
-        |_| Ok(terminal_pair(receiver, terminal_restored)),
+        |_, _| Ok(terminal_pair(receiver, terminal_restored)),
     )
     .await;
     backend.await.unwrap();
@@ -395,7 +395,7 @@ async fn handshake_failure_skips_terminal_and_preserves_the_original_error() {
                 stdout: std::io::Cursor::new(response.clone().into_bytes()),
                 stderr: tokio::io::empty(),
             },
-            |_| -> Result<(TestTerminal, ScriptedEvents), Error> {
+            |_, _| -> Result<(TestTerminal, ScriptedEvents), Error> {
                 panic!("terminal must not open")
             },
         )
@@ -431,7 +431,9 @@ async fn silent_handshake_has_a_deadline_and_cleans_up() {
             stdout,
             stderr: tokio::io::empty(),
         },
-        |_| -> Result<(TestTerminal, ScriptedEvents), Error> { panic!("terminal must not open") },
+        |_, _| -> Result<(TestTerminal, ScriptedEvents), Error> {
+            panic!("terminal must not open")
+        },
     )
     .await;
     assert!(matches!(result, Err(Error::HandshakeTimeout)));
@@ -452,7 +454,7 @@ async fn terminal_entry_failure_still_cleans_up_the_backend() {
             stdout: std::io::Cursor::new(response.into_bytes()),
             stderr: tokio::io::empty(),
         },
-        |_| -> Result<(TestTerminal, ScriptedEvents), Error> {
+        |_, _| -> Result<(TestTerminal, ScriptedEvents), Error> {
             Err(io::Error::other("terminal entry failed").into())
         },
     )
@@ -481,7 +483,7 @@ async fn unexpected_eof_restores_terminal_and_classifies_process_exit() {
             stdout: std::io::Cursor::new(response.into_bytes()),
             stderr: tokio::io::empty(),
         },
-        |_| Ok(terminal_pair(receiver, terminal_restored)),
+        |_, _| Ok(terminal_pair(receiver, terminal_restored)),
     )
     .await;
     assert!(matches!(result, Err(Error::BackendExited(status)) if status.success()));
@@ -512,7 +514,7 @@ async fn input_failure_restores_terminal_and_wins_over_cleanup_errors() {
             stdout,
             stderr: tokio::io::empty(),
         },
-        |_| Ok(terminal_pair(receiver, terminal_restored)),
+        |_, _| Ok(terminal_pair(receiver, terminal_restored)),
     )
     .await;
     assert!(matches!(result, Err(Error::Io(error)) if error.to_string() == "input read failed"));

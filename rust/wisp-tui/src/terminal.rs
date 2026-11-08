@@ -16,6 +16,7 @@ use std::sync::{
 };
 
 use crate::Error;
+use crate::color_depth::{BasicColorWriter, ColorDepth};
 
 type Hook = dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Send + Sync + 'static;
 
@@ -54,12 +55,21 @@ impl FrameBackend for ratatui::backend::TestBackend {
     }
 }
 
+/// Draws one frame inside a synchronized update, downconverting its colours to `depth`
+/// after `render` fills the buffer and before ratatui diffs and flushes it.
 pub(crate) fn draw_frame<B: FrameBackend>(
     terminal: &mut Terminal<B>,
+    depth: ColorDepth,
     render: impl FnOnce(&mut ratatui::Frame<'_>),
 ) -> io::Result<()> {
     terminal.backend_mut().begin_frame()?;
-    let draw_result = terminal.draw(render).map(drop).map_err(B::into_io_error);
+    let draw_result = terminal
+        .draw(|frame| {
+            render(frame);
+            depth.downconvert_buffer(frame.buffer_mut());
+        })
+        .map(drop)
+        .map_err(B::into_io_error);
     let end_result = terminal.backend_mut().end_frame();
     draw_result?;
     end_result
@@ -136,12 +146,16 @@ impl KeyboardProtocol {
     }
 }
 
+/// The backend the live TUI draws to: crossterm over stdout, with 16-colour output encoded
+/// as basic ANSI codes.
+pub(crate) type LiveBackend = CrosstermBackend<BasicColorWriter<Stdout>>;
+
 pub struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<LiveBackend>,
 }
 
 impl TerminalGuard {
-    pub fn enter(mouse_enabled: bool) -> Result<Self, Error> {
+    pub fn enter(mouse_enabled: bool, color_depth: ColorDepth) -> Result<Self, Error> {
         // Wisp handles NO_COLOR in its palette (grayscale with readable contrast).
         // Crossterm's own suppression would erase those grayscale colors too.
         crossterm::style::force_color_output(true);
@@ -161,7 +175,10 @@ impl TerminalGuard {
                 return Err(Error::Io(error));
             }
         }
-        match Terminal::new(CrosstermBackend::new(stdout)) {
+        match Terminal::new(CrosstermBackend::new(BasicColorWriter::new(
+            stdout,
+            color_depth,
+        ))) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
                 restore_terminal();
@@ -170,7 +187,7 @@ impl TerminalGuard {
         }
     }
 
-    pub fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+    pub fn terminal(&mut self) -> &mut Terminal<LiveBackend> {
         &mut self.terminal
     }
 }
