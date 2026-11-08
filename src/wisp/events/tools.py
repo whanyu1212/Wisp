@@ -24,12 +24,16 @@ class ToolExecutionStarted(WispEvent):
     call_id: str
     name: str
     arguments: JsonObject
+    # The MCP tool a proxied `mcp_call` runs; `name` stays the tool the model called.
+    target: str | None = None
 
 
 class ToolApprovalRequested(WispEvent):
     type: Literal["tool.approval.requested"] = "tool.approval.requested"
     call_id: str
     name: str
+    # The MCP tool a proxied `mcp_call` runs, which is what the approval grants.
+    target: str | None = None
     arguments: JsonObject
     safety: Literal["read", "mutating", "command"]
     # False for tools that need the user's confirmation on every call: the
@@ -44,6 +48,7 @@ class ToolApprovalResolved(WispEvent):
     type: Literal["tool.approval.resolved"] = "tool.approval.resolved"
     call_id: str
     name: str
+    target: str | None = None
     approved: bool
     reason: str | None = None
 
@@ -122,6 +127,8 @@ class _ToolResultEvent(_MessageOriginEvent):
 
     call_id: str
     name: str
+    # The MCP tool a proxied `mcp_call` ran; `name` stays the tool the model called.
+    target: str | None = None
     output: str
     is_error: bool
     # Typed recovery metadata for ordinary tool failures. These fields stay separate

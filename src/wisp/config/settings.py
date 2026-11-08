@@ -43,7 +43,7 @@ from pydantic import (
     model_validator,
 )
 
-from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig
+from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig, McpToolExposure
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
 from wisp.validation import redact_validation_error_inputs
@@ -61,6 +61,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "auto_compaction_enabled",
         "web_search",
         "mcp_servers",
+        "mcp_tool_exposure",
         "openai_compatible",
         "tui_keybindings",
     }
@@ -136,6 +137,7 @@ class WispSettings(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
+    mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
     tui_keybindings: dict[str, list[str]] | None = None
 
@@ -231,6 +233,7 @@ class ResolvedSettings(BaseModel):
     auto_compaction_enabled: bool | None = None
     web_search: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
+    mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
     tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
     # Provenance used only while applying higher-precedence provider overrides.
@@ -309,6 +312,7 @@ def resolve_settings(
     # user's provider account, so a project must not be able to switch it on.
     # MCP server definitions are user-only because they name commands that Wisp may
     # later execute; project trust never grants authority to configure executables.
+    # MCP tool exposure is user-only too: it decides what the model sees and costs.
     return ResolvedSettings(
         provider=project_provider or user_provider,
         model=project_model or user_model,
@@ -322,6 +326,7 @@ def resolve_settings(
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         web_search=user_settings.web_search,
         mcp_servers=user_settings.mcp_servers,
+        mcp_tool_exposure=user_settings.mcp_tool_exposure,
         openai_compatible=user_settings.openai_compatible,
         tui_keybindings=user_settings.tui_keybindings or {},
         user_provider=user_provider,

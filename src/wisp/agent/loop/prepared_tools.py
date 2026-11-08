@@ -12,6 +12,7 @@ from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     PreparedToolExecutor,
     ToolExecutionProtocolError,
+    resolved_target,
 )
 from wisp.events import ToolExecutionEnded
 from wisp.providers.events import ToolCall
@@ -171,7 +172,9 @@ class _PreparedToolBatch:
             if self._cancellation_requested():
                 return
 
-            yield tool_execution_started(tool_call)
+            yield tool_execution_started(
+                tool_call, target=resolved_target(self.executor, tool_call)
+            )
             if self._cancellation_requested():
                 return
 

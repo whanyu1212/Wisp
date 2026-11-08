@@ -158,11 +158,14 @@ def _tool_call_requested(tool_call: ToolCall) -> ToolCallRequested:
     )
 
 
-def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
+def tool_execution_started(
+    tool_call: ToolCall, *, target: str | None = None
+) -> ToolExecutionStarted:
     """Build the public start event for a call about to reach its executor.
 
     Args:
         tool_call (ToolCall): Requested call to publish.
+        target (str | None): The tool a proxy call will run, from the executor.
 
     Returns:
         ToolExecutionStarted: Event whose arguments are detached from the provider's call.
@@ -170,6 +173,7 @@ def tool_execution_started(tool_call: ToolCall) -> ToolExecutionStarted:
     return ToolExecutionStarted(
         call_id=tool_call.call_id,
         name=tool_call.name,
+        target=target,
         arguments=deepcopy(dict(tool_call.arguments)),
     )
 

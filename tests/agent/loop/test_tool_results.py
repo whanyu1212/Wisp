@@ -121,6 +121,7 @@ def test_projection_keeps_complete_wire_payload() -> None:
         "message_entry_id": "persisted-result",
         "call_id": "call-1",
         "name": "bash",
+        "target": None,
         "output": "Command exited with code 2: output",
         "is_error": True,
         "failure_code": None,

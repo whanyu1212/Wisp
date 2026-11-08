@@ -99,6 +99,14 @@ from wisp.events import (
     WispEvent,
     utc_now,
 )
+from wisp.mcp.config import McpToolExposure
+from wisp.mcp.discovery import (
+    DISCOVERY_PROMPT,
+    DISCOVERY_TOOL_NAMES,
+    McpCatalog,
+    catalog_guidance,
+    discovery_tools,
+)
 from wisp.messages import (
     CompactionRecord,
     Message,
@@ -133,6 +141,7 @@ from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.seen_files import SeenFiles
@@ -245,7 +254,8 @@ class _HarnessLoopState:
         elif isinstance(event, ToolExecutionEnded):
             was_started = event.call_id in self.started_tool_calls
             self.started_tool_calls.discard(event.call_id)
-            if was_started and tool_is_unsafe(event.name):
+            # A proxied MCP call is judged by the tool it ran, not by `mcp_call`.
+            if was_started and tool_is_unsafe(event.target or event.name):
                 compaction.unsafe_tool_ran()
         elif isinstance(event, ToolApprovalResolved) and not event.approved:
             self.tool_presentation_statuses[event.call_id] = "denied"
@@ -278,10 +288,14 @@ class CodingSession:
         auto_compaction_enabled: bool = True,
         web_search: bool = False,
         mode: AgentMode = DEFAULT_AGENT_MODE,
+        mcp_tool_exposure: McpToolExposure = "direct",
+        mcp_server_connected: Callable[[str], bool] | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
         self.tool_registry = tool_registry
+        self.mcp_tool_exposure: McpToolExposure = mcp_tool_exposure
+        self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tools = (
@@ -349,6 +363,8 @@ class CodingSession:
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
         project_context_root: Path | None = None,
         max_tool_iterations: int | None = None,
+        mcp_tool_exposure: McpToolExposure = "direct",
+        mcp_server_connected: Callable[[str], bool] | None = None,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -373,6 +389,8 @@ class CodingSession:
             context_reserve_tokens=configuration.context_reserve_tokens,
             auto_compaction_enabled=configuration.auto_compaction_enabled,
             web_search=configuration.web_search,
+            mcp_tool_exposure=mcp_tool_exposure,
+            mcp_server_connected=mcp_server_connected,
         )
 
     @property
@@ -786,6 +804,7 @@ class CodingSession:
             context=operation_context,
             session_id=session.session_id,
             session=session,
+            mcp_catalog=executor.mcp_catalog,
         )
         prompt_messages = session_prompt.messages
         if operation_instructions:
@@ -1376,18 +1395,70 @@ class CodingSession:
                     tool for tool in effective_tools if tool.name in allowed_names
                 )
             operation_policy = ToolPolicy.allow_tool_names(allowed_names)
+        policy = (
+            operation_policy
+            if operation_policy is not None
+            else self._effective_tool_policy(effective_tools)
+        )
+        offered_tools, catalog = self._apply_mcp_exposure(effective_tools, registry)
+        if catalog is not None:
+            # The catalog's tools stay allowed for resolved calls; the discovery tools
+            # are allowed on top of whatever the run's policy already allows.
+            policy = replace(
+                policy,
+                allowed_tools=policy.allowed_tools | {tool.name for tool in offered_tools},
+            )
         executor = ConfiguredToolExecutor(
             registry=registry,
             context=context,
-            policy=(
-                operation_policy
-                if operation_policy is not None
-                else self._effective_tool_policy(effective_tools)
-            ),
+            policy=policy,
             approval_policy=self.tool_approval_policy,
             progress_sink=progress_sink,
+            mcp_catalog=catalog,
         )
-        return effective_tools, executor
+        return offered_tools, executor
+
+    def _apply_mcp_exposure(
+        self, tools: tuple[ToolSpec, ...], registry: ToolRegistry | None
+    ) -> tuple[tuple[ToolSpec, ...], McpCatalog | None]:
+        """Replace MCP tools with the discovery tools when exposure is on demand.
+
+        The catalog holds exactly the MCP tools among ``tools``: what direct mode
+        would offer this run after selection, policy, plan mode and any operation
+        limit. The discovery tools are registered in ``registry``, which must be an
+        operation's own copy, so the executor and prompt find them.
+
+        Args:
+            tools (tuple[ToolSpec, ...]): The tools direct mode would offer.
+            registry (ToolRegistry | None): The operation's registry copy.
+
+        Returns:
+            tuple[tuple[ToolSpec, ...], McpCatalog | None]: The tools to offer, and
+            the catalog, or None when exposure is direct or no MCP tool is available.
+        """
+
+        if self.mcp_tool_exposure == "direct" or registry is None:
+            return tools, None
+        registered = set(registry.names())
+        if registered.intersection(DISCOVERY_TOOL_NAMES):
+            # Another tool already uses a discovery tool's name; never shadow it.
+            return tools, None
+        catalog = McpCatalog.from_tools(
+            (registry.get(spec.name) for spec in tools if spec.name in registered),
+            connected=self._mcp_server_connected,
+        )
+        if not catalog:
+            return tools, None
+        offered = [spec for spec in tools if catalog.get(spec.name) is None]
+        for tool in discovery_tools(catalog):
+            registry.register(
+                tool,
+                replace=False,
+                execution=ToolExecutionMetadata(parallel_safe=False),
+                prompt=DISCOVERY_PROMPT,
+            )
+            offered.append(ToolSpec.from_tool(tool))
+        return tuple(offered), catalog
 
     def _progress_sink(self, live_event_sink: LiveEventSink | None) -> LiveEventSink | None:
         """Return where tool progress goes: extensions observing events, then the caller.
@@ -1924,9 +1995,17 @@ class CodingSession:
                 )
             replay = replay_session_entries(entries)
             history = self._conversation_history(replay.messages)
+            # Stats count what a run would send, so they apply the run's MCP exposure.
+            stats_registry = self._operation_tool_registry()
+            stats_tools, stats_catalog = self._apply_mcp_exposure(
+                self._effective_tools(stats_registry), stats_registry
+            )
             prompt = await self._prompt_messages_async(
+                stats_tools,
+                registry=stats_registry,
                 session_id=session.session_id if session is not None else None,
                 session=session,
+                mcp_catalog=stats_catalog,
             )
             provider_messages = (*prompt.messages, *self._normalize_provider_messages(history))
             observation = self._context_observations.get(
@@ -1938,7 +2017,7 @@ class CodingSession:
                 entries=entries,
                 replay=replay,
                 provider_messages=provider_messages,
-                tools=self._effective_tools(),
+                tools=stats_tools,
                 context_window=self._context_window(),
                 reserve_tokens=self._effective_context_reserve_tokens(),
                 provider=self.provider.name,
@@ -2000,6 +2079,7 @@ class CodingSession:
         context: ToolContext | None = None,
         session_id: str | None = None,
         session: JsonlSession | None = None,
+        mcp_catalog: McpCatalog | None = None,
     ) -> _SessionPrompt:
         effective_tools = tuple(tools) if tools is not None else self._effective_tools()
         operation_context = context or self.tool_context
@@ -2018,6 +2098,11 @@ class CodingSession:
         additional_guidance = (
             PromptPart("skills", "skill index", skill_index),
             PromptPart("project_context", "web search", self._web_search_guidance()),
+            PromptPart(
+                "mcp_tools",
+                "mcp servers",
+                catalog_guidance(mcp_catalog) if mcp_catalog is not None else "",
+            ),
         )
         if self.prompt_messages is not None:
             custom = assemble_custom_prompt(
@@ -2119,6 +2204,7 @@ class CodingSession:
         context: ToolContext | None = None,
         session_id: str | None = None,
         session: JsonlSession | None = None,
+        mcp_catalog: McpCatalog | None = None,
     ) -> _SessionPrompt:
         """Build the operation prompt without blocking the event-loop thread."""
 
@@ -2129,6 +2215,7 @@ class CodingSession:
                 context=context,
                 session_id=session_id,
                 session=session,
+                mcp_catalog=mcp_catalog,
             ),
             abandon_on_cancel=True,
         )

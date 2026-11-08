@@ -69,6 +69,25 @@ class ToolExecutor(Protocol):
 
 
 @runtime_checkable
+class ToolTargetResolver(Protocol):
+    """Optional capability: name the tool a proxy call will run, before it is announced.
+
+    A proxy tool, such as on-demand MCP's `mcp_call`, runs another tool. The loop
+    asks for that tool before publishing `tool.execution.started`, so every event
+    of the call carries the same `target`. ``resolve_target`` must not raise or
+    have side effects; it returns None for a call that is not a resolvable proxy.
+    """
+
+    def resolve_target(self, tool_call: ToolCall) -> str | None: ...
+
+
+def resolved_target(executor: object, tool_call: ToolCall) -> str | None:
+    """Return the tool ``executor`` will run for a proxy ``tool_call``, or None."""
+
+    return executor.resolve_target(tool_call) if isinstance(executor, ToolTargetResolver) else None
+
+
+@runtime_checkable
 class PreparedToolExecutor(ToolExecutor, Protocol):
     """Optional two-phase capability for schedulers that can overlap safe calls."""
 

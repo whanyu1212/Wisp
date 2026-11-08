@@ -6822,6 +6822,41 @@ mod tests {
     }
 
     #[test]
+    fn proxied_approval_names_target() {
+        // On-demand MCP's `mcp_call` asks to approve the tool it runs; the panel and
+        // the session grant it offers must name that tool, not the proxy.
+        let BackendEvent::ToolApprovalRequested(approval) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.approval.requested",
+                "call_id": "proxied",
+                "name": "mcp_call",
+                "target": "mcp__db__drop_table",
+                "arguments": {"name": "mcp__db__drop_table", "arguments": {"table": "users"}},
+                "safety": "command"
+            }))
+            .unwrap()
+        else {
+            panic!("tool approval expected");
+        };
+        assert_eq!(approval.name, "mcp__db__drop_table");
+
+        let BackendEvent::ToolApprovalRequested(direct) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.approval.requested",
+                "call_id": "direct",
+                "name": "mcp__db__drop_table",
+                "target": null,
+                "arguments": {"table": "users"},
+                "safety": "command"
+            }))
+            .unwrap()
+        else {
+            panic!("tool approval expected");
+        };
+        assert_eq!(direct.name, "mcp__db__drop_table");
+    }
+
+    #[test]
     fn tool_argument_projection_drops_payload_bodies_and_bounds_generic_maps() {
         let BackendEvent::ToolCall(write) =
             BackendEvent::from_projection_value(&serde_json::json!({

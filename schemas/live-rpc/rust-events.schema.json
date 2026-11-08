@@ -5618,6 +5618,18 @@
           "title": "ToolApprovalRequestedSessionOnlyYolo",
           "type": "boolean"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolApprovalRequestedTarget"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolApprovalRequestedTimestamp",
@@ -5635,6 +5647,7 @@
         "timestamp",
         "call_id",
         "name",
+        "target",
         "arguments",
         "safety",
         "grants_allowed",
@@ -5670,6 +5683,18 @@
           "default": null,
           "title": "ToolApprovalResolvedReason"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolApprovalResolvedTarget"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolApprovalResolvedTimestamp",
@@ -5687,6 +5712,7 @@
         "timestamp",
         "call_id",
         "name",
+        "target",
         "approved",
         "reason"
       ],
@@ -6034,6 +6060,18 @@
           "default": null,
           "title": "ToolExecutionEndedSummary"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionEndedTarget"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolExecutionEndedTimestamp",
@@ -6057,6 +6095,7 @@
         "message_entry_id",
         "call_id",
         "name",
+        "target",
         "output",
         "is_error",
         "failure_code",
@@ -6170,6 +6209,18 @@
           "title": "ToolExecutionStartedName",
           "type": "string"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolExecutionStartedTarget"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolExecutionStartedTimestamp",
@@ -6187,7 +6238,8 @@
         "timestamp",
         "call_id",
         "name",
-        "arguments"
+        "arguments",
+        "target"
       ],
       "title": "ToolExecutionStarted",
       "type": "object"
@@ -6456,6 +6508,18 @@
           "default": null,
           "title": "ToolResultReadySummary"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolResultReadyTarget"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "ToolResultReadyTimestamp",
@@ -6479,6 +6543,7 @@
         "message_entry_id",
         "call_id",
         "name",
+        "target",
         "output",
         "is_error",
         "failure_code",

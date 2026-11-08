@@ -51,7 +51,7 @@ CLI flag. See [Provider retry behavior](../guide/providers.md#retry-behavior) fo
 Some fields are **user-only** and a project file can never set them:
 
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
-`auto_compaction_enabled` · `web_search` · `mcp_servers` · `openai_compatible`
+`auto_compaction_enabled` · `web_search` · `mcp_servers` · `mcp_tool_exposure` · `openai_compatible`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.

@@ -686,6 +686,8 @@ class RpcHost:
             tool_approval_policy=approval_policy,
             max_tool_iterations=options.max_tool_iterations,
             project_context_root=project_context_root,
+            mcp_tool_exposure=config.mcp_tool_exposure,
+            mcp_server_connected=runtime.mcp_server_connected,
         )
 
         host: RpcHost | None = None
