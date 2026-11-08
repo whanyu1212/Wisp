@@ -16,7 +16,7 @@ use std::sync::{
 };
 
 use crate::Error;
-use crate::color_depth::ColorDepth;
+use crate::color_depth::{BasicColorWriter, ColorDepth};
 
 type Hook = dyn for<'a, 'b> Fn(&'a PanicHookInfo<'b>) + Send + Sync + 'static;
 
@@ -146,12 +146,16 @@ impl KeyboardProtocol {
     }
 }
 
+/// The backend the live TUI draws to: crossterm over stdout, with 16-colour output encoded
+/// as basic ANSI codes.
+pub(crate) type LiveBackend = CrosstermBackend<BasicColorWriter<Stdout>>;
+
 pub struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<LiveBackend>,
 }
 
 impl TerminalGuard {
-    pub fn enter(mouse_enabled: bool) -> Result<Self, Error> {
+    pub fn enter(mouse_enabled: bool, color_depth: ColorDepth) -> Result<Self, Error> {
         // Wisp handles NO_COLOR in its palette (grayscale with readable contrast).
         // Crossterm's own suppression would erase those grayscale colors too.
         crossterm::style::force_color_output(true);
@@ -171,7 +175,10 @@ impl TerminalGuard {
                 return Err(Error::Io(error));
             }
         }
-        match Terminal::new(CrosstermBackend::new(stdout)) {
+        match Terminal::new(CrosstermBackend::new(BasicColorWriter::new(
+            stdout,
+            color_depth,
+        ))) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(error) => {
                 restore_terminal();
@@ -180,7 +187,7 @@ impl TerminalGuard {
         }
     }
 
-    pub fn terminal(&mut self) -> &mut Terminal<CrosstermBackend<Stdout>> {
+    pub fn terminal(&mut self) -> &mut Terminal<LiveBackend> {
         &mut self.terminal
     }
 }

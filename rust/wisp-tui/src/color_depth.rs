@@ -3,8 +3,10 @@
 //! Palettes stay RGB because blending and contrast checks need exact channels. A frame is
 //! downconverted only after it is rendered, so every colour, including derived and fixed
 //! ones, reaches a 256- or 16-colour terminal as the nearest colour it can show.
+//! [`BasicColorWriter`] then encodes 16-colour output with basic ANSI codes.
 
 use std::collections::HashMap;
+use std::io::{self, Write};
 
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
@@ -200,9 +202,8 @@ const ANSI_16: [(Color, (u8, u8, u8)); 16] = [
     (Color::White, (255, 255, 255)),
 ];
 
-/// The nearest named ANSI colour. Named variants are used rather than `Indexed(0..16)`,
-/// which crossterm writes as a 256-colour sequence a 16-colour terminal cannot parse.
-/// A tie keeps the lower index.
+/// The nearest named ANSI colour. A tie keeps the lower index. crossterm still writes
+/// named colours as `38;5;n`, so [`BasicColorWriter`] turns them into basic codes.
 fn nearest_16(r: u8, g: u8, b: u8) -> Color {
     ANSI_16
         .iter()
@@ -276,9 +277,189 @@ fn distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
     channel(a.0, b.0) + channel(a.1, b.1) + channel(a.2, b.2)
 }
 
+const ESCAPE: u8 = 0x1b;
+
+/// A CSI sequence longer than this is not one crossterm writes; it passes through as is.
+const MAX_SEQUENCE: usize = 64;
+
+/// Writes terminal output, encoding the 16 system colours with basic ANSI codes in
+/// 16-colour mode.
+///
+/// crossterm writes even named colours as 256-colour parameters (`38;5;n` and `48;5;n`),
+/// which a 16-colour terminal cannot parse. In 16-colour mode this writer rewrites those
+/// parameters in SGR sequences to `30`–`37`/`90`–`97` and `40`–`47`/`100`–`107`. Other
+/// bytes, and all output at other depths, pass through unchanged. A sequence split across
+/// writes is held until it completes.
+pub(crate) struct BasicColorWriter<W> {
+    inner: W,
+    rewrite: bool,
+    pending: Vec<u8>,
+}
+
+impl<W> BasicColorWriter<W> {
+    pub(crate) fn new(inner: W, depth: ColorDepth) -> Self {
+        Self {
+            inner,
+            rewrite: depth == ColorDepth::Ansi16,
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, byte: u8, out: &mut Vec<u8>) {
+        match self.pending.as_slice() {
+            [] if byte == ESCAPE => self.pending.push(byte),
+            [] => out.push(byte),
+            [ESCAPE] if byte == b'[' => self.pending.push(byte),
+            [ESCAPE] => {
+                out.append(&mut self.pending);
+                self.push(byte, out);
+            }
+            _ => {
+                self.pending.push(byte);
+                if (0x40..=0x7e).contains(&byte) {
+                    if byte == b'm' {
+                        let parameters = &self.pending[2..self.pending.len() - 1];
+                        out.extend_from_slice(b"\x1b[");
+                        out.extend(basic_sgr(parameters));
+                        out.push(b'm');
+                        self.pending.clear();
+                    } else {
+                        out.append(&mut self.pending);
+                    }
+                } else if self.pending.len() > MAX_SEQUENCE {
+                    out.append(&mut self.pending);
+                }
+            }
+        }
+    }
+}
+
+impl<W: Write> Write for BasicColorWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if !self.rewrite {
+            return self.inner.write(buf);
+        }
+        let mut out = Vec::with_capacity(buf.len());
+        for &byte in buf {
+            self.push(byte, &mut out);
+        }
+        self.inner.write_all(&out)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Rewrites SGR parameters, turning each `38;5;n` or `48;5;n` with `n < 16` into the
+/// matching basic foreground or background code.
+fn basic_sgr(parameters: &[u8]) -> Vec<u8> {
+    let tokens: Vec<&[u8]> = parameters.split(|byte| *byte == b';').collect();
+    let mut codes: Vec<Vec<u8>> = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+    while index < tokens.len() {
+        let system = match tokens[index..] {
+            [layer @ (b"38" | b"48"), b"5", value, ..] => std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .filter(|value| *value < 16)
+                .map(|value| (layer == b"48", value)),
+            _ => None,
+        };
+        if let Some((background, value)) = system {
+            let base = match (background, value < 8) {
+                (false, true) => 30,
+                (false, false) => 90 - 8,
+                (true, true) => 40,
+                (true, false) => 100 - 8,
+            };
+            codes.push((base + value).to_string().into_bytes());
+            index += 3;
+        } else {
+            codes.push(tokens[index].to_vec());
+            index += 1;
+        }
+    }
+    codes.join(&b';')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn written(depth: ColorDepth, chunks: &[&[u8]]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut writer = BasicColorWriter::new(&mut out, depth);
+        for chunk in chunks {
+            writer.write_all(chunk).unwrap();
+        }
+        writer.flush().unwrap();
+        out
+    }
+
+    #[test]
+    fn writer_uses_basic_codes() {
+        for (input, expected) in [
+            (&b"\x1b[38;5;1m"[..], &b"\x1b[31m"[..]),
+            (b"\x1b[38;5;9m", b"\x1b[91m"),
+            (b"\x1b[48;5;0m", b"\x1b[40m"),
+            (b"\x1b[48;5;15m", b"\x1b[107m"),
+            (b"\x1b[1;38;5;7;48;5;8m", b"\x1b[1;37;100m"),
+            (b"\x1b[38;5;196m", b"\x1b[38;5;196m"),
+            (b"\x1b[38;2;1;5;9m", b"\x1b[38;2;1;5;9m"),
+            (b"\x1b[39;49m", b"\x1b[39;49m"),
+            (b"\x1b[3;5H\x1b]0;title\x07", b"\x1b[3;5H\x1b]0;title\x07"),
+            (b"a\x1b\x1b[38;5;2mb", b"a\x1b\x1b[32mb"),
+        ] {
+            assert_eq!(
+                written(ColorDepth::Ansi16, &[input]),
+                expected,
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn writer_joins_split_sequences() {
+        let input = b"x\x1b[38;5;12;48;5;3my";
+        let chunks: Vec<&[u8]> = input.chunks(1).collect();
+        assert_eq!(written(ColorDepth::Ansi16, &chunks), b"x\x1b[94;43my");
+    }
+
+    #[test]
+    fn writer_passes_other_depths() {
+        let input = b"\x1b[38;5;9m\x1b[48;5;0m";
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            assert_eq!(written(depth, &[input]), input);
+        }
+    }
+
+    #[test]
+    fn backend_emits_basic_codes() {
+        use ratatui::backend::{Backend, CrosstermBackend};
+        use ratatui::buffer::Cell;
+
+        // Wisp forces colour output on in production; NO_COLOR in the test environment
+        // would otherwise suppress every colour sequence.
+        crossterm::style::force_color_output(true);
+        let mut cell = Cell::default();
+        cell.set_symbol("x")
+            .set_fg(Color::LightRed)
+            .set_bg(Color::Black);
+        let mut out = Vec::new();
+        {
+            let mut backend =
+                CrosstermBackend::new(BasicColorWriter::new(&mut out, ColorDepth::Ansi16));
+            backend.draw([(0, 0, &cell)].into_iter()).unwrap();
+            Backend::flush(&mut backend).unwrap();
+        }
+        // ratatui sends both colours in one `SetColors`, `38;5;9;48;5;0` from crossterm.
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("\x1b[91;40m"), "{text:?}");
+        assert!(!text.contains("5;"), "{text:?}");
+    }
 
     fn detect(variables: &[(&str, &str)]) -> ColorDepth {
         ColorDepth::from_environment(|name| {

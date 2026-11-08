@@ -5252,9 +5252,9 @@ async fn run(cli: Cli) -> Result<(), Error> {
             stdout,
             stderr,
         },
-        |mouse_enabled| {
+        |mouse_enabled, color_depth| {
             Ok((
-                TerminalGuard::enter(mouse_enabled)?,
+                TerminalGuard::enter(mouse_enabled, color_depth)?,
                 runtime::TerminalEvents,
             ))
         },
@@ -5267,7 +5267,7 @@ async fn run_with_io<P, W, R, E, T, S>(
     bindings: Bindings,
     binding_warning: Option<String>,
     backend_io: runtime::BackendIo<P, W, R, E>,
-    open_terminal: impl FnOnce(bool) -> Result<(T, S), Error>,
+    open_terminal: impl FnOnce(bool, ColorDepth) -> Result<(T, S), Error>,
 ) -> Result<(), Error>
 where
     P: runtime::Process,
@@ -5344,7 +5344,7 @@ where
             let no_color = std::env::var_os("NO_COLOR").is_some();
             let color_depth = ColorDepth::from_environment(|name| std::env::var(name).ok());
             let mouse_enabled = mouse::enabled(std::env::var("WISP_TUI_MOUSE").ok().as_deref());
-            let (mut terminal, input_source) = open_terminal(mouse_enabled)?;
+            let (mut terminal, input_source) = open_terminal(mouse_enabled, color_depth)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
             let (input_stop_tx, input_stop_rx) = watch::channel(false);
             let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled, input_source));
