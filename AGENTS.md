@@ -176,6 +176,35 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   do not restore the removed `wisp.tools.{process,file_ops,paths,process_manager,secure_fs}` or
   `wisp.providers.retry` shims.
 
+### Finding TUI code
+
+- `rust/wisp-tui` is the Rust terminal frontend. Start with `src/lib.rs`: `run_from_env` owns
+  startup and shutdown, and `LiveUi` holds the frontend state and draws each frame. `event_loop.rs`
+  runs the bounded loop over transport events, input, and paints; `transport.rs` admits backend
+  events and writes commands; `terminal.rs` owns raw mode, the alternate screen, the panic hook, and
+  the `FrameBackend` that wraps each frame in a synchronized update.
+- `reducer.rs` and `reducer/` hold the deterministic, terminal-independent state transitions
+  (`UiState`, `UiAction`). `ui.rs` lays out and paints a frame (`render_interactive`).
+  `transcript.rs` holds transcript state and `transcript_view.rs` projects it into styled rows and
+  the scroll viewport. `side_panel.rs` draws the session panel, `prompt_editor.rs` the composer, and
+  `markdown.rs` assistant Markdown. Wire types come from `rust/wisp-protocol`, which validates
+  against `schemas/live-rpc/`.
+- Rendering is mostly hand-drawn: views build `Line`/`Span` text and paint it with `Paragraph`,
+  `Block`, and `List` (in pickers), `Clear` for overlays, and a few direct `Buffer` writes. New
+  views should follow the same pattern.
+- Keep these invariants. The transcript draws no scrollbar (`visual_tests.rs` asserts it).
+  `ui::sanitize_for_terminal` replaces every control and bidi character in untrusted text, which
+  neutralizes OSC 0/8/52, CSI, and bidi overrides. Colours come from `theme.rs` palette tokens,
+  mostly loaded from `theme_catalog.json`; no other non-test module writes a `Color` value.
+- Rendering tests draw `LiveUi` into ratatui's `TestBackend` and assert on the buffer:
+  `visual_tests.rs` for screens and `overlay_tests.rs` for overlays, with more beside each view.
+- For ratatui APIs, read the pinned crate source rather than ratatui.rs, its repository examples,
+  or DeepWiki, which follow `main` and can show unreleased APIs (ratatui.rs publishes no
+  `llms.txt`). The source is under `~/.cargo/registry/src/*/ratatui-<version>/` with the
+  `ratatui-core`, `ratatui-widgets` (which has the examples), and `ratatui-crossterm` crates it
+  re-exports; `Cargo.lock` gives each version. The published crates omit the CHANGELOG and
+  BREAKING-CHANGES, so read those at the matching `ratatui-v<version>` tag on GitHub.
+
 ## Implementation conventions
 
 - Target Python 3.12+ and preserve strict typing.
