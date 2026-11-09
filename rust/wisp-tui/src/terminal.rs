@@ -30,6 +30,19 @@ pub(crate) trait FrameBackend: Backend {
     /// Writes terminal control output that is not part of a frame, such as the window
     /// title or a notification.
     fn write_control(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Gives the terminal to a child process: leaves raw mode, the alternate screen and
+    /// every input mode the TUI turned on. The saved window title stays saved, so the
+    /// title Wisp restores on exit is still the one from before it started.
+    fn suspend(&mut self) -> io::Result<Suspended>;
+    /// Takes the terminal back after [`FrameBackend::suspend`]. The screen must then be
+    /// cleared so the next frame repaints all of it.
+    fn resume(&mut self, suspended: Suspended) -> io::Result<()>;
+}
+
+/// What [`FrameBackend::suspend`] turned off that resuming turns back on.
+#[derive(Debug)]
+pub(crate) struct Suspended {
+    mouse_capture: bool,
 }
 
 impl<W: Write> FrameBackend for CrosstermBackend<W> {
@@ -49,6 +62,21 @@ impl<W: Write> FrameBackend for CrosstermBackend<W> {
     fn into_io_error(error: io::Error) -> io::Error {
         error
     }
+
+    // The live terminal is always stdout, which the screen modes are written to, as
+    // they are when the TUI starts and exits.
+    fn suspend(&mut self) -> io::Result<Suspended> {
+        Write::flush(self)?;
+        let suspended = Suspended {
+            mouse_capture: MOUSE_CAPTURE.requested.load(Ordering::SeqCst),
+        };
+        leave_screen();
+        Ok(suspended)
+    }
+
+    fn resume(&mut self, suspended: Suspended) -> io::Result<()> {
+        enter_screen(&mut io::stdout(), suspended.mouse_capture)
+    }
 }
 
 impl FrameBackend for ratatui::backend::TestBackend {
@@ -65,6 +93,16 @@ impl FrameBackend for ratatui::backend::TestBackend {
     }
 
     fn write_control(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn suspend(&mut self) -> io::Result<Suspended> {
+        Ok(Suspended {
+            mouse_capture: false,
+        })
+    }
+
+    fn resume(&mut self, _suspended: Suspended) -> io::Result<()> {
         Ok(())
     }
 }
@@ -87,6 +125,19 @@ pub(crate) fn draw_frame<B: FrameBackend>(
     let end_result = terminal.backend_mut().end_frame();
     draw_result?;
     end_result
+}
+
+/// Clears the screen and forgets the last frame, so the next frame repaints every cell,
+/// at the terminal's current size.
+///
+/// `Terminal::clear` would do the same but first asks the terminal where its cursor is,
+/// and the input task can take that reply as an ordinary event, which leaves the query
+/// waiting until it times out. Resizing to the current size clears without asking.
+pub(crate) fn repaint_all<B: FrameBackend>(terminal: &mut Terminal<B>) -> io::Result<()> {
+    let size = terminal.size().map_err(B::into_io_error)?;
+    terminal
+        .resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))
+        .map_err(B::into_io_error)
 }
 
 // A panic may occur between requesting capture and constructing the terminal guard.
@@ -181,29 +232,12 @@ impl TerminalGuard {
         // Wisp handles NO_COLOR in its palette (grayscale with readable contrast).
         // Crossterm's own suppression would erase those grayscale colors too.
         crossterm::style::force_color_output(true);
-        enable_raw_mode()?;
         let mut stdout = io::stdout();
-        if let Err(error) = execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableBracketedPaste,
-            EnableFocusChange,
-            Hide
-        ) {
+        if let Err(error) =
+            enter_screen(&mut stdout, mouse_enabled).and_then(|()| TITLE_STACK.enable(&mut stdout))
+        {
             restore_terminal();
             return Err(Error::Io(error));
-        }
-        for setting in [&KEYBOARD_PROTOCOL, &TITLE_STACK] {
-            if let Err(error) = setting.enable(&mut stdout) {
-                restore_terminal();
-                return Err(Error::Io(error));
-            }
-        }
-        if mouse_enabled {
-            if let Err(error) = MOUSE_CAPTURE.enable(&mut stdout) {
-                restore_terminal();
-                return Err(Error::Io(error));
-            }
         }
         match Terminal::new(CrosstermBackend::new(BasicColorWriter::new(
             stdout,
@@ -252,11 +286,29 @@ impl Drop for PanicHookGuard {
     }
 }
 
-fn restore_terminal() {
+/// Turns on raw mode, the alternate screen and the input modes the TUI reads with. Used
+/// on entry and to take the terminal back from a child process.
+fn enter_screen(stdout: &mut Stdout, mouse_capture: bool) -> io::Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableFocusChange,
+        Hide
+    )?;
+    KEYBOARD_PROTOCOL.enable(stdout)?;
+    if mouse_capture {
+        MOUSE_CAPTURE.enable(stdout)?;
+    }
+    Ok(())
+}
+
+/// Undoes [`enter_screen`]. Best effort: every step runs even if an earlier one fails.
+fn leave_screen() {
     let _ = disable_raw_mode();
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
     let _ = KEYBOARD_PROTOCOL.restore(&mut io::stdout());
-    let _ = TITLE_STACK.restore(&mut io::stdout());
     let _ = execute!(
         io::stdout(),
         EndSynchronizedUpdate,
@@ -265,6 +317,11 @@ fn restore_terminal() {
         DisableFocusChange,
         LeaveAlternateScreen
     );
+}
+
+fn restore_terminal() {
+    leave_screen();
+    let _ = TITLE_STACK.restore(&mut io::stdout());
 }
 
 #[cfg(test)]

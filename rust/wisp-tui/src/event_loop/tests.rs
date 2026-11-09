@@ -1295,3 +1295,130 @@ async fn active_animation_wakes_a_silent_terminal_and_stops_when_idle() {
     ui.no_color = true;
     assert!(!ui.advance_activity_animation());
 }
+
+/// A UI whose editor command is a shell snippet standing in for the user's editor. The
+/// file arrives as `"$1"`, appended after the snippet, so each one ends in `true`.
+fn editing_ui(editor: &str, draft: &str) -> LiveUi {
+    let mut ui = active_ui();
+    ui.editor_command = editor.into();
+    assert!(ui.editor.restore_prompt(draft).changed);
+    ui
+}
+
+/// Runs one external edit with an empty event queue.
+async fn edit(ui: &mut LiveUi) -> LoopControl {
+    let (writer, _commands) = mpsc::channel(16);
+    let (_events_tx, mut events) = mpsc::channel(EVENTS_PER_TURN);
+    let (_inputs_tx, mut inputs) = mpsc::channel(16);
+    let (mut reader, mut writer_outcome) = (None, None);
+    let mut ready_event = None;
+    let mut sources = Sources {
+        events: &mut events,
+        ready_event: &mut ready_event,
+        inputs: &mut inputs,
+        reader: &mut reader,
+        writer: &mut writer_outcome,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    edit_draft_externally(ui, &mut terminal, &mut sources, &writer, 8192)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn editor_key_requests_edit() {
+    let (writer, _commands) = mpsc::channel(16);
+    let ctrl_o = Input::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    let mut ui = editing_ui("true", "draft");
+    ui.handle_input(ctrl_o, &writer, 8192).await.unwrap();
+    assert!(ui.external_edit_requested);
+
+    // A pending decision owns the keyboard, so the editor stays closed.
+    let mut ui = editing_ui("true", "draft");
+    ui.dispatch(approval("call-1"), &writer, 8192)
+        .await
+        .unwrap();
+    let ctrl_o = Input::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    ui.handle_input(ctrl_o, &writer, 8192).await.unwrap();
+    assert!(!ui.external_edit_requested);
+}
+
+#[tokio::test]
+async fn edited_draft_replaces_composer() {
+    let mut ui = editing_ui(
+        r#"grep -qx 'first idea' "$1" && printf 'second idea\nwith detail\n' >"$1" && true"#,
+        "first idea",
+    );
+    ui.external_edit_requested = true;
+    assert_eq!(edit(&mut ui).await, LoopControl::Continue);
+    assert!(!ui.external_edit_requested);
+    assert_eq!(ui.editor.text(), "second idea\nwith detail");
+    assert!(ui.notice.is_none());
+    assert!(ui.render_pending);
+    // The edit is one undo step back to the original draft.
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(ui.editor.text(), "first idea");
+}
+
+#[tokio::test]
+async fn failed_edit_keeps_draft() {
+    let mut ui = editing_ui(r#"printf 'lost' >"$1"; exit 3; true"#, "kept draft");
+    edit(&mut ui).await;
+    assert_eq!(ui.editor.text(), "kept draft");
+    let notice = ui.notice.clone().unwrap();
+    assert!(
+        notice.starts_with("Draft unchanged: the editor exited"),
+        "{notice}"
+    );
+
+    // Quitting without saving adds no undo step, so undo still reaches the earlier
+    // draft, and a trailing newline in the draft survives the round trip.
+    let mut ui = editing_ui("true", "older");
+    ui.editor.insert_paste(" newer\n");
+    edit(&mut ui).await;
+    assert_eq!(ui.editor.text(), "older newer\n");
+    assert!(ui.notice.is_none());
+    ui.editor
+        .handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
+    assert_eq!(ui.editor.text(), "older");
+}
+
+#[tokio::test]
+async fn events_drain_while_editing() {
+    // The reader gives up on a backend whose events go unread for a few seconds, so
+    // events keep being handled while the editor is open. With a one-slot queue, the
+    // producer can only finish while the editor is still open if they are.
+    let (writer, _commands) = mpsc::channel(16);
+    let (events_tx, mut events) = mpsc::channel(1);
+    let (_inputs_tx, mut inputs) = mpsc::channel(16);
+    let (mut reader, mut writer_outcome) = (None, None);
+    let mut ready_event = None;
+    let budget = Arc::new(Semaphore::new(64));
+    let producer = tokio::spawn(async move {
+        for index in 0..20 {
+            let event = queued(delta(&format!("chunk {index} ")), &budget).await;
+            events_tx.send(event).await.unwrap();
+        }
+    });
+    let mut ui = editing_ui("sleep 0.5; true", "draft");
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut sources = Sources {
+        events: &mut events,
+        ready_event: &mut ready_event,
+        inputs: &mut inputs,
+        reader: &mut reader,
+        writer: &mut writer_outcome,
+    };
+    let control = edit_draft_externally(&mut ui, &mut terminal, &mut sources, &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(control, LoopControl::Continue);
+    // Checked as the editor closes: without draining, the producer would still be
+    // blocked on the full queue.
+    assert!(
+        producer.is_finished(),
+        "events waited for the editor to close"
+    );
+    assert_eq!(ui.editor.text(), "draft");
+}

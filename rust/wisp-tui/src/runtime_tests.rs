@@ -44,7 +44,13 @@ fn inputs(source: ScriptedEvents, mouse_enabled: bool) -> (Result<(), Error>, Ve
     let (stop, stop_rx) = watch::channel(false);
     // An exhausted script returns a false poll, where a closed stop channel ends input.
     drop(stop);
-    let result = input_task(sender, stop_rx, mouse_enabled, source);
+    let result = input_task(
+        sender,
+        stop_rx,
+        &crate::external_editor::InputGate::default(),
+        mouse_enabled,
+        source,
+    );
     let mut received = Vec::new();
     while let Ok(input) = receiver.try_recv() {
         received.push(input);
@@ -146,6 +152,7 @@ fn stopped_or_disconnected_input_does_not_read_more_events() {
     input_task(
         sender,
         stop_rx,
+        &crate::external_editor::InputGate::default(),
         false,
         ScriptedEvents {
             events: VecDeque::new(),
@@ -166,6 +173,7 @@ fn stopped_or_disconnected_input_does_not_read_more_events() {
         input_task(
             sender,
             stop_rx,
+            &crate::external_editor::InputGate::default(),
             true,
             ScriptedEvents {
                 events: [Ok(event), Err(io::Error::other("must not read"))].into(),

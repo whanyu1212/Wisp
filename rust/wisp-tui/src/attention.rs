@@ -111,6 +111,12 @@ impl Attention {
         self.focused = Some(focused);
     }
 
+    /// Makes the next [`Attention::observe`] write the title again, after something
+    /// else, such as an external editor, may have changed it.
+    pub(crate) fn forget_title(&mut self) {
+        self.last_title = None;
+    }
+
     /// Whether the terminal has reported that it is in the background.
     pub(crate) fn focus_lost(&self) -> bool {
         self.focused == Some(false)

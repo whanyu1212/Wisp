@@ -152,7 +152,10 @@ def run_rust_tui(options: TuiOptions) -> int:
         finally:
             try:
                 if process is not None:
-                    _cleanup_process_group(process, graceful_signal=graceful_signal)
+                    try:
+                        _cleanup_foreground_job(terminal, process)
+                    finally:
+                        _cleanup_process_group(process, graceful_signal=graceful_signal)
             except RustTuiLaunchError as exc:
                 cleanup_error = exc
             finally:
@@ -255,6 +258,60 @@ def _cleanup_process_group(
         raise RustTuiLaunchError("refusing to clean up the launcher's own process group")
     if graceful_signal is not None and _process_group_exists(pgid):
         _signal_process_group(pgid, graceful_signal)
+    _escalate_until_exit(pgid, process, name="Rust TUI")
+
+
+def _cleanup_foreground_job(
+    terminal: _TerminalSnapshot | None,
+    process: subprocess.Popen[bytes],
+) -> None:
+    """Stop a job the frontend made the terminal's foreground, such as the external editor.
+
+    The frontend runs the editor in its own process group, outside the one
+    `_cleanup_process_group` signals, so without this it would outlive the launcher.
+    Stopping it first also lets a still-running frontend remove the editor's draft file.
+
+    Args:
+        terminal (_TerminalSnapshot | None): The terminal state captured at launch.
+        process (subprocess.Popen[bytes]): The frontend, whose pid is its process group.
+
+    Raises:
+        RustTuiLaunchError: If the job's process group survives SIGKILL.
+    """
+    if terminal is None:
+        return
+    try:
+        pgid = os.tcgetpgrp(terminal.fd)
+    except OSError:
+        return
+    # Only the frontend's tree can have handed the terminal to another group while the
+    # launcher waited, but never signal the launcher's group or the one that ran it.
+    if pgid in (os.getpgrp(), terminal.foreground_pgrp, process.pid):
+        return
+    # A hangup and then a continue is what a shell sends its jobs; the continue lets a
+    # stopped job act on the hangup.
+    _signal_process_group(pgid, signal.SIGHUP)
+    _signal_process_group(pgid, signal.SIGCONT)
+    _escalate_until_exit(pgid, None, name="foreground job")
+
+
+def _escalate_until_exit(
+    pgid: int,
+    process: subprocess.Popen[bytes] | None,
+    *,
+    name: str,
+) -> None:
+    """Wait for a process group to exit, sending SIGTERM and then SIGKILL as each wait ends.
+
+    Args:
+        pgid (int): The process group to stop.
+        process (subprocess.Popen[bytes] | None): The group's leader when it is the
+            launcher's child, polled so it is reaped.
+        name (str): What the group runs, for the error message.
+
+    Raises:
+        RustTuiLaunchError: If the group survives SIGKILL.
+    """
     if _wait_for_process_group(process, pgid, _GRACE_SECONDS):
         return
     _signal_process_group(pgid, signal.SIGTERM)
@@ -262,11 +319,11 @@ def _cleanup_process_group(
         return
     _signal_process_group(pgid, signal.SIGKILL)
     if not _wait_for_process_group(process, pgid, _KILL_SECONDS):
-        raise RustTuiLaunchError("Rust TUI process group did not exit after SIGKILL")
+        raise RustTuiLaunchError(f"{name} process group {pgid} did not exit after SIGKILL")
 
 
 def _wait_for_process_group(
-    process: subprocess.Popen[bytes],
+    process: subprocess.Popen[bytes] | None,
     pgid: int,
     timeout: float,
     *,
@@ -275,7 +332,8 @@ def _wait_for_process_group(
 ) -> bool:
     deadline = clock() + timeout
     while True:
-        process.poll()
+        if process is not None:
+            process.poll()
         if not _process_group_exists(pgid):
             return True
         remaining = deadline - clock()
