@@ -18,6 +18,7 @@ from wisp.events import (
     ContextBudget,
     ContextObservation,
     FinishReason,
+    ImagePart,
     JsonObject,
     MessageCompleted,
     TokenUsage,
@@ -53,6 +54,9 @@ class Message(BaseModel):
 
     role: Role
     content: str
+    # Images the user attached, in order; None rather than empty so messages
+    # without images serialize exactly as before.
+    images: tuple[ImagePart, ...] | None = Field(default=None, min_length=1)
     prompt_cache_boundary: bool = Field(default=False, exclude=True, repr=False)
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -66,6 +70,12 @@ class Message(BaseModel):
     skill_invocation: SkillInvocationEvidence | None = None
     native_output: NativeOutput | None = None
     created_at: datetime = Field(default_factory=utc_now)
+
+    @model_validator(mode="after")
+    def _validate_images(self) -> Self:
+        if self.images is not None and self.role != "user":
+            raise ValueError("images are valid only on user messages")
+        return self
 
     @property
     def user_visible_content(self) -> str:

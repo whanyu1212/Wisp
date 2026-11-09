@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from wisp.agent.context_budget import context_fingerprint
-from wisp.events import ToolCallSnapshot
-from wisp.messages import Message
+from wisp.events import ImagePart, ToolCallSnapshot
+from wisp.messages import Message, Role
 from wisp.messages.history import normalize_provider_history
 
 
@@ -265,3 +268,19 @@ def test_fallback_escapes_lone_surrogates_from_legacy_rows() -> None:
     normalized[0].content.encode("utf-8")
     payload = json.loads(normalized[0].content)
     assert payload["calls"][0]["result"]["output"] == r"legacy surrogate: \ud800"
+
+
+_IMAGE = ImagePart(media_type="image/png", sha256="0" * 64, byte_size=84, width=3, height=2)
+
+
+@pytest.mark.parametrize(
+    ("role", "images"),
+    [("assistant", (_IMAGE,)), ("system", (_IMAGE,)), ("user", ())],
+)
+def test_rejects_misplaced_images(role: Role, images: tuple[ImagePart, ...]) -> None:
+    """Images belong only on user messages, and an empty list is not "no images"."""
+
+    with pytest.raises(ValidationError):
+        Message(role=role, content="look", images=images)
+
+    assert Message(role="user", content="look", images=(_IMAGE,)).images == (_IMAGE,)
