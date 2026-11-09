@@ -250,26 +250,40 @@ _INVENTORY_DECOYS = (
     ("get_reorder_alerts", "Number of reorder alerts raised this month.", "alerts", "", 0, 9),
 )
 
-INVENTORY = Catalog(
-    parameters=("sku", "warehouse"),
-    tools=(
-        CatalogTool(
-            "get_reorder_policy",
-            "The reorder point (the stock level at which a new purchase order is placed) "
-            "and the order quantity for a SKU at a warehouse.",
-            _reorder_policy,
+
+def _inventory(decoys: int = len(_INVENTORY_DECOYS)) -> Catalog:
+    """The inventory catalog with its first ``decoys`` decoy tools.
+
+    Every size keeps the reorder tool and `list_warehouses`, so the inventory task
+    has the same answer at any size; the smaller ones measure where on-demand
+    discovery starts to pay off.
+    """
+
+    return Catalog(
+        parameters=("sku", "warehouse"),
+        tools=(
+            CatalogTool(
+                "get_reorder_policy",
+                "The reorder point (the stock level at which a new purchase order is placed) "
+                "and the order quantity for a SKU at a warehouse.",
+                _reorder_policy,
+            ),
+            *(
+                CatalogTool(name, description, _measure(label, unit, low=low, high=high))
+                for name, description, label, unit, low, high in _INVENTORY_DECOYS[:decoys]
+            ),
+            CatalogTool(
+                "list_warehouses",
+                "Warehouse identifiers, for the warehouse parameter.",
+                lambda _arguments: "lisbon, porto, madrid, lyon",
+            ),
         ),
-        *(
-            CatalogTool(name, description, _measure(label, unit, low=low, high=high))
-            for name, description, label, unit, low, high in _INVENTORY_DECOYS
-        ),
-        CatalogTool(
-            "list_warehouses",
-            "Warehouse identifiers, for the warehouse parameter.",
-            lambda _arguments: "lisbon, porto, madrid, lyon",
-        ),
-    ),
-)
+    )
+
+
+INVENTORY = _inventory()
+# Smaller copies of the inventory catalog for the catalog-size sweep, by tool count.
+INVENTORY_SWEEP_SIZES = (6, 12, 20, 30)
 
 # The billing task asks for invoice INV-2207's current total from the live system.
 INVOICE_ID = "INV-2207"
@@ -298,6 +312,7 @@ def _billing(system: str, total: str, note: str) -> Catalog:
 
 CATALOGS: Mapping[str, Catalog] = {
     "inventory": INVENTORY,
+    **{f"inventory-{size}": _inventory(size - 2) for size in INVENTORY_SWEEP_SIZES},
     "devhub": DEVHUB,
     "billing": _billing("billing", LIVE_TOTAL, "Live production billing system."),
     "billing-legacy": _billing(

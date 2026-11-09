@@ -62,3 +62,19 @@ def test_selects_by_tag_or_id(tmp_path: Path) -> None:
     assert [task.id for task in select_tasks(tmp_path, ids=["one"])] == ["one"]
     with pytest.raises(TaskError, match="no task tagged mcp"):
         select_tasks(tmp_path, tags=["mcp"])
+
+
+def test_opt_in_tasks_need_selecting(tmp_path: Path) -> None:
+    _task(tmp_path, "everyday", _VALID.format(id="everyday"))
+    _task(
+        tmp_path,
+        "sweep",
+        _VALID.format(id="sweep").replace('"general"', '"mcp-sweep"') + "opt_in = true\n",
+    )
+
+    def ids(**selection: list[str]) -> list[str]:
+        return [task.id for task in select_tasks(tmp_path, **selection)]
+
+    assert ids() == ["everyday"]
+    assert ids(tags=["mcp-sweep"]) == ["sweep"]
+    assert ids(ids=["sweep"]) == ["sweep"]

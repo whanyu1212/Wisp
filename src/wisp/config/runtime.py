@@ -24,6 +24,7 @@ from wisp.config.settings import (
     user_settings_path,
 )
 from wisp.mcp.config import (
+    DEFAULT_MCP_TOOL_EXPOSURE,
     MAX_MCP_SERVERS,
     MCP_TOOL_EXPOSURES,
     McpServerConfig,
@@ -63,7 +64,7 @@ class WispConfig(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
-    mcp_tool_exposure: McpToolExposure = "direct"
+    mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE
     openai_compatible: OpenAICompatibleSettings | None = None
 
     @model_validator(mode="wrap")
@@ -178,7 +179,8 @@ class WispConfig(BaseModel):
 
         ``mcp_tool_exposure`` (``WISP_MCP_TOOL_EXPOSURE``) is user-only as well: it
         decides whether the model gets every MCP tool's schema or finds tools on
-        demand, which changes what it sees and what each request costs.
+        demand, which changes what it sees and what each request costs. The default,
+        ``auto``, finds them on demand only for a large catalog.
         """
 
         settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
@@ -354,7 +356,7 @@ def _resolve_mcp_tool_exposure(
     env_value: str | None, saved_value: McpToolExposure | None
 ) -> McpToolExposure:
     if env_value is None:
-        return saved_value or "direct"
+        return saved_value or DEFAULT_MCP_TOOL_EXPOSURE
     normalized = env_value.strip().casefold()
     for exposure in MCP_TOOL_EXPOSURES:
         if normalized == exposure:

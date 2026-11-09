@@ -14,7 +14,7 @@ from evals.tool_use.servers.catalogs import CATALOGS
 
 TASKS_DIR = Path(__file__).parent / "tasks"
 
-type Tag = Literal["general", "long-output", "edit", "mcp", "multi-read", "scale"]
+type Tag = Literal["general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "scale"]
 type ToolName = Literal["read", "write", "edit", "bash", "grep", "find", "ls", "read_output"]
 
 
@@ -56,6 +56,8 @@ class TaskDefinition(BaseModel):
         mcp_servers (tuple[str, ...]): Synthetic servers from
             `servers/catalogs.py` to start for the run. Every tool they offer is
             exposed as well.
+        opt_in (bool): Run only when selected by id or tag, never in a run of the
+            whole suite: for one-off measurements such as the catalog-size sweep.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -71,6 +73,7 @@ class TaskDefinition(BaseModel):
     max_tool_iterations: int = Field(default=40, gt=0)
     tools: tuple[ToolName, ...] = Field(min_length=1)
     mcp_servers: tuple[str, ...] = ()
+    opt_in: bool = False
 
     @field_validator("mcp_servers")
     @classmethod
@@ -150,6 +153,7 @@ def select_tasks(
         root (Path): Folder holding one subfolder per task.
         ids (Iterable[str]): Task ids to keep; empty keeps every id.
         tags (Iterable[str]): Tags to keep, any of which matches; empty keeps every tag.
+            With neither, opt-in tasks are left out.
 
     Returns:
         tuple[Task, ...]: The selected tasks, sorted by id.
@@ -167,6 +171,8 @@ def select_tasks(
     unknown_tags = wanted_tags - {tag for task in tasks for tag in task.definition.tags}
     if unknown_tags:
         raise TaskError(f"no task tagged {', '.join(sorted(unknown_tags))}")
+    if not wanted_ids and not wanted_tags:
+        return tuple(task for task in tasks if not task.definition.opt_in)
     return tuple(
         task
         for task in tasks

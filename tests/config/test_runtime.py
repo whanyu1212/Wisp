@@ -355,7 +355,7 @@ def test_config_resolves_mcp_tool_exposure(tmp_path: Path, monkeypatch: MonkeyPa
             session_dir=tmp_path, project_dir=project, trusted=True
         ).mcp_tool_exposure
 
-    assert exposure() == "direct"
+    assert exposure() == "auto"
     (home / ".wisp" / "settings.json").write_text(
         '{"mcp_tool_exposure": "on_demand"}', encoding="utf-8"
     )
@@ -364,6 +364,6 @@ def test_config_resolves_mcp_tool_exposure(tmp_path: Path, monkeypatch: MonkeyPa
     assert exposure() == "direct"
     monkeypatch.setenv("WISP_MCP_TOOL_EXPOSURE", "lazy")
     with pytest.raises(
-        ValueError, match="WISP_MCP_TOOL_EXPOSURE must be one of: direct, on_demand"
+        ValueError, match="WISP_MCP_TOOL_EXPOSURE must be one of: auto, direct, on_demand"
     ):
         exposure()

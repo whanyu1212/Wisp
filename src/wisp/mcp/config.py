@@ -26,10 +26,17 @@ from wisp.validation import redact_validation_error_inputs
 
 MAX_MCP_SERVERS = 16
 
-# How MCP tools reach the model: each tool's schema on every request ("direct"), or
-# found and called through mcp_search, mcp_describe and mcp_call ("on_demand").
-type McpToolExposure = Literal["direct", "on_demand"]
-MCP_TOOL_EXPOSURES: tuple[McpToolExposure, ...] = ("direct", "on_demand")
+# How MCP tools reach the model: each tool's schema on every request ("direct"),
+# found and called through mcp_search, mcp_describe and mcp_call ("on_demand"), or
+# on demand only when a run's MCP schemas reach AUTO_ON_DEMAND_SCHEMA_TOKENS ("auto").
+type McpToolExposure = Literal["auto", "direct", "on_demand"]
+MCP_TOOL_EXPOSURES: tuple[McpToolExposure, ...] = ("auto", "direct", "on_demand")
+DEFAULT_MCP_TOOL_EXPOSURE: McpToolExposure = "auto"
+# Estimated tokens of a run's MCP tool schemas (Wisp's bytes/4 estimate, as /stats
+# shows) from which "auto" finds tools on demand. In the tool-use evals' catalog-size
+# sweep, on demand broke even at about 1,800 on a one-question task and saved more
+# above it; below, the extra search turns cost more than the schemas they save.
+AUTO_ON_DEMAND_SCHEMA_TOKENS = 2_000
 MAX_MCP_ARGS = 64
 MAX_MCP_ENV_VARS = 64
 MAX_MCP_TOOL_OVERRIDES = 256

@@ -354,8 +354,14 @@ _UNAVAILABLE = "MCP server billing is unavailable: startup or tool discovery tim
         ("on_demand", ("read", *_DISCOVERY), (), None),
         ("on_demand", ("read",), (), "not offered 3 MCP tools, such as mcp_search"),
         ("on_demand", ("read", *_DISCOVERY), (_UNAVAILABLE,), "MCP server billing is unavailable"),
+        ("auto", ("read", *_BILLING_TOOLS), (), None),
+        ("auto", ("read", *_DISCOVERY), (), None),
+        ("auto", ("read", _BILLING_TOOLS[0]), (), "not offered 1 MCP tools"),
     ],
-    ids=["direct-ok", "direct-missing", "on-demand-ok", "on-demand-missing", "server-failed"],
+    ids=[
+        "direct-ok", "direct-missing", "on-demand-ok", "on-demand-missing", "server-failed",
+        "auto-direct", "auto-on-demand", "auto-missing",
+    ],
 )  # fmt: skip
 def test_mcp_setup_problem(
     tmp_path: Path,

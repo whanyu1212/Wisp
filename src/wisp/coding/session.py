@@ -16,6 +16,7 @@ from wisp.agent.context_budget import (
     build_context_budget,
     estimate_context,
     estimate_context_budget,
+    tool_schema_tokens,
 )
 from wisp.agent.harness import (
     DEFAULT_MAX_PENDING_QUEUE_MESSAGES,
@@ -99,7 +100,11 @@ from wisp.events import (
     WispEvent,
     utc_now,
 )
-from wisp.mcp.config import McpToolExposure
+from wisp.mcp.config import (
+    AUTO_ON_DEMAND_SCHEMA_TOKENS,
+    DEFAULT_MCP_TOOL_EXPOSURE,
+    McpToolExposure,
+)
 from wisp.mcp.discovery import (
     DISCOVERY_PROMPT,
     DISCOVERY_TOOL_NAMES,
@@ -288,7 +293,7 @@ class CodingSession:
         auto_compaction_enabled: bool = True,
         web_search: bool = False,
         mode: AgentMode = DEFAULT_AGENT_MODE,
-        mcp_tool_exposure: McpToolExposure = "direct",
+        mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
     ) -> None:
         self.sessions = sessions
@@ -363,7 +368,7 @@ class CodingSession:
         project_context_max_chars: int = DEFAULT_CONTEXT_MAX_CHARS,
         project_context_root: Path | None = None,
         max_tool_iterations: int | None = None,
-        mcp_tool_exposure: McpToolExposure = "direct",
+        mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
@@ -1424,7 +1429,9 @@ class CodingSession:
 
         The catalog holds exactly the MCP tools among ``tools``: what direct mode
         would offer this run after selection, policy, plan mode and any operation
-        limit. The discovery tools are registered in ``registry``, which must be an
+        limit. ``auto`` finds them on demand only when their schemas reach
+        ``AUTO_ON_DEMAND_SCHEMA_TOKENS``, so the decision follows each run's own
+        catalog. The discovery tools are registered in ``registry``, which must be an
         operation's own copy, so the executor and prompt find them.
 
         Args:
@@ -1447,6 +1454,11 @@ class CodingSession:
             connected=self._mcp_server_connected,
         )
         if not catalog:
+            return tools, None
+        if self.mcp_tool_exposure == "auto" and (
+            sum(tool_schema_tokens(spec) for spec in tools if catalog.get(spec.name) is not None)
+            < AUTO_ON_DEMAND_SCHEMA_TOKENS
+        ):
             return tools, None
         offered = [spec for spec in tools if catalog.get(spec.name) is None]
         for tool in discovery_tools(catalog):
