@@ -62,17 +62,19 @@ class SessionImageStore:
         """
 
         image = inspect_image(data)
-        if self._is_intact(image):
-            # Another process may have renamed this file in without syncing the
-            # directory yet; sync it before the caller references the image.
-            self._sync_directory()
-            return image
-        created_directory = not self.directory.exists()
+        if not self._is_intact(image):
+            self._write(image, data)
+        # The caller is about to reference this image, so both directory entries
+        # must be durable on every successful store: the file may have been renamed
+        # in, or the directory created, by another process that has not synced yet.
+        self._sync_directory(self.directory)
+        self._sync_directory(self.directory.parent)
+        return image
+
+    def _write(self, image: ImagePart, data: bytes) -> None:
+        """Replace the digest's file with ``data`` through a synced temporary file."""
+
         ensure_private_directory(self.directory)
-        if created_directory:
-            # Make the new directory's own entry durable, as appends do for new
-            # session files, or a crash could keep a reference and lose the image.
-            self._sync_parent_directory()
         target = self._path(image)
         temp_path = self.directory / f".{image.sha256}.{uuid4().hex}.tmp"
         try:
@@ -91,7 +93,6 @@ class SessionImageStore:
             fd = -1
             # Renaming replaces the name itself, never a file a symlink points to.
             os.replace(temp_path, target)
-            sync_directory(self.directory)
         except OSError as exc:
             raise SessionError(f"Could not store image {image.sha256}: {target}") from exc
         finally:
@@ -100,7 +101,6 @@ class SessionImageStore:
             if signature is not None:
                 # After a successful rename the temporary name no longer exists.
                 unlink_if_same_file(temp_path, signature)
-        return image
 
     def read(self, image: ImagePart) -> bytes:
         """Return an image's bytes after checking them against its digest.
@@ -177,19 +177,11 @@ class SessionImageStore:
     def _path(self, image: ImagePart) -> Path:
         return self.directory / image.sha256
 
-    def _sync_directory(self) -> None:
+    def _sync_directory(self, directory: Path) -> None:
         try:
-            sync_directory(self.directory)
+            sync_directory(directory)
         except OSError as exc:
-            raise SessionError(f"Could not sync image directory: {self.directory}") from exc
-
-    def _sync_parent_directory(self) -> None:
-        try:
-            sync_directory(self.directory.parent)
-        except OSError as exc:
-            raise SessionError(
-                f"Could not sync session directory: {self.directory.parent}"
-            ) from exc
+            raise SessionError(f"Could not sync directory for images: {directory}") from exc
 
 
 def _create_flags() -> int:

@@ -235,17 +235,23 @@ def test_concurrent_stores_agree(tmp_path: Path) -> None:
     assert [path.name for path in images.directory.iterdir()] == [results[0].sha256]
 
 
-def test_store_syncs_new_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The first image also makes the new ``images`` entry in its parent durable."""
+@pytest.mark.parametrize("directory_exists", [False, True])
+def test_every_store_syncs_both_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, directory_exists: bool
+) -> None:
+    """Each store makes the image and the ``images`` entry durable.
 
+    The directory may already exist because another process created it and has
+    not synced its parent yet, so existence alone does not prove durability.
+    """
+
+    images = SessionImageStore(tmp_path / "images")
+    if directory_exists:
+        images.directory.mkdir(mode=0o700)
     synced: list[Path] = []
     monkeypatch.setattr(images_module, "sync_directory", synced.append)
-    images = SessionImageStore(tmp_path / "images")
 
     images.store(PNG)
-    first_synced = list(synced)
-    synced.clear()
-    images.store(JPEG)
+    images.store(PNG)
 
-    assert first_synced == [tmp_path, images.directory]
-    assert synced == [images.directory]
+    assert synced == [images.directory, tmp_path] * 2
