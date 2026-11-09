@@ -290,6 +290,7 @@ def _rpc_message_snapshot(
         content=content,
         content_original_bytes=content_original_bytes,
         content_truncated=content_truncated or tool_result_projection_truncated,
+        images=message.images or (),
         tool_call_id=message.tool_call_id,
         tool_name=message.tool_name,
         tool_calls=tuple(

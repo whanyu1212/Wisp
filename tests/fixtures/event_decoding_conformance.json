@@ -1076,6 +1076,14 @@
    "event": "queue.message.injected",
    "operation": "remove",
    "path": [
+    "images"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.message.injected",
+   "operation": "remove",
+   "path": [
     "kind"
    ],
    "accepted": false
@@ -2533,6 +2541,14 @@
     "selected_entry_id"
    ],
    "accepted": false
+  },
+  {
+   "event": "rpc.session.forked",
+   "operation": "remove",
+   "path": [
+    "selected_images"
+   ],
+   "accepted": true
   },
   {
    "event": "rpc.session.forked",

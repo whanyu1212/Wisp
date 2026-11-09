@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import anyio
@@ -82,7 +83,7 @@ def test_typed_queue_identity_content_and_order(
         calls: list[object] = []
         state = QueueUpdated()
 
-        async def enqueue(value: str) -> QueueUpdated:
+        async def enqueue(value: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
             calls.append(value)
             return state
 
@@ -191,10 +192,10 @@ def test_typed_queue_identity_content_and_order(
 def test_typed_queue_runtime_failure_and_cancellation(
     tmp_path: Path, monkeypatch: MonkeyPatch, error_type: type[Exception], command_type: str
 ) -> None:
-    async def fail(_content: str) -> QueueUpdated:
+    async def fail(_content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
         raise error_type("queue failed")
 
-    async def blocked(_content: str) -> QueueUpdated:
+    async def blocked(_content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
         await anyio.sleep_forever()
         raise AssertionError("unreachable")
 
@@ -243,11 +244,11 @@ def test_executor_queue_commands_delegate_and_report_removed_items(
             calls.append(("state", session))
             return QueueUpdated(steering=("one", "two"), follow_up=("later",))
 
-        async def steer(content: str) -> QueueUpdated:
+        async def steer(content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
             calls.append(("steer", content))
             return QueueUpdated(steering=(content,))
 
-        async def follow_up(content: str) -> QueueUpdated:
+        async def follow_up(content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
             calls.append(("follow_up", content))
             return QueueUpdated(follow_up=(content,))
 

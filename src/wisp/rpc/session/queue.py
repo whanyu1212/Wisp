@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import assert_never
 
+import anyio
+
 from wisp.coding import CodingSession
 from wisp.events import QueueItemsRemoved, QueueUpdated, RpcCommandFinished, WispEvent
 from wisp.rpc.commands import (
@@ -16,6 +18,7 @@ from wisp.rpc.commands import (
 )
 from wisp.rpc.framing import encode_rpc_frame
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
+from wisp.rpc.session.images import decode_rpc_images
 from wisp.sessions.jsonl import JsonlSession
 
 type _RpcQueueCommand = (
@@ -63,9 +66,9 @@ async def handle_rpc_queue_command(
         if isinstance(command, GetQueueStateCommand):
             state = agent.queue_state(session)
         elif isinstance(command, SteerCommand):
-            state = await agent.steer(command.content)
+            state = await agent.steer(command.content, images=await _decoded_images(command))
         elif isinstance(command, FollowUpCommand):
-            state = await agent.follow_up(command.content)
+            state = await agent.follow_up(command.content, images=await _decoded_images(command))
         elif isinstance(command, SetQueueModeCommand):
             kind = command.kind
             mode = command.mode
@@ -107,6 +110,14 @@ async def handle_rpc_queue_command(
         write_event(removed)
     write_event(state)
     lifecycle.finish()
+
+
+async def _decoded_images(command: SteerCommand | FollowUpCommand) -> tuple[bytes, ...]:
+    """Decode and check a queued message's images; messages without images stay inline."""
+
+    if command.images is None:
+        return ()
+    return await anyio.to_thread.run_sync(decode_rpc_images, command.images)
 
 
 def _preflight_mutation(

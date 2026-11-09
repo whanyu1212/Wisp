@@ -1209,6 +1209,51 @@
       "title": "ErrorEvent",
       "type": "object"
     },
+    "ImagePart": {
+      "additionalProperties": false,
+      "description": "A reference to one validated image held in a session's image store.\n\nThe bytes live outside the transcript, addressed by their SHA-256 digest, so\nmessages and events carry only this description of them.",
+      "properties": {
+        "byte_size": {
+          "exclusiveMinimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "media_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "byte_size",
+        "width",
+        "height"
+      ],
+      "title": "ImagePart",
+      "type": "object"
+    },
     "MessageCompleted": {
       "additionalProperties": false,
       "properties": {
@@ -1853,6 +1898,14 @@
           "title": "Content",
           "type": "string"
         },
+        "images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "title": "Images",
+          "type": "array"
+        },
         "kind": {
           "enum": [
             "steering",
@@ -1904,6 +1957,7 @@
         "message_entry_id",
         "kind",
         "content",
+        "images",
         "skill_invocation"
       ],
       "title": "QueueMessageInjected",
@@ -3099,6 +3153,14 @@
           "default": null,
           "title": "Finish Reason"
         },
+        "images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "title": "Images",
+          "type": "array"
+        },
         "is_error": {
           "anyOf": [
             {
@@ -3262,6 +3324,7 @@
         "content",
         "content_original_bytes",
         "content_truncated",
+        "images",
         "tool_call_id",
         "tool_name",
         "tool_calls",
@@ -4150,6 +4213,14 @@
           "title": "Selected Entry Id",
           "type": "string"
         },
+        "selected_images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "title": "Selected Images",
+          "type": "array"
+        },
         "selected_prompt": {
           "title": "Selected Prompt",
           "type": "string"
@@ -4237,7 +4308,8 @@
         "session_name",
         "entry_count",
         "selected_entry_id",
-        "selected_prompt"
+        "selected_prompt",
+        "selected_images"
       ],
       "title": "RpcSessionForked",
       "type": "object",
@@ -8036,6 +8108,7 @@
     },
     "queue.message.injected": {
       "content": "fixture",
+      "images": [],
       "kind": "steering",
       "message_entry_id": null,
       "skill_invocation": null,
@@ -8257,6 +8330,7 @@
       "command_id": "command-1",
       "entry_count": 0,
       "selected_entry_id": "entry-1",
+      "selected_images": [],
       "selected_prompt": "fixture",
       "session_id": "target-session",
       "session_name": null,

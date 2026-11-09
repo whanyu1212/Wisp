@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from wisp.events import ImagePart
 from wisp.sessions.entries import MessageSessionEntry, SessionEntry, SessionTreeEntry
 from wisp.sessions.errors import InvalidSessionBranchPointError
 from wisp.sessions.replay import replay_session_entries, resolve_session_tree
@@ -19,6 +20,7 @@ class SessionBranchProjection:
     mode: Literal["clone", "fork"]
     selected_entry_id: str | None = None
     selected_prompt: str | None = None
+    selected_images: tuple[ImagePart, ...] = ()
 
 
 def project_session_path(
@@ -49,7 +51,7 @@ def project_fork_from_user_message(
     *,
     entry_id: str,
 ) -> SessionBranchProjection:
-    """Project history before one user message and retain its editable text."""
+    """Project history before one user message and retain its text and images."""
 
     tree = resolve_session_tree(entries)
     selected = next((entry for entry in tree.nodes if entry.id == entry_id), None)
@@ -69,4 +71,5 @@ def project_fork_from_user_message(
         mode="fork",
         selected_entry_id=selected.id,
         selected_prompt=selected.message.content,
+        selected_images=selected.message.images or (),
     )

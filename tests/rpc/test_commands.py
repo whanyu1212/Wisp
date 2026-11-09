@@ -36,6 +36,8 @@ from wisp.rpc import (
 from wisp.rpc.commands import (
     MAX_RPC_API_KEY_CHARS,
     MAX_RPC_COMMAND_ID_CHARS,
+    MAX_RPC_IMAGE_BASE64_CHARS,
+    MAX_RPC_MESSAGE_IMAGES,
     ApprovalCommand,
     PromptCommand,
     RpcCommand,
@@ -482,3 +484,27 @@ def test_rpc_commands_allow_protocol_optional_id() -> None:
     assert json.loads(line) == {"type": "prompt", "prompt": "hello"}
     assert command.id is None
     assert parsed == command
+
+
+@pytest.mark.parametrize(
+    "images",
+    [[], ["aGk="] * (MAX_RPC_MESSAGE_IMAGES + 1), [""], ["a" * (MAX_RPC_IMAGE_BASE64_CHARS + 4)]],
+    ids=["empty-list", "too-many", "empty-image", "too-long"],
+)
+@pytest.mark.parametrize("kind", ["prompt", "steer", "follow_up"])
+def test_rejects_bad_image_lists(kind: str, images: list[str]) -> None:
+    text_field = "prompt" if kind == "prompt" else "content"
+    line = json.dumps({"type": kind, text_field: "look", "images": images})
+
+    with pytest.raises(ValidationError):
+        rpc_command_from_json(line)
+
+
+def test_image_data_stays_out_of_repr() -> None:
+    command = rpc_command_from_json(
+        json.dumps({"type": "prompt", "prompt": "look", "images": ["c2VjcmV0LWJ5dGVz"]})
+    )
+
+    assert command.images == ("c2VjcmV0LWJ5dGVz",)
+    assert "c2VjcmV0LWJ5dGVz" not in repr(command)
+    assert "images" not in json.loads(SteerCommand(content="later").to_json_line())

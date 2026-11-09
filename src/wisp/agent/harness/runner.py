@@ -598,6 +598,7 @@ class AgentHarness:
         return QueueMessageInjected(
             kind=kind,
             content=message.content,
+            images=message.images or (),
             skill_invocation=message.skill_invocation,
             timestamp=message.created_at,
         )
