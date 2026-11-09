@@ -1366,11 +1366,11 @@ fn stored_images(
     let Some(value) = value else {
         return Ok(ComposerImages::default());
     };
-    let parts = value.as_array().ok_or_else(invalid)?;
-    if parts.len() > composer_images::MAX_IMAGES {
-        return Err(invalid());
-    }
-    parts
+    // A stored message may carry more images than one command accepts; the
+    // composer's limit applies when they are restored, not here.
+    value
+        .as_array()
+        .ok_or_else(invalid)?
         .iter()
         .map(|part| AttachedImage::stored(part).ok_or_else(invalid))
         .collect()

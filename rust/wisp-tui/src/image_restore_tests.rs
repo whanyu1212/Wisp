@@ -295,6 +295,50 @@ async fn session_draft_adds_images() {
 }
 
 #[tokio::test]
+async fn oversized_fork_keeps_text() {
+    // A stored message may carry more images than one command accepts.
+    let images = "0123456789"
+        .chars()
+        .take(composer_images::MAX_IMAGES + 1)
+        .map(part)
+        .collect::<Vec<_>>();
+    let forked = BackendEvent::from_projection_value(&json!({
+        "type": "rpc.session.forked", "command_id": "fork_session-1",
+        "source_session_id": "source", "source_session_path": "/s/source.jsonl",
+        "session_id": "fork", "session_path": "/s/fork.jsonl", "entry_count": 2,
+        "selected_entry_id": "user-2", "selected_prompt": "seven shots",
+        "selected_images": images,
+    }))
+    .unwrap();
+    let BackendEvent::SessionForked { derived, .. } = forked else {
+        panic!("expected a fork: {forked:?}")
+    };
+    let wire = Wire::new();
+    let mut ui = LiveUi::default();
+
+    ui.apply_effects(
+        vec![UiEffect::RestoreSessionDraft(RestoredDraft {
+            text: "seven shots".into(),
+            images: derived.selected_images,
+        })],
+        &wire.tx,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(ui.editor.text(), "seven shots");
+    assert!(ui.images.is_empty());
+    assert!(
+        ui.notice
+            .as_deref()
+            .unwrap()
+            .contains("without its 7 image(s)")
+    );
+    wire.close().await;
+}
+
+#[tokio::test]
 async fn leaving_store_drops_references() {
     let wire = Wire::new();
     let mut ui = LiveUi::default();
