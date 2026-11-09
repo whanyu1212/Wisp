@@ -22,7 +22,9 @@ from wisp.providers.base import (
     ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
+    image_placeholder_text,
     is_context_overflow_message,
+    message_image_inputs,
     strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
@@ -83,6 +85,10 @@ class GoogleProvider:
     name = "google"
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
+    supports_image_input: Literal[True] = True
+    # Gemini caps a request's inline data at about 20 MB; base64 grows images by
+    # 4/3, and the prompt needs the rest.
+    max_request_image_bytes = 12_000_000
 
     def __init__(
         self,
@@ -562,12 +568,34 @@ def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content
             continue
         provider_call_ids.clear()
         tool_names.clear()
+        if message.images:
+            contents.append(genai_types.Content(role="user", parts=_user_parts(message)))
+            index += 1
+            continue
         role = "model" if message.role == "assistant" else "user"
         contents.append(
             genai_types.Content(role=role, parts=[genai_types.Part(text=message.content)])
         )
         index += 1
     return contents
+
+
+def _user_parts(message: Message) -> list[genai_types.Part]:
+    """Encode a user message's images as inline data, then its text when present."""
+
+    parts: list[genai_types.Part] = []
+    for image, data in message_image_inputs(message):
+        if data is None:
+            parts.append(genai_types.Part(text=image_placeholder_text(image)))
+        else:
+            parts.append(
+                genai_types.Part(
+                    inline_data=genai_types.Blob(mime_type=image.media_type, data=data)
+                )
+            )
+    if message.content:
+        parts.append(genai_types.Part(text=message.content))
+    return parts
 
 
 def _tools_to_google(tools: Sequence[ToolSpec]) -> genai_types.Tool:

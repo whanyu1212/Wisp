@@ -12,8 +12,11 @@ from wisp.agent.context_budget import (
     context_fingerprint,
     estimate_context,
     estimate_context_budget,
+    image_tokens,
+    message_tokens,
     observe_context,
 )
+from wisp.events import ImagePart
 from wisp.messages import Message, NativeOutput
 from wisp.providers.base import ToolSpec
 
@@ -229,3 +232,32 @@ def test_allows_unknown_models_and_tracks_reserve() -> None:
     assert unknown.over_budget is None
     assert constrained.remaining_tokens == 100 - 16 - estimate.total_tokens
     assert constrained.over_budget is (constrained.remaining_tokens <= 0)
+
+
+def _image(sha: str, width: int, height: int) -> ImagePart:
+    return ImagePart(
+        media_type="image/png", sha256=sha * 64, byte_size=10, width=width, height=height
+    )
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "tokens"),
+    [(750, 1, 1), (1000, 1000, 1334), (3136, 1568, math.ceil(1568 * 784 / 750))],
+    ids=["tiny", "under-limit", "downscaled"],
+)
+def test_image_token_estimate(width: int, height: int, tokens: int) -> None:
+    assert image_tokens(_image("a", width, height)) == tokens
+
+
+def test_images_count_toward_budget() -> None:
+    text_only = Message(role="user", content="look")
+    with_image = Message(role="user", content="look", images=(_image("a", 1000, 1000),))
+    other_image = Message(role="user", content="look", images=(_image("b", 1000, 1000),))
+
+    assert message_tokens(with_image) >= message_tokens(text_only) + 1334
+    assert (
+        estimate_context([with_image]).message_tokens
+        >= estimate_context([text_only]).message_tokens + 1334
+    )
+    assert context_fingerprint([with_image]) != context_fingerprint([other_image])
+    assert context_fingerprint([with_image]) != context_fingerprint([text_only])

@@ -39,6 +39,7 @@ class FakeProvider:
 
     name = "fake"
     default_model: str | None = "fake"
+    supports_image_input: Literal[True] = True
 
     @staticmethod
     def _stream_interval_seconds() -> float:
@@ -96,6 +97,9 @@ class FakeProvider:
     ) -> AsyncIterator[ProviderEvent]:
         prompt = _last_user_prompt(messages)
         response = f"fake response to: {prompt}"
+        image_count = _last_user_image_count(messages)
+        if image_count:
+            response = f"{response} [{image_count} images]"
         extra_words = self._extra_response_words()
         if extra_words:
             response = f"{response} {' '.join('payload' for _ in range(extra_words))}"
@@ -120,6 +124,7 @@ class ScriptedProvider:
     name = "scripted"
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
+    supports_image_input: Literal[True] = True
 
     def __init__(
         self,
@@ -172,3 +177,12 @@ def _last_user_prompt(messages: Sequence[Message]) -> str:
 
 
 __all__ = ["FakeProvider", "ProviderRequest", "ScriptedProvider"]
+
+
+def _last_user_image_count(messages: Sequence[Message]) -> int:
+    """Count the images whose bytes reached the latest user message."""
+
+    for message in reversed(messages):
+        if message.role == "user":
+            return len(message.image_bytes or ())
+    return 0

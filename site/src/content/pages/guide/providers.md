@@ -110,7 +110,8 @@ model-picker metadata, context limits, effort tiers, or pricing are desired. The
 `name` must equal `provider_name`; list models in `models` and provider-native effort strings under
 `[providers.effort_levels]`. Optionally name the level a model uses when no effort is set under
 `[providers.default_effort]`; the TUI shows it until you choose a level, and shows `default` for a
-model that has effort levels but no listed default.
+model that has effort levels but no listed default. List models that accept images in
+`image_input_models`; Wisp sends images only to listed models and refuses new ones for others.
 
 ## Web search
 

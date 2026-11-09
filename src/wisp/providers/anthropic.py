@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
@@ -17,6 +18,7 @@ from anthropic import (
     AsyncAnthropic,
 )
 from anthropic.types import (
+    ImageBlockParam,
     MessageParam,
     RawContentBlockDeltaEvent,
     RawContentBlockStartEvent,
@@ -43,7 +45,9 @@ from wisp.providers.base import (
     ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
+    image_placeholder_text,
     is_context_overflow_message,
+    message_image_inputs,
     strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
@@ -313,6 +317,7 @@ class AnthropicProvider:
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
     supports_web_search: Literal[True] = True
+    supports_image_input: Literal[True] = True
 
     def __init__(
         self,
@@ -920,11 +925,42 @@ def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
             anthropic_messages.append(cast(MessageParam, {"role": "assistant", "content": blocks}))
             index += 1
             continue
+        if message.images:
+            anthropic_messages.append({"role": "user", "content": _user_content_blocks(message)})
+            index += 1
+            continue
         role = "user" if message.role == "tool" else message.role
         content: TextBlockParam = {"type": "text", "text": message.content}
         anthropic_messages.append(cast(MessageParam, {"role": role, "content": [content]}))
         index += 1
     return anthropic_messages
+
+
+def _user_content_blocks(message: Message) -> list[ImageBlockParam | TextBlockParam]:
+    """Encode a user message's images, then its text, which is omitted when empty.
+
+    Anthropic rejects empty text blocks, and its vision guide puts images before
+    the question about them.
+    """
+
+    blocks: list[ImageBlockParam | TextBlockParam] = []
+    for image, data in message_image_inputs(message):
+        if data is None:
+            blocks.append({"type": "text", "text": image_placeholder_text(image)})
+            continue
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            }
+        )
+    if message.content:
+        blocks.append({"type": "text", "text": message.content})
+    return blocks
 
 
 def _tool_results_to_message(tool_results: Sequence[ToolCallResult]) -> MessageParam:

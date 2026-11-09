@@ -32,6 +32,20 @@ models = [
     "gpt-5.4",
     "gpt-5.4-mini",
 ]
+# Verified 2026-11-09 on each model's page: "Input modalities: text, image".
+image_input_models = [
+    "gpt-6-astra",
+    "gpt-6.1-sol",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.5-pro",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+]
 
 [providers.model_aliases]
 "gpt-5.6" = "gpt-5.6-sol"
@@ -240,6 +254,16 @@ models = [
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 ]
+# The same models as the OpenAI API, which document image input on each model page.
+image_input_models = [
+    "gpt-6.1-sol",
+    "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+]
 
 [providers.model_aliases]
 "gpt-5.6" = "gpt-5.6-sol"
@@ -295,6 +319,21 @@ docs_url = "https://platform.claude.com/docs"
 # Current and legacy models verified 2026-10-13:
 # https://platform.claude.com/docs/en/models/overview
 models = [
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-haiku-4-5",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+]
+# Verified 2026-11-09: the vision guide lists every model here as supported.
+image_input_models = [
     "claude-fable-5-1",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
@@ -473,6 +512,19 @@ models = [
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
 ]
+# Verified 2026-11-09 on each model's page: inputs include images.
+image_input_models = [
+    "gemini-4-argon",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
+]
 
 # Deprecated release IDs remain valid configuration aliases without appearing
 # as duplicate picker choices. Google's moving alias currently targets 3.8.
@@ -569,6 +621,8 @@ models = [
     "deepseek-v4-pro",
     "deepseek-flash",
 ]
+# No image input yet: deepseek-v4-pro does not document it, and DeepSeek's vision
+# guide describes Responses-style input_image parts, not this Chat Completions adapter.
 
 [providers.model_aliases]
 "deepseek-v4-flash" = "deepseek-flash"
@@ -599,6 +653,17 @@ docs_url = "https://docs.x.ai/developers/models"
 # Text/tool-capable models and pricing verified against xAI's model catalog on
 # 2026-10-13. Image, video, and voice models are intentionally excluded.
 models = [
+    "grok-4.7",
+    "grok-4.6",
+    "grok-4.5",
+    "grok-4.3",
+    "grok-4.20-0309-reasoning",
+    "grok-4.20-0309-non-reasoning",
+    "grok-4.20-multi-agent-0309",
+    "grok-build-0.1",
+]
+# Verified 2026-11-09 on each model's page: "Modalities: text, image -> text".
+image_input_models = [
     "grok-4.7",
     "grok-4.6",
     "grok-4.5",
@@ -741,6 +806,8 @@ display_name = "Fake (offline testing)"
 default_model = "fake"
 docs_url = "https://github.com/whanyu1212/Wisp"
 models = ["fake"]
+# Test provider; it reports the images it receives.
+image_input_models = ["fake"]
 
 [providers.context_windows]
 fake = 1000

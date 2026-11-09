@@ -32,7 +32,10 @@ from wisp.providers.base import (
     ProviderProtocolError,
     ToolCallResult,
     ToolSpec,
+    image_data_url,
+    image_placeholder_text,
     is_context_overflow_message,
+    message_image_inputs,
     strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore
@@ -79,6 +82,7 @@ class OpenAICompatibleProvider:
     name = OPENAI_COMPATIBLE_PROVIDER_NAME
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
+    supports_image_input: Literal[True] = True
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Declare that portable call/result pairs can be reconstructed natively."""
@@ -485,10 +489,26 @@ def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:
                     ],
                 }
             )
+        elif message.images:
+            result.append({"role": "user", "content": _chat_user_content(message)})
         else:
             role = "user" if message.role == "tool" else message.role
             result.append({"role": role, "content": message.content})
     return result
+
+
+def _chat_user_content(message: Message) -> list[ChatPayload]:
+    """Encode a user message's images, then its text, as Chat Completions parts."""
+
+    parts: list[ChatPayload] = []
+    for image, data in message_image_inputs(message):
+        if data is None:
+            parts.append({"type": "text", "text": image_placeholder_text(image)})
+        else:
+            parts.append({"type": "image_url", "image_url": {"url": image_data_url(image, data)}})
+    if message.content:
+        parts.append({"type": "text", "text": message.content})
+    return parts
 
 
 def _tool_results_to_messages(results: Sequence[ToolCallResult]) -> tuple[ChatPayload, ...]:

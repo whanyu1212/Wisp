@@ -12,9 +12,13 @@ from wisp.events import (
     ContextBudget,
     ContextEstimate,
     ContextObservation,
+    ImagePart,
 )
 from wisp.messages import Message
 from wisp.providers.base import ToolSpec
+
+# Anthropic downscales images whose long edge exceeds this before counting tokens.
+_IMAGE_LONG_EDGE_PX = 1568
 
 
 def estimate_context(
@@ -39,7 +43,9 @@ def estimate_context(
     ]
     tool_payloads = [_tool_payload(tool) for tool in tools]
     system_tokens = _payload_tokens(system_payloads)
-    message_tokens = _payload_tokens(message_payloads)
+    message_tokens = _payload_tokens(message_payloads) + sum(
+        _message_image_tokens(message) for message in messages if message.role != "system"
+    )
     tool_schema_tokens = _payload_tokens(tool_payloads)
     return ContextEstimate(
         method="utf8_bytes_div_4_v2",
@@ -261,7 +267,25 @@ def message_tokens(message: Message) -> int:
         joint estimate, which rounds once.
     """
 
-    return _payload_tokens(_message_payload(message))
+    return _payload_tokens(_message_payload(message)) + _message_image_tokens(message)
+
+
+def image_tokens(image: ImagePart) -> int:
+    """Estimate the tokens one image costs a vision model.
+
+    Uses Anthropic's published estimate, width x height / 750, after the downscale
+    it applies to images whose long edge exceeds 1568 px. Other providers count
+    images differently (OpenAI and Gemini by tiles), so this is an approximation.
+
+    Args:
+        image (ImagePart): The image's reference, which records its dimensions.
+
+    Returns:
+        int: Estimated tokens.
+    """
+
+    scale = min(1.0, _IMAGE_LONG_EDGE_PX / max(image.width, image.height))
+    return math.ceil(image.width * scale * image.height * scale / 750)
 
 
 def tool_schema_tokens(tool: ToolSpec) -> int:
@@ -298,8 +322,16 @@ def _tool_payload(tool: ToolSpec) -> dict[str, object]:
     }
 
 
+def _message_image_tokens(message: Message) -> int:
+    return sum(image_tokens(image) for image in message.images or ())
+
+
 def _message_payload(message: Message) -> dict[str, object]:
     payload: dict[str, object] = {"role": message.role, "content": message.content}
+    if message.images:
+        # Image identity, so the fingerprint changes when an image does; their
+        # cost is counted separately from these few characters.
+        payload["images"] = [image.sha256 for image in message.images]
     if message.tool_call_id is not None:
         payload["tool_call_id"] = message.tool_call_id
     if message.tool_name is not None:
