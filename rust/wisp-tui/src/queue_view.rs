@@ -228,11 +228,11 @@ impl QueueView {
         if self.confirmation.is_none() {
             for (index, message) in self.messages(state).iter().enumerate() {
                 let preview: String = message.content.chars().take(160).collect();
-                rows.push(format!(
-                    "{}. {}",
-                    index + 1,
-                    sanitize_for_terminal(&preview).replace(['\n', '\r', '\t'], " ")
-                ));
+                let preview = sanitize_for_terminal(&preview).replace(['\n', '\r', '\t'], " ");
+                rows.push(match message.image_note() {
+                    Some(note) => format!("{}. {note} {preview}", index + 1),
+                    None => format!("{}. {preview}", index + 1),
+                });
             }
             if count == 0 {
                 rows.push("No pending items".into());

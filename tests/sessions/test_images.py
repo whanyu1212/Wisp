@@ -275,6 +275,22 @@ def test_fork_returns_selected_images(tmp_path: Path) -> None:
     assert selected_images == (image,)
 
 
+def test_navigation_returns_editor_images(tmp_path: Path) -> None:
+    """Navigating to a user message returns its images with its text for the editor."""
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def navigate() -> tuple[ImagePart, tuple[ImagePart, ...]]:
+        image = await session.store_image(PNG)
+        selected = await session.append_message(_image_message(image))
+        active = await session.append_message(Message(role="assistant", content="a square"))
+        navigation = await session.navigate_tree(selected.id, expected_active_leaf_id=active.id)
+        return image, navigation.editor_images
+
+    image, editor_images = anyio.run(navigate)
+
+    assert editor_images == (image,)
+
+
 def test_fork_copies_selected_images(tmp_path: Path) -> None:
     """Forking a session from another directory brings the edited message's images."""
 

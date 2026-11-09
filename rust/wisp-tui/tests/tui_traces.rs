@@ -403,7 +403,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                     }
                 }
                 UiEffect::RestoreDraft { content, .. } => restored_drafts.push(content),
-                UiEffect::RestoreSessionDraft(content) => restored_drafts.push(content),
+                UiEffect::RestoreSessionDraft(draft) => restored_drafts.push(draft.text),
                 UiEffect::SendSecretCommand(_)
                 | UiEffect::RecordPromptHistory(_)
                 | UiEffect::ShowConnectionPanel(_)
@@ -433,6 +433,7 @@ fn replay(trace: &TraceFile) -> Result<ReplayOutput, String> {
                 | UiEffect::AutoCompactionConfigured
                 | UiEffect::Diagnostic(_)
                 | UiEffect::Notice(_)
+                | UiEffect::DropStoredImages
                 | UiEffect::RequestRender => {}
                 UiEffect::Exit => exited = true,
             }

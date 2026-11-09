@@ -1,8 +1,11 @@
 //! Images attached to the composer draft: clipboard pastes and pasted image paths.
 //!
-//! The composer holds each image's bytes until the draft is sent. Limits mirror the
-//! backend's so a paste is refused here, with a clear notice, rather than failing the
-//! command after it is sent; the backend still checks every image itself.
+//! The composer holds each pasted image's bytes until the draft is sent. An image
+//! restored from the backend (a popped queued message, a forked prompt) is already in
+//! the session's image store, so the composer keeps only its reference and re-sends
+//! that. Limits mirror the backend's so a paste is refused here, with a clear notice,
+//! rather than failing the command after it is sent; the backend still checks every
+//! image itself.
 
 use std::fmt;
 use std::io::Read;
@@ -20,24 +23,32 @@ pub const MAX_IMAGES: usize = 6;
 const SNIFF_BYTES: usize = 16;
 
 /// One image waiting in the composer.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachedImage {
-    bytes: Arc<[u8]>,
+    source: ImageSource,
     media_type: &'static str,
     dimensions: Option<(u32, u32)>,
     file_name: Option<String>,
 }
 
+/// Where an attached image's bytes are.
+#[derive(Clone, PartialEq, Eq)]
+enum ImageSource {
+    /// Pasted here; sent as base64.
+    Inline(Arc<[u8]>),
+    /// Already in the session's image store; sent as an `ImagePart` reference.
+    Stored { sha256: String, byte_size: usize },
+}
+
 // Image bytes run to megabytes; a failing test assertion should print a summary.
-impl fmt::Debug for AttachedImage {
+impl fmt::Debug for ImageSource {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AttachedImage")
-            .field("media_type", &self.media_type)
-            .field("dimensions", &self.dimensions)
-            .field("file_name", &self.file_name)
-            .field("byte_size", &self.bytes.len())
-            .finish()
+        match self {
+            Self::Inline(bytes) => write!(formatter, "Inline({} bytes)", bytes.len()),
+            Self::Stored { sha256, byte_size } => {
+                write!(formatter, "Stored({sha256}, {byte_size} bytes)")
+            }
+        }
     }
 }
 
@@ -98,7 +109,7 @@ impl AttachedImage {
         };
         written.map_err(|_| AttachError::EncodeFailed)?;
         Ok(Self {
-            bytes: png.into(),
+            source: ImageSource::Inline(png.into()),
             media_type: "image/png",
             dimensions: Some((width, height)),
             file_name: None,
@@ -129,7 +140,7 @@ impl AttachedImage {
             return Err(AttachError::TooLarge(size));
         }
         Ok(Some(Self {
-            bytes: bytes.into(),
+            source: ImageSource::Inline(bytes.into()),
             media_type,
             dimensions: None,
             file_name: path
@@ -138,12 +149,64 @@ impl AttachedImage {
         }))
     }
 
-    pub fn byte_size(&self) -> usize {
-        self.bytes.len()
+    /// An image the backend reports by reference (an `ImagePart`), or `None` when
+    /// the value does not describe one.
+    pub fn stored(part: &serde_json::Value) -> Option<Self> {
+        let media_type = known_media_type(part.get("media_type")?.as_str()?)?;
+        let sha256 = part.get("sha256")?.as_str()?;
+        if sha256.len() != 64
+            || !sha256
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        let dimension = |field| {
+            part.get(field)?
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .filter(|value| *value > 0)
+        };
+        Some(Self {
+            source: ImageSource::Stored {
+                sha256: sha256.to_owned(),
+                byte_size: usize::try_from(part.get("byte_size")?.as_u64()?)
+                    .ok()
+                    .filter(|size| *size > 0)?,
+            },
+            media_type,
+            dimensions: Some((dimension("width")?, dimension("height")?)),
+            file_name: None,
+        })
     }
 
-    pub fn base64(&self) -> String {
-        base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+    pub fn byte_size(&self) -> usize {
+        match &self.source {
+            ImageSource::Inline(bytes) => bytes.len(),
+            ImageSource::Stored { byte_size, .. } => *byte_size,
+        }
+    }
+
+    /// The image as one item of a command's `images` array: base64 for a pasted
+    /// image, an `ImagePart` reference for one already in the session's store.
+    pub fn wire_value(&self) -> serde_json::Value {
+        match &self.source {
+            ImageSource::Inline(bytes) => base64::engine::general_purpose::STANDARD
+                .encode(bytes)
+                .into(),
+            ImageSource::Stored { sha256, byte_size } => {
+                let (width, height) = self
+                    .dimensions
+                    .expect("stored images are built with their dimensions");
+                serde_json::json!({
+                    "media_type": self.media_type,
+                    "sha256": sha256,
+                    "byte_size": byte_size,
+                    "width": width,
+                    "height": height,
+                })
+            }
+        }
     }
 
     /// The chip shown in the composer, such as `Image 1 · 1280×720`.
@@ -151,7 +214,7 @@ impl AttachedImage {
         match (&self.dimensions, &self.file_name) {
             (Some((width, height)), _) => format!("Image {number} · {width}×{height}"),
             (None, Some(name)) => format!("Image {number} · {name}"),
-            (None, None) => format!("Image {number} · {}", megabytes(self.bytes.len())),
+            (None, None) => format!("Image {number} · {}", megabytes(self.byte_size())),
         }
     }
 
@@ -234,6 +297,31 @@ impl ComposerImages {
         }
     }
 
+    /// Put restored images in front of the attached ones, as restored text is put in
+    /// front of the draft; refused, changing nothing, when the total would exceed
+    /// [`MAX_IMAGES`]. Model support is left to the send-time check, since the images
+    /// were accepted when they were first sent.
+    pub fn prepend_restored(&mut self, restored: &ComposerImages) -> Result<(), AttachError> {
+        if !self.fits_restored(restored) {
+            return Err(AttachError::TooMany);
+        }
+        self.images.splice(0..0, restored.images.iter().cloned());
+        Ok(())
+    }
+
+    /// Whether restored images fit beside the attached ones.
+    pub fn fits_restored(&self, restored: &ComposerImages) -> bool {
+        self.images.len() + restored.images.len() <= MAX_IMAGES
+    }
+
+    /// Remove the images held by reference, returning how many were removed.
+    pub fn remove_stored(&mut self) -> usize {
+        let before = self.images.len();
+        self.images
+            .retain(|image| matches!(image.source, ImageSource::Inline(_)));
+        before - self.images.len()
+    }
+
     pub fn remove_last(&mut self) -> Option<AttachedImage> {
         self.images.pop()
     }
@@ -263,8 +351,9 @@ impl ComposerImages {
             .collect()
     }
 
-    pub fn base64_images(&self) -> Vec<String> {
-        self.images.iter().map(AttachedImage::base64).collect()
+    /// The command's `images` array, in attachment order.
+    pub fn wire_images(&self) -> Vec<serde_json::Value> {
+        self.images.iter().map(AttachedImage::wire_value).collect()
     }
 
     /// The transcript lines for these images, one per image, in order.
@@ -291,6 +380,21 @@ fn check_support(total: usize, support: ImageSupport<'_>) -> Result<(), AttachEr
         return Err(AttachError::OverRequestBudget { total, limit });
     }
     Ok(())
+}
+
+impl FromIterator<AttachedImage> for ComposerImages {
+    fn from_iter<T: IntoIterator<Item = AttachedImage>>(images: T) -> Self {
+        Self {
+            images: images.into_iter().collect(),
+        }
+    }
+}
+
+/// The supported media type named by a reported image, as a static string.
+fn known_media_type(media_type: &str) -> Option<&'static str> {
+    ["image/png", "image/jpeg", "image/gif", "image/webp"]
+        .into_iter()
+        .find(|known| *known == media_type)
 }
 
 /// Identify PNG, JPEG, GIF or WebP from a file's first bytes.
@@ -397,6 +501,13 @@ mod tests {
         AttachedImage::from_rgba(width, height, &vec![255; width * height * 4]).unwrap()
     }
 
+    fn bytes(image: &AttachedImage) -> &[u8] {
+        match &image.source {
+            ImageSource::Inline(bytes) => bytes,
+            ImageSource::Stored { .. } => panic!("expected an inline image"),
+        }
+    }
+
     fn vision(max_request_bytes: u64) -> ImageSupport<'static> {
         ImageSupport {
             model: "vision-model",
@@ -410,10 +521,10 @@ mod tests {
         let image = png(3, 2);
         let translucent = AttachedImage::from_rgba(1, 1, &[0, 0, 0, 128]).unwrap();
 
-        assert_eq!(sniff_media_type(&image.bytes), Some("image/png"));
+        assert_eq!(sniff_media_type(bytes(&image)), Some("image/png"));
         // The IHDR colour type: 2 is RGB for opaque images, 6 keeps alpha.
-        assert_eq!(image.bytes[25], 2);
-        assert_eq!(translucent.bytes[25], 6);
+        assert_eq!(bytes(&image)[25], 2);
+        assert_eq!(bytes(&translucent)[25], 6);
         assert_eq!(image.chip_label(1), "Image 1 · 3×2");
         assert_eq!(image.transcript_line(), "[image 3×2 png]");
     }
@@ -431,7 +542,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("wisp-url-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("My Shot.png");
-        std::fs::write(&path, &*png(1, 1).bytes).unwrap();
+        std::fs::write(&path, bytes(&png(1, 1))).unwrap();
         let url = format!("file://{}", path.display().to_string().replace(' ', "%20"));
 
         assert_eq!(pasted_file_path(&url), Some(path.clone()));
@@ -493,7 +604,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("wisp-images-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let image_path = directory.join("My Shot.png");
-        std::fs::write(&image_path, &*png(3, 2).bytes).unwrap();
+        std::fs::write(&image_path, bytes(&png(3, 2))).unwrap();
         let text_path = directory.join("notes.txt");
         std::fs::write(&text_path, "not an image").unwrap();
 
@@ -531,6 +642,59 @@ mod tests {
             Err(AttachError::TooLarge(size)) if size == MAX_IMAGE_BYTES + 1
         ));
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    fn part(sha: char) -> serde_json::Value {
+        serde_json::json!({
+            "media_type": "image/jpeg",
+            "sha256": sha.to_string().repeat(64),
+            "byte_size": 2048,
+            "width": 640,
+            "height": 480,
+        })
+    }
+
+    #[test]
+    fn stored_image_resends_reference() {
+        let image = AttachedImage::stored(&part('a')).unwrap();
+
+        assert_eq!(image.wire_value(), part('a'));
+        assert_eq!(image.byte_size(), 2048);
+        assert_eq!(image.chip_label(1), "Image 1 · 640×480");
+        assert_eq!(image.transcript_line(), "[image 640×480 jpeg]");
+        let mut bad = part('a');
+        bad["sha256"] = "A".repeat(64).into();
+        assert_eq!(AttachedImage::stored(&bad), None);
+        bad = part('a');
+        bad["media_type"] = "image/bmp".into();
+        assert_eq!(AttachedImage::stored(&bad), None);
+        bad = part('a');
+        bad["width"] = 0.into();
+        assert_eq!(AttachedImage::stored(&bad), None);
+    }
+
+    #[test]
+    fn restored_images_go_first() {
+        let mut images = ComposerImages::default();
+        images.attach(png(1, 1), None).unwrap();
+        let restored = [part('a'), part('b')]
+            .iter()
+            .filter_map(AttachedImage::stored)
+            .collect::<ComposerImages>();
+
+        images.prepend_restored(&restored).unwrap();
+
+        let wire = images.wire_images();
+        assert_eq!(wire[..2], [part('a'), part('b')]);
+        assert!(wire[2].is_string());
+        let full = (0..MAX_IMAGES - 2)
+            .map(|_| png(1, 1))
+            .collect::<ComposerImages>();
+        assert_eq!(
+            images.clone().prepend_restored(&full),
+            Err(AttachError::TooMany)
+        );
+        assert_eq!(images.len(), 3);
     }
 
     #[test]

@@ -185,6 +185,8 @@ class SessionTreeNavigation:
     editor_text: str | None
     changed: bool
     entry_count: int
+    # The selected user message's images, returned to the editor with its text.
+    editor_images: tuple[ImagePart, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1119,10 +1121,12 @@ class JsonlSession:
                     )
 
                 editor_text: str | None = None
+                editor_images: tuple[ImagePart, ...] = ()
                 active_leaf_id: str | None = entry_id
                 if isinstance(target, MessageSessionEntry) and target.message.role == "user":
                     active_leaf_id = target.parent_id
                     editor_text = target.message.content
+                    editor_images = target.message.images or ()
 
                 if active_leaf_id == previous_active_leaf_id:
                     _raise_if_navigation_cancelled(cancel_requested)
@@ -1133,6 +1137,7 @@ class JsonlSession:
                         editor_text=editor_text,
                         changed=False,
                         entry_count=len(entries),
+                        editor_images=editor_images,
                     )
 
                 selection = ActiveLeafSessionEntry(
@@ -1154,6 +1159,7 @@ class JsonlSession:
                     editor_text=editor_text,
                     changed=True,
                     entry_count=len(self._entry_index),
+                    editor_images=editor_images,
                 )
 
     def _unrevert_tree_once(

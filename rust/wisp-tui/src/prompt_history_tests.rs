@@ -291,6 +291,8 @@ async fn queued_recall_waits_for_backend_acceptance_and_failure_preempts_the_bro
                 } else {
                     vec![]
                 },
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &writer,
             8192,
@@ -314,6 +316,8 @@ async fn queued_recall_waits_for_backend_acceptance_and_failure_preempts_the_bro
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec![],
                 follow_up: vec![],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &writer,
             8192,

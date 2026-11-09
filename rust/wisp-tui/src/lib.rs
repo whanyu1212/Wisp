@@ -27,6 +27,8 @@ mod hydration_profile;
 mod hyperlink;
 #[cfg(test)]
 mod image_paste_tests;
+#[cfg(test)]
+mod image_restore_tests;
 mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
@@ -543,6 +545,7 @@ enum UnsendableResponseContext {
 struct DeferredQueueRecovery {
     content: String,
     local_order: Option<u64>,
+    images: ComposerImages,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -746,7 +749,12 @@ impl LiveUi {
                 <= reducer::QUEUE_CONTENT_BYTES_LIMIT
     }
 
-    fn defer_queue_recovery(&mut self, content: String, local_order: Option<u64>) {
+    fn defer_queue_recovery(
+        &mut self,
+        content: String,
+        local_order: Option<u64>,
+        images: ComposerImages,
+    ) {
         self.prompt_history_view = None;
         assert!(
             self.deferred_queue_recovery_can_accept(&content),
@@ -766,10 +774,11 @@ impl LiveUi {
             DeferredQueueRecovery {
                 content,
                 local_order,
+                images,
             },
         );
         self.notice = Some(
-            "Could not restore queued text because it exceeds the editor limit; Alt+Up restores deferred items one at a time."
+            "Could not restore the queued message because it does not fit the editor's text or image limit; Alt+Up restores deferred items one at a time."
                 .into(),
         );
         self.render_pending = true;
@@ -780,14 +789,25 @@ impl LiveUi {
             return false;
         };
         self.prompt_history_view = None;
+        if !self.images.fits_restored(&recovery.images) {
+            self.notice = Some(format!(
+                "The deferred queued message has {} image(s), which with those attached exceeds the limit of {}; remove some and press Alt+Up again.",
+                recovery.images.len(),
+                composer_images::MAX_IMAGES
+            ));
+            self.render_pending = true;
+            return true;
+        }
         let outcome = self.editor.prepend_restored(&recovery.content);
+        let images_restored = !recovery.images.is_empty();
         self.notice = if outcome.rejected_limit {
             Some(
                 "Deferred queued text still exceeds the editor limit; kept your newer draft unchanged."
                     .into(),
             )
-        } else if outcome.changed {
-            self.deferred_queue_recovery.remove(0);
+        } else if outcome.changed || images_restored {
+            let recovery = self.deferred_queue_recovery.remove(0);
+            self.restore_images(&recovery.images);
             self.recovered_queue_recovery = true;
             if outcome.ignored_controls > 0 {
                 Some(format!(
@@ -919,11 +939,13 @@ impl LiveUi {
                 UiEffect::RestoreDraft {
                     content,
                     local_order: Some(local_order),
-                } => self.defer_queue_recovery(content, Some(local_order)),
+                    images,
+                } => self.defer_queue_recovery(content, Some(local_order), images),
                 UiEffect::RestoreDraft {
                     content,
                     local_order: None,
-                } => self.restore_queued_draft(content),
+                    images,
+                } => self.restore_queued_draft(content, images),
                 UiEffect::SessionCatalogStarted(id) => {
                     if let Some(picker) = &mut self.session_picker {
                         picker.started(id);
@@ -960,7 +982,8 @@ impl LiveUi {
                     self.session_tree_picker = None;
                     self.render_pending = true;
                 }
-                UiEffect::RestoreSessionDraft(content) => self.restore_session_draft(&content),
+                UiEffect::RestoreSessionDraft(draft) => self.restore_session_draft(draft),
+                UiEffect::DropStoredImages => self.drop_stored_images(),
                 UiEffect::SendCommittedHydration {
                     command,
                     session_id: _,
@@ -1135,14 +1158,23 @@ impl LiveUi {
         self.render_pending = true;
     }
 
-    fn restore_queued_draft(&mut self, content: String) {
+    /// Return a queued message to the composer: its text before the draft and its
+    /// images before the attached ones. Both must fit, or the whole message is deferred,
+    /// so a restore never keeps the text and drops the images.
+    fn restore_queued_draft(&mut self, content: String, images: ComposerImages) {
         self.prompt_history_view = None;
-        let outcome = self.editor.prepend_restored(&content);
-        if outcome.rejected_limit {
-            self.defer_queue_recovery(content, None);
+        if !self.images.fits_restored(&images) {
+            self.defer_queue_recovery(content, None, images);
             return;
         }
-        if outcome.changed {
+        let outcome = self.editor.prepend_restored(&content);
+        if outcome.rejected_limit {
+            self.defer_queue_recovery(content, None, images);
+            return;
+        }
+        let images_restored = !images.is_empty();
+        self.restore_images(&images);
+        if outcome.changed || images_restored {
             self.theme_picker = None;
             self.logo_picker = None;
             self.recovered_queue_recovery = true;
@@ -1152,7 +1184,7 @@ impl LiveUi {
                 "Restored queued text after ignoring {} unsafe terminal control character(s).",
                 outcome.ignored_controls
             ))
-        } else if outcome.changed {
+        } else if outcome.changed || images_restored {
             None
         } else {
             Some("Queued text had no editable content; kept your newer draft unchanged.".into())
@@ -1253,14 +1285,37 @@ impl LiveUi {
         }
     }
 
-    fn restore_session_draft(&mut self, content: &str) {
+    fn restore_session_draft(&mut self, draft: reducer::RestoredDraft) {
         self.prompt_history_view = None;
-        let outcome = self.editor.insert_paste(content);
+        let outcome = self.editor.insert_paste(&draft.text);
         if outcome.changed {
             self.theme_picker = None;
             self.logo_picker = None;
         }
-        self.notice = if outcome.rejected_limit {
+        // The message stays in the session's history, so a part that does not fit is
+        // left there rather than deferred, and the notice names it.
+        let images_fit = self.images.fits_restored(&draft.images);
+        if images_fit {
+            self.restore_images(&draft.images);
+        }
+        self.notice = if !images_fit && outcome.rejected_limit {
+            Some(format!(
+                "The restored session prompt exceeds the editor limit and its {} image(s) exceed the limit of {}; neither was inserted.",
+                draft.images.len(),
+                composer_images::MAX_IMAGES
+            ))
+        } else if !images_fit {
+            Some(format!(
+                "Restored the prompt without its {} image(s): with those attached they exceed the limit of {}.",
+                draft.images.len(),
+                composer_images::MAX_IMAGES
+            ))
+        } else if outcome.rejected_limit && !draft.images.is_empty() {
+            Some(
+                "Restored the session prompt's images; its text exceeds the editor limit and was not inserted."
+                    .into(),
+            )
+        } else if outcome.rejected_limit {
             Some(
                 "The restored session prompt exceeds the editor limit; it was not truncated or inserted."
                     .into(),
@@ -2431,7 +2486,8 @@ impl LiveUi {
             && !self.recovered_queue_recovery
         {
             self.notice = Some(
-                "Restore deferred queued text with Alt+Up before queueing another message.".into(),
+                "Restore the deferred queued message with Alt+Up before queueing another one."
+                    .into(),
             );
             self.render_pending = true;
             return Ok(LoopControl::Continue);
@@ -2458,9 +2514,7 @@ impl LiveUi {
                 }
                 // Built with the images the reducer will send, so the frame check
                 // below measures the real payload.
-                let encoded = images
-                    .map(ComposerImages::base64_images)
-                    .unwrap_or_default();
+                let encoded = images.map(ComposerImages::wire_images).unwrap_or_default();
                 Some(match kind {
                     QueueKind::Steering => (
                         "Steering",
@@ -2491,14 +2545,19 @@ impl LiveUi {
                 {
                     return self.dispatch(action, writer, limit).await;
                 }
-                let Some((kind, content)) = self.state.queue_restore_candidate() else {
+                let Some((kind, message)) = self.state.queue_restore_candidate() else {
                     return self.dispatch(action, writer, limit).await;
                 };
-                if !self.editor.can_prepend_restored(content) {
+                if !self.editor.can_prepend_restored(&message.content) {
                     self.notice = Some(
                         "Queued text no longer fits with your newer draft; kept the queue unchanged."
                             .into(),
                     );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                if let Some(notice) = self.queued_images_overflow(message) {
+                    self.notice = Some(notice);
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
@@ -2538,6 +2597,11 @@ impl LiveUi {
                             self.notice = Some(
                                 "Queued text does not fit with your draft; queue unchanged.".into(),
                             );
+                            self.render_pending = true;
+                            return Ok(LoopControl::Continue);
+                        }
+                        if let Some(notice) = self.queued_images_overflow(message) {
+                            self.notice = Some(notice);
                             self.render_pending = true;
                             return Ok(LoopControl::Continue);
                         }
@@ -2731,6 +2795,48 @@ impl LiveUi {
         true
     }
 
+    /// Put restored images in front of the attached ones; the caller has checked
+    /// that they fit with [`ComposerImages::fits_restored`].
+    fn restore_images(&mut self, restored: &ComposerImages) {
+        if restored.is_empty() {
+            return;
+        }
+        self.images
+            .prepend_restored(restored)
+            .expect("restored images were checked to fit");
+        self.sync_image_chips();
+    }
+
+    /// Why popping `message` now would leave its images without room, checked before
+    /// the pop so the message stays queued rather than held only here.
+    fn queued_images_overflow(&self, message: &reducer::QueuedMessage) -> Option<String> {
+        (self.images.len() + message.image_count > composer_images::MAX_IMAGES).then(|| {
+            format!(
+                "The queued message's {} image(s) do not fit beside the {} attached (at most {}); kept the queue unchanged.",
+                message.image_count,
+                self.images.len(),
+                composer_images::MAX_IMAGES
+            )
+        })
+    }
+
+    fn drop_stored_images(&mut self) {
+        let mut dropped = self.images.remove_stored();
+        // Deferred messages hold references into the same store; one left with neither
+        // text nor images has nothing to restore.
+        for recovery in &mut self.deferred_queue_recovery {
+            dropped += recovery.images.remove_stored();
+        }
+        self.deferred_queue_recovery
+            .retain(|recovery| !recovery.content.is_empty() || !recovery.images.is_empty());
+        if dropped > 0 {
+            self.notice = Some(format!(
+                "Removed {dropped} restored image(s): they are stored with the previous session."
+            ));
+            self.sync_image_chips();
+        }
+    }
+
     fn clear_images(&mut self) {
         if !self.images.is_empty() {
             self.images.clear();
@@ -2777,7 +2883,7 @@ impl LiveUi {
         let command = WispTypedClientRpcCommands::prompt_with_images(
             &id,
             prompt,
-            &self.images.base64_images(),
+            &self.images.wire_images(),
         )?;
         let encoded_len = serde_json::to_vec(&command)?.len();
         if encoded_len <= limit {
@@ -7882,7 +7988,7 @@ mod tests {
         live_ui
             .apply_effects(
                 vec![UiEffect::RestoreSessionDraft(
-                    "x".repeat(prompt_editor::MAX_PROMPT_BYTES + 1),
+                    "x".repeat(prompt_editor::MAX_PROMPT_BYTES + 1).into(),
                 )],
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -7912,7 +8018,7 @@ mod tests {
         live_ui.state.session_operation = Some(reducer::SessionOperation::HydratingSelection {
             command_id: "get_messages-1".into(),
             selected: selected.clone(),
-            restore_editor_text: None,
+            restore_draft: None,
             committed_operation: "Session clone",
             report: None,
             loaded: None,
@@ -8303,6 +8409,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: vec!["restored steering".into()],
                     follow_up: Vec::new(),
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -8337,6 +8445,8 @@ mod tests {
                     kind: Some(QueueKind::Steering),
                     steering: vec!["restored steering".into()],
                     follow_up: Vec::new(),
+                    follow_up_images: Vec::new(),
+                    steering_images: Vec::new(),
                 }),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -8384,6 +8494,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: vec!["restored steering".into()],
                     follow_up: Vec::new(),
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -8418,6 +8530,8 @@ mod tests {
                     kind: Some(QueueKind::Steering),
                     steering: vec!["restored steering".into()],
                     follow_up: Vec::new(),
+                    follow_up_images: Vec::new(),
+                    steering_images: Vec::new(),
                 }),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -8478,6 +8592,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: vec!["cached candidate".into()],
                     follow_up: Vec::new(),
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,
@@ -8506,7 +8622,11 @@ mod tests {
     async fn idle_alt_up_restores_deferred_queue_recovery_without_popping() {
         let (writer_tx, mut writer_rx) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
         let mut live_ui = LiveUi::default();
-        live_ui.defer_queue_recovery("recover after idle".into(), Some(0));
+        live_ui.defer_queue_recovery(
+            "recover after idle".into(),
+            Some(0),
+            ComposerImages::default(),
+        );
 
         live_ui
             .handle_input(
@@ -8790,6 +8910,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["queued\u{1b}[2J\u{202e}steer".into()],
                 follow_up: vec!["restore me".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -8804,6 +8926,8 @@ mod tests {
                 kind: Some(QueueKind::FollowUp),
                 steering: Vec::new(),
                 follow_up: vec!["restore me".into()],
+                follow_up_images: Vec::new(),
+                steering_images: Vec::new(),
             }),
             &mut ids,
         )
@@ -8812,6 +8936,7 @@ mod tests {
         let deferred = [DeferredQueueRecovery {
             content: "deferred recovery".into(),
             local_order: Some(0),
+            images: Default::default(),
         }];
         let lines = render_unsent_queue_diagnostics(&state, &deferred);
         let rendered = lines.join("\n");
@@ -8864,10 +8989,12 @@ mod tests {
                     UiEffect::RestoreDraft {
                         content: second.clone(),
                         local_order: Some(1),
+                        images: Default::default(),
                     },
                     UiEffect::RestoreDraft {
                         content: first.clone(),
                         local_order: Some(0),
+                        images: Default::default(),
                     },
                 ],
                 &writer_tx,
@@ -8918,7 +9045,11 @@ mod tests {
             } else {
                 item_bytes
             };
-            live_ui.defer_queue_recovery("x".repeat(bytes), Some(local_order as u64));
+            live_ui.defer_queue_recovery(
+                "x".repeat(bytes),
+                Some(local_order as u64),
+                ComposerImages::default(),
+            );
         }
         assert_eq!(
             live_ui.deferred_queue_recovery.len(),
@@ -8937,10 +9068,12 @@ mod tests {
             DeferredQueueRecovery {
                 content: "same deferred text".into(),
                 local_order: Some(0),
+                images: Default::default(),
             },
             DeferredQueueRecovery {
                 content: "same deferred text".into(),
                 local_order: Some(1),
+                images: Default::default(),
             },
         ];
         let lines = render_unsent_queue_diagnostics(&UiState::unconfigured(), &deferred);
@@ -11861,6 +11994,7 @@ mod tests {
         let queued = |content: &str| UiEffect::RestoreDraft {
             content: content.into(),
             local_order: None,
+            images: Default::default(),
         };
         let cases = [
             (queued("plain"), None, true),

@@ -628,6 +628,7 @@ async def run_rpc_navigate_session_tree_command(
                 previous_active_leaf_id=navigation.previous_active_leaf_id,
                 active_leaf_id=active_leaf_id,
                 editor_text=navigation.editor_text,
+                editor_images=navigation.editor_images,
                 changed=navigation.changed,
                 entry_count=refreshed_entry_count,
             )

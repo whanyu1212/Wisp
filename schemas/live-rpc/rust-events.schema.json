@@ -4353,6 +4353,14 @@
           "title": "RpcSessionTreeNavigatedCommandId",
           "type": "string"
         },
+        "editor_images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "title": "RpcSessionTreeNavigatedEditorImages",
+          "type": "array"
+        },
         "editor_text": {
           "anyOf": [
             {
@@ -4420,6 +4428,7 @@
         "previous_active_leaf_id",
         "active_leaf_id",
         "editor_text",
+        "editor_images",
         "changed",
         "entry_count"
       ],

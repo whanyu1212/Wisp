@@ -9,7 +9,7 @@ use super::{
     SessionMessages, SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode,
     SessionTreeNodeKind, SessionTreePage, SessionTreeUnrevert,
 };
-use crate::composer_images;
+use crate::composer_images::{self, AttachedImage, ComposerImages};
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolProgressInput,
@@ -637,11 +637,19 @@ impl BackendEvent {
                     &event_type,
                     [("steering", steering), ("follow_up", follow_up)],
                 )?;
+                let image_counts = |field, message_count| {
+                    queued_images(value, &event_type, field, message_count)
+                        .map(|images| images.iter().map(ComposerImages::len).collect::<Vec<_>>())
+                };
+                let steering_image_counts = image_counts("steering_images", steering.len());
+                let follow_up_image_counts = image_counts("follow_up_images", follow_up.len());
                 if value.get("steering_mode").is_some()
                     || value.get("token").is_some()
                     || value.get("command_id").is_some()
                 {
                     Self::QueueSnapshot(super::queue_management::Snapshot {
+                        steering_image_counts: steering_image_counts?,
+                        follow_up_image_counts: follow_up_image_counts?,
                         steering: queue_strings(steering),
                         follow_up: queue_strings(follow_up),
                         steering_mode: queue_mode(value, &event_type, "steering_mode")?,
@@ -656,6 +664,8 @@ impl BackendEvent {
                     })
                 } else {
                     Self::QueueUpdated {
+                        steering_image_counts: steering_image_counts?,
+                        follow_up_image_counts: follow_up_image_counts?,
                         steering: queue_strings(steering),
                         follow_up: queue_strings(follow_up),
                     }
@@ -675,6 +685,18 @@ impl BackendEvent {
                     command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                     operation,
                     kind,
+                    steering_images: queued_images(
+                        value,
+                        &event_type,
+                        "steering_images",
+                        steering.len(),
+                    )?,
+                    follow_up_images: queued_images(
+                        value,
+                        &event_type,
+                        "follow_up_images",
+                        follow_up.len(),
+                    )?,
                     steering: queue_strings(steering),
                     follow_up: queue_strings(follow_up),
                 }
@@ -988,6 +1010,11 @@ fn session_derivation(
         entry_count: bounded_entry_count(value, event_type)?,
         selected_entry_id,
         selected_prompt,
+        selected_images: if forked {
+            stored_images(value.get("selected_images"), event_type, "selected_images")?
+        } else {
+            ComposerImages::default()
+        },
     })
 }
 
@@ -1132,6 +1159,7 @@ fn session_tree_navigation(
             "editor_text",
             MAX_APPLICATION_FRAME_BYTES,
         )?,
+        editor_images: stored_images(value.get("editor_images"), event_type, "editor_images")?,
         changed,
         entry_count: bounded_entry_count(value, event_type)?,
     })
@@ -1322,6 +1350,53 @@ fn queue_strings(contents: &[Value]) -> Vec<String> {
                 .expect("queue strings were validated before cloning")
                 .to_owned()
         })
+        .collect()
+}
+
+/// One message's stored images, from an array of `ImagePart` references.
+fn stored_images(
+    value: Option<&Value>,
+    event_type: &str,
+    field: &'static str,
+) -> Result<ComposerImages, EventProjectionError> {
+    let invalid = || EventProjectionError::InvalidField {
+        event_type: event_type.to_owned(),
+        field,
+    };
+    let Some(value) = value else {
+        return Ok(ComposerImages::default());
+    };
+    // A stored message may carry more images than one command accepts; the
+    // composer's limit applies when they are restored, not here.
+    value
+        .as_array()
+        .ok_or_else(invalid)?
+        .iter()
+        .map(|part| AttachedImage::stored(part).ok_or_else(invalid))
+        .collect()
+}
+
+/// Each queued message's stored images, which the backend sends either empty or
+/// aligned one entry per message.
+fn queued_images(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    message_count: usize,
+) -> Result<Vec<ComposerImages>, EventProjectionError> {
+    let Some(images) = value.get(field) else {
+        return Ok(Vec::new());
+    };
+    let entries = images
+        .as_array()
+        .filter(|entries| entries.is_empty() || entries.len() == message_count)
+        .ok_or_else(|| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        })?;
+    entries
+        .iter()
+        .map(|entry| stored_images(Some(entry), event_type, field))
         .collect()
 }
 

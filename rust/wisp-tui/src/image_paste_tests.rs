@@ -132,7 +132,7 @@ async fn pasted_image_path_attaches_the_file() {
     std::fs::write(
         &image,
         base64::engine::general_purpose::STANDARD
-            .decode(png.base64())
+            .decode(png.wire_value().as_str().unwrap())
             .unwrap(),
     )
     .unwrap();
@@ -201,7 +201,7 @@ async fn attach_red_pixels(
 async fn image_only_prompt_sends_the_image() {
     let (mut ui, clipboard) = ui_with_clipboard();
     attach_red_pixels(&mut ui, &clipboard).await;
-    let encoded = ui.images.base64_images();
+    let encoded = ui.images.wire_images();
     let (writer, mut received) = mpsc::channel(8);
 
     ui.handle_input(key(KeyCode::Enter), &writer, MAX_APPLICATION_FRAME_BYTES)
@@ -302,7 +302,7 @@ async fn steering_sends_attached_images() {
         command_type: ActiveCommandType::Prompt,
     });
     attach_red_pixels(&mut ui, &clipboard).await;
-    let encoded = ui.images.base64_images();
+    let encoded = ui.images.wire_images();
     ui.editor.insert_paste("and this");
 
     ui.handle_input(
@@ -470,7 +470,7 @@ async fn refused_image_path_pastes_as_text() {
     std::fs::write(
         &image,
         base64::engine::general_purpose::STANDARD
-            .decode(png.base64())
+            .decode(png.wire_value().as_str().unwrap())
             .unwrap(),
     )
     .unwrap();

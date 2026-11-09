@@ -9,9 +9,21 @@ import pytest
 from pytest import MonkeyPatch
 
 from tests.rpc.execution_support import dispatch_parsed
-from tests.support.rpc import build_rpc_executor_fixture, guard_rpc_command_serialization
+from tests.support.rpc import (
+    build_rpc_executor_fixture,
+    guard_rpc_command_serialization,
+    preserve_running_command,
+    reject_unexpected_command,
+)
 from wisp.agent.harness import QueuedMessages
-from wisp.events import AgentStarted, QueueItemsRemoved, QueueUpdated, RpcCommandFinished
+from wisp.events import (
+    AgentStarted,
+    ImagePart,
+    QueueItemsRemoved,
+    QueueUpdated,
+    RpcCommandFinished,
+    RpcSessionTreeNavigated,
+)
 from wisp.messages import Message
 from wisp.rpc.coordinator import _RpcCommandCompleted, _RpcRunningCommand
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -256,3 +268,42 @@ def test_steer_resolves_reference(tmp_path: Path, monkeypatch: MonkeyPatch, sele
         assert finished.ok is False
         assert (finished.error or "").startswith("Image 1 rejected (not_stored)")
         assert received == []
+
+
+def test_tree_navigation_returns_images(tmp_path: Path) -> None:
+    """Navigating to a user message reports its images for the editor."""
+
+    async def scenario() -> tuple[ImagePart, RpcSessionTreeNavigated]:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        session = fixture.sessions.create()
+        image = await session.store_image(PNG)
+        selected = await session.append_message(
+            Message(role="user", content="look", images=(image,))
+        )
+        await session.append_message(Message(role="assistant", content="a pixel"))
+        fixture.session_state.session = session
+        fixture.session_state.history = session.read_context_messages()
+        fixture.session_state.entry_count = 2
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = await dispatch_parsed(
+                executor,
+                {"id": "navigate", "type": "navigate_session_tree", "entry_id": selected.id},
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            await fixture.coordinator.handle_event(
+                completed,
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+            )
+            task_group.cancel_scope.cancel()
+        return image, next(
+            event for event in fixture.events if isinstance(event, RpcSessionTreeNavigated)
+        )
+
+    image, navigated = anyio.run(scenario)
+
+    assert navigated.editor_text == "look"
+    assert navigated.editor_images == (image,)
