@@ -124,7 +124,8 @@ class ProjectConfigApplied(WispEvent):
 
 # The most edit locations one result carries; a call with more edits reports none.
 MAX_EDIT_LOCATIONS = 256
-_MAX_EDIT_LINE = (1 << 63) - 1
+# The highest line an edit location may name, within every reader's 64-bit range.
+MAX_EDIT_LINE = (1 << 63) - 1
 
 
 class EditLocation(BaseModel):
@@ -138,9 +139,8 @@ class EditLocation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    # Bounded so every reader, including the Rust TUI's 64-bit lines, accepts it.
-    old_line: int = Field(ge=1, le=_MAX_EDIT_LINE)
-    new_line: int = Field(ge=1, le=_MAX_EDIT_LINE)
+    old_line: int = Field(ge=1, le=MAX_EDIT_LINE)
+    new_line: int = Field(ge=1, le=MAX_EDIT_LINE)
 
 
 class _ToolResultEvent(_MessageOriginEvent):
