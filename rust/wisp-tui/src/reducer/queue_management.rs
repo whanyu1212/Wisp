@@ -20,6 +20,9 @@ pub struct Management {
 pub struct Snapshot {
     pub steering: Vec<String>,
     pub follow_up: Vec<String>,
+    /// Image counts aligned like `BackendEvent::QueueUpdated`'s.
+    pub steering_image_counts: Vec<usize>,
+    pub follow_up_image_counts: Vec<usize>,
     pub steering_mode: QueueMode,
     pub follow_up_mode: QueueMode,
     pub token: Option<String>,
@@ -54,7 +57,17 @@ pub(super) fn apply_snapshot(state: &mut UiState, snapshot: Snapshot) {
             state.queue.management.refresh = None;
         }
     }
-    apply_queue_update(state, snapshot.steering, snapshot.follow_up);
+    apply_queue_update(
+        state,
+        super::ReportedMessages {
+            contents: snapshot.steering,
+            images: snapshot.steering_image_counts,
+        },
+        super::ReportedMessages {
+            contents: snapshot.follow_up,
+            images: snapshot.follow_up_image_counts,
+        },
+    );
     state.queue.management.token = snapshot.token;
     state.queue.management.steering_mode = snapshot.steering_mode;
     state.queue.management.follow_up_mode = snapshot.follow_up_mode;

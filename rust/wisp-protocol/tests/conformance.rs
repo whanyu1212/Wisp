@@ -904,11 +904,18 @@ fn command_discovery_and_mode_projections_use_existing_live_contract() {
 
 #[test]
 fn image_commands_attach_or_omit_images() {
-    let images = vec!["aGk=".to_owned()];
+    let stored = serde_json::json!({
+        "media_type": "image/png",
+        "sha256": "a".repeat(64),
+        "byte_size": 4,
+        "width": 1,
+        "height": 1,
+    });
+    let images = vec![serde_json::json!("aGk="), stored.clone()];
     let prompt = commands::WispTypedClientRpcCommands::prompt_with_images("prompt-1", "", &images)
         .expect("image-only prompt");
     let value = serde_json::to_value(&prompt).unwrap();
-    assert_eq!(value["images"], serde_json::json!(["aGk="]));
+    assert_eq!(value["images"], serde_json::json!(["aGk=", stored]));
     assert_eq!(value["prompt"], "");
     for command in [
         commands::WispTypedClientRpcCommands::steer_with_images("steer-1", "x", &images),
@@ -916,7 +923,7 @@ fn image_commands_attach_or_omit_images() {
     ] {
         assert_eq!(
             serde_json::to_value(command.unwrap()).unwrap()["images"],
-            serde_json::json!(["aGk="])
+            serde_json::json!(images)
         );
     }
 
@@ -928,8 +935,18 @@ fn image_commands_attach_or_omit_images() {
             .get("images")
             .is_none()
     );
-    let too_many = vec!["aGk=".to_owned(); 7];
+    let too_many = vec![serde_json::json!("aGk="); 7];
     assert!(
         commands::WispTypedClientRpcCommands::steer_with_images("steer-2", "x", &too_many).is_err()
+    );
+    let mut bad_reference = images[1].clone();
+    bad_reference["sha256"] = serde_json::json!("not-a-digest");
+    assert!(
+        commands::WispTypedClientRpcCommands::follow_up_with_images(
+            "follow-2",
+            "x",
+            &[bad_reference]
+        )
+        .is_err()
     );
 }

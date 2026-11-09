@@ -604,10 +604,15 @@ pub mod commands {
         }
     }
 
-    /// Attach base64 images to a command, leaving the field out when there are none.
+    /// Attach images to a command, leaving the field out when there are none.
     ///
+    /// Each item is a base64-encoded image file or an `ImagePart` reference to an image
+    /// already in the session's store; deserializing the command checks both shapes.
     /// The schema requires at least one image when `images` is present.
-    fn with_images(mut command: serde_json::Value, images: &[String]) -> serde_json::Value {
+    fn with_images(
+        mut command: serde_json::Value,
+        images: &[serde_json::Value],
+    ) -> serde_json::Value {
         if !images.is_empty() {
             command["images"] = serde_json::json!(images);
         }
@@ -721,11 +726,11 @@ pub mod commands {
             Self::prompt_with_images(id, prompt, &[])
         }
 
-        /// Construct one agent-turn request with base64-encoded image files attached.
+        /// Construct one agent-turn request with images attached (see `with_images`).
         pub fn prompt_with_images(
             id: &str,
             prompt: &str,
-            images: &[String],
+            images: &[serde_json::Value],
         ) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(with_images(
                 serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}),
@@ -747,7 +752,7 @@ pub mod commands {
         pub fn steer_with_images(
             id: &str,
             content: &str,
-            images: &[String],
+            images: &[serde_json::Value],
         ) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(with_images(
                 serde_json::json!({"type": "steer", "id": id, "content": content}),
@@ -764,7 +769,7 @@ pub mod commands {
         pub fn follow_up_with_images(
             id: &str,
             content: &str,
-            images: &[String],
+            images: &[serde_json::Value],
         ) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(with_images(
                 serde_json::json!({"type": "follow_up", "id": id, "content": content}),

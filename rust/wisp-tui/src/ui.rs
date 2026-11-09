@@ -4894,6 +4894,8 @@ mod tests {
             crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["steer".into()],
                 follow_up: vec!["later".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -5029,6 +5031,8 @@ mod tests {
             crate::reducer::UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["first\u{1b}[2J\u{202e}spoof".into()],
                 follow_up: vec!["later one".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )

@@ -1007,11 +1007,19 @@ fn queue_lines(
     let number_width = queued.len().min(MAX_QUEUE_ROWS).to_string().len();
     for (index, (kind, message)) in queued.iter().enumerate().take(MAX_QUEUE_ROWS) {
         let lead = format!("{:>number_width$} {kind} ", index + 1);
-        let room = width.saturating_sub(lead.width());
-        lines.push(Line::from(vec![
-            Span::styled(lead, Style::default().fg(palette.secondary)),
-            Span::raw(ui::clip_columns(&first_line(&message.content), room)),
-        ]));
+        let mut room = width.saturating_sub(lead.width());
+        let mut row = vec![Span::styled(lead, Style::default().fg(palette.secondary))];
+        // The image note comes first so a long message cannot clip it away.
+        if let Some(note) = message.image_note() {
+            let note = format!("{note} ");
+            room = room.saturating_sub(note.width());
+            row.push(Span::styled(note, muted));
+        }
+        row.push(Span::raw(ui::clip_columns(
+            &first_line(&message.content),
+            room,
+        )));
+        lines.push(Line::from(row));
     }
     if queued.len() > MAX_QUEUE_ROWS {
         lines.push(Line::styled(
@@ -2183,6 +2191,8 @@ mod tests {
             crate::reducer::BackendEvent::QueueUpdated {
                 steering: steering.iter().map(|&text| text.into()).collect(),
                 follow_up: follow_up.iter().map(|&text| text.into()).collect(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             },
         );
     }

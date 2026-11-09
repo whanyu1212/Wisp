@@ -2910,6 +2910,14 @@
    "event": "rpc.session.tree.navigated",
    "operation": "remove",
    "path": [
+    "editor_images"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.session.tree.navigated",
+   "operation": "remove",
+   "path": [
     "editor_text"
    ],
    "accepted": true

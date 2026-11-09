@@ -92,6 +92,8 @@ fn queue_view_is_safe_and_navigable_at_supported_sizes() {
         crate::reducer::UiAction::BackendEvent(crate::reducer::BackendEvent::QueueUpdated {
             steering: vec!["你好\n\u{1b}[2J\u{202e}payload".into()],
             follow_up: vec![],
+            follow_up_image_counts: Default::default(),
+            steering_image_counts: Default::default(),
         }),
         &mut crate::SequentialCommandIds::default(),
     )

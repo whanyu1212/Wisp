@@ -4625,6 +4625,14 @@
           "title": "Command Id",
           "type": "string"
         },
+        "editor_images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "title": "Editor Images",
+          "type": "array"
+        },
         "editor_text": {
           "anyOf": [
             {
@@ -4692,6 +4700,7 @@
         "previous_active_leaf_id",
         "active_leaf_id",
         "editor_text",
+        "editor_images",
         "changed",
         "entry_count"
       ],
@@ -8457,6 +8466,7 @@
       "active_leaf_id": "entry-1",
       "changed": true,
       "command_id": "command-1",
+      "editor_images": [],
       "editor_text": null,
       "entry_count": 1,
       "previous_active_leaf_id": null,

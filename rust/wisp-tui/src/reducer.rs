@@ -145,6 +145,46 @@ pub struct SessionDerivation {
     pub entry_count: u32,
     pub selected_entry_id: Option<String>,
     pub selected_prompt: Option<String>,
+    /// The forked prompt's images, by reference into the new session's store.
+    pub selected_images: ComposerImages,
+}
+
+/// A prompt returned to the composer after a session change, such as the message a
+/// fork-to-edit selected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoredDraft {
+    pub text: String,
+    pub images: ComposerImages,
+}
+
+#[cfg(test)]
+impl From<&str> for RestoredDraft {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            images: ComposerImages::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl From<String> for RestoredDraft {
+    fn from(text: String) -> Self {
+        text.as_str().into()
+    }
+}
+
+impl RestoredDraft {
+    /// The draft a session change returns to the composer, if it returns one.
+    fn from_reported(text: Option<String>, images: ComposerImages) -> Option<Self> {
+        if text.is_none() && images.is_empty() {
+            return None;
+        }
+        Some(Self {
+            text: text.unwrap_or_default(),
+            images,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +201,7 @@ pub struct SessionTreeNavigation {
     pub previous_active_leaf_id: Option<String>,
     pub active_leaf_id: Option<String>,
     pub editor_text: Option<String>,
+    pub editor_images: ComposerImages,
     pub changed: bool,
     pub entry_count: u32,
 }
@@ -359,7 +400,7 @@ pub enum SessionOperation {
     HydratingSelection {
         command_id: String,
         selected: SessionIdentity,
-        restore_editor_text: Option<String>,
+        restore_draft: Option<RestoredDraft>,
         committed_operation: &'static str,
         report: Option<SessionMessages>,
         loaded: Option<HistoryHydration>,
@@ -527,9 +568,22 @@ pub struct PendingApproval {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedMessage {
     pub content: String,
+    /// How many images the message carries; the backend holds the images themselves.
+    pub image_count: usize,
     pub local_order: Option<u64>,
     local_display: Option<String>,
     identity: u64,
+}
+
+impl QueuedMessage {
+    /// A short note such as `[2 images]` for queue rows, when the message has images.
+    pub(crate) fn image_note(&self) -> Option<String> {
+        match self.image_count {
+            0 => None,
+            1 => Some("[1 image]".into()),
+            count => Some(format!("[{count} images]")),
+        }
+    }
 }
 
 /// Authoritative queue contents plus local identity and ordering metadata.
@@ -556,17 +610,25 @@ impl QueueState {
         }
     }
 
-    fn replace(&mut self, kind: QueueKind, contents: Vec<String>) -> Vec<u64> {
+    /// Replace one queue with the backend's contents; `image_counts` is empty or
+    /// aligned with `contents`.
+    fn replace(
+        &mut self,
+        kind: QueueKind,
+        contents: Vec<String>,
+        image_counts: Vec<usize>,
+    ) -> Vec<u64> {
         let previous = std::mem::take(self.messages_mut(kind));
         let mut previous = previous.into_iter().map(Some).collect::<Vec<_>>();
         let mut replacement = Vec::with_capacity(contents.len());
         let mut new_identities = Vec::new();
+        let image_counts = image_counts.into_iter().chain(std::iter::repeat(0));
 
-        for content in contents {
+        for (content, image_count) in contents.into_iter().zip(image_counts) {
             if let Some(index) = previous.iter().position(|message| {
-                message
-                    .as_ref()
-                    .is_some_and(|message| message.content == content)
+                message.as_ref().is_some_and(|message| {
+                    message.content == content && message.image_count == image_count
+                })
             }) {
                 replacement.push(previous[index].take().expect("matched queue item exists"));
             } else {
@@ -577,6 +639,7 @@ impl QueueState {
                     .expect("queue item identity exhausted");
                 replacement.push(QueuedMessage {
                     content,
+                    image_count,
                     local_order: None,
                     local_display: None,
                     identity,
@@ -675,6 +738,9 @@ pub enum QueueRemovalOperation {
 struct PendingQueueSubmission {
     kind: QueueKind,
     content: String,
+    // Kept until the backend accepts the message, so a rejected one returns to the
+    // composer with its images as well as its text.
+    images: ComposerImages,
     local_display: Option<String>,
     local_order: u64,
     observed_queue_update: bool,
@@ -687,6 +753,7 @@ struct PendingQueueRestore {
     kind: QueueKind,
     removal_received: bool,
     removed_content: Option<String>,
+    removed_images: ComposerImages,
     completion: Option<bool>,
 }
 
@@ -924,12 +991,11 @@ impl UiState {
         self.editor_editable() && self.current_command.is_some()
     }
 
-    pub(crate) fn queue_restore_candidate(&self) -> Option<(QueueKind, &str)> {
+    pub(crate) fn queue_restore_candidate(&self) -> Option<(QueueKind, &QueuedMessage)> {
         self.pending_queue_restore
             .is_none()
             .then(|| self.queue.newest())
             .flatten()
-            .map(|(kind, message)| (kind, message.content.as_str()))
     }
 
     pub(crate) fn queue_submission_preflight(
@@ -1233,6 +1299,10 @@ pub enum BackendEvent {
     QueueUpdated {
         steering: Vec<String>,
         follow_up: Vec<String>,
+        /// Each message's image count, aligned with `steering` / `follow_up`; empty
+        /// when none of them carries images.
+        steering_image_counts: Vec<usize>,
+        follow_up_image_counts: Vec<usize>,
     },
     QueueSnapshot(queue_management::Snapshot),
     QueueItemsRemoved {
@@ -1241,6 +1311,10 @@ pub enum BackendEvent {
         kind: Option<QueueKind>,
         steering: Vec<String>,
         follow_up: Vec<String>,
+        /// Each removed message's images, aligned with `steering` / `follow_up`;
+        /// empty when none of them carries images.
+        steering_images: Vec<ComposerImages>,
+        follow_up_images: Vec<ComposerImages>,
     },
     QueueMessageInjected {
         kind: QueueKind,
@@ -1464,6 +1538,7 @@ pub enum UiEffect {
     RestoreDraft {
         content: String,
         local_order: Option<u64>,
+        images: ComposerImages,
     },
     SessionCatalogStarted(String),
     SessionCatalogFailed {
@@ -1481,7 +1556,10 @@ pub enum UiEffect {
         append: bool,
     },
     CloseSessionTree,
-    RestoreSessionDraft(String),
+    RestoreSessionDraft(RestoredDraft),
+    /// Remove attached images held by reference, which the newly selected session's
+    /// image store may not have.
+    DropStoredImages,
     SendCommittedHydration {
         command: WispTypedClientRpcCommands,
         session_id: String,
@@ -1776,7 +1854,7 @@ fn submit(
     }
     let id = ids.next_id(CommandKind::Prompt);
     let command =
-        WispTypedClientRpcCommands::prompt_with_images(&id, &content, &images.base64_images())?;
+        WispTypedClientRpcCommands::prompt_with_images(&id, &content, &images.wire_images())?;
     state.last_command_error = None;
     state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
@@ -1891,7 +1969,7 @@ fn queue_submission(
         QueueKind::Steering => CommandKind::Steer,
         QueueKind::FollowUp => CommandKind::FollowUp,
     });
-    let encoded = images.base64_images();
+    let encoded = images.wire_images();
     let command = match kind {
         QueueKind::Steering => {
             WispTypedClientRpcCommands::steer_with_images(&id, &content, &encoded)?
@@ -1910,6 +1988,7 @@ fn queue_submission(
         PendingQueueSubmission {
             kind,
             content,
+            images: images.clone(),
             local_display,
             local_order,
             observed_queue_update: false,
@@ -1973,6 +2052,7 @@ fn restore_queue_draft(
         kind,
         removal_received: false,
         removed_content: None,
+        removed_images: ComposerImages::default(),
         completion: None,
     });
     Ok(vec![
@@ -2991,15 +3071,24 @@ fn capture_session_completion(
     SessionCapture::Captured
 }
 
+fn image_store_directory(session: &SessionIdentity) -> Option<&std::path::Path> {
+    std::path::Path::new(&session.session_path).parent()
+}
+
 fn commit_session_and_hydrate(
     state: &mut UiState,
     selected: SessionIdentity,
-    restore_editor_text: Option<String>,
+    restore_draft: Option<RestoredDraft>,
     committed_operation: &'static str,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     let id = ids.next_id(CommandKind::GetMessages);
     let command = WispTypedClientRpcCommands::get_messages(&id, Some(&selected.session_id))?;
+    // Images restored by reference resolve only in the image store beside the session
+    // files, which a session in another directory does not share.
+    let image_store_changed = state.selected_session.as_ref().is_some_and(|previous| {
+        image_store_directory(previous) != image_store_directory(&selected)
+    });
     state.context.invalidate();
     state.selected_session = Some(selected.clone());
     state.last_session = Some(selected.session_id.clone());
@@ -3015,7 +3104,7 @@ fn commit_session_and_hydrate(
     state.session_operation = Some(SessionOperation::HydratingSelection {
         command_id: id,
         selected: selected.clone(),
-        restore_editor_text,
+        restore_draft,
         committed_operation,
         report: None,
         loaded: None,
@@ -3029,6 +3118,9 @@ fn commit_session_and_hydrate(
         },
         queue_state_effect(state, ids)?,
     ];
+    if image_store_changed {
+        effects.push(UiEffect::DropStoredImages);
+    }
     // Leaving a session ends its grants, a session-only YOLO among them.
     effects.extend(discovery::permissions(state, None, ids)?);
     effects.push(UiEffect::RequestRender);
@@ -3276,7 +3368,7 @@ fn finish_session_operation(
         SessionOperation::HydratingSelection {
             command_id,
             selected,
-            restore_editor_text,
+            restore_draft,
             committed_operation,
             report,
             loaded,
@@ -3285,7 +3377,7 @@ fn finish_session_operation(
             state,
             command_id,
             selected,
-            restore_editor_text,
+            restore_draft,
             committed_operation,
             report,
             loaded,
@@ -3619,7 +3711,7 @@ fn finish_hydration(
     state: &mut UiState,
     command_id: String,
     selected: SessionIdentity,
-    restore_editor_text: Option<String>,
+    restore_draft: Option<RestoredDraft>,
     committed_operation: &'static str,
     report: Option<SessionMessages>,
     loaded: Option<HistoryHydration>,
@@ -3661,7 +3753,7 @@ fn finish_hydration(
                 state.session_operation = Some(SessionOperation::HydratingSelection {
                     command_id: id,
                     selected: selected.clone(),
-                    restore_editor_text,
+                    restore_draft,
                     committed_operation,
                     report: None,
                     loaded: Some(hydration),
@@ -3686,8 +3778,8 @@ fn finish_hydration(
             install_history_snapshot(state, report);
             state.input_ready = true;
             let mut effects = vec![UiEffect::ReplaceTranscript];
-            if let Some(text) = restore_editor_text {
-                effects.push(UiEffect::RestoreSessionDraft(text));
+            if let Some(draft) = restore_draft {
+                effects.push(UiEffect::RestoreSessionDraft(draft));
             }
             effects.push(UiEffect::RequestRender);
             Ok(effects)
@@ -3696,7 +3788,7 @@ fn finish_hydration(
             state.session_operation = Some(SessionOperation::HydratingSelection {
                 command_id,
                 selected,
-                restore_editor_text,
+                restore_draft,
                 committed_operation,
                 report,
                 loaded,
@@ -3883,7 +3975,7 @@ fn finish_fork(
         (Some(derived), Some(_)) => commit_session_and_hydrate(
             state,
             derived.session,
-            derived.selected_prompt,
+            RestoredDraft::from_reported(derived.selected_prompt, derived.selected_images),
             "Session fork",
             ids,
         ),
@@ -4028,8 +4120,10 @@ fn finish_tree_navigation(
         (Some(navigation), Some(_)) if !navigation.changed => {
             state.input_ready = true;
             let mut effects = Vec::new();
-            if let Some(text) = navigation.editor_text {
-                effects.push(UiEffect::RestoreSessionDraft(text));
+            if let Some(draft) =
+                RestoredDraft::from_reported(navigation.editor_text, navigation.editor_images)
+            {
+                effects.push(UiEffect::RestoreSessionDraft(draft));
             }
             effects.push(UiEffect::RequestRender);
             Ok(effects)
@@ -4043,7 +4137,7 @@ fn finish_tree_navigation(
             commit_session_and_hydrate(
                 state,
                 selected,
-                navigation.editor_text,
+                RestoredDraft::from_reported(navigation.editor_text, navigation.editor_images),
                 "Session tree navigation",
                 ids,
             )
@@ -4145,7 +4239,13 @@ fn finish_new_session(
             clear_queue_cache(state);
             state.history_request = None;
             state.input_ready = true;
-            let mut effects = vec![UiEffect::ReplaceTranscript, queue_state_effect(state, ids)?];
+            // The new session's directory is not known yet, so its image store may not
+            // hold images restored from the one just left.
+            let mut effects = vec![
+                UiEffect::ReplaceTranscript,
+                queue_state_effect(state, ids)?,
+                UiEffect::DropStoredImages,
+            ];
             // Leaving a session ends its grants, a session-only YOLO among them.
             effects.extend(discovery::permissions(state, None, ids)?);
             effects.push(UiEffect::RequestRender);
@@ -4690,9 +4790,26 @@ fn apply_exact_detail(
     vec![UiEffect::OpenExactDetail(target), UiEffect::RequestRender]
 }
 
-fn apply_queue_update(state: &mut UiState, steering: Vec<String>, follow_up: Vec<String>) {
-    let mut new_steering = state.queue.replace(QueueKind::Steering, steering);
-    let mut new_follow_up = state.queue.replace(QueueKind::FollowUp, follow_up);
+/// One queue's messages as the backend reports them, with per-message image data
+/// (counts or the images themselves) that is empty or aligned with `contents`.
+pub(crate) struct ReportedMessages<T> {
+    pub contents: Vec<String>,
+    pub images: Vec<T>,
+}
+
+fn apply_queue_update(
+    state: &mut UiState,
+    steering: ReportedMessages<usize>,
+    follow_up: ReportedMessages<usize>,
+) {
+    let mut new_steering =
+        state
+            .queue
+            .replace(QueueKind::Steering, steering.contents, steering.images);
+    let mut new_follow_up =
+        state
+            .queue
+            .replace(QueueKind::FollowUp, follow_up.contents, follow_up.images);
     let mut pending = state
         .pending_queue_submissions
         .iter()
@@ -4757,6 +4874,7 @@ fn finish_pending_queue_restore(state: &mut UiState) -> Vec<UiEffect> {
         .map(|content| UiEffect::RestoreDraft {
             content,
             local_order: None,
+            images: pending.removed_images,
         })
         .into_iter()
         .collect::<Vec<_>>()
@@ -4767,8 +4885,8 @@ fn handle_queue_items_removed(
     command_id: String,
     operation: QueueRemovalOperation,
     kind: Option<QueueKind>,
-    steering: Vec<String>,
-    follow_up: Vec<String>,
+    steering: ReportedMessages<ComposerImages>,
+    follow_up: ReportedMessages<ComposerImages>,
 ) -> Vec<UiEffect> {
     if operation == QueueRemovalOperation::Clear {
         for queue_kind in [QueueKind::Steering, QueueKind::FollowUp] {
@@ -4796,10 +4914,12 @@ fn handle_queue_items_removed(
         }
         pending.kind
     };
-    let removed_content = match pending_kind {
-        QueueKind::Steering => steering.into_iter().next(),
-        QueueKind::FollowUp => follow_up.into_iter().next(),
+    let removed = match pending_kind {
+        QueueKind::Steering => steering,
+        QueueKind::FollowUp => follow_up,
     };
+    let removed_content = removed.contents.into_iter().next();
+    let removed_images = removed.images.into_iter().next().unwrap_or_default();
     if let Some(content) = removed_content.as_deref() {
         state.queue.remove_last(pending_kind, content);
     }
@@ -4809,6 +4929,7 @@ fn handle_queue_items_removed(
         .expect("checked pending queue restore");
     pending.removal_received = true;
     pending.removed_content = removed_content;
+    pending.removed_images = removed_images;
     finish_pending_queue_restore(state)
 }
 
@@ -4831,6 +4952,7 @@ fn handle_queue_command_finished(
         }
         pending.completion = Some(ok);
         let content = pending.content.clone();
+        let images = std::mem::take(&mut pending.images);
         let local_order = pending.local_order;
         let observed = pending.observed_queue_update;
         if !ok || observed {
@@ -4842,6 +4964,7 @@ fn handle_queue_command_finished(
             vec![UiEffect::RestoreDraft {
                 content,
                 local_order: Some(local_order),
+                images,
             }]
         });
     }
@@ -5267,8 +5390,20 @@ fn handle_backend_event(
         BackendEvent::QueueUpdated {
             steering,
             follow_up,
+            steering_image_counts,
+            follow_up_image_counts,
         } => {
-            apply_queue_update(state, steering, follow_up);
+            apply_queue_update(
+                state,
+                ReportedMessages {
+                    contents: steering,
+                    images: steering_image_counts,
+                },
+                ReportedMessages {
+                    contents: follow_up,
+                    images: follow_up_image_counts,
+                },
+            );
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::QueueItemsRemoved {
@@ -5277,8 +5412,21 @@ fn handle_backend_event(
             kind,
             steering,
             follow_up,
+            steering_images,
+            follow_up_images,
         } => Ok(handle_queue_items_removed(
-            state, command_id, operation, kind, steering, follow_up,
+            state,
+            command_id,
+            operation,
+            kind,
+            ReportedMessages {
+                contents: steering,
+                images: steering_images,
+            },
+            ReportedMessages {
+                contents: follow_up,
+                images: follow_up_images,
+            },
         )),
         BackendEvent::QueueMessageInjected {
             kind,
@@ -5739,6 +5887,7 @@ mod tests {
             | UiEffect::ShowSessionTreePage { .. }
             | UiEffect::CloseSessionTree
             | UiEffect::RestoreSessionDraft(_)
+            | UiEffect::DropStoredImages
             | UiEffect::ReplaceTranscript
             | UiEffect::ReanchorTranscript { .. }
             | UiEffect::HistoryWindowChanged { .. }
@@ -8315,6 +8464,7 @@ mod tests {
             entry_count: 2,
             selected_entry_id: None,
             selected_prompt: None,
+            selected_images: Default::default(),
         }
     }
 
@@ -8384,6 +8534,80 @@ mod tests {
     }
 
     #[test]
+    fn fork_restores_prompt_images() {
+        let image = composer_images::AttachedImage::stored(&serde_json::json!({
+            "media_type": "image/png", "sha256": "a".repeat(64),
+            "byte_size": 4, "width": 1, "height": 1,
+        }))
+        .unwrap();
+        // The fork lands in the same directory, so its store is the source's.
+        for (target_path, drops_references) in [
+            ("/sessions/fork.jsonl", false),
+            ("/elsewhere/fork.jsonl", true),
+        ] {
+            let mut state = UiState::unconfigured();
+            state.selected_session = Some(session("source"));
+            state.history.session = Some(session("source"));
+            state.history.active_leaf_id = Some("source-leaf".into());
+            let mut ids = DeterministicIds::default();
+            reduce(
+                &mut state,
+                UiAction::ForkSession {
+                    entry_id: "user-2".into(),
+                },
+                &mut ids,
+            )
+            .unwrap();
+            let mut forked = derivation("source", "fork");
+            forked.session.session_path = target_path.into();
+            forked.selected_entry_id = Some("user-2".into());
+            forked.selected_prompt = Some(String::new());
+            forked.selected_images = std::iter::once(image.clone()).collect();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("fork_session-1", "fork_session", true)),
+                &mut ids,
+            )
+            .unwrap();
+            let committed = reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::SessionForked {
+                    command_id: "fork_session-1".into(),
+                    derived: forked,
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(
+                committed
+                    .iter()
+                    .any(|effect| matches!(effect, UiEffect::DropStoredImages)),
+                drops_references,
+                "{target_path}"
+            );
+            let mut fork = session("fork");
+            fork.session_path = target_path.into();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(history("get_messages-1", Some(fork), "forked")),
+                &mut ids,
+            )
+            .unwrap();
+            let hydrated = reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_messages-1", "get_messages", true)),
+                &mut ids,
+            )
+            .unwrap();
+            assert!(hydrated.iter().any(|effect| matches!(
+                effect,
+                UiEffect::RestoreSessionDraft(RestoredDraft { text, images })
+                    if text.is_empty() && images.iter().eq([&image])
+            )));
+        }
+    }
+
+    #[test]
     fn fork_and_navigation_restore_prompts_only_after_authoritative_hydration() {
         let mut state = UiState::unconfigured();
         state.selected_session = Some(session("source"));
@@ -8437,7 +8661,7 @@ mod tests {
         .unwrap();
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiEffect::RestoreSessionDraft(text) if text == "restore me\u{1b}[31m"
+            UiEffect::RestoreSessionDraft(RestoredDraft { text, .. }) if text == "restore me\u{1b}[31m"
         )));
         assert_eq!(
             state
@@ -8475,6 +8699,7 @@ mod tests {
                     editor_text: Some("edit again".into()),
                     changed: true,
                     entry_count: 4,
+                    editor_images: Default::default(),
                 },
             }),
             &mut ids,
@@ -8504,7 +8729,7 @@ mod tests {
         .unwrap();
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiEffect::RestoreSessionDraft(text) if text == "edit again"
+            UiEffect::RestoreSessionDraft(RestoredDraft { text, .. }) if text == "edit again"
         )));
     }
 
@@ -8651,6 +8876,7 @@ mod tests {
                     editor_text: None,
                     changed: true,
                     entry_count: 3,
+                    editor_images: Default::default(),
                 },
             }),
             &mut ids,
@@ -8753,6 +8979,7 @@ mod tests {
                     editor_text: Some("edit me".into()),
                     changed: false,
                     entry_count: 2,
+                    editor_images: Default::default(),
                 },
             }),
             &mut ids,
@@ -8763,7 +8990,7 @@ mod tests {
         assert!(state.session_operation.is_none());
         assert!(effects.iter().any(|effect| matches!(
             effect,
-            UiEffect::RestoreSessionDraft(text) if text == "edit me"
+            UiEffect::RestoreSessionDraft(RestoredDraft { text, .. }) if text == "edit me"
         )));
         assert!(
             effects
@@ -8782,7 +9009,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             updated,
-            BackendEvent::QueueUpdated { steering, follow_up }
+            BackendEvent::QueueUpdated { steering, follow_up, ..  }
                 if steering == ["first", "duplicate"] && follow_up == ["duplicate"]
         ));
 
@@ -8909,6 +9136,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["first".into(), "duplicate".into(), "duplicate".into()],
                 follow_up: vec!["follow-up".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -8925,6 +9154,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["duplicate".into(), "first".into(), "duplicate".into()],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -8952,6 +9183,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["duplicate".into(), "duplicate".into()],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9020,6 +9253,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: vec!["duplicate".into(); queued_count],
                     follow_up: Vec::new(),
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &mut ids,
             )
@@ -9081,6 +9316,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: Vec::new(),
                 follow_up: vec!["raw queued".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9146,6 +9383,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: Vec::new(),
                 follow_up: vec!["accepted raw".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut combined_ids,
         )
@@ -9236,6 +9475,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: Vec::new(),
                 follow_up: vec!["queued raw".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9253,6 +9494,8 @@ mod tests {
                 kind: None,
                 steering: Vec::new(),
                 follow_up: Vec::new(),
+                follow_up_images: Vec::new(),
+                steering_images: Vec::new(),
             }),
             &mut ids,
         )
@@ -9300,6 +9543,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: Vec::new(),
                 follow_up: vec!["older follow-up".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9315,6 +9560,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["newer steering".into()],
                 follow_up: vec!["older follow-up".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9345,7 +9592,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             effects.as_slice(),
-            [UiEffect::RestoreDraft { content, local_order: Some(0) }] if content == "saved draft"
+            [UiEffect::RestoreDraft { content, local_order: Some(0), .. }] if content == "saved draft"
         ));
         assert!(state.pending_queue_submissions.is_empty());
     }
@@ -9359,6 +9606,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["steering".into()],
                 follow_up: vec!["follow-up".into()],
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut fallback_ids,
         )
@@ -9379,6 +9628,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: Vec::new(),
                     follow_up: vec!["draft".into()],
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &mut ids,
             )
@@ -9392,6 +9643,8 @@ mod tests {
                 kind: Some(QueueKind::FollowUp),
                 steering: Vec::new(),
                 follow_up: vec!["draft".into()],
+                follow_up_images: Vec::new(),
+                steering_images: Vec::new(),
             };
             let finished = finished("pop_queue-1", "pop_queue", true);
             let (first, second) = if removal_first {
@@ -9407,7 +9660,7 @@ mod tests {
             let effects = reduce(&mut state, UiAction::BackendEvent(second), &mut ids).unwrap();
             assert!(matches!(
                 effects.as_slice(),
-                [UiEffect::RestoreDraft { content, local_order: None }] if content == "draft"
+                [UiEffect::RestoreDraft { content, local_order: None, .. }] if content == "draft"
             ));
             assert!(state.pending_queue_restore.is_none());
         }
@@ -9422,6 +9675,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["steering".into()],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9437,6 +9692,8 @@ mod tests {
                     kind: Some(QueueKind::Steering),
                     steering: vec!["steering".into()],
                     follow_up: Vec::new(),
+                    follow_up_images: Vec::new(),
+                    steering_images: Vec::new(),
                 }),
                 &mut ids,
             )
@@ -9479,6 +9736,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["x".into(); QUEUE_MESSAGE_LIMIT - 2],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9508,6 +9767,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["x".repeat(QUEUE_CONTENT_BYTES_LIMIT - 1)],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9534,6 +9795,8 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueUpdated {
                 steering: vec!["duplicate".into(), "between".into(), "duplicate".into()],
                 follow_up: Vec::new(),
+                follow_up_image_counts: Vec::new(),
+                steering_image_counts: Vec::new(),
             }),
             &mut ids,
         )
@@ -9549,6 +9812,8 @@ mod tests {
                 kind: Some(QueueKind::Steering),
                 steering: vec!["duplicate".into()],
                 follow_up: Vec::new(),
+                follow_up_images: Vec::new(),
+                steering_images: Vec::new(),
             }),
             &mut ids,
         )
@@ -9592,6 +9857,8 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueUpdated {
                     steering: vec!["stale".into()],
                     follow_up: vec!["stale follow-up".into()],
+                    follow_up_image_counts: Vec::new(),
+                    steering_image_counts: Vec::new(),
                 }),
                 &mut ids,
             )
@@ -9834,7 +10101,7 @@ mod tests {
                     assert_eq!(command["before_entry_id"], format!("entry-{start}"));
                     assert_eq!(command["limit"], 200);
                 } else if selecting {
-                    assert!(effects.iter().any(|effect| matches!(effect, UiEffect::RestoreSessionDraft(text) if text == "draft")));
+                    assert!(effects.iter().any(|effect| matches!(effect, UiEffect::RestoreSessionDraft(RestoredDraft { text, .. }) if text == "draft")));
                 }
                 end = start;
                 request += 1;
@@ -10229,6 +10496,12 @@ mod tests {
         assert!(effects.iter().any(|effect| {
             command_value(effect).is_some_and(|command| command["type"] == "get_queue_state")
         }));
+        // Images restored from the old session may not be in the new one's store.
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::DropStoredImages))
+        );
     }
 
     fn connection_catalog(label: &str, source: &str) -> ConnectionCatalogSnapshot {
@@ -12015,6 +12288,7 @@ mod tests {
                 editor_text: Some("draft".into()),
                 changed,
                 entry_count: 3,
+                editor_images: Default::default(),
             },
         }
     }
@@ -12207,7 +12481,7 @@ mod tests {
         assert!(state.session_operation.is_none());
         assert!(matches!(
             effects.as_slice(),
-            [UiEffect::RestoreSessionDraft(text), UiEffect::RequestRender] if text == "draft"
+            [UiEffect::RestoreSessionDraft(RestoredDraft { text, .. }), UiEffect::RequestRender] if text == "draft"
         ));
     }
 

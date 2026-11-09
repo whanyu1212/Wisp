@@ -322,6 +322,8 @@ class RpcSessionTreeNavigated(WispEvent):
     previous_active_leaf_id: str | None = Field(default=None, min_length=1)
     active_leaf_id: str | None = Field(default=None, min_length=1)
     editor_text: str | None = None
+    # The selected user message's images, by reference into the session's store.
+    editor_images: tuple[ImagePart, ...] = ()
     changed: bool
     entry_count: int = Field(ge=0)
 

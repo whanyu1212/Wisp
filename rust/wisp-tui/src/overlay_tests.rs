@@ -1778,6 +1778,7 @@ async fn effects_request_a_frame() {
             UiEffect::RestoreDraft {
                 content: "queued".into(),
                 local_order: None,
+                images: Default::default(),
             },
         ),
         (

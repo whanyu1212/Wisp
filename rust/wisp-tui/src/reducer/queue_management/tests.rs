@@ -30,6 +30,8 @@ fn snapshot(token: &str, command: Option<&str>) -> Snapshot {
         follow_up_mode: QueueMode::All,
         token: Some(token.into()),
         command_id: command.map(str::to_owned),
+        follow_up_image_counts: Default::default(),
+        steering_image_counts: Default::default(),
     }
 }
 
