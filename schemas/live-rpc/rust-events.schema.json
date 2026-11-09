@@ -3216,6 +3216,18 @@
           "default": null,
           "title": "RpcMessageToolResultSnapshotSummary"
         },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotTarget"
+        },
         "truncated": {
           "default": false,
           "title": "RpcMessageToolResultSnapshotTruncated",
@@ -3232,7 +3244,8 @@
         "truncated",
         "duration_ms",
         "process_started_at",
-        "process_ended_at"
+        "process_ended_at",
+        "target"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"

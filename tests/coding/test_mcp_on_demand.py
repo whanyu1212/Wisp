@@ -195,6 +195,27 @@ def test_proxied_call_runs_target(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("exposure", "tool", "arguments", "target"),
+    [
+        ("on_demand", MCP_CALL, {"name": "mcp__db__query", "arguments": {}}, "mcp__db__query"),
+        ("direct", "mcp__db__query", {}, None),
+    ],
+    ids=["proxied", "direct"],
+)
+def test_saved_result_keeps_target(
+    tmp_path: Path, exposure: str, tool: str, arguments: dict[str, object], target: str | None
+) -> None:
+    _run(tmp_path, _Tools(), [_call(tool, **arguments)], exposure=exposure)
+
+    session = JsonlSessionStore(tmp_path / "sessions").latest()
+    (saved,) = [
+        message for message in session.read_message_page().messages if message.role == "tool"
+    ]
+    assert saved.tool_name == tool
+    assert saved.tool_result is not None and saved.tool_result.target == target
+
+
+@pytest.mark.parametrize(
     ("name", "failure_code"),
     [
         ("bash", "policy_denied"),

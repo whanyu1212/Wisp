@@ -51,6 +51,8 @@ class RpcMessageToolResultSnapshot(BaseModel):
     duration_ms: int | None = Field(default=None, ge=0)
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
+    # The MCP tool a proxied `mcp_call` ran; None for every other call.
+    target: str | None = None
 
 
 class RpcSkillInvocationSnapshot(BaseModel):

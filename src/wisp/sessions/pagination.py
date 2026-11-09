@@ -425,6 +425,7 @@ def _rpc_tool_result_snapshot(
             duration_ms=tool_result.duration_ms,
             process_started_at=tool_result.process_started_at,
             process_ended_at=tool_result.process_ended_at,
+            target=tool_result.target,
         ),
         projection_truncated,
     )

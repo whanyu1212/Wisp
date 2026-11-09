@@ -19,6 +19,8 @@ this policy.
   (`mcp_call`, see MCP below) it names the MCP tool that runs, while `name` stays `mcp_call`. It is
   `null` for every other call. The schema bundle and conformance fixture are regenerated; the
   same-release rule applies.
+  Sessions save the target with a proxied call's result (an optional field, so no
+  `schema_version` change), and `rpc.messages` snapshots carry it as `tool_result.target`.
 
 - `agent.started` gains an optional `setup` (`RunSetup`): the names of the tools offered to the
   model, in offered order, and SHA-256 hashes of the tool specs and of the system messages the run
@@ -37,9 +39,9 @@ this policy.
   tokens per run by 76–77% on a multi-step task with a 102-tool catalog and by 28–46% with 50 small
   tools, with every run still passing; with 6 tools it cost 20–34% more, so it stays off by default.
   A call missing a required parameter is refused before approval; types are left to the server.
-- In the TUI, a running session's `mcp_call` card shows the MCP tool it runs and that tool's own
-  arguments, as a direct call's card does, once the backend has resolved the call. Resumed sessions
-  still show `mcp_call`: saved calls do not record the tool they ran.
+- In the TUI, an `mcp_call` card shows the MCP tool it runs and that tool's own arguments, as a
+  direct call's card does, once the backend has resolved the call, in resumed sessions too. A call
+  interrupted before its result, or split across two history pages, still shows `mcp_call`.
 
 ### CLI
 
