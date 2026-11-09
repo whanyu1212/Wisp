@@ -229,7 +229,11 @@ def _for_image_support(message: Message, *, takes_images: bool) -> Message:
 
 
 class ImageInputUnsupportedError(ValueError):
-    """New images were attached for a model that does not take image input."""
+    """New images that this session's model or provider request cannot carry.
+
+    Raised before anything is stored when the model does not take images, or
+    when one message's images alone exceed the provider's per-request budget.
+    """
 
 
 async def _store_images(session: JsonlSession, images: Sequence[bytes]) -> tuple[ImagePart, ...]:
@@ -547,7 +551,7 @@ class CodingSession:
     ) -> QueueUpdated:
         harness = self._active_queue_harness()
         if images:
-            self._require_image_input()
+            self._require_image_input(images)
         stored_images = await _store_images(self._active_run_session(), images) if images else ()
         message = await self._prepare_user_message(
             content, images=stored_images, image_bytes=images
@@ -726,14 +730,26 @@ class CodingSession:
         model = self.model or self.provider.default_model
         return model is not None and self.models.supports_image_input(self.provider.name, model)
 
-    def _require_image_input(self) -> None:
-        """Refuse new images before anything is stored when the model cannot see them."""
+    def _require_image_input(self, images: Sequence[bytes]) -> None:
+        """Refuse new images before anything is stored when no request could carry them.
 
+        Older images in history are trimmed to fit the request budget, but a new
+        message's own images must all reach the model, so a set larger than the
+        budget is refused rather than sent to a provider that would reject it.
+        """
+
+        model = self.model or self.provider.default_model
         if not self._model_takes_images():
-            model = self.model or self.provider.default_model
             raise ImageInputUnsupportedError(
                 f"{self.provider.name} model {model!r} does not accept images; "
                 "switch to a model that does, or send text only"
+            )
+        total = sum(len(image) for image in images)
+        budget = provider_image_request_byte_budget(self.provider)
+        if total > budget:
+            raise ImageInputUnsupportedError(
+                f"The attached images total {total} bytes; one {self.provider.name} request "
+                f"carries at most {budget} bytes of images. Attach fewer or smaller images"
             )
 
     async def _with_image_bytes(
@@ -924,7 +940,7 @@ class CodingSession:
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
         if images:
-            self._require_image_input()
+            self._require_image_input(images)
         session = session or self.sessions.create()
         assert session is not None
         user_message = await self._prepare_user_message(

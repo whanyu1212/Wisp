@@ -257,3 +257,24 @@ def test_queued_images_follow_model(tmp_path: Path) -> None:
     ]
     assert queued.images is not None
     assert queued.image_bytes is None
+
+
+def test_oversized_prompt_images_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new message's own images must fit one request; they are not trimmed."""
+
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    provider = _answers(1)
+    monkeypatch.setattr(provider, "max_request_image_bytes", len(PNG), raising=False)
+    agent = CodingSession(provider=provider, sessions=store)
+
+    async def run() -> None:
+        async for _ in agent.run("look", images=[PNG, JPEG], session=session):
+            pass
+
+    with pytest.raises(ImageInputUnsupportedError, match="Attach fewer or smaller images"):
+        anyio.run(run)
+
+    assert provider.calls == []
+    assert not session.path.exists()
+    assert not session.images.directory.exists()
