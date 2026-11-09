@@ -19,6 +19,24 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 Change behavior at the narrowest layer that can express it. Do not add a frontend-specific agent
 loop or move runtime behavior into an adapter.
 
+## Finding code
+
+Start from each layer's entry module under `src/wisp/`:
+
+- `agent/harness/runner.py` for the transcript and queues across runs, then `agent/loop/runner.py`
+  for one run. Each package keeps its configuration in `config.py`.
+- `coding/session.py` for `CodingSession`; prompt assembly lives in `coding/prompt/`.
+- `sessions/jsonl.py` for session persistence, with durable file handling in `sessions/file_io.py`.
+- `rpc/host.py`, then `rpc/coordinator.py` and `rpc/execution.py`, for the RPC command host.
+- `config/runtime.py` for `WispConfig`; `config/settings.py` resolves user and project settings.
+- `trust/records.py` for project trust; `trust/permissions.py` for saved permission modes.
+- `mcp/` for MCP connections, tool adaptation, and on-demand discovery.
+- `events/` for the typed event vocabulary; import from `wisp.events`.
+
+`wisp.messages` holds the provider-neutral message records and sits below `wisp.providers`:
+providers know messages, and the agent knows providers. Import from defining modules rather than
+restoring removed shims such as `wisp.agent.prompt` or `wisp.agent.messages`.
+
 ## Events and persistence
 
 `wisp.events` defines the typed event contract. Events carry no per-event version, and backend and
