@@ -15,6 +15,7 @@ import anyio
 import pytest
 
 from tests.agent.loop.support import tool_call_stream
+from wisp.agent.context_budget import tool_schema_tokens
 from wisp.coding.session import CodingSession, _HarnessLoopState
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
@@ -26,7 +27,9 @@ from wisp.events import (
     ToolResultReady,
     WispEvent,
 )
+from wisp.mcp.config import AUTO_ON_DEMAND_SCHEMA_TOKENS
 from wisp.mcp.discovery import MCP_CALL, MCP_DESCRIBE, MCP_SEARCH, McpCatalog
+from wisp.providers.base import ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -158,6 +161,52 @@ def test_offers_discovery_instead_of_mcp_tools(tmp_path: Path) -> None:
     assert started.setup is not None and list(started.setup.tool_names) == offered
     system = "\n".join(message.content for message in provider.calls[0].messages)
     assert "Drop a table" not in system and "db (2 tools)" in system
+
+
+def _sized_catalog(tokens: int) -> _Tools:
+    """Tools whose two MCP schemas come to exactly ``tokens`` estimated tokens."""
+
+    tools = _Tools()
+    base = tools.query.description
+    padding = 0
+    while (
+        size := sum(
+            tool_schema_tokens(ToolSpec.from_tool(tool)) for tool in (tools.query, tools.drop)
+        )
+    ) < tokens:
+        padding += 1
+        tools.query.description = base + "x" * padding
+    assert size == tokens
+    return tools
+
+
+@pytest.mark.parametrize(
+    ("tokens", "on_demand"),
+    [(AUTO_ON_DEMAND_SCHEMA_TOKENS - 1, False), (AUTO_ON_DEMAND_SCHEMA_TOKENS, True)],
+    ids=["below-threshold", "at-threshold"],
+)
+def test_auto_follows_catalog_size(tmp_path: Path, tokens: int, on_demand: bool) -> None:
+    _, provider = _run(tmp_path, _sized_catalog(tokens), [], exposure="auto")
+
+    offered = [tool.name for tool in provider.calls[0].tools]
+    assert offered == (
+        ["bash", MCP_SEARCH, MCP_DESCRIBE, MCP_CALL]
+        if on_demand
+        else ["bash", "mcp__db__query", "mcp__db__drop_table"]
+    )
+
+
+@pytest.mark.parametrize(("mode", "on_demand"), [("build", True), ("plan", False)])
+def test_auto_judges_the_run_catalog(tmp_path: Path, mode: AgentMode, on_demand: bool) -> None:
+    # The large tool is a command tool, which plan mode leaves out of the catalog.
+    tools = _Tools()
+    tools.drop.description += " " + "x" * 10_000
+
+    _, provider = _run(tmp_path, tools, [], exposure="auto", mode=mode)
+
+    offered = [tool.name for tool in provider.calls[0].tools]
+    assert (MCP_SEARCH in offered) is on_demand
+    assert ("mcp__db__query" in offered) is not on_demand
 
 
 def test_direct_mode_unchanged(tmp_path: Path) -> None:

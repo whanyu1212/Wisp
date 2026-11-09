@@ -11,9 +11,10 @@ from pathlib import Path
 import pytest
 
 from evals.tool_use.runner import _prepare, _run_command, command_environment
-from evals.tool_use.task_definitions import Task, select_tasks
+from evals.tool_use.task_definitions import TASKS_DIR, Task, load_task
 
-_TASKS = select_tasks()
+# Every task folder, opt-in ones too, which a whole-suite selection leaves out.
+_TASKS = tuple(load_task(folder) for folder in sorted(TASKS_DIR.iterdir()) if folder.is_dir())
 
 
 def _verify(task: Task, tmp_path: Path, *, solved: bool, with_home: bool = True) -> int | None:

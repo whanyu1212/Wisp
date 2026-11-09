@@ -37,7 +37,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--budget-tokens` | Stop starting rounds once unpriced runs (Codex subscription) used this many tokens |
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
-| `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead |
+| `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead; `auto`, Wisp's own default, picks one by catalog size |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
 before each round, so a stopped suite has the same number of runs for every pairing.
@@ -145,10 +145,12 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-08-current-tools.json` | All 12 tasks before the `bash` head-and-tail preview (#921) |
 | `2026-11-08-bash-preview.json` | All 12 tasks after it; compare tool changes against this |
 | `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
+| `2026-11-09-mcp-sweep-direct.json`, `2026-11-09-mcp-sweep-on-demand.json` | The `mcp-sweep` tasks, 5 runs each in each mode: the inventory question with 6, 12, 20, 30 and 50 tools |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
-passing in both modes; see [the tools guide](../../site/src/content/pages/guide/tools-and-safety.md#what-on-demand-discovery-saves).
+passing in both modes. On the one-question sweep it broke even at about 20 small tools, which placed
+the `auto` threshold; see [the tools guide](../../site/src/content/pages/guide/tools-and-safety.md#what-on-demand-discovery-saves).
 
 ## Add a task
 
@@ -161,7 +163,7 @@ Ruff and mypy skip `tasks/`, so fixtures stay byte-exact.
 ```toml
 id = "fix-failing-test"          # must match the folder name
 title = "One line saying what the task asks for"
-tags = ["general"]               # general, long-output, edit, mcp, multi-read, scale
+tags = ["general"]               # general, long-output, edit, mcp, mcp-sweep, multi-read, scale
 prompt = "What the user types"
 setup = "optional command run after the fixture is committed"
 verify = "{python} -m unittest -q"   # exit 0 means passed
@@ -169,6 +171,7 @@ timeout_seconds = 300
 max_tool_iterations = 30
 tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]
 mcp_servers = ["inventory"]      # optional; synthetic servers from servers/catalogs.py
+opt_in = false                   # optional; true runs it only when named by id or tag
 
 [checks]                         # optional; a passing run must also meet these
 no_rerun = "make build"          # a bash command containing this may run only once

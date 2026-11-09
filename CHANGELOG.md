@@ -31,13 +31,15 @@ this policy.
 
 ### MCP
 
-- New user-only setting `mcp_tool_exposure` (`"direct"` by default, or `"on_demand"`) and
-  `WISP_MCP_TOOL_EXPOSURE`. On demand, the model gets `mcp_search`, `mcp_describe` and `mcp_call`
-  instead of every MCP tool's definition. `mcp_call` reaches only the MCP tools direct mode would
+- New user-only setting `mcp_tool_exposure` and `WISP_MCP_TOOL_EXPOSURE`: `"auto"` (the default),
+  `"direct"` or `"on_demand"`. On demand, the model gets `mcp_search`, `mcp_describe` and `mcp_call`
+  instead of every MCP tool's definition. `auto` finds tools on demand when a run's MCP definitions
+  come to at least 2,000 estimated tokens, and sends them directly below that. `mcp_call` reaches only the MCP tools direct mode would
   offer that run, and each call goes through that tool's own safety, approval and session grant.
   The TUI and CLI approval prompts name the tool that runs. In the tool-use evals, on demand cut
   tokens per run by 76–77% on a multi-step task with a 102-tool catalog and by 28–46% with 50 small
-  tools, with every run still passing; with 6 tools it cost 20–34% more, so it stays off by default.
+  tools, with every run still passing; with 6 tools it cost 20–34% more. A sweep from 6 to 50 tools
+  found the break-even at about 1,800 estimated tokens of definitions, which sets `auto`'s threshold.
   A call missing a required parameter is refused before approval; types are left to the server.
 - In the TUI, an `mcp_call` card shows the MCP tool it runs and that tool's own arguments, as a
   direct call's card does, once the backend has resolved the call, in resumed sessions too. A call

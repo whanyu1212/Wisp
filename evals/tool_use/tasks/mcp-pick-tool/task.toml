@@ -1,6 +1,6 @@
 id = "mcp-pick-tool"
 title = "Pick the one right tool out of a 50-tool MCP server"
-tags = ["mcp"]
+tags = ["mcp", "mcp-sweep"]
 prompt = "At what stock level does the Lisbon warehouse place a new purchase order for SKU A-1172? Use the inventory tools, and write just the number of units to ANSWER.txt."
 verify = "{python} {task}/verify.py"
 timeout_seconds = 180

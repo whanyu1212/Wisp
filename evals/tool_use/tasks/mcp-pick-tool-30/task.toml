@@ -1,0 +1,10 @@
+id = "mcp-pick-tool-30"
+title = "Pick the one right tool out of a 30-tool MCP server (catalog-size sweep)"
+tags = ["mcp-sweep"]
+opt_in = true
+prompt = "At what stock level does the Lisbon warehouse place a new purchase order for SKU A-1172? Use the inventory tools, and write just the number of units to ANSWER.txt."
+verify = "{python} {task}/../mcp-pick-tool/verify.py"
+timeout_seconds = 180
+max_tool_iterations = 20
+tools = ["write", "ls"]
+mcp_servers = ["inventory-30"]

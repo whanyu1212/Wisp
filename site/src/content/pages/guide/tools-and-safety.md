@@ -324,8 +324,8 @@ starting it.
 
 ### Finding MCP tools on demand
 
-With `"mcp_tool_exposure": "on_demand"` in `~/.wisp/settings.json`, or `WISP_MCP_TOOL_EXPOSURE=on_demand`
-for one process, the model is not sent each MCP tool's definition. It gets three small tools instead:
+When a run's MCP tool definitions are large, the model is not sent each one. It gets three small
+tools instead:
 
 | Tool | What it does |
 |---|---|
@@ -333,10 +333,21 @@ for one process, the model is not sent each MCP tool's definition. It gets three
 | `mcp_describe` | Returns one tool's full description and input schema |
 | `mcp_call` | Runs one of those tools by name, with its arguments |
 
-The system prompt names each server and how many tools it has, so the model knows what to search. The
-default, `"direct"`, sends every definition as before. The setting is user-only: a project cannot
-change what the model sees or what each request costs. It is off by default while the default is
-decided; the measurements below suggest when to turn it on.
+The system prompt names each server and how many tools it has, so the model knows what to search.
+
+`"mcp_tool_exposure"` in `~/.wisp/settings.json`, or `WISP_MCP_TOOL_EXPOSURE` for one process,
+chooses when this happens:
+
+| Value | MCP tools reach the model |
+|---|---|
+| `"auto"` (default) | On demand when the run's MCP tool definitions come to at least 2,000 tokens, by the estimate `/stats` uses; directly below that |
+| `"direct"` | Every definition, on every request |
+| `"on_demand"` | Always through `mcp_search`, `mcp_describe` and `mcp_call` |
+
+`auto` decides for each run from the MCP tools that run may use, so `--allow-tool` or plan mode can
+bring a large catalog under the threshold. 2,000 tokens is roughly 20 small tools or a handful of
+real-server ones. The setting is user-only: a project cannot change what the model sees or what
+each request costs.
 
 `mcp_call` reaches only the MCP tools direct mode would have offered that run: tool selection
 (`--allow-tool`, `--all-tools`), plan mode and the run's own tool limits all apply, and built-in tools
@@ -363,12 +374,28 @@ The two figures in each row are `gpt-5.6-luna` and `gpt-6.1-sol`. Counting only 
 from the provider's prompt cache, the triage task still fell 60–72%. Runs took 10–35% longer, from
 the extra search and describe turns.
 
-So on-demand discovery pays off with large catalogs, such as a code-hosting or project-tracker
-server with dozens of tools, and over tasks of several steps, where each request would otherwise
-resend every definition. With a handful of small tools it costs more than it saves: keep `direct`.
-The committed baselines `evals/tool_use/baselines/2026-11-08-mcp-direct.json` and
-`2026-11-08-mcp-on-demand.json` hold every run; compare them with
-`uv run python -m evals.tool_use compare`.
+To place `auto`'s threshold, a sweep ran the one-question inventory task with 6 to 50 of its tools,
+again 5 runs a side on both models, all passing. Sizes here are Wisp's own estimate, the one `auto`
+uses, which runs about 1.4 times the provider's count:
+
+| Inventory tools | Definitions (Wisp's estimate) | Tokens per run, on demand against direct |
+|---|---|---|
+| 6 | about 560 | +45%, +8% |
+| 12 | about 1,100 | +36%, +3% |
+| 20 | about 1,800 | +6%, −8% |
+| 30 | about 2,700 | −9%, −32% |
+| 50 | about 4,400 | −34%, −49% |
+
+The 50-tool row is the same task as in the first table, measured again in a separate run, so its
+figures differ a little from the first table's. On a single question, on demand breaks even at
+about 1,800 tokens of definitions. Over tasks of
+several steps it saves more, since each request would otherwise resend every definition. Below the
+threshold, `auto` keeps `direct`, which is also faster.
+
+The committed baselines in `evals/tool_use/baselines/` hold every run:
+`2026-11-08-mcp-direct.json` and `2026-11-08-mcp-on-demand.json` for the table above, and
+`2026-11-09-mcp-sweep-direct.json` and `2026-11-09-mcp-sweep-on-demand.json` for the sweep. Compare
+them with `uv run python -m evals.tool_use compare`.
 
 Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and
 sanitized startup failures, and to add, remove, enable, disable, or reconnect servers without

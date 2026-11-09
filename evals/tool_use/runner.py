@@ -144,7 +144,8 @@ class RunContext:
         results_dir (Path): Where rows and run folders go.
         python (str): The interpreter for task commands and synthetic servers.
         mcp_tool_exposure (McpToolExposure): How MCP tasks' tools reach the
-            model: every definition (`direct`) or found on demand (`on_demand`).
+            model: every definition (`direct`), found on demand (`on_demand`), or
+            either by catalog size (`auto`, Wisp's default).
     """
 
     build: Build
@@ -590,7 +591,8 @@ def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposur
     """Say why a run did not get the MCP setup its task needs, or None.
 
     In direct mode every catalog tool must be offered. On demand only the discovery
-    tools are offered, so a server that failed shows as Wisp's startup error.
+    tools are offered, so a server that failed shows as Wisp's startup error. Auto
+    offers one set or the other, depending on the catalog's size.
     """
 
     if not task.definition.mcp_servers:
@@ -599,7 +601,17 @@ def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposur
     if failed:
         return failed[0]
     offered = set(metrics.setup.tool_names) if metrics.setup is not None else set()
-    expected = DISCOVERY_TOOL_NAMES if exposure == "on_demand" else mcp_tool_names(task)
+    match exposure:
+        case "direct":
+            expected = mcp_tool_names(task)
+        case "on_demand":
+            expected = DISCOVERY_TOOL_NAMES
+        case "auto":
+            expected = (
+                DISCOVERY_TOOL_NAMES
+                if offered.issuperset(DISCOVERY_TOOL_NAMES)
+                else mcp_tool_names(task)
+            )
     missing = [name for name in expected if name not in offered]
     if missing:
         return f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
