@@ -6,14 +6,22 @@ import anyio
 import pytest
 
 from wisp.coding.session import CodingSession, ImageInputUnsupportedError
-from wisp.events import QueueMessageInjected, QueueUpdated, WispEvent
+from wisp.events import QueueMessageInjected, QueueUpdated, ToolResultReady, WispEvent
 from wisp.images import ImageRejectedError, inspect_image
 from wisp.messages import Message
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
-from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
+from wisp.providers.events import (
+    ProviderResponseCompleted,
+    ProviderResponseStarted,
+    ProviderToolCallCompleted,
+    ToolCall,
+)
 from wisp.providers.fake import ProviderRequest, ScriptedProvider
 from wisp.runtime.event_bus import EventBus
+from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tools.builtin import ReadTool
+from wisp.tools.context import ToolContext
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures" / "images"
 PNG = (_FIXTURES / "pixel.png").read_bytes()
@@ -284,3 +292,55 @@ def test_oversized_prompt_images_refused(tmp_path: Path, monkeypatch: pytest.Mon
     assert provider.calls == []
     assert not session.path.exists()
     assert not session.images.directory.exists()
+
+
+def test_read_tool_result_keeps_image(tmp_path: Path) -> None:
+    """An image `read` returns is stored, persisted on the tool message, and resumed."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "shot.png").write_bytes(PNG)
+    read = ToolCall(call_id="call-1", name="read", arguments={"path": "shot.png"})
+    provider = ScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="test"),
+                ProviderToolCallCompleted(tool_call=read),
+                ProviderResponseCompleted(
+                    content="", tool_calls=(read,), finish_reason="tool_calls"
+                ),
+            ],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="seen")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="again")],
+        ]
+    )
+    tools = ToolRegistry()
+    tools.register(ReadTool())
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = store.create()
+    agent = CodingSession(
+        provider=provider,
+        sessions=store,
+        tool_registry=tools,
+        tool_context=ToolContext(cwd=project),
+        models=_registry(image_models=("scripted",)),
+    )
+
+    async def two_runs() -> list[WispEvent]:
+        events = [event async for event in agent.run("look at shot.png", session=session)]
+        async for _ in agent.run("and now?", session=session):
+            pass
+        return events
+
+    events = anyio.run(two_runs)
+
+    image = inspect_image(PNG)
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert result.images == (image,)
+    assert result.output.startswith("Image file shot.png: PNG")
+    (tool_message,) = [m for m in store.load(session.path).read_messages() if m.role == "tool"]
+    assert tool_message.images == (image,)
+    assert session.images.read(image) == PNG
+    # Adapters send tool results as text for now, so no request loads their bytes.
+    assert len(provider.calls) == 3
+    assert not any(message.image_bytes for call in provider.calls for message in call.messages)

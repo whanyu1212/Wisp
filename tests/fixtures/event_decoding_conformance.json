@@ -4551,6 +4551,14 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "images"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "is_error"
    ],
    "accepted": false
@@ -4922,6 +4930,14 @@
    "operation": "remove",
    "path": [
     "failure_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "images"
    ],
    "accepted": true
   },

@@ -8,7 +8,13 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from wisp.events._base import JsonObject, ManagedProcessState, WispEvent, _MessageOriginEvent
+from wisp.events._base import (
+    ImagePart,
+    JsonObject,
+    ManagedProcessState,
+    WispEvent,
+    _MessageOriginEvent,
+)
 from wisp.tool_types import ToolFailureCode
 
 
@@ -124,6 +130,8 @@ class ProjectConfigApplied(WispEvent):
 
 # The most edit locations one result carries; a call with more edits reports none.
 MAX_EDIT_LOCATIONS = 256
+# The most images one tool result carries, as many as one user message may.
+MAX_TOOL_RESULT_IMAGES = 6
 # The highest line an edit location may name, within every reader's 64-bit range.
 MAX_EDIT_LINE = (1 << 63) - 1
 
@@ -200,6 +208,9 @@ class _ToolResultEvent(_MessageOriginEvent):
     # end is None while it still runs.
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
+    # Images the tool returned, such as an image file `read` showed, by reference
+    # into the session's image store; they are stored before the result is published.
+    images: tuple[ImagePart, ...] = Field(default=(), max_length=MAX_TOOL_RESULT_IMAGES)
 
     @model_validator(mode="after")
     def _validate_failure_metadata(self) -> Self:
@@ -210,6 +221,8 @@ class _ToolResultEvent(_MessageOriginEvent):
             raise ValueError("Tool failure metadata requires is_error=true")
         if (self.retryable or self.recovery_hint is not None) and self.failure_code is None:
             raise ValueError("Retry metadata requires a tool failure code")
+        if self.images and self.is_error:
+            raise ValueError("A failed tool result carries no images")
         return self
 
     def _result_payload(self) -> JsonObject:

@@ -55,8 +55,8 @@ class Message(BaseModel):
 
     role: Role
     content: str
-    # Images the user attached, in order; None rather than empty so messages
-    # without images serialize exactly as before.
+    # Images the user attached, or a tool returned, in order; None rather than
+    # empty so messages without images serialize exactly as before.
     images: tuple[ImagePart, ...] | None = Field(default=None, min_length=1)
     # The bytes of `images`, in order, loaded only for a request to a model that
     # takes images; never persisted or shown. Adapters send a text placeholder for
@@ -78,8 +78,11 @@ class Message(BaseModel):
 
     @model_validator(mode="after")
     def _validate_images(self) -> Self:
-        if self.images is not None and self.role != "user":
-            raise ValueError("images are valid only on user messages")
+        if self.images is not None and self.role not in ("user", "tool"):
+            raise ValueError("images are valid only on user and tool messages")
+        # Adapters route an unpaired message with images as user input.
+        if self.images is not None and self.role == "tool" and not self.tool_call_id:
+            raise ValueError("a tool message with images needs its tool_call_id")
         if self.image_bytes is not None and len(self.image_bytes) != len(self.images or ()):
             raise ValueError("image_bytes must hold exactly one entry per image")
         return self
@@ -193,6 +196,7 @@ def message_from_completion_event(
         tool_call_id=event.call_id,
         tool_name=event.name,
         is_error=event.is_error,
+        images=event.images or None,
         created_at=event.timestamp,
     )
 

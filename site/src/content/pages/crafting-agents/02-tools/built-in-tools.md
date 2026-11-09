@@ -128,9 +128,13 @@ The `bool` check matters: in Python `isinstance(True, int)` is true, so without 
 
 ### Results, errors, and output budgets
 
-A tool returns a `ToolResult(text, data, truncated)`. `text` is what the model
-reads. `data` holds structured fields for interfaces, such as an exit code or
-the text a file had before a write, which the TUI uses to draw a diff.
+A tool returns a `ToolResult(text, data, truncated, images)`. `text` is what the
+model reads. `data` holds structured fields for interfaces, such as an exit code or
+the text a file had before a write, which the TUI uses to draw a diff. `images`
+holds complete image files, such as the one `read` returns for a PNG. The executor
+validates each one and stores it in the session's image store before the result is
+published, so the result carries only a reference (`ImagePart`) that already
+resolves.
 
 A tool reports an expected failure by raising `ToolError`. The executor turns it
 into an observation with the message, failure code, and recovery hint. Any
@@ -349,6 +353,29 @@ The notice depends on why the read stopped:
 The total `line_count` is reported only when the scan reached the end of the file.
 An offset past the end fails with the valid range, and a file that is not valid
 UTF-8, including most binary files, fails with `File is not valid UTF-8`.
+
+### Image files
+
+Before decoding anything as text, `read` looks at the file's first 16 bytes on the
+same secured descriptor. A PNG, JPEG, GIF or WebP signature makes it an image read:
+
+- The tool reads at most one byte past the 7.5 MB image limit, so a huge file costs
+  no more than that, and refuses a file over the limit.
+- `wisp.images.inspect_image` checks the format, the header's dimensions (at most
+  8000 px a side) and the file's structure without decoding any pixels. A file that
+  declares a huge size to exhaust memory when decoded is refused from its header.
+- The text the model reads names the file, its format, its size in pixels and its
+  bytes. The image itself travels as `ToolResult.images`. `offset` and `limit` do
+  not apply and are ignored, with a note saying so.
+- A BMP, TIFF, HEIC or AVIF file is refused with a message naming its format and
+  suggesting a conversion, rather than failing as text that is not UTF-8.
+
+Wisp does not resize images. Validating headers needs no image library, which keeps
+installation free of native dependencies such as Pillow, and the providers that
+take images scale large ones down themselves. The 8000 px and 7.5 MB bounds are
+the tightest limits among those providers. Sending a tool result's image to the
+model is each provider adapter's job; until an adapter encodes it, the model reads
+the text line only.
 
 ## 4. `write`
 

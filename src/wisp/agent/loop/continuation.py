@@ -48,6 +48,7 @@ class ContinuationState:
                 tool_call_id=result_event.call_id,
                 tool_name=result_event.name,
                 is_error=result_event.is_error,
+                images=result_event.images or None,
             )
         )
 

@@ -10,11 +10,21 @@ from wisp.tool_types import ToolFailureCode
 
 @dataclass(frozen=True)
 class ToolResult:
-    """Result returned by a Wisp tool invocation."""
+    """Result returned by a Wisp tool invocation.
+
+    Attributes:
+        text (str): What the model reads.
+        data (Mapping[str, object]): Structured facts for summaries and the UI.
+        truncated (bool): Whether the tool capped its own output.
+        images (tuple[bytes, ...]): Complete image files to attach to the result.
+            The executor validates and stores them; an image it refuses fails the
+            call.
+    """
 
     text: str
     data: Mapping[str, object] = field(default_factory=dict)
     truncated: bool = False
+    images: tuple[bytes, ...] = ()
 
 
 _INVALID_ARGUMENT_RECOVERY_HINT = "Retry with arguments that match the tool's input schema."

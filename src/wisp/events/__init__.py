@@ -147,6 +147,7 @@ from wisp.events.sessions import (
 from wisp.events.tools import (
     MAX_EDIT_LINE,
     MAX_EDIT_LOCATIONS,
+    MAX_TOOL_RESULT_IMAGES,
     TOOL_PROGRESS_TAIL_MAX_BYTES,
     TOOL_PROGRESS_TAIL_MAX_LINES,
     EditLocation,
@@ -193,6 +194,7 @@ from wisp.events.usage import (
 __all__ = [
     "MAX_EDIT_LINE",
     "MAX_EDIT_LOCATIONS",
+    "MAX_TOOL_RESULT_IMAGES",
     "TOOL_PROGRESS_TAIL_MAX_BYTES",
     "TOOL_PROGRESS_TAIL_MAX_LINES",
     "DEFAULT_AGENT_MODE",

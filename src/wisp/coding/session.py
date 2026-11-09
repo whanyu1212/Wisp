@@ -67,7 +67,7 @@ from wisp.coding.prompt import (
     read_repository_status,
 )
 from wisp.coding.stats import RunStats, build_session_stats
-from wisp.coding.tool_execution import ConfiguredToolExecutor
+from wisp.coding.tool_execution import ConfiguredToolExecutor, ImageStore
 from wisp.coding.tool_progress import LiveEventSink
 from wisp.events import (
     DEFAULT_AGENT_MODE,
@@ -778,7 +778,8 @@ class CodingSession:
         prepared = list(messages)
         for index in range(len(prepared) - 1, -1, -1):
             message = prepared[index]
-            if message.images is None:
+            # Adapters send tool results as text, so only user images take budget.
+            if message.images is None or message.role != "user":
                 continue
             size = sum(image.byte_size for image in message.images)
             image_bytes = None
@@ -977,6 +978,7 @@ class CodingSession:
             operation_tool_names,
             context=operation_context,
             progress_sink=self._progress_sink(live_event_sink),
+            image_store=session.store_image,
         )
         harness, restored_queues = self._start_run_harness(
             session,
@@ -1561,6 +1563,7 @@ class CodingSession:
         *,
         context: ToolContext,
         progress_sink: LiveEventSink | None = None,
+        image_store: ImageStore | None = None,
     ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
         """Select the tools one run may use and build the executor that enforces them.
 
@@ -1571,6 +1574,9 @@ class CodingSession:
             context (ToolContext): Tool context the executor runs tools with.
             progress_sink (LiveEventSink | None, optional): Where running tools'
                 progress goes, or None when nobody listens. Defaults to None.
+            image_store (ImageStore | None, optional): Stores the images a tool
+                returns in the run's session before its result references them.
+                Defaults to None, which drops them.
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
@@ -1619,6 +1625,7 @@ class CodingSession:
             approval_policy=self.tool_approval_policy,
             progress_sink=progress_sink,
             mcp_catalog=catalog,
+            image_store=image_store,
         )
         return offered_tools, executor
 

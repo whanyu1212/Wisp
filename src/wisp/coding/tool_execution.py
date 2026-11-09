@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+import logging
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import cast
@@ -17,15 +18,19 @@ from wisp.agent.tool_contracts import (
 from wisp.coding.tool_progress import LiveEventSink, run_with_progress
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
+    MAX_TOOL_RESULT_IMAGES,
     EditLocation,
+    ImagePart,
     ManagedProcessState,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolExecutionEnded,
 )
+from wisp.images import ImageRejectedError
 from wisp.mcp.discovery import MCP_CALL, McpCatalog, check_proxied_arguments, resolve_target
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
+from wisp.sessions.errors import SessionError
 from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
@@ -35,6 +40,11 @@ from wisp.tools.progress import ToolProgress
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
+
+_logger = logging.getLogger(__name__)
+
+type ImageStore = Callable[[bytes], Awaitable[ImagePart]]
+"""Validates an image and makes it durable, returning the reference to record."""
 
 # Tools whose ``ToolResult.data["exit_code"]`` carries genuine process
 # exit-status semantics. Gating promotion by name keeps a custom tool that
@@ -142,6 +152,7 @@ class _ToolRunOutcome:
     stderr_dropped_bytes: int = 0
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
+    images: tuple[ImagePart, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +162,7 @@ class _RawToolResultSnapshot:
     text: object
     data: dict[str, object]
     truncated: object
+    images: object
 
 
 @dataclass(frozen=True)
@@ -160,6 +172,7 @@ class _ToolResultSnapshot:
     text: str
     data: dict[str, object]
     truncated: bool
+    images: tuple[bytes, ...]
 
 
 class _MalformedToolResultError(TypeError):
@@ -178,6 +191,7 @@ class ConfiguredToolExecutor:
         approval_policy: ToolApprovalPolicy,
         progress_sink: LiveEventSink | None = None,
         mcp_catalog: McpCatalog | None = None,
+        image_store: ImageStore | None = None,
     ) -> None:
         self._registry = registry
         self._context = context
@@ -185,6 +199,9 @@ class ConfiguredToolExecutor:
         self._approval_policy = approval_policy
         self._progress_sink = progress_sink
         self._mcp_catalog = mcp_catalog
+        # Stores a tool's images before its result references them; without one a
+        # result's images are dropped and the model is told so.
+        self._image_store = image_store
 
     @property
     def mcp_catalog(self) -> McpCatalog | None:
@@ -428,7 +445,7 @@ class ConfiguredToolExecutor:
             snapshot = _normalize_tool_result(
                 raw_snapshot, tool_name=tool_name, context=self._context
             )
-            return _ToolRunOutcome(
+            outcome = _ToolRunOutcome(
                 output=snapshot.text,
                 exit_code=_promote_exit_code(tool_name, snapshot.data),
                 output_has_exit_status=_promote_output_has_exit_status(
@@ -486,6 +503,44 @@ class ConfiguredToolExecutor:
             )
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
+        return await self._with_stored_images(outcome, snapshot.images)
+
+    async def _with_stored_images(
+        self, outcome: _ToolRunOutcome, images: tuple[bytes, ...]
+    ) -> _ToolRunOutcome:
+        """Store a result's images and attach their references to the outcome.
+
+        Storing comes before the result is published, so every reference a tool
+        result carries already resolves in the session's image store.
+
+        Args:
+            outcome (_ToolRunOutcome): The normalized result without images.
+            images (tuple[bytes, ...]): The image files the tool returned.
+
+        Returns:
+            _ToolRunOutcome: The outcome with its image references, or a failure
+            when an image is invalid or cannot be stored.
+        """
+
+        if not images:
+            return outcome
+        if self._image_store is None:
+            return replace(
+                outcome,
+                output=f"{outcome.output}\n[The image could not be attached to this result.]",
+            )
+        try:
+            stored = tuple([await self._image_store(image) for image in images])
+        except ImageRejectedError as exc:
+            return _failure_outcome(
+                f"Tool returned an image Wisp cannot use: {exc}", failure_code="invalid_result"
+            )
+        except SessionError:
+            _logger.exception("Could not store a tool result's image")
+            return _failure_outcome(
+                "Could not store the image the tool returned", failure_code="internal_error"
+            )
+        return replace(outcome, images=stored)
 
     async def _run_reporting_progress(
         self,
@@ -546,6 +601,7 @@ def _execution_ended(
         stderr_dropped_bytes=outcome.stderr_dropped_bytes,
         process_started_at=outcome.process_started_at,
         process_ended_at=outcome.process_ended_at,
+        images=outcome.images,
     )
 
 
@@ -558,7 +614,9 @@ def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSn
     if not isinstance(data, Mapping):
         raise TypeError("ToolResult.data must be a mapping")
     raw_data = {key: data.get(key) for key in _RESULT_DATA_KEYS.get(tool_name, ())}
-    return _RawToolResultSnapshot(text=text, data=raw_data, truncated=truncated)
+    return _RawToolResultSnapshot(
+        text=text, data=raw_data, truncated=truncated, images=result.images
+    )
 
 
 def _normalize_tool_result(
@@ -595,10 +653,20 @@ def _normalize_tool_result(
         if preserves_status_line
         else max(0, context.max_output_lines),
     )
+    images = result.images
+    if (
+        type(images) is not tuple
+        or len(images) > MAX_TOOL_RESULT_IMAGES
+        or any(type(image) is not bytes for image in images)
+    ):
+        raise _MalformedToolResultError(
+            f"ToolResult.images must be a tuple of at most {MAX_TOOL_RESULT_IMAGES} bytes objects"
+        )
     return _ToolResultSnapshot(
         text=bounded_text.text,
         data=data,
         truncated=(truncated if type(truncated) is bool else False) or bounded_text.truncated,
+        images=cast(tuple[bytes, ...], images),
     )
 
 

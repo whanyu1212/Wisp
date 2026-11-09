@@ -6076,6 +6076,15 @@
           "default": null,
           "title": "ToolExecutionEndedFailureCode"
         },
+        "images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "maxItems": 6,
+          "title": "ToolExecutionEndedImages",
+          "type": "array"
+        },
         "is_error": {
           "title": "ToolExecutionEndedIsError",
           "type": "boolean"
@@ -6325,7 +6334,8 @@
         "stdout_dropped_bytes",
         "stderr_dropped_bytes",
         "process_started_at",
-        "process_ended_at"
+        "process_ended_at",
+        "images"
       ],
       "title": "ToolExecutionEnded",
       "type": "object"
@@ -6533,6 +6543,15 @@
           ],
           "default": null,
           "title": "ToolResultReadyFailureCode"
+        },
+        "images": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ImagePart"
+          },
+          "maxItems": 6,
+          "title": "ToolResultReadyImages",
+          "type": "array"
         },
         "is_error": {
           "title": "ToolResultReadyIsError",
@@ -6783,7 +6802,8 @@
         "stdout_dropped_bytes",
         "stderr_dropped_bytes",
         "process_started_at",
-        "process_ended_at"
+        "process_ended_at",
+        "images"
       ],
       "title": "ToolResultReady",
       "type": "object"
