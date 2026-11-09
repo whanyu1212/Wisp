@@ -43,7 +43,7 @@ the entire default keymap; other valid user settings still apply.
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
-| `prompt.external_editor` | Ctrl+O | Edit the draft in `$VISUAL` or `$EDITOR` |
+| `prompt.external_editor` | Ctrl+O | Edit the draft, or open a browsed card's file, in `$VISUAL` or `$EDITOR` |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+B | Show or hide the side panel |
 | `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
@@ -90,6 +90,13 @@ editor with Ctrl+Z is ignored, since Wisp waits for it. Saving replaces the draf
 edit; quitting without saving keeps the draft exactly, and an editor that exits with an error leaves
 it unchanged and says why. The draft goes through a temporary file only you can read, removed
 afterwards. A long draft comes back folded, as a restored prompt does.
+
+While browsing transcript cards (F6), or in a card's retained detail, the same key opens the file
+the selected card names in the same editor, at the right line: a read's start line, a search's
+first match, or the top of an edited or written file. The path is resolved against the folder the
+card's run used and must name an existing file. Most editors are given `+LINE path`; VS Code and
+its forks (`code`, `cursor`, `codium`, `windsurf`) get `--goto path:line`, and Zed, Helix and
+Sublime Text get `path:line`.
 
 Undo and redo retain at most 100 states and 4 MiB of draft text in each direction. Consecutive
 typing and repeated character deletion are grouped; paste, completion, file insertion, prompt-history
@@ -141,7 +148,7 @@ characters per chord.
 | `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
-| `Ctrl+O` | Edit the draft in `$VISUAL`, `$EDITOR`, or `vi`, then return with the saved text |
+| `Ctrl+O` | Edit the draft in `$VISUAL`, `$EDITOR`, or `vi`, then return with the saved text; while browsing cards, open the selected card's file |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
 | `Ctrl+Up` / `Ctrl+Down` | Scroll the transcript by one line |

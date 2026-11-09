@@ -4,6 +4,7 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import select
 import struct
 import sys
@@ -318,5 +319,9 @@ for line in sys.stdin:
     assert b"old\xef\xbf\xbd[2J" in output
     assert b"old\x1b[2J" not in output
     assert b"this tool edit" in output
+    # The read card's path links to the file it names, each cell a whole OSC 8 link.
+    assert re.search(
+        rb"\x1b\]8;id=[0-9a-f]+;file://[^\x1b]*/README\.md\x1b\\R\x1b\]8;;\x1b\\", output
+    ), bytes(output)
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)
     assert termios.tcgetattr(terminal_fd) == initial_terminal

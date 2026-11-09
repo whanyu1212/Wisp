@@ -84,6 +84,9 @@ pub struct TranscriptSpan {
     pub text: String,
     pub style: TranscriptSpanStyle,
     pub affinity: SourceAffinity,
+    /// Where the text links to: a URI built by [`crate::hyperlink`], never one taken
+    /// from text as it is.
+    pub link: Option<std::sync::Arc<str>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -452,6 +455,7 @@ fn literal_block(source: &str, base_offset: usize) -> MarkdownBlock {
             Vec::new()
         } else {
             vec![TranscriptSpan {
+                link: None,
                 text: source.to_owned(),
                 style: TranscriptSpanStyle::default(),
                 affinity: SourceAffinity {
@@ -476,6 +480,7 @@ fn truncation_block(source_offset: usize) -> Arc<MarkdownBlock> {
         tables: Vec::new(),
         table_spans: Vec::new(),
         spans: vec![TranscriptSpan {
+            link: None,
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
                 inline: InlineStyle::ListMarker,
@@ -1031,6 +1036,9 @@ struct BlockRenderer {
     spans: Vec<TranscriptSpan>,
     style: TranscriptSpanStyle,
     style_stack: Vec<TranscriptSpanStyle>,
+    /// The destination of the link being emitted, if any, and those of the tags around it.
+    link: Option<std::sync::Arc<str>>,
+    link_stack: Vec<Option<std::sync::Arc<str>>>,
     lists: Vec<ListState>,
     quote_depth: usize,
     output_bytes: usize,
@@ -1284,6 +1292,7 @@ impl BlockRenderer {
 
     fn start_tag(&mut self, tag: &Tag<'_>, source_offset: usize) {
         self.style_stack.push(self.style);
+        self.link_stack.push(self.link.clone());
         match tag {
             Tag::Paragraph => {
                 if self.paragraph_inline {
@@ -1362,7 +1371,11 @@ impl BlockRenderer {
                     }
                 }
             }
-            Tag::Link { .. } | Tag::Image { .. } => self.style.inline = InlineStyle::Link,
+            Tag::Link { dest_url, .. } => {
+                self.style.inline = InlineStyle::Link;
+                self.link = crate::hyperlink::web_uri(dest_url);
+            }
+            Tag::Image { .. } => self.style.inline = InlineStyle::Link,
             Tag::BlockQuote(_) => {
                 self.quote_depth = self.quote_depth.saturating_add(1);
                 let mut style = self.style;
@@ -1420,6 +1433,7 @@ impl BlockRenderer {
             _ => {}
         }
         self.style = self.style_stack.pop().unwrap_or_default();
+        self.link = self.link_stack.pop().flatten();
     }
 
     fn end_table_tag(&mut self, tag: TagEnd, source_offset: usize) {
@@ -1531,6 +1545,7 @@ impl BlockRenderer {
                 source_end,
                 output_offset,
             },
+            link: self.link.clone(),
         });
     }
 
@@ -1585,6 +1600,7 @@ impl BlockRenderer {
         }
         let output_offset = u32::try_from(self.output_bytes).unwrap_or(u32::MAX);
         self.spans.push(TranscriptSpan {
+            link: None,
             text: PRESENTATION_TRUNCATED.to_owned(),
             style: TranscriptSpanStyle {
                 inline: InlineStyle::ListMarker,
@@ -2336,6 +2352,7 @@ mod tests {
                 table_spans: Vec::new(),
                 spans: (0..fragments)
                     .map(|_| TranscriptSpan {
+                        link: None,
                         text: "x".repeat(fragment_bytes),
                         style: TranscriptSpanStyle::default(),
                         affinity: SourceAffinity {

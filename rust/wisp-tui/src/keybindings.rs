@@ -89,7 +89,7 @@ impl Action {
             Self::TogglePanel => "Show or hide the side panel",
             Self::FocusPanel => "Focus the side panel (Esc returns to the composer)",
             Self::SessionTree => "Open the session tree to switch branches (/tree)",
-            Self::ExternalEditor => "Edit the draft in $VISUAL or $EDITOR",
+            Self::ExternalEditor => "Edit the draft, or open a browsed card's file, in $EDITOR",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",

@@ -2225,3 +2225,35 @@ async fn click_keeps_its_pressed_card() {
     .unwrap();
     assert!(ui.transcript_row_cache.fold().is_expanded(card));
 }
+
+#[tokio::test]
+async fn copying_a_linked_row_copies_its_text() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let (mut ui, copied) = transcript_ui();
+    ui.state
+        .transcript
+        .complete_message(1, "see [docs](https://example.test/docs) here".into());
+    // Positions come from a plain paint; the linked one lays out the same.
+    let buffer = draw(&mut ui, 60, 20);
+    let (x, y) = cell_of(&buffer, "see docs here");
+    ui.hyperlinks = true;
+    draw(&mut ui, 60, 20);
+
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    ui.handle_input(
+        drag(MouseEventKind::Drag(MouseButton::Left), x + 12, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, 60, 20);
+    ui.handle_input(
+        drag(MouseEventKind::Up(MouseButton::Left), x + 12, y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(copied.lock().unwrap().copied, ["see docs here"]);
+}

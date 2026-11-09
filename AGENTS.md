@@ -185,8 +185,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   the `FrameBackend` that wraps each frame in a synchronized update. `color_depth.rs` detects the
   terminal's colour depth and downconverts each rendered frame to it. `attention.rs` turns the run
   state and terminal focus into the window title and notifications written after each frame.
-  `external_editor.rs` runs the user's editor on the draft; the event loop parks the input task
-  with its `InputGate` and suspends the terminal while it runs.
+  `external_editor.rs` runs the user's editor on the draft or on a card's file; the event loop
+  parks the input task with its `InputGate` and suspends the terminal while it runs.
+  `hyperlink.rs` builds the only URIs a link may carry and paints linked cells as OSC 8.
 - `reducer.rs` and `reducer/` hold the deterministic, terminal-independent state transitions
   (`UiState`, `UiAction`). `ui.rs` lays out and paints a frame (`render_interactive`).
   `transcript.rs` holds transcript state and `transcript_view.rs` projects it into styled rows and
