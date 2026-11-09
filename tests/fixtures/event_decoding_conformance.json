@@ -4451,6 +4451,14 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "edit_locations"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "exit_code"
    ],
    "accepted": true
@@ -4814,6 +4822,14 @@
    "operation": "remove",
    "path": [
     "duration_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "edit_locations"
    ],
    "accepted": true
   },

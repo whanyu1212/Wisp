@@ -14,6 +14,12 @@ this policy.
 
 ### Events
 
+- `tool.execution.ended` and `tool.result` gain `edit_locations`: for a successful `edit`, each
+  edit's first line in the file before the call and in the file it produced, in call order (empty
+  for other tools). Sessions save them with the result (optional, so no `schema_version` change),
+  and `rpc.messages` snapshots carry them as `tool_result.edit_locations`. The schema bundle and
+  conformance fixture are regenerated; the same-release rule applies.
+
 - `tool.execution.started`, `tool.approval.requested`, `tool.approval.resolved`,
   `tool.execution.ended` and `tool.result` gain an optional `target`: for a proxied MCP call
   (`mcp_call`, see MCP below) it names the MCP tool that runs, while `name` stays `mcp_call`. It is
@@ -71,6 +77,9 @@ this policy.
   finished glows briefly. The breath blends colour on truecolor terminals and steps between bold and
   dim at lower colour depths; the glow needs truecolor. `WISP_TUI_MOTION=off`, `NO_COLOR`, and a
   terminal in the background keep everything still.
+- An edit card's diff shows the file's real line numbers, live and in resumed sessions, and each
+  edit's header names the line it starts at. Edits saved before this release keep numbering each
+  fragment from 1.
 
 ### Prompt
 

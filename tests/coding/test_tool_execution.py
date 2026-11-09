@@ -778,3 +778,30 @@ def test_executor_propagates_wisp_output_normalization_failures(
 
     assert str(raised.value) == "Internal error while processing a tool result"
     assert isinstance(raised.value.__cause__, RuntimeError)
+
+
+_LOCATIONS = [{"old_line": 4, "new_line": 5}, {"old_line": 2, "new_line": 2}]
+
+
+@pytest.mark.parametrize(
+    ("name", "locations", "expected"),
+    [
+        pytest.param("edit", _LOCATIONS, ((4, 5), (2, 2)), id="edit"),
+        # Another tool's "locations" must not renumber a diff.
+        pytest.param("custom", _LOCATIONS, (), id="custom-tool"),
+        pytest.param("edit", [{"old_line": 0, "new_line": 1}], (), id="zero-line"),
+        pytest.param("edit", [{"old_line": True, "new_line": 1}], (), id="bool-line"),
+        pytest.param("edit", [*_LOCATIONS, "x"], (), id="one-malformed"),
+        pytest.param("edit", [{"old_line": 1, "new_line": 1}] * 257, (), id="over-cap"),
+        pytest.param("edit", "4:5", (), id="not-list"),
+    ],
+)
+def test_promotes_only_valid_edit_locations(
+    name: str, locations: object, expected: tuple[tuple[int, int], ...]
+) -> None:
+    tool = _ResultTool(name=name, result=ToolResult(text="ok", data={"locations": locations}))
+
+    ended = _run_executor(tool)
+
+    assert tuple((place.old_line, place.new_line) for place in ended.edit_locations) == expected
+    assert ended.is_error is False

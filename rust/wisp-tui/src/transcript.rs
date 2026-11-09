@@ -1039,6 +1039,7 @@ impl Transcript {
                             started_at_ms: None,
                             process_started_at_ms: None,
                             process_ended_at_ms: None,
+                            edit_locations: Vec::new(),
                             is_error: true,
                             ..input.clone()
                         },
@@ -1106,6 +1107,7 @@ impl Transcript {
                             started_at_ms: None,
                             process_started_at_ms: None,
                             process_ended_at_ms: None,
+                            edit_locations: Vec::new(),
                             is_error: true,
                             ..input.clone()
                         },
@@ -2882,6 +2884,7 @@ mod tests {
             started_at_ms: None,
             process_started_at_ms: None,
             process_ended_at_ms: None,
+            edit_locations: Vec::new(),
         }
     }
 

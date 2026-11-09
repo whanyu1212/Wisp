@@ -2345,6 +2345,7 @@ class CodingSession:
                     else None
                 ),
                 target=event.target,
+                edit_locations=event.edit_locations or None,
             )
             if isinstance(event, ToolExecutionEnded)
             else None

@@ -12,6 +12,7 @@ from pytest import MonkeyPatch
 
 from wisp.events import (
     AgentCompleted,
+    EditLocation,
     ErrorEvent,
     RpcMessageToolResultSnapshot,
     RunOutcome,
@@ -533,6 +534,7 @@ def test_projects_tool_result_presentation_metadata(
             created=False,
             summary="wrote file",
             truncated=True,
+            edit_locations=(EditLocation(old_line=4, new_line=5),),
         ),
     )
 
@@ -554,6 +556,7 @@ def test_projects_tool_result_presentation_metadata(
         created=False,
         summary="wrote file",
         truncated=True,
+        edit_locations=(EditLocation(old_line=4, new_line=5),),
     )
 
 

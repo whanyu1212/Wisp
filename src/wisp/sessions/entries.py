@@ -19,6 +19,8 @@ from pydantic import (
 )
 
 from wisp.events import (
+    MAX_EDIT_LOCATIONS,
+    EditLocation,
     JsonObject,
     JsonObjectAdapter,
     KnownWispEvent,
@@ -83,6 +85,11 @@ class ToolResultPresentationSnapshot(BaseModel):
     # The MCP tool a proxied `mcp_call` ran, so a reopened session's card shows that
     # tool; absent for other calls and for results recorded before it was kept.
     target: str | None = Field(default=None, min_length=1)
+    # Where each of an edit's edits landed, so a reopened session's diff shows real
+    # line numbers; absent for other tools and for results recorded before they were kept.
+    edit_locations: tuple[EditLocation, ...] | None = Field(
+        default=None, min_length=1, max_length=MAX_EDIT_LOCATIONS
+    )
 
 
 class RepositoryStatusSnapshot(BaseModel):

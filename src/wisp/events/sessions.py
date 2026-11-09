@@ -19,6 +19,7 @@ from wisp.events._base import (
     _MessageOriginEvent,
 )
 from wisp.events.run import AgentCompleted, WebSearchPerformed
+from wisp.events.tools import MAX_EDIT_LOCATIONS, EditLocation
 from wisp.events.usage import TokenUsage, UsageCost
 from wisp.skills.models import SkillInvocationEvidence
 
@@ -53,6 +54,10 @@ class RpcMessageToolResultSnapshot(BaseModel):
     process_ended_at: datetime | None = None
     # The MCP tool a proxied `mcp_call` ran; None for every other call.
     target: str | None = None
+    # Where each of an edit's edits landed; None for other tools.
+    edit_locations: tuple[EditLocation, ...] | None = Field(
+        default=None, max_length=MAX_EDIT_LOCATIONS
+    )
 
 
 class RpcSkillInvocationSnapshot(BaseModel):

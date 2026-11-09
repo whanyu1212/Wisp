@@ -221,6 +221,9 @@ pub struct ToolResultInput {
     /// milliseconds.
     pub process_started_at_ms: Option<i64>,
     pub process_ended_at_ms: Option<i64>,
+    /// Where each of an edit call's edits landed, in call order; empty for other
+    /// tools and for results that did not say.
+    pub edit_locations: Vec<crate::tool_detail::EditLocation>,
 }
 
 /// A running call's output so far, from one `tool.execution.progress` event.
@@ -576,6 +579,7 @@ impl ToolCardSnapshot {
                 DetailResult {
                     output: &normalized_output,
                     before_text: input.before_text.as_deref(),
+                    edit_locations: &input.edit_locations,
                     created: input.created,
                     summary: input.summary.as_deref(),
                     truncated: input.truncated,
@@ -2229,6 +2233,7 @@ mod tests {
             started_at_ms: None,
             process_started_at_ms: None,
             process_ended_at_ms: None,
+            edit_locations: Vec::new(),
         }
     }
 
