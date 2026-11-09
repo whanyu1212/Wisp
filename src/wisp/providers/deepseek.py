@@ -21,6 +21,9 @@ class DeepSeekProvider(OpenAICompatibleProvider):
     """Provider for DeepSeek's thinking-capable Chat Completions API."""
 
     name = "deepseek"
+    # DeepSeek documents images only as Responses-style parts, not the Chat
+    # Completions parts this adapter would send.
+    supports_image_input = False  # type: ignore[assignment]
 
     def __init__(
         self,

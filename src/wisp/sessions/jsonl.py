@@ -1566,9 +1566,15 @@ def _matches_reference(path: Path, reference: str) -> bool:
 def _as_persisted(entry: SessionEntry) -> SessionEntry:
     """Return ``entry`` as it reads back from disk, dropping serialization-excluded fields."""
 
-    if isinstance(entry, MessageSessionEntry) and entry.message.prompt_cache_boundary:
+    if isinstance(entry, MessageSessionEntry) and (
+        entry.message.prompt_cache_boundary or entry.message.image_bytes is not None
+    ):
         return entry.model_copy(
-            update={"message": entry.message.model_copy(update={"prompt_cache_boundary": False})}
+            update={
+                "message": entry.message.model_copy(
+                    update={"prompt_cache_boundary": False, "image_bytes": None}
+                )
+            }
         )
     return entry
 

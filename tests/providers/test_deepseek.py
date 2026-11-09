@@ -10,7 +10,12 @@ from openai.types.chat import ChatCompletionChunk
 from pytest import MonkeyPatch
 
 from wisp.messages import Message
-from wisp.providers.base import ProviderConfigurationError, ToolCallResult, ToolSpec
+from wisp.providers.base import (
+    ProviderConfigurationError,
+    ToolCallResult,
+    ToolSpec,
+    provider_supports_image_input,
+)
 from wisp.providers.deepseek import DEFAULT_DEEPSEEK_MODEL, DeepSeekProvider
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -336,3 +341,9 @@ def test_thinking_mode_cannot_fresh_reconstruct_structured_tool_history() -> Non
 
     assert provider.supports_structured_tool_replacement(effort=None) is False
     assert provider.supports_structured_tool_replacement(effort="high") is False
+
+
+def test_deepseek_opts_out_of_images() -> None:
+    """DeepSeek inherits the Chat Completions encoder but does not declare image input."""
+
+    assert not provider_supports_image_input(DeepSeekProvider(api_key="test-key"))

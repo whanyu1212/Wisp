@@ -297,3 +297,23 @@ def test_fork_copies_selected_images(tmp_path: Path) -> None:
 
     assert result.selected_images == (image,)
     assert anyio.run(result.session.read_image, image) == PNG
+
+
+def test_loaded_bytes_stay_in_memory(tmp_path: Path) -> None:
+    """A message appended with its image bytes is indexed and cloned as persisted."""
+
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+
+    async def append_and_clone() -> JsonlSession:
+        image = await session.store_image(PNG)
+        entry = await session.append_message(
+            Message(role="user", content="look", images=(image,), image_bytes=(PNG,))
+        )
+        return await store.clone(session, expected_active_leaf_id=entry.id)
+
+    clone = anyio.run(append_and_clone)
+
+    (message,) = clone.read_messages()
+    assert message.image_bytes is None
+    assert message.images is not None

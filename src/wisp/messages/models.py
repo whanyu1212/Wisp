@@ -57,6 +57,10 @@ class Message(BaseModel):
     # Images the user attached, in order; None rather than empty so messages
     # without images serialize exactly as before.
     images: tuple[ImagePart, ...] | None = Field(default=None, min_length=1)
+    # The bytes of `images`, in order, loaded only for a request to a model that
+    # takes images; never persisted or shown. Adapters send a text placeholder for
+    # images whose bytes are absent.
+    image_bytes: tuple[bytes, ...] | None = Field(default=None, exclude=True, repr=False)
     prompt_cache_boundary: bool = Field(default=False, exclude=True, repr=False)
     tool_call_id: str | None = None
     tool_name: str | None = None
@@ -75,6 +79,8 @@ class Message(BaseModel):
     def _validate_images(self) -> Self:
         if self.images is not None and self.role != "user":
             raise ValueError("images are valid only on user messages")
+        if self.image_bytes is not None and len(self.image_bytes) != len(self.images or ()):
+            raise ValueError("image_bytes must hold exactly one entry per image")
         return self
 
     @property

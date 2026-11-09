@@ -116,6 +116,9 @@ class ModelCatalogProviderEntry(BaseModel):
     # immutable snapshots for calculating new requests, never a source for
     # repricing historical session entries.
     pricing: dict[str, tuple[ModelPricing, ...]] = {}
+    # Models that accept image input through this provider's adapter. A model
+    # absent here, including one the catalog does not know, is sent text only.
+    image_input_models: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _validate_cross_references(self) -> ModelCatalogProviderEntry:
@@ -140,6 +143,12 @@ class ModelCatalogProviderEntry(BaseModel):
                 raise ValueError(
                     f"provider {self.name!r} model_aliases[{alias!r}] references "
                     f"unknown model {target!r}"
+                )
+        for model_id in self.image_input_models:
+            if model_id not in model_set:
+                raise ValueError(
+                    f"provider {self.name!r} image_input_models references "
+                    f"unknown model {model_id!r}"
                 )
         for model_id, window in self.context_windows.items():
             if model_id not in model_set:
@@ -445,6 +454,16 @@ class ModelRegistry:
             return canonical_model is not None and effort in entry.effort_levels.get(
                 canonical_model, ()
             )
+        return False
+
+    def supports_image_input(self, provider_name: str, model_id: str) -> bool:
+        """Return whether the catalog lists ``model_id`` (or its alias) as taking images."""
+
+        for entry in self._catalog.providers:
+            if entry.name != provider_name:
+                continue
+            canonical_model = entry.canonical_model(model_id)
+            return canonical_model is not None and canonical_model in entry.image_input_models
         return False
 
     def knows_model(self, provider_name: str, model_id: str) -> bool:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from wisp.events import ImagePart
 from wisp.messages import Message, NativeOutput
 from wisp.messages.history import normalize_provider_history
 from wisp.providers.events import JsonObject, ProviderEvent
@@ -195,6 +197,92 @@ def provider_supports_web_search(provider: Provider) -> bool:
         bool: True only when supports_web_search is literally True.
     """
     return getattr(provider, "supports_web_search", False) is True
+
+
+class ImageInputProvider(Protocol):
+    """Opt-in capability to send user-message images to the model.
+
+    An adapter that declares it encodes each user message's ``image_bytes`` in
+    its own wire format, before the message text and in order, and sends
+    ``image_placeholder_text`` for images whose bytes are absent. Whether a given
+    model takes images is the model catalog's decision, not the adapter's.
+
+    ``max_request_image_bytes`` optionally lowers the total image bytes one
+    request carries, for APIs with a smaller request limit than the default.
+    """
+
+    supports_image_input: Literal[True]
+
+
+def provider_supports_image_input(provider: Provider) -> bool:
+    """Return whether an adapter has opted in to encoding user-message images.
+
+    Args:
+        provider (Provider): Adapter whose optional capability is inspected.
+
+    Returns:
+        bool: True only when supports_image_input is literally True.
+    """
+    return getattr(provider, "supports_image_input", False) is True
+
+
+# Total raw image bytes one request carries unless the adapter sets a lower limit:
+# about 32 MB once base64-encoded, well inside Anthropic's and OpenAI's request limits.
+DEFAULT_MAX_REQUEST_IMAGE_BYTES = 24_000_000
+
+
+def provider_image_request_byte_budget(provider: Provider) -> int:
+    """Return the total raw image bytes one request to ``provider`` may carry.
+
+    Args:
+        provider (Provider): Adapter whose optional ``max_request_image_bytes`` is read.
+
+    Returns:
+        int: The adapter's limit, or ``DEFAULT_MAX_REQUEST_IMAGE_BYTES``.
+    """
+    budget = getattr(provider, "max_request_image_bytes", None)
+    return budget if isinstance(budget, int) else DEFAULT_MAX_REQUEST_IMAGE_BYTES
+
+
+def image_placeholder_text(image: ImagePart) -> str:
+    """Describe an image the request cannot carry, in place of its bytes.
+
+    Args:
+        image (ImagePart): The image a user attached.
+
+    Returns:
+        str: A short bracketed note naming the image's format and size.
+    """
+    return f"[image not sent: {image.media_type}, {image.width}x{image.height}]"
+
+
+def image_data_url(image: ImagePart, data: bytes) -> str:
+    """Return an image's bytes as a base64 ``data:`` URL.
+
+    Args:
+        image (ImagePart): The image's reference, which names its media type.
+        data (bytes): The image's bytes.
+
+    Returns:
+        str: ``data:<media type>;base64,<payload>``.
+    """
+    return f"data:{image.media_type};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def message_image_inputs(message: Message) -> tuple[tuple[ImagePart, bytes | None], ...]:
+    """Pair each of a user message's images with its bytes, if they were loaded.
+
+    Args:
+        message (Message): A provider-facing message.
+
+    Returns:
+        tuple[tuple[ImagePart, bytes | None], ...]: The images in order; bytes are
+        None when the run did not load them, and the adapter sends a placeholder.
+    """
+    images = message.images or ()
+    if message.image_bytes is None:
+        return tuple((image, None) for image in images)
+    return tuple(zip(images, message.image_bytes, strict=True))
 
 
 class ContinuationMessageProvider(Protocol):

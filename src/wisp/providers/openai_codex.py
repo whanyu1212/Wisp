@@ -45,6 +45,7 @@ from wisp.providers.events import (
     ToolCall,
     parse_tool_call,
 )
+from wisp.providers.openai import responses_user_content
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
@@ -84,6 +85,7 @@ class OpenAICodexProvider:
     supports_continuation_messages: Literal[True] = True
     supports_context_rebase: Literal[True] = True
     supports_web_search: Literal[True] = True
+    supports_image_input: Literal[True] = True
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Declare that portable call/result pairs can be reconstructed natively."""
@@ -762,6 +764,9 @@ def _messages_to_codex_input(
                         "arguments": json.dumps(dict(call.arguments), separators=(",", ":")),
                     }
                 )
+            continue
+        if message.images:
+            result.append({"role": "user", "content": responses_user_content(message)})
             continue
         result.append({"role": _to_codex_role(message.role), "content": message.content})
     return result

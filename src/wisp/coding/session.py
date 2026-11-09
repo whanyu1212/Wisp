@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -125,7 +126,9 @@ from wisp.providers.base import (
     Provider,
     ToolSpec,
     prepare_provider_history,
+    provider_image_request_byte_budget,
     provider_native_output,
+    provider_supports_image_input,
     provider_supports_web_search,
 )
 from wisp.providers.catalog import ModelRegistry
@@ -139,6 +142,7 @@ from wisp.sessions.entries import (
     ToolResultPresentationSnapshot,
 )
 from wisp.sessions.errors import StaleSessionWriterError
+from wisp.sessions.images import SessionImageError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplay, replay_session_entries
 from wisp.skills.invocation import expand_skill_invocation
@@ -156,6 +160,8 @@ from wisp.tools.seen_files import SeenFiles
 # still hold the cached prefix built from it. After a longer pause the cache has
 # expired anyway, so a fresh read costs nothing and avoids a long-stale status.
 RESUMED_REPOSITORY_STATUS_MAX_AGE = timedelta(hours=1)
+
+_logger = logging.getLogger(__name__)
 
 PERSISTED_SESSION_EVENT_TYPES = frozenset(
     {
@@ -198,6 +204,32 @@ class _RetainedQueueState:
     messages: QueuedMessages
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
+
+
+async def _read_message_images(session: JsonlSession, message: Message) -> tuple[bytes, ...] | None:
+    """Read a message's images from the store, or None when one cannot be read.
+
+    A missing or damaged image becomes placeholder text for the whole message
+    rather than failing the run; the failure is logged so it is not invisible.
+    """
+
+    try:
+        return tuple([await session.read_image(image) for image in message.images or ()])
+    except SessionImageError as exc:
+        _logger.warning("Sending image placeholders for session %s: %s", session.session_id, exc)
+        return None
+
+
+def _for_image_support(message: Message, *, takes_images: bool) -> Message:
+    """Drop a message's image bytes when the run's model cannot take images."""
+
+    if takes_images or message.image_bytes is None:
+        return message
+    return message.model_copy(update={"image_bytes": None})
+
+
+class ImageInputUnsupportedError(ValueError):
+    """New images were attached for a model that does not take image input."""
 
 
 async def _store_images(session: JsonlSession, images: Sequence[bytes]) -> tuple[ImagePart, ...]:
@@ -514,8 +546,12 @@ class CodingSession:
         self, kind: QueueKind, content: str, images: Sequence[bytes]
     ) -> QueueUpdated:
         harness = self._active_queue_harness()
+        if images:
+            self._require_image_input()
         stored_images = await _store_images(self._active_run_session(), images) if images else ()
-        message = await self._prepare_user_message(content, images=stored_images)
+        message = await self._prepare_user_message(
+            content, images=stored_images, image_bytes=images
+        )
         # Storing and skill expansion await, so the run may have ended meanwhile.
         if harness is not self._active_queue_harness():
             raise RuntimeError("CodingSession active agent run changed")
@@ -660,6 +696,7 @@ class CodingSession:
         content: str,
         *,
         images: tuple[ImagePart, ...] = (),
+        image_bytes: Sequence[bytes] = (),
         context: ToolContext | None = None,
     ) -> Message:
         expanded, evidence = await expand_skill_invocation(
@@ -671,8 +708,75 @@ class CodingSession:
             role="user",
             content=expanded,
             images=images or None,
+            image_bytes=tuple(image_bytes) if images else None,
             skill_invocation=evidence,
         )
+
+    def _model_takes_images(self) -> bool:
+        """Return whether this session's provider and model accept image input.
+
+        The adapter must opt in, and when a model catalog is configured it must
+        list the model; without one the adapter's declaration decides.
+        """
+
+        if not provider_supports_image_input(self.provider):
+            return False
+        if self.models is None:
+            return True
+        model = self.model or self.provider.default_model
+        return model is not None and self.models.supports_image_input(self.provider.name, model)
+
+    def _require_image_input(self) -> None:
+        """Refuse new images before anything is stored when the model cannot see them."""
+
+        if not self._model_takes_images():
+            model = self.model or self.provider.default_model
+            raise ImageInputUnsupportedError(
+                f"{self.provider.name} model {model!r} does not accept images; "
+                "switch to a model that does, or send text only"
+            )
+
+    async def _with_image_bytes(
+        self,
+        session: JsonlSession,
+        messages: Sequence[Message],
+        *,
+        reserved_bytes: int = 0,
+    ) -> tuple[Message, ...]:
+        """Give a request's image-bearing messages the bytes this model can take.
+
+        Images are sent newest first until the adapter's per-request image budget
+        is spent; older ones, every image for a model that does not take images,
+        and images missing from the store go as placeholder text instead, so a
+        long session never grows past what the provider accepts.
+
+        Args:
+            session (JsonlSession): Session whose image store holds the images.
+            messages (Sequence[Message]): Transcript about to be sent.
+            reserved_bytes (int, optional): Budget already taken by images the
+                request adds after these messages. Defaults to 0.
+
+        Returns:
+            tuple[Message, ...]: The messages in order; each image-bearing one
+            carries bytes for all of its images, or none.
+        """
+
+        takes_images = self._model_takes_images()
+        remaining = provider_image_request_byte_budget(self.provider) - reserved_bytes
+        prepared = list(messages)
+        for index in range(len(prepared) - 1, -1, -1):
+            message = prepared[index]
+            if message.images is None:
+                continue
+            size = sum(image.byte_size for image in message.images)
+            image_bytes = None
+            if takes_images and size <= remaining:
+                image_bytes = message.image_bytes or await _read_message_images(session, message)
+            if image_bytes is not None:
+                remaining -= size
+            if image_bytes != message.image_bytes:
+                prepared[index] = message.model_copy(update={"image_bytes": image_bytes})
+        return tuple(prepared)
 
     @staticmethod
     def _queue_updated_from_snapshot(queued: _RetainedQueueState | None) -> QueueUpdated:
@@ -819,11 +923,14 @@ class CodingSession:
         live_event_sink: LiveEventSink | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
+        if images:
+            self._require_image_input()
         session = session or self.sessions.create()
         assert session is not None
         user_message = await self._prepare_user_message(
             prompt,
             images=await _store_images(session, images),
+            image_bytes=images,
             context=operation_context,
         )
         self._active_session_id = session.session_id
@@ -831,7 +938,11 @@ class CodingSession:
         if operation_context.seen_files is not None:
             seen_files = self._seen_files.setdefault(session.session_id, SeenFiles())
             operation_context = replace(operation_context, seen_files=seen_files)
-        history, active_leaf_id = await self._resume_history(session, history)
+        history, active_leaf_id = await self._resume_history(
+            session,
+            history,
+            reserved_image_bytes=sum(image.byte_size for image in user_message.images or ()),
+        )
         persistence = RunPersistence(
             session=session,
             expected_active_leaf_id=active_leaf_id,
@@ -1044,6 +1155,8 @@ class CodingSession:
         self,
         session: JsonlSession,
         history: Sequence[Message],
+        *,
+        reserved_image_bytes: int = 0,
     ) -> tuple[Sequence[Message], str | None]:
         """Choose the history a run resumes and read the leaf its writer is pinned to.
 
@@ -1053,6 +1166,8 @@ class CodingSession:
         Args:
             session (JsonlSession): Session the run appends to.
             history (Sequence[Message]): History the caller supplied.
+            reserved_image_bytes (int, optional): Image budget the new prompt
+                already uses, so history images are trimmed around it. Defaults to 0.
 
         Returns:
             tuple[Sequence[Message], str | None]: The persisted history when the
@@ -1068,7 +1183,10 @@ class CodingSession:
         if snapshot.entry_count or recover_history:
             history = snapshot.replay.messages
             self._history_refresh_session_ids.discard(session.session_id)
-        return history, snapshot.active_leaf_id
+        return (
+            await self._with_image_bytes(session, history, reserved_bytes=reserved_image_bytes),
+            snapshot.active_leaf_id,
+        )
 
     async def _persist_run_prompt(
         self,
@@ -1599,10 +1717,13 @@ class CodingSession:
             return harness, False
         harness.set_steering_mode(retained.steering_mode)
         harness.set_follow_up_mode(retained.follow_up_mode)
+        # Queued messages kept their bytes from an earlier run; the model may have
+        # changed since to one that cannot take images.
+        takes_images = self._model_takes_images()
         for message in retained.messages.steering:
-            harness.steer_message(message)
+            harness.steer_message(_for_image_support(message, takes_images=takes_images))
         for message in retained.messages.follow_up:
-            harness.follow_up_message(message)
+            harness.follow_up_message(_for_image_support(message, takes_images=takes_images))
         return harness, True
 
     def _persist_queue_injection(
@@ -2651,7 +2772,10 @@ class _RunCompaction:
                 compacted = True
             yield compaction_event
         if compacted:
-            active_history = await anyio.to_thread.run_sync(self._session.read_context_messages)
+            active_history = await self._owner._with_image_bytes(
+                self._session,
+                await anyio.to_thread.run_sync(self._session.read_context_messages),
+            )
             self._harness.replace_messages(
                 (*self._prompt_messages, *self._owner._conversation_history(active_history))
             )
@@ -2871,7 +2995,10 @@ class _RunCompaction:
         """Rehydrate durable context into the least disruptive loop transition."""
 
         owner = self._owner
-        active_history = await anyio.to_thread.run_sync(self._session.read_context_messages)
+        active_history = await owner._with_image_bytes(
+            self._session,
+            await anyio.to_thread.run_sync(self._session.read_context_messages),
+        )
         replacement = (*self._prompt_messages, *owner._conversation_history(active_history))
         tail = tuple(continuation_messages)
         injected = tuple(injected_messages)

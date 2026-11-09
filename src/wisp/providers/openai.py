@@ -40,7 +40,10 @@ from wisp.providers.base import (
     ProviderConfigurationError,
     ToolCallResult,
     ToolSpec,
+    image_data_url,
+    image_placeholder_text,
     is_context_overflow_message,
+    message_image_inputs,
     strip_or_none,
 )
 from wisp.providers.continuations import ContinuationStore, replayable_native_items
@@ -91,6 +94,7 @@ class OpenAIProvider:
     # its backend has been checked to accept the replayed items.
     _replays_native_output: bool = False
     supports_web_search: Literal[True] = True
+    supports_image_input: Literal[True] = True
     # Extra output the request asks for when web search is on. OpenAI returns a
     # search's sources only when asked; other Responses backends may not accept it.
     _web_search_includes: tuple[ResponseIncludable, ...] = ("web_search_call.action.sources",)
@@ -575,6 +579,14 @@ def _messages_to_response_input(
                     )
                 )
             continue
+        if message.images:
+            response_input.append(
+                cast(
+                    EasyInputMessageParam,
+                    {"role": "user", "content": responses_user_content(message)},
+                )
+            )
+            continue
         if explicit_prompt_cache and message.prompt_cache_boundary and not boundary_written:
             message_param = cast(
                 EasyInputMessageParam,
@@ -597,6 +609,31 @@ def _messages_to_response_input(
             }
         response_input.append(message_param)
     return response_input
+
+
+def responses_user_content(message: Message) -> list[dict[str, object]]:
+    """Encode a user message's images, then its text, as Responses input parts.
+
+    Shared with the Codex adapter, which speaks the same input format. Empty text
+    is omitted, so an image-only message carries only its images.
+
+    Args:
+        message (Message): A user message with images.
+
+    Returns:
+        list[dict[str, object]]: ``input_image`` parts, or placeholder
+        ``input_text`` parts for images whose bytes are absent, then the text.
+    """
+
+    parts: list[dict[str, object]] = []
+    for image, data in message_image_inputs(message):
+        if data is None:
+            parts.append({"type": "input_text", "text": image_placeholder_text(image)})
+        else:
+            parts.append({"type": "input_image", "image_url": image_data_url(image, data)})
+    if message.content:
+        parts.append({"type": "input_text", "text": message.content})
+    return parts
 
 
 def _uses_explicit_prompt_cache(

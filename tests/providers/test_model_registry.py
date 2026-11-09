@@ -9,6 +9,7 @@ from wisp.providers.catalog import (
     ModelCatalog,
     ModelRegistry,
     UnknownModelError,
+    builtin_catalog,
     startup_effort,
 )
 
@@ -312,3 +313,41 @@ def test_startup_effort_keeps_a_tier_for_an_unresolvable_model() -> None:
     )
 
     assert result == "high"
+
+
+def test_image_input_lookup() -> None:
+    entry = _provider("acme", ["acme-1", "acme-2"], model_aliases={"latest": "acme-1"})
+    registry = ModelRegistry(_catalog({**entry, "image_input_models": ["acme-1"]}))
+
+    assert registry.supports_image_input("acme", "acme-1")
+    assert registry.supports_image_input("acme", "latest")
+    assert not registry.supports_image_input("acme", "acme-2")
+    assert not registry.supports_image_input("acme", "unknown-model")
+    assert not registry.supports_image_input("other", "acme-1")
+
+
+def test_image_input_rejects_unknown_model() -> None:
+    entry = _provider("acme", ["acme-1"])
+
+    with pytest.raises(ValueError, match="image_input_models references unknown model"):
+        _catalog({**entry, "image_input_models": ["acme-9"]})
+
+
+@pytest.mark.parametrize(
+    ("provider", "takes_images"),
+    [
+        ("openai", True),
+        ("openai-codex", True),
+        ("anthropic", True),
+        ("google", True),
+        ("xai", True),
+        ("deepseek", False),
+    ],
+)
+def test_builtin_defaults_image_input(provider: str, takes_images: bool) -> None:
+    """Each provider's default model takes images, except DeepSeek's (not yet supported)."""
+
+    registry = ModelRegistry(builtin_catalog())
+    (entry,) = [entry for entry in registry.providers() if entry.name == provider]
+
+    assert registry.supports_image_input(provider, entry.default_model) is takes_images
