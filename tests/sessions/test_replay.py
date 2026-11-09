@@ -671,28 +671,34 @@ def test_replay_cost_grows_linearly_with_session_length() -> None:
     far from both so ordinary timing noise cannot decide the result.
     """
 
-    def replay_duration(message_count: int) -> float:
-        entries = tuple(
-            _message_entry(
-                f"entry-{index}",
-                "user" if index % 2 == 0 else "assistant",
-                f"message {index}",
+    def session(message_count: int) -> tuple[SessionEntry, ...]:
+        return linked_entries(
+            tuple(
+                _message_entry(
+                    f"entry-{index}",
+                    "user" if index % 2 == 0 else "assistant",
+                    f"message {index}",
+                )
+                for index in range(message_count)
             )
-            for index in range(message_count)
         )
-        entries = linked_entries(entries)
-        # Take the best of several runs so an unlucky scheduling slice on a busy
-        # CI machine cannot inflate the ratio.
-        samples = []
-        for _ in range(5):
-            start = time.perf_counter()
-            replay_session_entries(entries)
-            samples.append(time.perf_counter() - start)
-        return min(samples)
 
-    replay_duration(500)  # warm import-time caches
-    baseline = replay_duration(2_000)
-    quadrupled = replay_duration(8_000)
+    def replay_seconds(entries: tuple[SessionEntry, ...]) -> float:
+        start = time.perf_counter()
+        replay_session_entries(entries)
+        return time.perf_counter() - start
+
+    small, large = session(2_000), session(8_000)
+    replay_seconds(session(500))  # warm import-time caches
+    # Alternate the two sizes so a burst of load from other work on the machine
+    # slows both alike, then compare the best of each; the ratio stays stable
+    # even when this runs beside parallel test workers.
+    baseline_samples: list[float] = []
+    quadrupled_samples: list[float] = []
+    for _ in range(7):
+        baseline_samples.append(replay_seconds(small))
+        quadrupled_samples.append(replay_seconds(large))
+    baseline, quadrupled = min(baseline_samples), min(quadrupled_samples)
 
     # Linear predicts ~4x, quadratic ~16x (measured ~13.5x before the fix).
     assert quadrupled < baseline * 8

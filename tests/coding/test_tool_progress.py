@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Awaitable, Callable
 
 import anyio
@@ -206,22 +208,31 @@ def test_cancelling_the_call_stops_progress() -> None:
 
 
 def test_throttles_delivery_to_the_minimum_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sends stay at least the interval apart, however long the tool takes to run.
+
+    The bound on the number of sends comes from the tool's measured duration, not
+    from the duration it would have on an idle machine: under parallel load the
+    fifty short sleeps take longer, and the forwarder rightly sends more often.
+    """
+
     monkeypatch.setattr(tool_progress_module, "_FIRST_DELAY_SECONDS", 0.0)
     monkeypatch.setattr(tool_progress_module, "_MIN_INTERVAL_SECONDS", 0.2)
     sink = RecordingSink()
 
     async def tool(progress: ToolProgress) -> None:
-        # Fifty reports over 0.5 s; the forwarder may send at most three.
         for index in range(50):
             progress.report(output(f"line {index}\n"))
             await anyio.sleep(0.01)
 
-    async def scenario() -> None:
+    async def scenario() -> float:
+        started = time.monotonic()
         await run_with_progress(sink, call_id="call-1", name="bash", run=tool)
+        return time.monotonic() - started
 
-    run(scenario)
+    duration = run(scenario)
 
-    assert 1 <= len(sink.events) <= 3
+    # Fifty reports without the throttle would mean dozens of sends.
+    assert 1 <= len(sink.events) <= math.floor(duration / 0.2) + 1
     elapsed = [event.elapsed_ms for event in sink.events]
     assert all(later - earlier >= 190 for earlier, later in zip(elapsed, elapsed[1:], strict=False))
 
