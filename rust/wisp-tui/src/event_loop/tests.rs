@@ -1577,3 +1577,38 @@ async fn failed_open_names_file() {
     );
     assert!(notice.starts_with(&expected), "{notice}");
 }
+
+#[tokio::test]
+async fn card_opens_exact_path() {
+    // The card shows a bounded, one-line projection of the path; the file opened is
+    // the one the call named, even when that projection differs or is dropped.
+    let dir = ScratchDir::new("exact-path");
+    let spaced = "my  notes\twith tab.md";
+    let long = format!("{}.md", "n".repeat(200));
+    std::fs::write(dir.0.join(spaced), "notes\n").unwrap();
+    std::fs::write(dir.0.join(&long), "notes\n").unwrap();
+    std::fs::write(dir.0.join("big.txt"), "").unwrap();
+    let nested = "d/".repeat(140);
+    std::fs::create_dir_all(dir.0.join(&nested)).unwrap();
+    let deep = format!("{nested}deep.md");
+    std::fs::write(dir.0.join(&deep), "").unwrap();
+    let big = "line\n".repeat(600);
+    let cases = [
+        ("read", json!({"path": spaced}), spaced.to_owned()),
+        ("read", json!({"path": deep}), deep.clone()),
+        (
+            "write",
+            json!({"path": "big.txt", "content": big}),
+            "big.txt".to_owned(),
+        ),
+        ("edit", json!({"path": long, "edits": []}), long.clone()),
+    ];
+    for (name, arguments, path) in cases {
+        let mut ui = browsing_card(&dir.0, name, arguments, "done").await;
+        press_ctrl_o(&mut ui).await;
+        let Some(EditorRequest::File(target)) = ui.editor_request.clone() else {
+            panic!("{name} {path}: no file request, notice {:?}", ui.notice);
+        };
+        assert_eq!(target.path(), dir.0.join(&path), "{name}");
+    }
+}

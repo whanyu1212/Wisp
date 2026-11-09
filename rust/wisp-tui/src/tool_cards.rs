@@ -317,6 +317,9 @@ pub struct ToolCardSnapshot {
     pub file_reference: Option<FileReference>,
 }
 
+/// The longest path a file reference keeps, the usual `PATH_MAX`.
+const FILE_REFERENCE_MAX_BYTES: usize = 4096;
+
 /// A file a tool call names, as the call gave its path, and the line to open it at.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileReference {
@@ -325,20 +328,28 @@ pub struct FileReference {
 }
 
 impl FileReference {
-    /// A read's start line, or the top of an edited or written file. A search names
-    /// its files only in its result.
-    fn of_call(source: &ToolDetailSource) -> Option<Self> {
-        let (path, line) = match source {
-            ToolDetailSource::Read(source) => (&source.path, source.offset),
-            ToolDetailSource::Edit(source) => (&source.path, 1),
-            ToolDetailSource::Write(source) => (&source.path, 1),
-            ToolDetailSource::Grep(_)
-            | ToolDetailSource::None
-            | ToolDetailSource::Find
-            | ToolDetailSource::Unavailable(_) => return None,
+    /// A read's start line, or the top of an edited or written file, from the call's
+    /// own arguments. The detail source holds a path bounded and folded onto one line
+    /// for display, and none at all when the content is over its budget, so it cannot
+    /// say which file to open. A search names its files only in its result.
+    fn of_call(name: &str, arguments: &Value) -> Option<Self> {
+        if !matches!(name, "read" | "edit" | "write") {
+            return None;
+        }
+        let path = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty() && path.len() <= FILE_REFERENCE_MAX_BYTES)?;
+        let line = match name {
+            "read" => arguments
+                .get("offset")
+                .and_then(Value::as_u64)
+                .filter(|offset| *offset > 0)
+                .unwrap_or(1),
+            _ => 1,
         };
-        (!path.is_empty()).then(|| Self {
-            path: path.clone(),
+        Some(Self {
+            path: path.to_owned(),
             line,
         })
     }
@@ -380,7 +391,7 @@ impl ToolCardSnapshot {
             progress_sequence: 0,
             progress_bytes: (0, 0),
             live_line: None,
-            file_reference: FileReference::of_call(&input.detail_source),
+            file_reference: FileReference::of_call(&input.name, &input.arguments),
         }
     }
 
@@ -430,7 +441,7 @@ impl ToolCardSnapshot {
             );
         } else {
             self.detail_source = input.detail_source.clone();
-            self.file_reference = FileReference::of_call(&self.detail_source);
+            self.file_reference = FileReference::of_call(&input.name, &input.arguments);
         }
         self.name = name;
         self.action_arguments = action_arguments;
@@ -1320,6 +1331,15 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                 })
                 .map(Value::String)
                 .unwrap_or_else(|| bounded_argument_value(value, 64))
+        } else if *key == "path"
+            && matches!(name, "read" | "edit" | "write")
+            && value
+                .as_str()
+                .is_some_and(|path| path.len() <= FILE_REFERENCE_MAX_BYTES)
+        {
+            // The card opens this file, so it keeps the path exactly; the action shown
+            // is clipped when it is formatted.
+            value.clone()
         } else {
             let max_chars = if *key == "command" {
                 BUILTIN_ACTION_MAX_CHARS
