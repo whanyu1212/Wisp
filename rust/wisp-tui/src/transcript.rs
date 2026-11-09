@@ -863,6 +863,26 @@ impl Transcript {
         entry_id
     }
 
+    /// Show a proxied call's card as the tool the backend resolved it to. Returns
+    /// whether the card changed; a call with no open card is left alone.
+    pub fn observe_tool_target(&mut self, resolved: &ToolCallInput) -> bool {
+        let Some(binding) = self.call_entries.get(&resolved.call_id).copied() else {
+            return false;
+        };
+        if binding.resolved || binding.kind != ToolBindingKind::Tool {
+            return false;
+        }
+        let changed = match &mut self.entry_mut(binding.entry_id).kind {
+            TranscriptEntryKind::Tool(card) => card.adopt_target(resolved),
+            _ => unreachable!("tool binding must target a tool card"),
+        };
+        if changed {
+            self.update_pending_detail_tracking(binding.entry_id);
+            self.bump_card(binding.entry_id);
+        }
+        changed
+    }
+
     pub fn observe_approval_requested(&mut self, input: ToolCallInput) -> TranscriptEntryId {
         let entry_id =
             self.ensure_tool_entry(&input, ToolStatus::AwaitingApproval, ToolCallSource::Live);

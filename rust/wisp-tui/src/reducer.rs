@@ -1183,6 +1183,8 @@ pub enum BackendEvent {
     /// A run finished; its totals close the run's last reply.
     RunCompleted(crate::transcript::RunTotals),
     ToolCall(ToolCallInput),
+    /// The tool a proxied call (on-demand MCP's `mcp_call`) runs, with its own arguments.
+    ToolTargetResolved(ToolCallInput),
     ToolApprovalRequested(PendingApproval),
     ToolApprovalResolved {
         call_id: String,
@@ -5115,6 +5117,13 @@ fn handle_backend_event(
             state.transcript.attach_tool_origin(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::ToolTargetResolved(resolved) => {
+            Ok(if state.transcript.observe_tool_target(&resolved) {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
         BackendEvent::ToolApprovalRequested(pending) => request_tool_approval(state, pending, ids),
         BackendEvent::ToolApprovalResolved {
             call_id,
@@ -6865,6 +6874,142 @@ mod tests {
             panic!("tool approval expected");
         };
         assert_eq!(direct.name, "mcp__db__drop_table");
+        assert_eq!(approval.arguments, direct.arguments);
+
+        // Without a backend target the call is not proxied, so a tool of the user's
+        // own named `mcp_call` cannot pass itself off as the MCP tool it names.
+        let BackendEvent::ToolApprovalRequested(own) =
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.approval.requested",
+                "call_id": "own",
+                "name": "mcp_call",
+                "target": null,
+                "arguments": {"name": "mcp__db__list_tables", "arguments": {}},
+                "safety": "command"
+            }))
+            .unwrap()
+        else {
+            panic!("tool approval expected");
+        };
+        assert_eq!(own.name, "mcp_call");
+        assert_eq!(
+            own.arguments,
+            crate::tool_cards::bounded_tool_arguments(
+                "mcp_call",
+                &serde_json::json!({"name": "mcp__db__list_tables", "arguments": {}})
+            )
+        );
+    }
+
+    /// Runs one approved call's events through the reducer and returns its card.
+    fn approved_call_card(
+        name: &str,
+        target: Option<&str>,
+        arguments: Value,
+    ) -> crate::tool_cards::ToolCardSnapshot {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let lifecycle = serde_json::json!({"call_id": "call", "name": name, "target": target});
+        let event = |fields: Value| {
+            let mut event = lifecycle.clone();
+            event
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            event
+        };
+        for event in [
+            serde_json::json!({
+                "type": "tool.call", "call_id": "call", "name": name, "arguments": arguments
+            }),
+            event(serde_json::json!({"type": "tool.execution.started", "arguments": arguments})),
+            event(serde_json::json!({
+                "type": "tool.approval.requested", "arguments": arguments, "safety": "mutating"
+            })),
+            event(serde_json::json!({"type": "tool.approval.resolved", "approved": true})),
+            event(serde_json::json!({"type": "tool.result", "is_error": false, "output": "ok"})),
+        ] {
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::from_projection_value(&event).unwrap()),
+                &mut ids,
+            )
+            .unwrap();
+        }
+        let entry = state
+            .transcript
+            .tool_entry_for_call(&bounded_identity("call"))
+            .unwrap();
+        state
+            .transcript
+            .entry(entry)
+            .unwrap()
+            .tool_card()
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn proxied_card_shows_its_target() {
+        // The model's call names `mcp_call` while the approval and result name the MCP
+        // tool it runs; the card must show that tool throughout, not flag a conflict.
+        let card = approved_call_card(
+            "mcp_call",
+            Some("mcp__devhub__close_issue"),
+            serde_json::json!({"name": "mcp__devhub__close_issue", "arguments": {"issue_id": 412}}),
+        );
+        assert_eq!(card.status.as_str(), "done");
+        assert_eq!(card.action(), "MCP      devhub/close_issue  issue_id=412");
+        assert_eq!(card.display_arguments(), "412");
+    }
+
+    #[test]
+    fn interrupted_proxied_card_keeps_target() {
+        // A call interrupted after its start settles with no target, named `mcp_call`;
+        // the card keeps showing the tool it was running.
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let arguments =
+            serde_json::json!({"name": "mcp__devhub__get_issue", "arguments": {"issue_id": 412}});
+        for event in [
+            serde_json::json!({
+                "type": "tool.call", "call_id": "call", "name": "mcp_call", "arguments": arguments
+            }),
+            serde_json::json!({
+                "type": "tool.execution.started", "call_id": "call", "name": "mcp_call",
+                "target": "mcp__devhub__get_issue", "arguments": arguments
+            }),
+            serde_json::json!({
+                "type": "tool.result", "call_id": "call", "name": "mcp_call", "target": null,
+                "is_error": true, "output": "interrupted", "process_state": "cancelled"
+            }),
+        ] {
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::from_projection_value(&event).unwrap()),
+                &mut ids,
+            )
+            .unwrap();
+        }
+        let entry = state
+            .transcript
+            .tool_entry_for_call(&bounded_identity("call"))
+            .unwrap();
+        let card = state.transcript.entry(entry).unwrap().tool_card().unwrap();
+        assert_eq!(card.status.as_str(), "cancelled");
+        assert_eq!(card.action(), "MCP      devhub/get_issue  issue_id=412");
+    }
+
+    #[test]
+    fn own_mcp_call_stays_itself() {
+        // Without a backend target, a tool of the user's own named `mcp_call` is shown
+        // as itself, whatever MCP tool its arguments name.
+        let arguments = serde_json::json!({"name": "mcp__db__drop_table", "arguments": {}});
+        let card = approved_call_card("mcp_call", None, arguments);
+        assert_eq!(card.status.as_str(), "done");
+        assert_eq!(card.action_label(), "mcp_call");
+        assert!(card.mcp_target().is_none());
+        assert!(card.action_arguments.contains("mcp__db__drop_table"));
     }
 
     #[test]
