@@ -43,6 +43,7 @@ the entire default keymap; other valid user settings still apply.
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
+| `prompt.external_editor` | Ctrl+O | Edit the draft in `$VISUAL` or `$EDITOR` |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+B | Show or hide the side panel |
 | `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
@@ -79,6 +80,16 @@ The Rust composer supports these fixed editing keys:
 | Ctrl+C, Ctrl+Insert | Copy selected composer text |
 | Ctrl+X, Shift+Delete | Cut selected composer text as one undoable edit |
 | Ctrl+V, Shift+Insert | Paste system-clipboard text, replacing the selection |
+
+Ctrl+O (`prompt.external_editor`) opens the whole draft, including folded pastes, in `$VISUAL`,
+else `$EDITOR`, else `vi`. The command may carry arguments, such as `code --wait`; a graphical
+editor needs its wait flag so Wisp knows when editing ends. The editor runs as the terminal's
+foreground job: the TUI steps aside, keeps handling a running prompt's events without redrawing,
+and repaints when the editor exits. Ctrl+C in the editor cancels only the edit, and suspending the
+editor with Ctrl+Z is ignored, since Wisp waits for it. Saving replaces the draft as one undoable
+edit; quitting without saving keeps the draft exactly, and an editor that exits with an error leaves
+it unchanged and says why. The draft goes through a temporary file only you can read, removed
+afterwards. A long draft comes back folded, as a restored prompt does.
 
 Undo and redo retain at most 100 states and 4 MiB of draft text in each direction. Consecutive
 typing and repeated character deletion are grouped; paste, completion, file insertion, prompt-history
@@ -130,6 +141,7 @@ characters per chord.
 | `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
+| `Ctrl+O` | Edit the draft in `$VISUAL`, `$EDITOR`, or `vi`, then return with the saved text |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
 | `Ctrl+Up` / `Ctrl+Down` | Scroll the transcript by one line |

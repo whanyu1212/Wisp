@@ -48,6 +48,15 @@ this policy.
   open 10 seconds after that, Wisp exits at once. No event or session format changes. `CodingSession.cancel_run()` is the new public way to ask an active run to stop like
   this; a run it stops between turns reports `cancelled`, not the last turn's `completed`.
 
+### TUI
+
+- Ctrl+O (`prompt.external_editor`) opens the draft in `$VISUAL`, `$EDITOR` or `vi` and makes the
+  saved text the new draft, as one undoable edit. The editor runs as the terminal's foreground job,
+  so Ctrl+C cancels only the edit, and a running prompt's events keep being handled meanwhile. A
+  custom `tui_keybindings` that already binds Ctrl+O to another action now conflicts with this
+  default, which restores the default keymap with a warning; bind `prompt.external_editor` to
+  another key, or to `[]`, to keep yours.
+
 ### Prompt
 
 - When neither the project root nor any folder down to the working directory has an `AGENTS.md`

@@ -151,7 +151,13 @@ class _TuiProcess:
                 time.sleep(0.05)
 
 
-def _launch(tmp_path: Path, *, home: Path, cwd: Path | None = None) -> tuple[_TuiProcess, Path]:
+def _launch(
+    tmp_path: Path,
+    *,
+    home: Path,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[_TuiProcess, Path]:
     session_dir = tmp_path / "sessions"
     binary = _rust_binary()
     child_pid, terminal_fd = pty.fork()
@@ -167,6 +173,7 @@ def _launch(tmp_path: Path, *, home: Path, cwd: Path | None = None) -> tuple[_Tu
         }
         for name in ("WISP_PROVIDER", "WISP_MODEL", "WISP_RUST_TUI_BINDINGS_JSON"):
             environment.pop(name, None)
+        environment.update(env or {})
         os.execve(
             sys.executable,
             [
@@ -249,6 +256,130 @@ def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_p
     assert messages[0] == ("user", "/init")
     assert messages[1][0] == "assistant"
     assert not (project / "AGENTS.md").exists()
+
+
+def _editor_script(tmp_path: Path, body: str) -> Path:
+    """Write an executable stand-in for the user's editor; the draft file is ``$1``."""
+    editor = tmp_path / "editor.sh"
+    editor.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    editor.chmod(0o755)
+    return editor
+
+
+def _open_editor(tui: _TuiProcess, draft: bytes) -> None:
+    """Type a draft, open the editor with Ctrl+O and wait until the TUI steps aside."""
+    tui.send(draft)
+    tui.wait_until(
+        lambda output: screen_shows(output, draft.decode()),
+        failure="Rust TUI did not show the typed draft",
+    )
+    offset = len(tui.output)
+    tui.send(b"\x0f")
+    # Leaving the alternate screen is the last thing the TUI does before the editor runs.
+    tui.wait_for(b"\x1b[?1049l", since=offset, failure="Rust TUI did not hand over the terminal")
+
+
+def _send_settled(tui: _TuiProcess) -> None:
+    offset = len(tui.output)
+    tui.send(b"\r")
+    tui.wait_until(
+        lambda output: run_settled(output, offset, b"fake", b"response"),
+        failure="Rust TUI did not send the draft",
+    )
+
+
+@pytest.mark.process
+def test_external_editor_replaces_the_draft(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    # The editor proves it received the draft, then reads its new text from the
+    # terminal. Only a foreground job may read it, and only if the TUI has stopped
+    # reading, so the typed line arriving proves both.
+    editor = _editor_script(
+        tmp_path,
+        "grep -q 'typed draft' \"$1\" || exit 1\n"
+        'read line </dev/tty\nprintf \'%s\\n\' "$line" >"$1"',
+    )
+    tui, session_dir = _launch(tmp_path, home=home, env={"VISUAL": str(editor)})
+    try:
+        tui.wait_ready()
+        _open_editor(tui, b"typed draft")
+        tui.send(b"from the editor\r")
+        tui.wait_until(
+            lambda output: screen_shows(output, "from the editor"),
+            failure="Rust TUI did not load the draft the editor saved",
+        )
+        # The TUI reads the keyboard again once the editor exits.
+        tui.send(b" and more")
+        tui.wait_until(
+            lambda output: screen_shows(output, "from the editor and more"),
+            failure="Rust TUI did not take keyboard input back after the editor",
+        )
+        _send_settled(tui)
+        tui.quit()
+    finally:
+        tui.close()
+
+    messages = _conversation_messages(session_dir)
+    assert messages[0] == ("user", "from the editor and more")
+
+
+@pytest.mark.process
+def test_ctrl_c_in_editor_cancels_only_the_edit(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    # The first read proves the editor holds the terminal's foreground; Ctrl+C then
+    # interrupts only the editor, as it would a shell job.
+    editor = _editor_script(
+        tmp_path,
+        "read line </dev/tty\nprintf 'EDITOR READY\\n' >/dev/tty\n"
+        "read line </dev/tty\nprintf 'lost' >\"$1\"",
+    )
+    tui, session_dir = _launch(tmp_path, home=home, env={"VISUAL": str(editor)})
+    try:
+        tui.wait_ready()
+        _open_editor(tui, b"typed draft")
+        offset = len(tui.output)
+        tui.send(b"go\r")
+        tui.wait_for(b"EDITOR READY", since=offset, failure="the editor did not take the terminal")
+        tui.send(b"\x03")
+        tui.wait_until(
+            lambda output: screen_shows(output, "Draft unchanged"),
+            failure="Rust TUI did not report the interrupted edit",
+        )
+        tui.send(b" still here")
+        tui.wait_until(
+            lambda output: screen_shows(output, "typed draft still here"),
+            failure="Rust TUI did not keep the draft and its keyboard after Ctrl+C",
+        )
+        _send_settled(tui)
+        tui.quit()
+    finally:
+        tui.close()
+
+    messages = _conversation_messages(session_dir)
+    assert messages[0] == ("user", "typed draft still here")
+
+
+@pytest.mark.process
+def test_suspended_editor_is_resumed(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    # Stopping the whole job is what an editor's Ctrl+Z does (vim sends SIGTSTP to its
+    # process group). The TUI continues it rather than waiting forever.
+    editor = _editor_script(tmp_path, "kill -STOP 0\nprintf 'resumed\\n' >\"$1\"")
+    tui, _session_dir = _launch(tmp_path, home=home, env={"VISUAL": str(editor)})
+    try:
+        tui.wait_ready()
+        _open_editor(tui, b"typed draft")
+        tui.wait_until(
+            lambda output: screen_shows(output, "resumed"),
+            failure="Rust TUI did not resume a stopped editor",
+        )
+        _send_settled(tui)
+        tui.quit()
+    finally:
+        tui.close()
 
 
 @pytest.mark.process

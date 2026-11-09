@@ -17,6 +17,7 @@ mod diff_card;
 mod diff_review;
 mod discovery_view;
 mod event_loop;
+mod external_editor;
 mod file_picker;
 mod framing;
 mod git_diff_view;
@@ -86,6 +87,7 @@ use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
+use external_editor::InputGate;
 use file_picker::{FilePicker, PickerAction};
 use transport::{
     QueuedEvent, ReaderTermination, WriterMessage, queue_shutdown_and_close, send_payload,
@@ -571,6 +573,14 @@ struct LiveUi {
     attention: Attention,
     /// Whether motion such as the decision pulse may play (`WISP_TUI_MOTION`).
     motion_allowed: bool,
+    /// The editor command for editing the draft (`$VISUAL`, `$EDITOR`, then `vi`).
+    editor_command: String,
+    /// Set by the key that opens the editor; the event loop runs the editor after the
+    /// input that set it, since that needs the terminal.
+    external_edit_requested: bool,
+    /// Parks the input task while the editor owns the terminal. `None` in tests that
+    /// run no input task.
+    input_gate: Option<Arc<InputGate>>,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
     /// A drag selection over the transcript and the last frame painted while it was active,
@@ -639,6 +649,9 @@ impl Default for LiveUi {
             color_depth: ColorDepth::default(),
             attention: Attention::default(),
             motion_allowed: true,
+            editor_command: "vi".into(),
+            external_edit_requested: false,
+            input_gate: None,
             mouse_enabled: false,
             mouse_frame: None,
             transcript_selection: None,
@@ -1153,6 +1166,40 @@ impl LiveUi {
             self.session_tree_picker = Some(SessionTreePicker::new(page));
         }
         self.render_pending = true;
+    }
+
+    /// Applies what the external editor returned, once the TUI has the terminal back.
+    ///
+    /// A failed edit keeps the draft and says why in the footer; an unchanged one is not
+    /// recorded as an undo step. Events handled while the editor ran may have changed the
+    /// view, for example to a pending approval; the draft is still replaced, and shown
+    /// once the composer is back.
+    fn apply_external_edit(&mut self, edited: Result<String, external_editor::EditFailure>) {
+        // The editor may have set its own window title; write Wisp's again.
+        self.attention.forget_title();
+        self.invalidate_rendered_frame();
+        self.render_pending = true;
+        let saved = match edited {
+            Ok(saved) => saved,
+            Err(failure) => {
+                self.notice = Some(format!("Draft unchanged: {failure}."));
+                return;
+            }
+        };
+        if saved == self.editor.text() {
+            return;
+        }
+        let outcome = self.editor.restore_prompt(&saved);
+        self.notice = if outcome.rejected_limit {
+            Some("Draft unchanged: the saved text exceeds the editor limit.".into())
+        } else if outcome.ignored_controls > 0 {
+            Some(format!(
+                "Loaded the edited draft after ignoring {} unsafe terminal control character(s).",
+                outcome.ignored_controls
+            ))
+        } else {
+            None
+        };
     }
 
     fn restore_session_draft(&mut self, content: &str) {
@@ -4412,6 +4459,15 @@ impl LiveUi {
                 }
                 Ok(Some(LoopControl::Continue))
             }
+            Some(KeyAction::ExternalEditor)
+                if self.active_overlay().is_none()
+                    && !decision_pending
+                    && self.browse_selected.is_none()
+                    && self.editor_editable() =>
+            {
+                self.external_edit_requested = true;
+                Ok(Some(LoopControl::Continue))
+            }
             Some(KeyAction::SessionTree)
                 if matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel))
                     && self.editor_editable() =>
@@ -5393,7 +5449,11 @@ where
             let (mut terminal, input_source) = open_terminal(mouse_enabled, color_depth)?;
             let (input_tx, mut input_rx) = mpsc::channel(INPUT_CHANNEL_CAPACITY);
             let (input_stop_tx, input_stop_rx) = watch::channel(false);
-            let input = tokio::task::spawn_blocking(move || input_task(input_tx, input_stop_rx, mouse_enabled, input_source));
+            let input_gate = Arc::new(InputGate::default());
+            let input = tokio::task::spawn_blocking({
+                let input_gate = Arc::clone(&input_gate);
+                move || input_task(input_tx, input_stop_rx, &input_gate, mouse_enabled, input_source)
+            });
             let connection = ConnectionInfo {
                 backend_version: actual_version,
             };
@@ -5408,6 +5468,8 @@ where
                 color_depth,
                 attention,
                 motion_allowed,
+                editor_command: external_editor::editor_command(|name| std::env::var(name).ok()),
+                input_gate: Some(input_gate),
                 mouse_enabled,
                 ..LiveUi::default()
             };
@@ -5840,11 +5902,14 @@ fn collect_scroll_run(
 fn input_task(
     sender: mpsc::Sender<Input>,
     mut stop: watch::Receiver<bool>,
+    gate: &InputGate,
     mouse_enabled: bool,
     mut source: impl runtime::EventSource,
 ) -> Result<(), Error> {
     let mut deferred = None;
     while !*stop.borrow() {
+        // While an editor owns the terminal, nothing here may read it.
+        gate.hold(|| *stop.borrow());
         if deferred.is_none() && !source.poll(Duration::from_millis(50))? {
             match stop.has_changed() {
                 Ok(true) => {

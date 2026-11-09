@@ -7,6 +7,7 @@ use crate::{
     printable_char, receive_reader_outcome, terminal::FrameBackend,
 };
 use ratatui::Terminal;
+use std::sync::Arc;
 use tokio::{
     sync::{mpsc, oneshot},
     time::Instant,
@@ -468,6 +469,13 @@ async fn run_with_interrupts<B: FrameBackend>(
             if input.apply(ui, writer, limit).await? == LoopControl::Exit {
                 return Ok(Exit::User);
             }
+            // Opening the editor needs the terminal, which only the loop holds.
+            if ui.external_edit_requested
+                && edit_draft_externally(ui, terminal, &mut sources, writer, limit).await?
+                    == LoopControl::Exit
+            {
+                return Ok(Exit::User);
+            }
         }
         if !eof {
             ui.poll_session_catalog(writer, limit).await?;
@@ -549,6 +557,85 @@ async fn run_with_interrupts<B: FrameBackend>(
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}
         }
     }
+}
+
+/// Opens the draft in the user's editor, keeping backend events flowing until it exits.
+///
+/// The input task is parked and the terminal suspended first. While the editor runs,
+/// backend events are still dispatched, without drawing, because the reader gives up
+/// on a backend whose events go unread for a few seconds. The terminal and the input
+/// task are taken back before this returns, whatever happened: if handling an event
+/// failed or asked to exit, that outcome waits for the editor to close, so the editor
+/// is never left holding the terminal of an exited TUI.
+///
+/// Returns:
+///     LoopControl: `Exit` when an event handled during the edit asked to exit.
+pub(super) async fn edit_draft_externally<B: FrameBackend>(
+    ui: &mut LiveUi,
+    terminal: &mut Terminal<B>,
+    sources: &mut Sources<'_>,
+    writer: &mpsc::Sender<WriterMessage>,
+    limit: usize,
+) -> Result<LoopControl, Error> {
+    ui.external_edit_requested = false;
+    let draft = ui.editor.text().to_owned();
+    let command = ui.editor_command.clone();
+    let gate = ui.input_gate.clone();
+    if let Some(gate) = &gate {
+        let gate = Arc::clone(gate);
+        tokio::task::spawn_blocking(move || gate.pause())
+            .await
+            .map_err(Error::Task)?;
+    }
+    let suspended = match terminal.backend_mut().suspend() {
+        Ok(suspended) => suspended,
+        Err(error) => {
+            if let Some(gate) = &gate {
+                gate.resume();
+            }
+            return Err(error.into());
+        }
+    };
+    let mut editor =
+        tokio::task::spawn_blocking(move || crate::external_editor::edit(&command, &draft));
+    let mut stopped: Option<Result<LoopControl, Error>> = None;
+    let mut events_open = true;
+    let edited = loop {
+        if stopped.is_none() {
+            if let Some(event) = sources.ready_event.take() {
+                match ui
+                    .dispatch(UiAction::BackendEvent(event.event), writer, limit)
+                    .await
+                {
+                    Ok(LoopControl::Continue) => {}
+                    outcome => stopped = Some(outcome),
+                }
+                continue;
+            }
+        }
+        tokio::select! {
+            biased;
+            edited = &mut editor => break edited,
+            event = sources.events.recv(), if events_open && stopped.is_none() => match event {
+                Some(event) => *sources.ready_event = Some(event),
+                None => events_open = false,
+            },
+        }
+    };
+    let restored = terminal
+        .backend_mut()
+        .resume(suspended)
+        .and_then(|()| crate::terminal::repaint_all(terminal));
+    if let Some(gate) = &gate {
+        gate.resume();
+    }
+    restored?;
+    let edited = edited.map_err(Error::Task)?;
+    if let Some(outcome) = stopped {
+        return outcome;
+    }
+    ui.apply_external_edit(edited);
+    Ok(LoopControl::Continue)
 }
 
 #[cfg(test)]
