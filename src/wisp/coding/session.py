@@ -6,7 +6,15 @@ import hashlib
 import json
 import logging
 from collections import deque
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -236,8 +244,21 @@ class ImageInputUnsupportedError(ValueError):
     """New images that this session's model or provider request cannot carry.
 
     Raised before anything is stored when the model does not take images, or
-    when one message's images alone exceed the provider's per-request budget.
+    when one message's images alone exceed the provider's per-request budget;
+    and before a message is queued when its images no longer fit beside those
+    the active run's requests already carry.
     """
+
+
+def _queued_image_bytes(messages: Iterable[Message]) -> int:
+    """Return the image bytes queued messages add to the requests that carry them."""
+
+    return sum(
+        image.byte_size
+        for message in messages
+        if message.image_bytes is not None
+        for image in message.images or ()
+    )
 
 
 async def _store_images(session: JsonlSession, images: Sequence[bytes]) -> tuple[ImagePart, ...]:
@@ -382,10 +403,11 @@ class CodingSession:
         self._cancelled_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
         self._active_persistence: RunPersistence | None = None
-        # Image bytes the active run's tool results may still add to its requests:
-        # the request budget less the images its history already sends. Earlier
-        # tool images stay in later requests (Anthropic replays them each time), so
-        # the allowance only shrinks until the history is reloaded.
+        # Image bytes the active run's tool results and queued messages may still
+        # add to its requests: the request budget less the images its history
+        # already sends and those its queues hold. Earlier tool images stay in later
+        # requests (Anthropic replays them each time), so the allowance only shrinks
+        # until the history is reloaded or a queued message is removed unsent.
         self._tool_image_allowance = 0
         self._last_session_id: str | None = None
         self._accepting_queued_messages = False
@@ -568,12 +590,23 @@ class CodingSession:
         # Storing and skill expansion await, so the run may have ended meanwhile.
         if harness is not self._active_queue_harness():
             raise RuntimeError("CodingSession active agent run changed")
-        # The run's requests carry this message's images too, so its tools have less
-        # room for theirs.
-        self._tool_image_allowance -= sum(image.byte_size for image in stored_images)
-        if kind == "steering":
-            return harness.steer_message(message)
-        return harness.follow_up_message(message)
+        # Every later request of the run carries this message's images beside the
+        # ones it already sends, so they must fit what is left of its budget; they
+        # take that room from its tools until the message leaves the queue unsent.
+        image_size = _queued_image_bytes((message,))
+        if image_size > self._tool_image_allowance:
+            raise ImageInputUnsupportedError(
+                f"The attached images total {image_size} bytes, but this run's requests "
+                f"have room for {max(self._tool_image_allowance, 0)} more bytes of images. "
+                "Send them after the run ends, or attach fewer or smaller images"
+            )
+        queued = (
+            harness.steer_message(message)
+            if kind == "steering"
+            else harness.follow_up_message(message)
+        )
+        self._tool_image_allowance -= image_size
+        return queued
 
     @staticmethod
     def queued_message_rejection(queued_messages: int) -> str | None:
@@ -679,6 +712,8 @@ class CodingSession:
             message = harness.pop_latest_follow_up()
         else:
             raise ValueError(f"Unsupported queue kind: {kind!r}")
+        if message is not None:
+            self._tool_image_allowance += _queued_image_bytes((message,))
         return message, harness.queue_updated_event()
 
     def clear_queue(self, kind: QueueKind | None = None) -> tuple[QueuedMessages, QueueUpdated]:
@@ -693,6 +728,7 @@ class CodingSession:
             cleared = QueuedMessages(follow_up=harness.clear_queue(kind))
         else:
             raise ValueError(f"Unsupported queue kind: {kind!r}")
+        self._tool_image_allowance += _queued_image_bytes((*cleared.steering, *cleared.follow_up))
         return cleared, harness.queue_updated_event()
 
     def _active_queue_harness(self) -> AgentHarness:
@@ -813,8 +849,9 @@ class CodingSession:
 
         Args:
             history (Sequence[Message]): The run's history with its bytes loaded.
-            reserved_bytes (int, optional): Budget taken by images the run's first
-                request adds after ``history``. Defaults to 0.
+            reserved_bytes (int, optional): Budget taken by images the run's
+                requests add after ``history``: the prompt's, or those of messages
+                still queued. Defaults to 0.
         """
 
         sent = sum(
@@ -1812,14 +1849,26 @@ class CodingSession:
             return harness, False
         harness.set_steering_mode(retained.steering_mode)
         harness.set_follow_up_mode(retained.follow_up_mode)
-        # Queued messages kept their bytes from an earlier run; the model may have
-        # changed since to one that cannot take images.
-        takes_images = self._model_takes_images()
         for message in retained.messages.steering:
-            harness.steer_message(_for_image_support(message, takes_images=takes_images))
+            harness.steer_message(self._restored_queue_message(message))
         for message in retained.messages.follow_up:
-            harness.follow_up_message(_for_image_support(message, takes_images=takes_images))
+            harness.follow_up_message(self._restored_queue_message(message))
         return harness, True
+
+    def _restored_queue_message(self, message: Message) -> Message:
+        """Fit a message queued by an earlier run into this run's image budget.
+
+        The message kept its image bytes from that run, but the model may have
+        changed since to one that cannot take images, and this run's history may
+        leave less room. Images that no longer fit go as placeholder text.
+        """
+
+        message = _for_image_support(message, takes_images=self._model_takes_images())
+        image_size = _queued_image_bytes((message,))
+        if image_size > self._tool_image_allowance:
+            return message.model_copy(update={"image_bytes": None})
+        self._tool_image_allowance -= image_size
+        return message
 
     def _persist_queue_injection(
         self,
@@ -2871,7 +2920,9 @@ class _RunCompaction:
                 self._session,
                 await anyio.to_thread.run_sync(self._session.read_context_messages),
             )
-            self._owner._start_tool_image_allowance(active_history)
+            self._owner._start_tool_image_allowance(
+                active_history, reserved_bytes=self._pending_queue_image_bytes()
+            )
             self._harness.replace_messages(
                 (*self._prompt_messages, *self._owner._conversation_history(active_history))
             )
@@ -3081,6 +3132,12 @@ class _RunCompaction:
         self._recovered_from_overflow = True
         return retry_decision
 
+    def _pending_queue_image_bytes(self) -> int:
+        """Return the image bytes of messages still queued for this run's requests."""
+
+        queued = self._harness.queued_messages
+        return _queued_image_bytes((*queued.steering, *queued.follow_up))
+
     async def _replacement_after_compaction(
         self,
         continuation_messages: Sequence[Message],
@@ -3122,7 +3179,9 @@ class _RunCompaction:
         )
         # Only a fresh replacement drops the provider's replay of earlier tool results
         # and their images; a rebase above keeps it, and with it the allowance spent.
-        owner._start_tool_image_allowance(active_history)
+        owner._start_tool_image_allowance(
+            active_history, reserved_bytes=self._pending_queue_image_bytes()
+        )
         return RequestBoundaryDecision(
             messages=owner._normalize_provider_messages(
                 replacement,

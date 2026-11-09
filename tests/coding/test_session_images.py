@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import anyio
@@ -456,3 +457,102 @@ def test_tool_images_share_run_budget(tmp_path: Path) -> None:
     assert first.image_bytes == (PNG,)
     assert second.images == first.images
     assert second.image_bytes is None
+
+
+def _queue_during_run(
+    tmp_path: Path, *, budget: int, queue: Callable[[CodingSession], Awaitable[None]]
+) -> None:
+    """Run a prompt carrying PNG and call ``queue`` once the run accepts messages."""
+
+    store = JsonlSessionStore(tmp_path)
+    event_bus = EventBus()
+    provider = _answers(3)
+    provider.max_request_image_bytes = budget  # type: ignore[attr-defined]
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+
+    async def on_started(event: WispEvent) -> None:
+        await queue(agent)
+
+    event_bus.on("agent.started", on_started)
+
+    async def run() -> None:
+        async for _ in agent.run("look", images=[PNG], session=store.create()):
+            pass
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("room", [0, -1], ids=["fits", "too-big"])
+def test_queued_image_fits_run(tmp_path: Path, room: int) -> None:
+    """A queued message's images must fit beside those the run already sends."""
+
+    outcomes: list[str] = []
+
+    async def steer(agent: CodingSession) -> None:
+        try:
+            await agent.steer("and this?", images=[JPEG])
+        except ImageInputUnsupportedError as exc:
+            outcomes.append(str(exc))
+        else:
+            outcomes.append("queued")
+
+    _queue_during_run(tmp_path, budget=len(PNG) + len(JPEG) + room, queue=steer)
+
+    if room == 0:
+        assert outcomes == ["queued"]
+    else:
+        (rejection,) = outcomes
+        assert f"room for {len(JPEG) - 1} more bytes" in rejection
+
+
+@pytest.mark.parametrize("remove", ["pop", "clear"])
+def test_removed_queue_frees_budget(tmp_path: Path, remove: str) -> None:
+    """Images removed from the queue unsent stop holding the run's budget."""
+
+    async def requeue(agent: CodingSession) -> None:
+        await agent.follow_up("later", images=[JPEG])
+        if remove == "pop":
+            agent.pop_queue("follow_up")
+        else:
+            agent.clear_queue()
+        await agent.follow_up("later", images=[JPEG])
+
+    _queue_during_run(tmp_path, budget=len(PNG) + len(JPEG), queue=requeue)
+
+
+def test_restored_queue_fits_budget(tmp_path: Path) -> None:
+    """A queue kept from a failed run drops image bytes the next run cannot fit."""
+
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    event_bus = EventBus()
+    provider = ScriptedProvider(
+        [
+            [RuntimeError("provider failed")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="one")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="two")],
+        ]
+    )
+    provider.max_request_image_bytes = len(PNG) + len(JPEG) - 1  # type: ignore[attr-defined]
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+    queued_once: list[bool] = []
+
+    async def queue_once(event: WispEvent) -> None:
+        if not queued_once:
+            queued_once.append(True)
+            await agent.follow_up("later", images=[PNG])
+
+    event_bus.on("agent.started", queue_once)
+
+    async def run(prompt: str, images: list[bytes]) -> None:
+        async for _ in agent.run(prompt, images=images, session=session):
+            pass
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        anyio.run(run, "look", [])
+    anyio.run(run, "next", [JPEG])
+
+    request = _user_messages(provider.calls[-1])
+    assert [message.image_bytes for message in request] == [None, (JPEG,), None]
+    assert request[-1].content == "later"
+    assert request[-1].images is not None
