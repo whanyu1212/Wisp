@@ -124,3 +124,27 @@ def test_counts_compaction_usage() -> None:
 
     assert (metrics.input_tokens, metrics.output_tokens) == (1100, 110)
     assert (metrics.known_usd, metrics.unpriced_responses) == (Decimal("0.5"), 1)
+
+
+def test_counts_proxied_calls_by_target() -> None:
+    events: list[WispEvent] = [
+        ToolExecutionStarted(call_id="1", name="mcp_search", arguments={"query": "orders"}),
+        ToolExecutionStarted(call_id="2", name="mcp_call", target="mcp__db__q", arguments={}),
+        ToolExecutionStarted(call_id="3", name="mcp_call", arguments={"name": "x"}),
+        ToolResultReady(
+            call_id="3",
+            name="mcp_call",
+            output="",
+            is_error=True,
+            failure_code="invalid_arguments",
+        ),
+    ]
+
+    metrics = measure(parse_events(_lines(events)))
+
+    assert dict(metrics.tool_calls) == {"mcp_search": 1, "mcp__db__q": 1, "mcp_call": 1}
+    assert (metrics.proxied_calls, metrics.proxied_errors, metrics.proxied_argument_errors) == (
+        2,
+        1,
+        1,
+    )

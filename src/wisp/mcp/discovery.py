@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -33,21 +33,6 @@ MAX_SEARCH_RESULTS = 20
 # The prefix `adapt_mcp_tool` puts on every description; results show the rest.
 _DESCRIPTION_PREFIX = re.compile(r"^MCP server [a-z0-9-]+: ")
 _WORD = re.compile(r"[a-z0-9]+")
-# A JSON Schema primitive type and the Python values it accepts. `bool` is an `int`
-# in Python, so integer and number checks exclude it explicitly.
-_JSON_TYPES: Mapping[str, Callable[[object], bool]] = {
-    "string": lambda value: isinstance(value, str),
-    "boolean": lambda value: isinstance(value, bool),
-    # JSON has one number type, so 2.0 is a valid integer.
-    "integer": lambda value: (
-        (isinstance(value, int) and not isinstance(value, bool))
-        or (isinstance(value, float) and value.is_integer())
-    ),
-    "number": lambda value: isinstance(value, int | float) and not isinstance(value, bool),
-    "array": lambda value: isinstance(value, list),
-    "object": lambda value: isinstance(value, dict),
-    "null": lambda value: value is None,
-}
 
 
 @runtime_checkable
@@ -206,12 +191,12 @@ def resolve_target(catalog: McpCatalog | None, arguments: ToolArguments) -> str 
 
 
 def check_proxied_arguments(entry: CatalogEntry, arguments: object) -> str | None:
-    """Check proxied arguments lightly against the target's schema, before approval.
+    """Check proxied arguments against the target's schema, before approval.
 
-    Only the shape is checked: an object, required top-level properties present,
-    and each top-level property's primitive `type`. Full JSON Schema validation is
-    left to the server, as for a direct call: a server-supplied `pattern` could
-    hang the event loop, and an unresolvable `$ref` would raise.
+    Only that the arguments are an object with every required top-level property.
+    Types are left to the server, as for a direct call: many servers accept a
+    numeric string for a number, so judging types here would refuse calls direct
+    mode lets through. The server still validates fully.
 
     Returns:
         str | None: A model-facing problem, or None when the call may proceed.
@@ -219,27 +204,11 @@ def check_proxied_arguments(entry: CatalogEntry, arguments: object) -> str | Non
 
     if not isinstance(arguments, dict):
         return f"{MCP_CALL}.arguments must be an object of {entry.name}'s parameters"
-    schema = entry.tool.input_schema
-    required = schema.get("required")
+    required = entry.tool.input_schema.get("required")
     if isinstance(required, list):
         missing = [name for name in required if isinstance(name, str) and name not in arguments]
         if missing:
             return f"{entry.name} needs {', '.join(missing)}; see {MCP_DESCRIBE} for its schema"
-    properties = schema.get("properties")
-    if isinstance(properties, dict):
-        for name, value in arguments.items():
-            expected = properties.get(name)
-            declared = expected.get("type") if isinstance(expected, dict) else None
-            types = [declared] if isinstance(declared, str) else declared
-            # Only a union of plain type names is checked. Older drafts allow schemas
-            # or names like "any" in a `type` list; a value may match such a branch,
-            # so that property is left for the server to validate.
-            if not isinstance(types, list) or not all(
-                isinstance(kind, str) and kind in _JSON_TYPES for kind in types
-            ):
-                continue
-            if types and not any(_JSON_TYPES[kind](value) for kind in types):
-                return f"{entry.name}.{name} must be {' or '.join(types)}"
     return None
 
 

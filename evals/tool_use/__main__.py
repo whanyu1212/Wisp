@@ -36,6 +36,7 @@ from evals.tool_use.runner import (
     write_row,
 )
 from evals.tool_use.task_definitions import TaskError, select_tasks
+from wisp.mcp.config import MCP_TOOL_EXPOSURES
 
 RESULTS_DIR = Path(__file__).parent / "results"
 BASELINES_DIR = Path(__file__).parent / "baselines"
@@ -58,6 +59,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--env-file", type=Path, default=DEFAULT_ENV_FILE)
     run.add_argument("--auth-file", type=Path, default=DEFAULT_AUTH_FILE)
     run.add_argument("--results", type=Path, help="output folder (default: a new timestamped one)")
+    run.add_argument(
+        "--mcp-tool-exposure",
+        choices=MCP_TOOL_EXPOSURES,
+        default="direct",
+        help="how MCP tasks' tools reach the model (default: direct)",
+    )
 
     runs_help = "a results folder, its runs.jsonl, or a baseline .json file"
     report = commands.add_parser("report", help="summarize one set of runs")
@@ -140,7 +147,10 @@ def _run(args: argparse.Namespace) -> int:
         return 2
     results_dir.mkdir(parents=True, exist_ok=True)
     context = RunContext(
-        build=detect_build(REPO_ROOT), credentials=credentials, results_dir=results_dir
+        build=detect_build(REPO_ROOT),
+        credentials=credentials,
+        results_dir=results_dir,
+        mcp_tool_exposure=args.mcp_tool_exposure,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -168,6 +178,7 @@ def _run(args: argparse.Namespace) -> int:
         "wisp_version": context.build.version,
         "git_commit": context.build.git_commit,
         "credential_sources": dict(credentials.sources),
+        "mcp_tool_exposure": args.mcp_tool_exposure,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

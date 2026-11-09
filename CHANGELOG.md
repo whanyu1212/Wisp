@@ -33,7 +33,10 @@ this policy.
   `WISP_MCP_TOOL_EXPOSURE`. On demand, the model gets `mcp_search`, `mcp_describe` and `mcp_call`
   instead of every MCP tool's definition. `mcp_call` reaches only the MCP tools direct mode would
   offer that run, and each call goes through that tool's own safety, approval and session grant.
-  The TUI and CLI approval prompts name the tool that runs.
+  The TUI and CLI approval prompts name the tool that runs. In the tool-use evals, on demand cut
+  tokens per run by 76–77% on a multi-step task with a 102-tool catalog and by 28–46% with 50 small
+  tools, with every run still passing; with 6 tools it cost 20–34% more, so it stays off by default.
+  A call missing a required parameter is refused before approval; types are left to the server.
 
 ### CLI
 

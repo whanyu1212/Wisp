@@ -37,6 +37,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--budget-tokens` | Stop starting rounds once unpriced runs (Codex subscription) used this many tokens |
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
+| `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
 before each round, so a stopped suite has the same number of runs for every pairing.
@@ -84,6 +85,9 @@ Reports leave errored runs out of pass rates and count them on their own, so a r
 read as a task failure. Rows also record tool calls by name, tool errors by `failure_code`,
 repeated `bash` commands, whether `read_output` was used, tokens (including cache reads), the known
 cost, provider retries, the setup hashes from `agent.started`, the Wisp version, and the commit.
+A proxied `mcp_call` counts under the MCP tool it ran, so both exposure modes count calls the same
+way; rows also record the exposure, the number of proxied calls, and how many of them were
+rejected for their arguments.
 
 ## Report
 
@@ -134,6 +138,18 @@ with `suite.json`), and never overwrites an existing baseline. Baselines are
 committed so later changes to Wisp's tools are compared against the same numbers. Record one on
 the commit the change starts from, with the models the change will be measured on.
 
+## Recorded results
+
+| Baseline | What it measures |
+|---|---|
+| `2026-11-08-current-tools.json` | All 12 tasks before the `bash` head-and-tail preview (#921) |
+| `2026-11-08-bash-preview.json` | All 12 tasks after it; compare tool changes against this |
+| `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
+
+On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
+`mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
+passing in both modes; see [the tools guide](../../site/src/content/pages/guide/tools-and-safety.md#what-on-demand-discovery-saves).
+
 ## Add a task
 
 Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve
@@ -163,8 +179,15 @@ max_tool_errors = 2
 A task's `mcp_servers` start for each run from the run's private `HOME`, and all their tools are
 exposed with the built-in `tools`. `servers/catalogs.py` defines each server's tools and answers;
 decoy tools return plausible wrong values rather than errors, so a model cannot find the right
-tool by trying them all. A run whose servers did not offer every catalog tool is `errored`, since
-a server that failed to start says nothing about the model.
+tool by trying them all. A run whose server failed to start is `errored`, since that says nothing
+about the model: Wisp reports it as an `MCP server … is unavailable` error, and in direct mode the
+run is also missing the server's tools. On demand, the run must have been offered the three
+discovery tools.
+
+`inventory` (50 small tools), `billing`, `billing-legacy` and `billing-sandbox` keep definitions
+short. `devhub` (`servers/devhub.py`) is about 100 tools of a code-hosting API with descriptions
+of a few sentences and typed, partly nested parameters, close to real servers, so it measures
+what large catalogs cost; `mcp-triage` uses it over several steps.
 
 Commands run with `bash -c` in the run's folder. `{python}` becomes the runner's interpreter and
 `{task}` the task's own folder, so a verifier script can live beside `task.toml`, out of the

@@ -22,6 +22,7 @@ from wisp.events import (
     ToolResultReady,
     wisp_event_from_json,
 )
+from wisp.mcp.discovery import MCP_CALL
 
 
 @dataclass(slots=True)
@@ -46,6 +47,14 @@ class RunMetrics:
         context_overflowed (bool): Whether the conversation outgrew the model's
             context window.
         errors (list[str]): Every `error` event's message, in order.
+        proxied_calls (int): On-demand `mcp_call` calls. Each also counts in
+            ``tool_calls`` under the tool it resolved to, or as `mcp_call` when
+            the name it gave matched no catalog tool.
+        proxied_errors (int): `mcp_call` calls that failed for any reason: Wisp's
+            pre-check, an unknown name, or the server rejecting them. The measure
+            of whether proxied calls are harder to get right than direct ones.
+        proxied_argument_errors (int): The subset Wisp's pre-check rejected
+            because a required parameter was missing or arguments were not an object.
     """
 
     setup: RunSetup | None = None
@@ -62,6 +71,9 @@ class RunMetrics:
     retries: int = 0
     context_overflowed: bool = False
     errors: list[str] = field(default_factory=list)
+    proxied_calls: int = 0
+    proxied_errors: int = 0
+    proxied_argument_errors: int = 0
 
     @property
     def last_error(self) -> str | None:
@@ -109,12 +121,18 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             metrics.outcome = event.outcome
             metrics.turns = event.turns
         elif isinstance(event, ToolExecutionStarted):
-            metrics.tool_calls[event.name] += 1
+            # A proxied call counts under the tool it ran, so modes compare like with like.
+            metrics.tool_calls[event.target or event.name] += 1
+            metrics.proxied_calls += event.name == MCP_CALL
             command = event.arguments.get("command")
             if event.name == "bash" and isinstance(command, str):
                 metrics.commands.append(command)
         elif isinstance(event, ToolResultReady) and event.is_error:
             metrics.tool_errors[event.failure_code or "unknown"] += 1
+            metrics.proxied_errors += event.name == MCP_CALL
+            metrics.proxied_argument_errors += (
+                event.name == MCP_CALL and event.failure_code == "invalid_arguments"
+            )
         elif isinstance(event, MessageCompleted | CompactionCompleted):
             # Compaction summarizes the conversation with its own paid request.
             _add_usage(metrics, event)

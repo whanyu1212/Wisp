@@ -27,7 +27,7 @@ from evals.tool_use.task_definitions import select_tasks
 from tests.agent.loop.support import tool_call_stream
 from wisp.coding.session import CodingSession
 from wisp.config.settings import WispSettings
-from wisp.events import AgentCompleted, ToolResultReady, WispEvent
+from wisp.events import AgentCompleted, ToolApprovalRequested, ToolResultReady, WispEvent
 from wisp.messages import Message
 from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
@@ -103,7 +103,12 @@ def _answer(text: str) -> _Step:
 
 
 async def _run(
-    tmp_path: Path, steps: Sequence[_Step], *, tools: Sequence[str], settings: dict[str, object]
+    tmp_path: Path,
+    steps: Sequence[_Step],
+    *,
+    tools: Sequence[str],
+    settings: dict[str, object],
+    approval: ToolApprovalPolicy | None = None,
 ) -> list[WispEvent]:
     servers = WispSettings.model_validate(settings).mcp_servers or ()
     runtime = await build_runtime(mcp_servers=servers)
@@ -113,7 +118,8 @@ async def _run(
             sessions=JsonlSessionStore(tmp_path / "sessions"),
             tool_registry=select_tools(runtime.tools, allowed_tools=tuple(tools)),
             tool_context=ToolContext(cwd=tmp_path),
-            tool_approval_policy=ToolApprovalPolicy.approve_all(),
+            tool_approval_policy=approval or ToolApprovalPolicy.approve_all(),
+            mcp_tool_exposure=WispSettings.model_validate(settings).mcp_tool_exposure or "direct",
         )
         return [event async for event in session.run("go")]
     finally:
@@ -215,3 +221,40 @@ def test_mcp_tool_found_and_called(tmp_path: Path) -> None:
     assert offered == ["mcp__inventory__get_reorder_policy"]
     assert f"reorder point {REORDER_POINT} units" in policy.output and not policy.is_error
     assert _outcome(events) == "completed"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("granted", [False, True], ids=["denied", "granted"])
+def test_proxied_call_needs_target_approval(tmp_path: Path, granted: bool) -> None:
+    # The synthetic servers mark every tool read-only, so the live evals never ask
+    # for approval; here the target is a command tool, as real MCP tools default to.
+    task = next(task for task in select_tasks(tags=["mcp"]) if task.id == "mcp-similar-servers")
+    settings = mcp_settings(task, sys.executable, "on_demand")
+    servers = settings["mcp_servers"]
+    assert isinstance(servers, dict)
+    servers["billing"]["tool_safety"]["get_invoice"] = "command"
+    target = "mcp__billing__get_invoice"
+    steps = [
+        lambda _request: _tool_call(
+            "mcp_call", {"name": target, "arguments": {"invoice_id": "INV-2207"}}
+        ),
+        _answer("done"),
+    ]
+    approval = (
+        ToolApprovalPolicy.approve_tool_names({target})
+        if granted
+        else ToolApprovalPolicy.require_approval()
+    )
+
+    events = anyio.run(
+        lambda: _run(tmp_path, steps, tools=[target], settings=settings, approval=approval)
+    )
+
+    requests = [event for event in events if isinstance(event, ToolApprovalRequested)]
+    (result,) = _results(events)
+    assert result.target == target
+    if granted:
+        assert not requests and "1880.40" in result.output
+    else:
+        assert [(event.target, event.safety) for event in requests] == [(target, "command")]
+        assert result.failure_code == "approval_denied"
