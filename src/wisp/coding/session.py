@@ -2332,6 +2332,7 @@ class CodingSession:
                     if tool_cwd is not None and event.name in ("edit", "write")
                     else None
                 ),
+                target=event.target,
             )
             if isinstance(event, ToolExecutionEnded)
             else None

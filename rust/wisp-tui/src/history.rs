@@ -8,7 +8,7 @@ use thiserror::Error;
 use crate::tool_cards::{
     BoundedText, INTERRUPTED_TOOL_RESULT_TEXT, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
     ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
-    identity_for_display, process_call_identity,
+    identity_for_display, process_call_identity, proxied_arguments,
 };
 use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
 use crate::transcript::{SharedTranscript, TranscriptEntryId};
@@ -79,6 +79,7 @@ pub(crate) fn project_chronological_history<'a>(
     let mut durable_entry_ids = Vec::new();
     let mut seen = BTreeSet::new();
     let mut process_ids = HashMap::new();
+    let mut proxied_calls = HashMap::new();
     for (index, message) in messages.enumerate() {
         let durable_entry_id = string(message, index, "entry_id")?;
         if durable_entry_id.is_empty() || durable_entry_id.len() > HISTORY_ENTRY_ID_MAX_BYTES {
@@ -101,13 +102,19 @@ pub(crate) fn project_chronological_history<'a>(
                 None
             }
             "assistant" => {
-                assistant_entries =
-                    project_assistant(&mut transcript, &mut process_ids, message, index)?;
+                assistant_entries = project_assistant(
+                    &mut transcript,
+                    &mut process_ids,
+                    &mut proxied_calls,
+                    message,
+                    index,
+                )?;
                 None
             }
             "tool" => Some(project_tool_result(
                 &mut transcript,
                 &mut process_ids,
+                &mut proxied_calls,
                 message,
                 index,
             )?),
@@ -164,9 +171,12 @@ pub fn project_rpc_exact_tool_result(
     tool_result(message, 0)
 }
 
+/// Projects one assistant message and its tool calls. `proxied_calls` keeps each
+/// `mcp_call`'s arguments until its result names the tool it ran.
 fn project_assistant(
     transcript: &mut SharedTranscript,
     process_ids: &mut HashMap<String, String>,
+    proxied_calls: &mut HashMap<String, Value>,
     message: &Value,
     index: usize,
 ) -> Result<Vec<TranscriptEntryId>, HistoryProjectionError> {
@@ -202,10 +212,15 @@ fn project_assistant(
         transcript.complete_message(turn(index), EMPTY_ASSISTANT_MESSAGE.into());
     }
     let mut entries = Vec::with_capacity(tool_calls.len());
-    for tool_call in tool_calls {
-        let tool_call = tool_call_input(tool_call, index)?;
+    for raw_tool_call in tool_calls {
+        let tool_call = tool_call_input(raw_tool_call, index)?;
         if let Some(process) = process_call_identity(&tool_call.name, &tool_call.arguments) {
             process_ids.insert(tool_call.call_id.clone(), process.process_id);
+        }
+        if tool_call.name == "mcp_call" {
+            if let Some(arguments) = raw_tool_call.get("arguments") {
+                proxied_calls.insert(tool_call.call_id.clone(), arguments.clone());
+            }
         }
         let entry_id = transcript.observe_historical_tool_call(tool_call);
         entries.push(entry_id);
@@ -323,11 +338,28 @@ fn tool_call_input(value: &Value, index: usize) -> Result<ToolCallInput, History
 fn project_tool_result(
     transcript: &mut SharedTranscript,
     process_ids: &mut HashMap<String, String>,
+    proxied_calls: &mut HashMap<String, Value>,
     message: &Value,
     index: usize,
 ) -> Result<(TranscriptEntryId, Option<ToolResultInput>), HistoryProjectionError> {
     let mut result = tool_result(message, index)?;
     let request_missing = !transcript.has_unresolved_tool_call(&result.call_id);
+    // A proxied call's card shows the tool it ran, as the live card did. A call on an
+    // older page, or whose saved arguments were clipped, keeps showing `mcp_call`.
+    let proxied = proxied_calls.remove(&result.call_id);
+    if let (Some(target), Some(arguments)) = (result_target(message, index)?, &proxied) {
+        if let Some(inner) = proxied_arguments("mcp_call", arguments, target) {
+            transcript.observe_tool_target(&ToolCallInput {
+                call_id: result.call_id.clone(),
+                detail_source: project_tool_detail_source(
+                    target,
+                    inner.as_object().expect("proxied arguments are an object"),
+                ),
+                arguments: bounded_tool_arguments(target, inner),
+                name: bounded_tool_name(target),
+            });
+        }
+    }
     result.process_id = process_ids.remove(&result.call_id);
     if let Some(process_id) = result.process_id.clone() {
         project_historical_process_result(&mut result, &process_id);
@@ -348,7 +380,26 @@ fn project_tool_result(
     Ok((entry_id, pending_result))
 }
 
+/// The MCP tool a saved proxied call ran; None for every other result and for
+/// results saved before the target was kept.
+fn result_target(message: &Value, index: usize) -> Result<Option<&str>, HistoryProjectionError> {
+    message
+        .get("tool_result")
+        .and_then(|result| result.get("target"))
+        .map_or(Ok(None), |value| match value {
+            Value::Null => Ok(None),
+            Value::String(target) => Ok(Some(target.as_str())),
+            _ => Err(HistoryProjectionError::InvalidField {
+                index,
+                field: "tool_result.target",
+            }),
+        })
+}
+
 fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, HistoryProjectionError> {
+    // Named as the model's call even when a target was saved: a result whose call is
+    // on an older page joins that call's card when the page loads, and the card keeps
+    // the name it was given then.
     let name = optional_string(message, index, "tool_name")?.unwrap_or("unknown");
     let result = message
         .get("tool_result")
@@ -980,6 +1031,37 @@ mod tests {
         assert_eq!(cards.len(), 2);
         assert_eq!(cards[1].status.as_str(), "done");
         assert_eq!(cards[0].status.as_str(), "cancelled");
+    }
+
+    #[test]
+    fn replays_saved_proxy_target() {
+        // A result saved with its target shows the tool the call ran; one saved before
+        // the target was kept shows the call as the model made it.
+        for (target, action) in [
+            (
+                json!("mcp__devhub__get_issue"),
+                "MCP      devhub/get_issue  issue_id=412",
+            ),
+            (
+                Value::Null,
+                "mcp_call  arguments={1 fields} name=mcp__devhub__get_issue",
+            ),
+        ] {
+            let mut assistant = message("assistant", "");
+            assistant["tool_calls"] = json!([{
+                "call_id": "issue",
+                "name": "mcp_call",
+                "arguments": {"name": "mcp__devhub__get_issue", "arguments": {"issue_id": 412}}
+            }]);
+            let mut result = message("tool", "Issue 412");
+            result["tool_call_id"] = json!("issue");
+            result["tool_name"] = json!("mcp_call");
+            result["tool_result"] = json!({"status": "done", "target": target});
+            let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+            let card = transcript.entries()[0].tool_card().unwrap();
+            assert_eq!(card.status.as_str(), "done");
+            assert_eq!(card.action(), action);
+        }
     }
 
     #[test]
