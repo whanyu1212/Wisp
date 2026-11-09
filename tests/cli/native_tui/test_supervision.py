@@ -70,6 +70,68 @@ def test_cleanup_reports_kill_timeout(monkeypatch: MonkeyPatch) -> None:
         rust_launcher._cleanup_process_group(process, graceful_signal=None)  # type: ignore[arg-type]
 
 
+_SNAPSHOT = _TerminalSnapshot(fd=7, foreground_pgrp=81, attributes=[0, 0, 0, 0, 0, 0, [b"\x00"]])
+
+
+def _record_job_cleanup(monkeypatch: MonkeyPatch, *, foreground: int) -> list[tuple[int, int]]:
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(rust_launcher.os, "getpgrp", lambda: 99)
+    monkeypatch.setattr(rust_launcher.os, "tcgetpgrp", lambda _fd: foreground)
+    monkeypatch.setattr(rust_launcher, "_wait_for_process_group", lambda *_args: True)
+    monkeypatch.setattr(
+        rust_launcher,
+        "_signal_process_group",
+        lambda pgid, signum: signals.append((pgid, signum)),
+    )
+    return signals
+
+
+def test_foreground_job_gets_hangup_and_continue(monkeypatch: MonkeyPatch) -> None:
+    signals = _record_job_cleanup(monkeypatch, foreground=555)
+
+    rust_launcher._cleanup_foreground_job(_SNAPSHOT, _FakeProcess())  # type: ignore[arg-type]
+
+    assert signals == [(555, signal.SIGHUP), (555, signal.SIGCONT)]
+
+
+@pytest.mark.parametrize("foreground", [99, 81, _FakeProcess.pid])
+def test_own_groups_are_not_a_job(monkeypatch: MonkeyPatch, foreground: int) -> None:
+    signals = _record_job_cleanup(monkeypatch, foreground=foreground)
+
+    rust_launcher._cleanup_foreground_job(_SNAPSHOT, _FakeProcess())  # type: ignore[arg-type]
+
+    assert signals == []
+
+
+def test_job_cleanup_failure_still_cleans_frontend(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cleaned: list[int | None] = []
+
+    async def fake_preflight(_options: TuiOptions) -> None:
+        return None
+
+    def fail_job(*_args: object) -> None:
+        raise RustTuiLaunchError("foreground job process group 555 did not exit after SIGKILL")
+
+    monkeypatch.setattr(rust_launcher, "resolve_rust_tui_binary", lambda: Path("/wisp-tui"))
+    monkeypatch.setattr(rust_launcher, "_preflight_tui_options", fake_preflight)
+    monkeypatch.setattr(rust_launcher.subprocess, "Popen", lambda *_args, **_kwargs: _FakeProcess())
+    monkeypatch.setattr(rust_launcher, "_snapshot_terminal", lambda: None)
+    monkeypatch.setattr(rust_launcher, "_cleanup_foreground_job", fail_job)
+    monkeypatch.setattr(
+        rust_launcher,
+        "_cleanup_process_group",
+        lambda _process, *, graceful_signal: cleaned.append(graceful_signal),
+    )
+
+    with pytest.raises(RustTuiLaunchError, match="foreground job"):
+        rust_launcher.run_rust_tui(_options(tmp_path))
+
+    assert cleaned == [None]
+
+
 def test_terminal_restoration_restores_pgrp_termios_and_ansi_baseline(
     monkeypatch: MonkeyPatch,
 ) -> None:

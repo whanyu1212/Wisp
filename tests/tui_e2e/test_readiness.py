@@ -383,6 +383,50 @@ def test_suspended_editor_is_resumed(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
+def test_terminated_launcher_stops_the_editor(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    draft_dir = tmp_path / "drafts"
+    draft_dir.mkdir()
+    pid_file = tmp_path / "editor.pid"
+    # The editor runs in its own process group, outside the group the launcher
+    # supervises, so terminating the launcher must still reach it.
+    editor = _editor_script(tmp_path, f"echo $$ >'{pid_file}'\nexec sleep 60")
+    tui, _session_dir = _launch(
+        tmp_path, home=home, env={"VISUAL": str(editor), "TMPDIR": str(draft_dir)}
+    )
+    try:
+        tui.wait_ready()
+        _open_editor(tui, b"typed draft")
+        tui.wait_until(
+            lambda _output: pid_file.exists() and pid_file.read_text().strip() != "",
+            failure="the editor did not start",
+        )
+        editor_pid = int(pid_file.read_text())
+        os.kill(tui.pid, signal.SIGTERM)
+        tui.wait_until(
+            lambda _output: tui.status is not None,
+            failure="the launcher did not exit after SIGTERM",
+        )
+        deadline = time.monotonic() + 5
+        while _process_alive(editor_pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not _process_alive(editor_pid), "the editor outlived the launcher"
+        assert list(draft_dir.glob("wisp-prompt-*")) == []
+        assert termios.tcgetattr(tui.fd) == tui.initial_terminal
+    finally:
+        tui.close()
+
+
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.process
 def test_shift_enter_inserts_newline(tmp_path: Path) -> None:
     home = tmp_path / "home"
     _write_user_settings(home, provider="fake")
