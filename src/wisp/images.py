@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import struct
 import zlib
+from collections.abc import Callable
 from typing import Literal
 
 from wisp.events import ImageMediaType, ImagePart
@@ -92,6 +93,71 @@ def inspect_image(data: bytes) -> ImagePart:
         width=width,
         height=height,
     )
+
+
+# Enough leading bytes to recognise every format `image_format` names.
+IMAGE_SNIFF_BYTES = 16
+# Common image formats that models do not accept, recognised so a caller can say
+# why such a file is refused instead of treating it as text.
+_UNSUPPORTED_FORMATS: tuple[tuple[str, Callable[[bytes], bool]], ...] = (
+    # "BM", the file size, then four reserved bytes that are always zero; the zero
+    # bytes keep a text file that happens to start with "BM" from matching.
+    ("BMP", lambda header: header.startswith(b"BM") and header[6:10] == b"\x00" * 4),
+    ("TIFF", lambda header: header[:4] in (b"II*\x00", b"MM\x00*")),
+    ("HEIC", lambda header: header[4:12] in (b"ftypheic", b"ftypheix", b"ftypmif1")),
+    ("AVIF", lambda header: header[4:12] == b"ftypavif"),
+)
+
+
+def image_format(header: bytes) -> tuple[str, ImageMediaType | None] | None:
+    """Name the image format a file's first bytes announce.
+
+    Only the signature is checked; ``inspect_image`` still validates the whole file.
+
+    Args:
+        header (bytes): At least the first ``IMAGE_SNIFF_BYTES`` of the file, or the
+            whole file when it is shorter.
+
+    Returns:
+        tuple[str, ImageMediaType | None] | None: The format's name and, when Wisp
+        can send it to a model, its media type; None for anything that is not a
+        recognised image.
+
+    Examples:
+        >>> image_format(b"\\x89PNG\\r\\n\\x1a\\n")
+        ('PNG', 'image/png')
+        >>> image_format(b"BM6\\x00\\x00\\x00\\x00\\x00\\x00\\x00")
+        ('BMP', None)
+        >>> image_format(b"plain text") is None
+        True
+        >>> image_format(b"GIF89a release notes") is None
+        True
+    """
+
+    if header.startswith(_PNG_SIGNATURE):
+        return "PNG", "image/png"
+    if header.startswith(_JPEG_START + b"\xff"):
+        return "JPEG", "image/jpeg"
+    if header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        return "WebP", "image/webp"
+    # The remaining signatures are plain ASCII, so a text file could start with one;
+    # every real such image has a control byte in its header (a GIF's dimensions
+    # stay below 0x2000, a HEIC or AVIF box size starts with zero bytes).
+    if _looks_like_text(header):
+        return None
+    if header[:6] in _GIF_SIGNATURES:
+        return "GIF", "image/gif"
+    for name, matches in _UNSUPPORTED_FORMATS:
+        if matches(header):
+            return name, None
+    return None
+
+
+def _looks_like_text(header: bytes) -> bool:
+    """Whether a header has no byte that text files avoid (controls other than
+    tab, newline and carriage return, or DEL); UTF-8 sequences count as text."""
+
+    return all(byte >= 0x20 and byte != 0x7F or byte in b"\t\n\r" for byte in header)
 
 
 def _identify(data: bytes) -> tuple[ImageMediaType, int, int]:

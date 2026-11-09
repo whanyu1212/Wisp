@@ -74,7 +74,10 @@ class SessionImageStore:
     def _write(self, image: ImagePart, data: bytes) -> None:
         """Replace the digest's file with ``data`` through a synced temporary file."""
 
-        ensure_private_directory(self.directory)
+        try:
+            ensure_private_directory(self.directory)
+        except OSError as exc:
+            raise SessionError(f"Could not create the image directory: {self.directory}") from exc
         target = self._path(image)
         temp_path = self.directory / f".{image.sha256}.{uuid4().hex}.tmp"
         try:

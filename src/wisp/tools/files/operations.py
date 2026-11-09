@@ -15,6 +15,13 @@ from uuid import uuid4
 
 import anyio
 
+from wisp.images import (
+    IMAGE_SNIFF_BYTES,
+    MAX_IMAGE_BYTES,
+    ImageRejectedError,
+    image_format,
+    inspect_image,
+)
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string
 from wisp.tools.context import ToolContext
@@ -61,11 +68,15 @@ class CreateOnlyWriteReceipt:
 
 
 class ReadTool:
-    """Read text files with optional line slicing."""
+    """Read text files with optional line slicing, or show an image file."""
 
     name = "read"
     safety: ToolSafety = "read"
-    description = "Read a UTF-8 text file. Supports 1-indexed offset and line limit."
+    description = (
+        "Read a UTF-8 text file. Supports 1-indexed offset and line limit. "
+        "For a PNG, JPEG, GIF or WebP file, returns its format, size and dimensions, "
+        "with the image attached for models that accept images."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
@@ -106,6 +117,13 @@ class ReadTool:
             )
         except UnicodeDecodeError as exc:
             raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
+        if isinstance(slice_result, _ImageFile):
+            return _image_result(
+                path,
+                slice_result,
+                context,
+                ignored_slice="offset" in arguments or "limit" in arguments,
+            )
         line_count = slice_result.line_count
         if line_count is not None and offset > max(line_count, 1):
             raise ToolError(
@@ -149,6 +167,46 @@ class ReadTool:
             data=data,
             truncated=slice_result.truncated or truncated.truncated,
         )
+
+
+def _image_result(
+    path: SecureToolPath,
+    image_file: _ImageFile,
+    context: ToolContext,
+    *,
+    ignored_slice: bool,
+) -> ToolResult:
+    """Describe an image file and attach its bytes, or explain why it cannot be shown.
+
+    Raises:
+        ToolError: The format is one models do not accept, the file is over
+            ``MAX_IMAGE_BYTES``, or its contents fail ``inspect_image``.
+    """
+
+    if image_file.data is None:
+        raise ToolError(
+            f"{path.display} is a {image_file.format_name} image; read shows PNG, JPEG, "
+            "GIF and WebP images. Convert it first, for example with bash."
+        )
+    if len(image_file.data) > MAX_IMAGE_BYTES:
+        raise ToolError(
+            f"{path.display} is a {image_file.format_name} image over the "
+            f"{MAX_IMAGE_BYTES}-byte limit for images. Make a smaller copy first, "
+            "for example with bash."
+        )
+    try:
+        image = inspect_image(image_file.data)
+    except ImageRejectedError as exc:
+        raise ToolError(f"Cannot show {path.display}: {exc}") from exc
+    if context.seen_files is not None and image_file.version is not None:
+        context.seen_files.record(path.path, image_file.version)
+    text = (
+        f"Image file {path.display}: {image_file.format_name}, "
+        f"{image.width}x{image.height} px, {image.byte_size} bytes."
+    )
+    if ignored_slice:
+        text += " offset and limit apply only to text files and were ignored."
+    return ToolResult(text=text, data={"path": path.display}, images=(image_file.data,))
 
 
 def _read_continuation_notice(
@@ -1241,9 +1299,27 @@ def _secure_read_line_slice(
     max_bytes: int,
     max_lines: int,
     notice_bytes: int,
-) -> _ReadSlice:
+) -> _ReadSlice | _ImageFile:
+    """Read a line slice of a text file, or the bytes of an image file.
+
+    The file's first bytes decide which: a recognised image signature returns an
+    ``_ImageFile`` instead of decoding the file as text.
+    """
+
     with open_file(path) as descriptor:
         before = file_version(os.fstat(descriptor))
+        header = _read_up_to(descriptor, IMAGE_SNIFF_BYTES)
+        if (recognised := image_format(header)) is not None:
+            format_name, media_type = recognised
+            # One byte past the limit is enough to know the image is too large.
+            data = (
+                header + _read_up_to(descriptor, MAX_IMAGE_BYTES + 1 - len(header))
+                if media_type is not None
+                else None
+            )
+            after = file_version(os.fstat(descriptor))
+            return _ImageFile(format_name, data, before if before == after else None)
+        os.lseek(descriptor, 0, os.SEEK_SET)
         result = _read_line_slice(
             descriptor,
             offset=offset,
@@ -1256,6 +1332,26 @@ def _secure_read_line_slice(
         # version, so only a version that held for the whole read counts as seen.
         after = file_version(os.fstat(descriptor))
         return replace(result, version=before if before == after else None)
+
+
+def _read_up_to(descriptor: int, size: int) -> bytes:
+    """Read at most ``size`` bytes from the descriptor's position, stopping at EOF."""
+
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining > 0 and (chunk := os.read(descriptor, min(remaining, 1 << 20))):
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+@dataclass(frozen=True, slots=True)
+class _ImageFile:
+    format_name: str
+    data: bytes | None
+    """The file's bytes, up to one past the image limit; None for a format models do
+    not accept, which is never read past its header."""
+    version: FileVersion | None
 
 
 @dataclass(frozen=True, slots=True)

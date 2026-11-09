@@ -147,6 +147,7 @@ def test_projection_keeps_complete_wire_payload() -> None:
         "started_at": None,
         "process_started_at": None,
         "process_ended_at": None,
+        "images": (),
     }
 
     envelope_fields = {"type", "schema_version", "timestamp"}
