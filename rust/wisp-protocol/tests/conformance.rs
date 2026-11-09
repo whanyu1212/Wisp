@@ -901,3 +901,35 @@ fn command_discovery_and_mode_projections_use_existing_live_contract() {
     assert_eq!(event.agent_mode("command-1"), Some(AgentMode::Plan));
     assert!(event.agent_mode("stale").is_none());
 }
+
+#[test]
+fn image_commands_attach_or_omit_images() {
+    let images = vec!["aGk=".to_owned()];
+    let prompt = commands::WispTypedClientRpcCommands::prompt_with_images("prompt-1", "", &images)
+        .expect("image-only prompt");
+    let value = serde_json::to_value(&prompt).unwrap();
+    assert_eq!(value["images"], serde_json::json!(["aGk="]));
+    assert_eq!(value["prompt"], "");
+    for command in [
+        commands::WispTypedClientRpcCommands::steer_with_images("steer-1", "x", &images),
+        commands::WispTypedClientRpcCommands::follow_up_with_images("follow-1", "x", &images),
+    ] {
+        assert_eq!(
+            serde_json::to_value(command.unwrap()).unwrap()["images"],
+            serde_json::json!(["aGk="])
+        );
+    }
+
+    let text_only = commands::WispTypedClientRpcCommands::prompt_with_images("prompt-2", "hi", &[])
+        .expect("text prompt");
+    assert!(
+        serde_json::to_value(&text_only)
+            .unwrap()
+            .get("images")
+            .is_none()
+    );
+    let too_many = vec!["aGk=".to_owned(); 7];
+    assert!(
+        commands::WispTypedClientRpcCommands::steer_with_images("steer-2", "x", &too_many).is_err()
+    );
+}

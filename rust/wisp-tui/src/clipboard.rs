@@ -39,11 +39,23 @@ pub(crate) enum ClipboardError {
     CopyFailed,
     #[error("the system clipboard does not contain readable text")]
     PasteFailed,
+    #[error("the system clipboard does not contain an image")]
+    NoImage,
+}
+
+/// A clipboard bitmap: 8-bit RGBA rows, top to bottom.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ClipboardImage {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
 }
 
 pub(crate) trait ClipboardBackend: Send {
     fn copy(&mut self, text: &str) -> Result<(), ClipboardError>;
     fn paste(&mut self) -> Result<String, ClipboardError>;
+    /// Read an image from the clipboard; `NoImage` when it holds none.
+    fn paste_image(&mut self) -> Result<ClipboardImage, ClipboardError>;
 }
 
 #[derive(Default)]
@@ -82,6 +94,18 @@ impl ClipboardBackend for SystemClipboard {
             .and_then(arboard::Clipboard::get_text)
             .map_err(|_| ClipboardError::PasteFailed)
     }
+
+    fn paste_image(&mut self) -> Result<ClipboardImage, ClipboardError> {
+        let image = self
+            .native()
+            .and_then(arboard::Clipboard::get_image)
+            .map_err(|_| ClipboardError::NoImage)?;
+        Ok(ClipboardImage {
+            width: image.width,
+            height: image.height,
+            rgba: image.bytes.into_owned(),
+        })
+    }
 }
 
 fn write_osc52(writer: &mut impl Write, text: &str) -> io::Result<()> {
@@ -98,6 +122,8 @@ pub(crate) struct TestClipboardState {
     pub copied: Vec<String>,
     pub copy_error: Option<ClipboardError>,
     pub pastes: std::collections::VecDeque<Result<String, ClipboardError>>,
+    /// Images handed out by `paste_image`; empty means the clipboard holds none.
+    pub image_pastes: std::collections::VecDeque<ClipboardImage>,
 }
 
 #[cfg(test)]
@@ -123,6 +149,15 @@ impl ClipboardBackend for TestClipboard {
             .pastes
             .pop_front()
             .unwrap_or(Err(ClipboardError::PasteFailed))
+    }
+
+    fn paste_image(&mut self) -> Result<ClipboardImage, ClipboardError> {
+        self.state
+            .lock()
+            .expect("test clipboard lock")
+            .image_pastes
+            .pop_front()
+            .ok_or(ClipboardError::NoImage)
     }
 }
 

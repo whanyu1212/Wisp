@@ -17,6 +17,7 @@ caseless.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+image.workspace = true
 nix.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true

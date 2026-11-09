@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use crate::composer_images;
 use crate::tool_cards::{
     BoundedText, INTERRUPTED_TOOL_RESULT_TEXT, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES,
     ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
@@ -100,7 +101,14 @@ pub(crate) fn project_chronological_history<'a>(
         let tool_result_entry = match string(message, index, "role")? {
             "system" => None,
             "user" => {
-                transcript.append_prompt(user_content(message, index)?);
+                let content = user_content(message, index)?;
+                let images = composer_images::reported_image_lines(message.get("images"));
+                if images.is_empty() {
+                    transcript.append_prompt(content);
+                } else {
+                    let display = composer_images::with_image_lines(&content, &images);
+                    transcript.append_prompt_with_display(content, Some(display));
+                }
                 None
             }
             "assistant" => {

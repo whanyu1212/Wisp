@@ -7,6 +7,7 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, DeviceCodeChallenge, DeviceCodeProgress, ModelCatalogSnapshot,
 };
 
+use crate::composer_images::{self, ComposerImages};
 use crate::tool_cards::{
     BoundedText, ToolCallInput, ToolProgressInput, ToolResultInput, bounded_identity,
 };
@@ -934,8 +935,9 @@ impl UiState {
     pub(crate) fn queue_submission_preflight(
         &self,
         content: &str,
+        has_images: bool,
     ) -> Result<(), QueueSubmissionPreflightError> {
-        if content.trim().is_empty() {
+        if content.trim().is_empty() && !has_images {
             return Err(QueueSubmissionPreflightError::Empty);
         }
         let (count, bytes) = self
@@ -1243,6 +1245,8 @@ pub enum BackendEvent {
     QueueMessageInjected {
         kind: QueueKind,
         content: String,
+        /// Transcript lines for the message's images, one per image.
+        images: Vec<String>,
     },
     SessionsReported {
         command_id: String,
@@ -1297,6 +1301,14 @@ pub enum BackendEvent {
     },
 }
 
+/// Which command a draft with images goes out as.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageMessageTarget {
+    Prompt,
+    Steer,
+    FollowUp,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum UiAction {
     Submit(String),
@@ -1331,6 +1343,14 @@ pub enum UiAction {
     FollowUpPresented {
         content: String,
         presentation: String,
+    },
+    /// Send the draft with the images attached to it; text-only drafts use the
+    /// variants above.
+    SendWithImages {
+        target: ImageMessageTarget,
+        content: String,
+        presentation: Option<String>,
+        images: ComposerImages,
     },
     RestoreNewestQueueDraft,
     ManageQueue {
@@ -1530,26 +1550,80 @@ pub fn reduce(
             Ok(context::configure_auto(state, enabled, ids)?)
         }
         UiAction::Compact(instructions) => Ok(context::compact(state, instructions, ids)?),
-        UiAction::Submit(content) => submit(state, content, None, ids),
+        UiAction::Submit(content) => submit(state, content, None, &ComposerImages::default(), ids),
         UiAction::SubmitPresented {
             content,
             presentation,
-        } => submit(state, content, Some(presentation), ids),
+        } => submit(
+            state,
+            content,
+            Some(presentation),
+            &ComposerImages::default(),
+            ids,
+        ),
         UiAction::Init => init_project(state, ids),
-        UiAction::Steer(content) => {
-            queue_submission(state, QueueKind::Steering, content, None, ids)
-        }
+        UiAction::Steer(content) => queue_submission(
+            state,
+            QueueKind::Steering,
+            content,
+            None,
+            &ComposerImages::default(),
+            ids,
+        ),
         UiAction::SteerPresented {
             content,
             presentation,
-        } => queue_submission(state, QueueKind::Steering, content, Some(presentation), ids),
-        UiAction::FollowUp(content) => {
-            queue_submission(state, QueueKind::FollowUp, content, None, ids)
-        }
+        } => queue_submission(
+            state,
+            QueueKind::Steering,
+            content,
+            Some(presentation),
+            &ComposerImages::default(),
+            ids,
+        ),
+        UiAction::FollowUp(content) => queue_submission(
+            state,
+            QueueKind::FollowUp,
+            content,
+            None,
+            &ComposerImages::default(),
+            ids,
+        ),
         UiAction::FollowUpPresented {
             content,
             presentation,
-        } => queue_submission(state, QueueKind::FollowUp, content, Some(presentation), ids),
+        } => queue_submission(
+            state,
+            QueueKind::FollowUp,
+            content,
+            Some(presentation),
+            &ComposerImages::default(),
+            ids,
+        ),
+        UiAction::SendWithImages {
+            target,
+            content,
+            presentation,
+            images,
+        } => match target {
+            ImageMessageTarget::Prompt => submit(state, content, presentation, &images, ids),
+            ImageMessageTarget::Steer => queue_submission(
+                state,
+                QueueKind::Steering,
+                content,
+                presentation,
+                &images,
+                ids,
+            ),
+            ImageMessageTarget::FollowUp => queue_submission(
+                state,
+                QueueKind::FollowUp,
+                content,
+                presentation,
+                &images,
+                ids,
+            ),
+        },
         UiAction::RestoreNewestQueueDraft => restore_newest_queue_draft(state, ids),
         UiAction::RefreshQueueState => refresh_queue_state(state, ids),
         UiAction::ManageQueue {
@@ -1661,6 +1735,7 @@ fn submit(
     state: &mut UiState,
     content: String,
     local_display: Option<String>,
+    images: &ComposerImages,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     // The backend would hold the prompt until the browser returns, for minutes.
@@ -1678,7 +1753,7 @@ fn submit(
             UiEffect::RequestRender,
         ]);
     }
-    if content.trim().is_empty() {
+    if content.trim().is_empty() && images.is_empty() {
         return Ok(Vec::new());
     }
     if session_sync_pending(state) {
@@ -1700,7 +1775,8 @@ fn submit(
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
     let id = ids.next_id(CommandKind::Prompt);
-    let command = WispTypedClientRpcCommands::prompt(&id, &content)?;
+    let command =
+        WispTypedClientRpcCommands::prompt_with_images(&id, &content, &images.base64_images())?;
     state.last_command_error = None;
     state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
@@ -1712,16 +1788,35 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
+    let local_display = display_with_images(&content, local_display, images);
     let prompt = state
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
     state.run_progress = Some(RunProgress { prompt, turn: 0 });
     state.finished_run_cost = None;
-    Ok(vec![
-        UiEffect::SendCommand(command),
-        UiEffect::RecordPromptHistory(content),
-        UiEffect::RequestRender,
-    ])
+    let mut effects = vec![UiEffect::SendCommand(command)];
+    // An image-only prompt has no text worth recalling from history.
+    if !content.trim().is_empty() {
+        effects.push(UiEffect::RecordPromptHistory(content));
+    }
+    effects.push(UiEffect::RequestRender);
+    Ok(effects)
+}
+
+/// The transcript text for a sent message: its own display, then its image lines.
+fn display_with_images(
+    content: &str,
+    local_display: Option<String>,
+    images: &ComposerImages,
+) -> Option<String> {
+    if images.is_empty() {
+        return local_display;
+    }
+    let base = local_display.as_deref().unwrap_or(content);
+    Some(composer_images::with_image_lines(
+        base,
+        &images.transcript_lines(),
+    ))
 }
 
 /// Keep what the side panel shows loaded while it is on screen: the changed files
@@ -1783,9 +1878,10 @@ fn queue_submission(
     kind: QueueKind,
     content: String,
     local_display: Option<String>,
+    images: &ComposerImages,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    if let Err(error) = state.queue_submission_preflight(&content) {
+    if let Err(error) = state.queue_submission_preflight(&content, !images.is_empty()) {
         return Ok(vec![
             UiEffect::Notice(error.notice().into()),
             UiEffect::RequestRender,
@@ -1795,9 +1891,14 @@ fn queue_submission(
         QueueKind::Steering => CommandKind::Steer,
         QueueKind::FollowUp => CommandKind::FollowUp,
     });
+    let encoded = images.base64_images();
     let command = match kind {
-        QueueKind::Steering => WispTypedClientRpcCommands::steer(&id, &content)?,
-        QueueKind::FollowUp => WispTypedClientRpcCommands::follow_up(&id, &content)?,
+        QueueKind::Steering => {
+            WispTypedClientRpcCommands::steer_with_images(&id, &content, &encoded)?
+        }
+        QueueKind::FollowUp => {
+            WispTypedClientRpcCommands::follow_up_with_images(&id, &content, &encoded)?
+        }
     };
     let local_order = state.next_queue_order;
     state.next_queue_order = state
@@ -5179,11 +5280,19 @@ fn handle_backend_event(
         } => Ok(handle_queue_items_removed(
             state, command_id, operation, kind, steering, follow_up,
         )),
-        BackendEvent::QueueMessageInjected { kind, content } => {
-            let local_display = state
+        BackendEvent::QueueMessageInjected {
+            kind,
+            content,
+            images,
+        } => {
+            let mut local_display = state
                 .queue
                 .remove_first(kind, &content)
                 .and_then(|message| message.local_display);
+            if !images.is_empty() {
+                let base = local_display.as_deref().unwrap_or(&content);
+                local_display = Some(composer_images::with_image_lines(base, &images));
+            }
             state
                 .transcript
                 .append_prompt_with_display(content, local_display);
@@ -8708,6 +8817,7 @@ mod tests {
             BackendEvent::QueueMessageInjected {
                 kind: QueueKind::Steering,
                 content: "/skill request".into(),
+                images: Vec::new(),
             }
         );
 
@@ -8853,6 +8963,7 @@ mod tests {
             UiAction::BackendEvent(BackendEvent::QueueMessageInjected {
                 kind: QueueKind::Steering,
                 content: "duplicate".into(),
+                images: Vec::new(),
             }),
             &mut ids,
         )
@@ -8927,6 +9038,7 @@ mod tests {
                 UiAction::BackendEvent(BackendEvent::QueueMessageInjected {
                     kind: QueueKind::Steering,
                     content: "duplicate".into(),
+                    images: Vec::new(),
                 }),
                 &mut ids,
             )
@@ -9371,12 +9483,12 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert!(state.queue_submission_preflight("x").is_ok());
+        assert!(state.queue_submission_preflight("x", false).is_ok());
         reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
-        assert!(state.queue_submission_preflight("x").is_ok());
+        assert!(state.queue_submission_preflight("x", false).is_ok());
         reduce(&mut state, UiAction::FollowUp("x".into()), &mut ids).unwrap();
         assert_eq!(
-            state.queue_submission_preflight("x"),
+            state.queue_submission_preflight("x", false),
             Err(QueueSubmissionPreflightError::Full)
         );
         let effects = reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
@@ -9400,10 +9512,10 @@ mod tests {
             &mut ids,
         )
         .unwrap();
-        assert!(state.queue_submission_preflight("x").is_ok());
+        assert!(state.queue_submission_preflight("x", false).is_ok());
         reduce(&mut state, UiAction::Steer("x".into()), &mut ids).unwrap();
         assert_eq!(
-            state.queue_submission_preflight("x"),
+            state.queue_submission_preflight("x", false),
             Err(QueueSubmissionPreflightError::Full)
         );
         let effects = reduce(&mut state, UiAction::FollowUp("x".into()), &mut ids).unwrap();
