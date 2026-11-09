@@ -13,6 +13,7 @@ use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolProgressInput,
     ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
+    proxied_arguments,
 };
 use crate::tool_detail::{capture_write_before, project_tool_detail_source};
 use serde_json::Value;
@@ -428,11 +429,20 @@ impl BackendEvent {
             }
             "tool.approval.requested" => {
                 // A proxied call (on-demand MCP's `mcp_call`) asks to approve the tool it
-                // runs; the panel and any session grant must name that tool, not the proxy.
+                // runs; the panel and any session grant must name that tool, not the proxy,
+                // and show that tool's own arguments, as its card does. Only the backend's
+                // `target` makes a call proxied: a tool of the user's own named `mcp_call`
+                // is shown as itself, whatever its arguments name.
                 let target = optional_string_field(value, &event_type, "target")?;
                 let name = string_field_ref(value, &event_type, "name")?;
-                let raw_name = target.as_deref().unwrap_or(name);
                 let arguments = object_field(value, &event_type, "arguments")?;
+                let (raw_name, arguments) = match target.as_deref() {
+                    Some(target) => (
+                        target,
+                        proxied_arguments(name, arguments, target).unwrap_or(arguments),
+                    ),
+                    None => (name, arguments),
+                };
                 // Sessions saved before this field existed only hold grantable tools.
                 let grants_allowed = bool_field_or(value, &event_type, "grants_allowed", true)?;
                 let session_only_yolo =
@@ -459,9 +469,33 @@ impl BackendEvent {
                     session_only_yolo,
                 })
             }
+            // A proxied call's target is resolved before any approval; its card shows
+            // that tool from here on. Every other start changes nothing the TUI shows.
+            "tool.execution.started" => {
+                let call_id = bounded_identity(&string_field(value, &event_type, "call_id")?);
+                let name = string_field_ref(value, &event_type, "name")?;
+                let arguments = object_field(value, &event_type, "arguments")?;
+                let resolved =
+                    optional_string_field(value, &event_type, "target")?.and_then(|target| {
+                        let inner = proxied_arguments(name, arguments, &target)?;
+                        Some(ToolCallInput {
+                            call_id,
+                            detail_source: project_tool_detail_source(
+                                &target,
+                                inner.as_object().expect("proxied arguments are an object"),
+                            ),
+                            arguments: bounded_tool_arguments(&target, inner),
+                            name: bounded_tool_name(&target),
+                        })
+                    });
+                match resolved {
+                    Some(resolved) => Self::ToolTargetResolved(resolved),
+                    None => Self::Other { event_type },
+                }
+            }
             "tool.approval.resolved" => Self::ToolApprovalResolved {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
-                name: bounded_tool_name(string_field_ref(value, &event_type, "name")?),
+                name: bounded_tool_name(target_or_name(value, &event_type)?),
                 approved: bool_field(value, &event_type, "approved")?,
                 reason: optional_bounded_display_string_field(value, &event_type, "reason", 512)?,
             },
@@ -479,7 +513,7 @@ impl BackendEvent {
                 },
             },
             "tool.result" => {
-                let raw_name = string_field_ref(value, &event_type, "name")?;
+                let raw_name = target_or_name(value, &event_type)?;
                 let is_error = bool_field(value, &event_type, "is_error")?;
                 let exit_code = optional_i64_field(value, &event_type, "exit_code")?;
                 let process_state = optional_string_field(value, &event_type, "process_state")?;
@@ -1423,6 +1457,20 @@ fn queue_visible_content(
         Some(_) => Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field: "skill_invocation",
+        }),
+    }
+}
+
+/// The tool a tool lifecycle event's call ran: the `target` a proxied call (on-demand
+/// MCP's `mcp_call`) names, otherwise the tool the model called.
+fn target_or_name<'a>(value: &'a Value, event_type: &str) -> Result<&'a str, EventProjectionError> {
+    let name = string_field_ref(value, event_type, "name")?;
+    match value.get("target") {
+        None | Some(Value::Null) => Ok(name),
+        Some(Value::String(target)) => Ok(target),
+        Some(_) => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "target",
         }),
     }
 }

@@ -37,6 +37,9 @@ this policy.
   tokens per run by 76–77% on a multi-step task with a 102-tool catalog and by 28–46% with 50 small
   tools, with every run still passing; with 6 tools it cost 20–34% more, so it stays off by default.
   A call missing a required parameter is refused before approval; types are left to the server.
+- In the TUI, a running session's `mcp_call` card shows the MCP tool it runs and that tool's own
+  arguments, as a direct call's card does, once the backend has resolved the call. Resumed sessions
+  still show `mcp_call`: saved calls do not record the tool they ran.
 
 ### CLI
 

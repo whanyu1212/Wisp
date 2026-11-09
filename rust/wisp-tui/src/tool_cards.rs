@@ -384,6 +384,23 @@ impl ToolCardSnapshot {
         true
     }
 
+    /// Show a proxied call as the tool the backend resolved it to, with that tool's
+    /// own arguments. The model's call named the proxy (`mcp_call`); this is not a
+    /// conflict, so it applies only to a card still showing that proxy, before any
+    /// approval or result.
+    pub fn adopt_target(&mut self, resolved: &ToolCallInput) -> bool {
+        if self.status != ToolStatus::Requested || self.name != "mcp_call" {
+            return false;
+        }
+        self.name = bounded_tool_name(&resolved.name);
+        self.action_arguments = format_tool_arguments(&resolved.name, &resolved.arguments);
+        self.command_summary = command_summary(resolved);
+        self.mcp_subject = mcp_subject(resolved);
+        self.detail_source = resolved.detail_source.clone();
+        self.arguments_available = true;
+        true
+    }
+
     pub fn approval_requested(&mut self) -> bool {
         if self.status != ToolStatus::Requested {
             return false;
@@ -1662,6 +1679,18 @@ fn one_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The arguments a proxied call passes to `target`, the tool the backend resolved it
+/// to. On-demand MCP's `mcp_call` carries them as `{"name": target, "arguments": {...}}`.
+/// None for any other call, and for an `mcp_call` whose arguments do not name `target`
+/// or carry no argument object. Only the backend's `target` makes a call proxied: a
+/// user's own tool named `mcp_call` has none, whatever its arguments name.
+pub fn proxied_arguments<'a>(name: &str, arguments: &'a Value, target: &str) -> Option<&'a Value> {
+    (name == "mcp_call" && arguments.get("name").and_then(Value::as_str) == Some(target))
+        .then(|| arguments.get("arguments"))
+        .flatten()
+        .filter(|inner| inner.is_object())
+}
+
 pub fn bounded_tool_name(value: &str) -> String {
     if value.is_empty() {
         return "(unnamed)".to_owned();
@@ -2142,6 +2171,32 @@ mod tests {
         let card = transcript.entry(id).unwrap().tool_card().unwrap();
         assert_eq!(card.action_label().chars().count(), TOOL_LABEL_MAX_CHARS);
         assert_eq!(card.status_note(), Some("awaiting approval"));
+    }
+
+    #[test]
+    fn proxied_arguments_need_matching_target() {
+        let inner = serde_json::json!({"issue_id": 412});
+        let proxied = serde_json::json!({"name": "mcp__devhub__get_issue", "arguments": inner});
+        assert_eq!(
+            proxied_arguments("mcp_call", &proxied, "mcp__devhub__get_issue"),
+            Some(&inner)
+        );
+        for (name, arguments, target) in [
+            ("mcp_search", proxied.clone(), "mcp__devhub__get_issue"),
+            ("mcp_call", proxied.clone(), "mcp__devhub__close_issue"),
+            (
+                "mcp_call",
+                serde_json::json!({"name": "mcp__devhub__get_issue"}),
+                "mcp__devhub__get_issue",
+            ),
+            (
+                "mcp_call",
+                serde_json::json!({"name": "mcp__devhub__get_issue", "arguments": "412"}),
+                "mcp__devhub__get_issue",
+            ),
+        ] {
+            assert_eq!(proxied_arguments(name, &arguments, target), None);
+        }
     }
 
     #[test]
