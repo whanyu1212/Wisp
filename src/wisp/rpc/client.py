@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
@@ -116,11 +117,31 @@ class RpcController:
         self._transport = transport
         self._command_id_factory = command_id_factory or _default_command_id
 
-    async def prompt(self, prompt: str, *, command_id: str | None = None) -> str:
-        """Send a prompt command and return its command id."""
+    async def prompt(
+        self,
+        prompt: str,
+        *,
+        images: Sequence[bytes] = (),
+        command_id: str | None = None,
+    ) -> str:
+        """Send a prompt command and return its command id.
+
+        Args:
+            prompt (str): The user prompt.
+            images (Sequence[bytes], optional): Image files (PNG, JPEG, GIF or
+                WebP) to attach, at most ``MAX_RPC_MESSAGE_IMAGES``. The backend
+                checks them and fails the command if one is rejected. Defaults to ().
+            command_id (str | None, optional): Command id to use instead of a
+                generated one. Defaults to None.
+
+        Returns:
+            str: The command id.
+        """
 
         selected_id = command_id or self._command_id_factory("prompt")
-        await self._transport.send(PromptCommand(id=selected_id, prompt=prompt))
+        await self._transport.send(
+            PromptCommand(id=selected_id, prompt=prompt, images=_encoded_images(images))
+        )
         return selected_id
 
     async def init(self, *, command_id: str | None = None) -> str:
@@ -517,18 +538,34 @@ class RpcController:
         )
         return selected_id
 
-    async def steer(self, content: str, *, command_id: str | None = None) -> str:
-        """Queue steering text for the active run."""
+    async def steer(
+        self,
+        content: str,
+        *,
+        images: Sequence[bytes] = (),
+        command_id: str | None = None,
+    ) -> str:
+        """Queue a steering message, with optional image files, for the active run."""
 
         selected_id = command_id or self._command_id_factory("steer")
-        await self._transport.send(SteerCommand(id=selected_id, content=content))
+        await self._transport.send(
+            SteerCommand(id=selected_id, content=content, images=_encoded_images(images))
+        )
         return selected_id
 
-    async def follow_up(self, content: str, *, command_id: str | None = None) -> str:
-        """Queue follow-up text for the active run."""
+    async def follow_up(
+        self,
+        content: str,
+        *,
+        images: Sequence[bytes] = (),
+        command_id: str | None = None,
+    ) -> str:
+        """Queue a follow-up message, with optional image files, for the active run."""
 
         selected_id = command_id or self._command_id_factory("follow-up")
-        await self._transport.send(FollowUpCommand(id=selected_id, content=content))
+        await self._transport.send(
+            FollowUpCommand(id=selected_id, content=content, images=_encoded_images(images))
+        )
         return selected_id
 
     async def get_queue_state(self, *, command_id: str | None = None) -> str:
@@ -982,6 +1019,10 @@ class JsonlSubprocessRpcTransport:
         except ValueError as exc:
             raise RpcHandshakeError(str(exc)) from exc
         self._limits = response.limits
+
+
+def _encoded_images(images: Sequence[bytes]) -> tuple[str, ...] | None:
+    return tuple(base64.b64encode(image).decode("ascii") for image in images) or None
 
 
 def _default_command_id(prefix: str) -> str:

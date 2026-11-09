@@ -14,6 +14,7 @@ from pydantic import (
     ConfigDict,
     Field,
     ModelWrapValidatorHandler,
+    StringConstraints,
     TypeAdapter,
     ValidationError,
     model_validator,
@@ -29,6 +30,7 @@ from wisp.events import (
     QueueMode,
     RpcMcpServerLaunch,
 )
+from wisp.images import MAX_IMAGE_BYTES
 from wisp.validation import redact_validation_error_inputs
 
 type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project"]
@@ -38,6 +40,15 @@ MAX_RPC_MCP_SERVER_NAME_CHARS = 64
 MAX_RPC_MCP_SNIPPET_CHARS = 65_536
 MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
+# Base64 of the largest image Wisp accepts: 4 characters per 3 bytes, padded.
+MAX_RPC_IMAGE_BASE64_CHARS = -(-MAX_IMAGE_BYTES // 3) * 4
+# Six full-size images stay under the 64 MiB live frame limit, so an image-heavy
+# message is rejected as a command rather than dropping the connection.
+MAX_RPC_MESSAGE_IMAGES = 6
+# One image file, base64-encoded; its format is identified from the decoded bytes.
+type RpcImageData = Annotated[
+    str, StringConstraints(min_length=1, max_length=MAX_RPC_IMAGE_BASE64_CHARS)
+]
 STORE_API_KEY_SECRET_FIELD = "_api_key"
 # Secret-bearing fields by command type. Before a command is queued, each one is
 # moved under its underscore-prefixed name and wrapped so the retained payload
@@ -133,6 +144,14 @@ class PromptCommand(RpcCommandModel):
 
     type: Literal["prompt"] = "prompt"
     prompt: str
+    # Omitted rather than empty when nothing is attached, like Message.images.
+    images: tuple[RpcImageData, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_MESSAGE_IMAGES,
+        repr=False,
+        description="Base64-encoded image files attached to this user message, in order.",
+    )
 
 
 class InitCommand(RpcCommandModel):
@@ -491,6 +510,14 @@ class SteerCommand(RpcCommandModel):
 
     type: Literal["steer"] = "steer"
     content: str
+    # Omitted rather than empty when nothing is attached, like Message.images.
+    images: tuple[RpcImageData, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_MESSAGE_IMAGES,
+        repr=False,
+        description="Base64-encoded image files attached to this user message, in order.",
+    )
 
 
 class FollowUpCommand(RpcCommandModel):
@@ -498,6 +525,14 @@ class FollowUpCommand(RpcCommandModel):
 
     type: Literal["follow_up"] = "follow_up"
     content: str
+    # Omitted rather than empty when nothing is attached, like Message.images.
+    images: tuple[RpcImageData, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_MESSAGE_IMAGES,
+        repr=False,
+        description="Base64-encoded image files attached to this user message, in order.",
+    )
 
 
 class GetQueueStateCommand(RpcCommandModel):

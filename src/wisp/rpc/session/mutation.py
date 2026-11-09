@@ -522,6 +522,7 @@ async def run_rpc_fork_session_command(
                 entry_count=refreshed_entry_count,
                 selected_entry_id=fork_result.selected_entry_id,
                 selected_prompt=fork_result.selected_prompt,
+                selected_images=fork_result.selected_images,
             )
             selected_session = fork_result.session
             post_apply_events = (

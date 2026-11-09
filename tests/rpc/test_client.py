@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from pathlib import Path
@@ -581,3 +582,23 @@ print(json.dumps({
         assert events[0].ok is True
 
     anyio.run(run)
+
+
+def test_controller_encodes_attached_images() -> None:
+    async def run() -> RecordingTransport:
+        transport = RecordingTransport()
+        controller = RpcController(transport, command_id_factory=lambda prefix: prefix)
+        await controller.prompt("look", images=[b"\x89PNG one"])
+        await controller.steer("and", images=[b"two", b"three"])
+        await controller.follow_up("later", images=[b"four"])
+        await controller.prompt("text only")
+        return transport
+
+    transport = anyio.run(run)
+
+    assert [getattr(command, "images", None) for command in transport.commands] == [
+        (base64.b64encode(b"\x89PNG one").decode(),),
+        (base64.b64encode(b"two").decode(), base64.b64encode(b"three").decode()),
+        (base64.b64encode(b"four").decode(),),
+        None,
+    ]

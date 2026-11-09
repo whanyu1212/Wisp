@@ -130,7 +130,7 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class SessionForkResult:
-    """A forked session plus the selected user prompt to edit and resubmit."""
+    """A forked session plus the selected user prompt and images to edit and resubmit."""
 
     session: JsonlSession
     source_session_id: str
@@ -139,6 +139,7 @@ class SessionForkResult:
     fork_leaf_id: str | None
     selected_entry_id: str
     selected_prompt: str
+    selected_images: tuple[ImagePart, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,6 +356,7 @@ class JsonlSessionStore:
             fork_leaf_id=projection.source_leaf_id,
             selected_entry_id=projection.selected_entry_id,
             selected_prompt=projection.selected_prompt,
+            selected_images=projection.selected_images,
         )
 
     def _persist_projection(
@@ -365,14 +367,15 @@ class JsonlSessionStore:
         name: str | None,
     ) -> JsonlSession:
         target = self.create()
+        # A session opened by path from outside this store has its own image
+        # directory; copy what the projected entries and a fork's selected message
+        # reference so they resolve here. Storing is idempotent and replaces a
+        # damaged copy already in the target.
+        if source.images.directory != target.images.directory:
+            for image in (*_referenced_images(projection.entries), *projection.selected_images):
+                target.images.store(source.images.read(image))
         if not projection.entries and name is None:
             return target
-        # A session opened by path from outside this store has its own image
-        # directory; copy what the projected entries reference so they resolve here.
-        # Storing is idempotent and replaces a damaged copy already in the target.
-        if source.images.directory != target.images.directory:
-            for image in _referenced_images(projection.entries):
-                target.images.store(source.images.read(image))
         copied_tree_entries = tuple(
             entry.model_copy(update={"session_id": target.session_id})
             for entry in projection.entries

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wisp.events._base import (
     FinishReason,
+    ImagePart,
     JsonObject,
     MessageRole,
     QueueKind,
@@ -89,6 +90,8 @@ class RpcMessageSnapshot(BaseModel):
     content: str
     content_original_bytes: int = Field(ge=0)
     content_truncated: bool = False
+    # Images attached to a user message, in order; fetch bytes from the session.
+    images: tuple[ImagePart, ...] = ()
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = ()
@@ -252,6 +255,8 @@ class RpcSessionForked(_RpcSessionDerived):
     type: Literal["rpc.session.forked"] = "rpc.session.forked"
     selected_entry_id: str = Field(min_length=1)
     selected_prompt: str
+    # Images the selected message carried, stored in the forked session's image store.
+    selected_images: tuple[ImagePart, ...] = ()
 
 
 class RpcSessionNameChanged(WispEvent):
@@ -397,6 +402,7 @@ class QueueMessageInjected(_MessageOriginEvent):
     type: Literal["queue.message.injected"] = "queue.message.injected"
     kind: QueueKind
     content: str
+    images: tuple[ImagePart, ...] = ()
     skill_invocation: SkillInvocationEvidence | None = None
 
 

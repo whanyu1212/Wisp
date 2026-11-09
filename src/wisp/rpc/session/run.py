@@ -43,6 +43,7 @@ from wisp.rpc.errors import RpcOutputAlreadyReportedError
 from wisp.rpc.handlers.control import RpcTrustResolver
 from wisp.rpc.handlers.inspection import rpc_workspace_report
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
+from wisp.rpc.session.images import decode_rpc_images
 from wisp.rpc.session.state import updated_rpc_session_state
 from wisp.sessions.entries import MessageSessionEntry
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -224,6 +225,7 @@ def start_rpc_prompt_command(
     command_type = command.type
     command_id = lifecycle.command_id
     prompt = command.prompt if isinstance(command, PromptCommand) else "/init"
+    encoded_images = (command.images or ()) if isinstance(command, PromptCommand) else ()
 
     selected_session = session_state.session or sessions.create()
     cancel_scope = anyio.CancelScope()
@@ -249,6 +251,7 @@ def start_rpc_prompt_command(
         event_observer,
         completion_error,
         after_run,
+        encoded_images,
     )
     return (
         running_command_factory(
@@ -466,6 +469,7 @@ async def run_rpc_prompt_command(
     event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
     after_run: Callable[[], Awaitable[str | None]] | None = None,
+    encoded_images: tuple[str, ...] = (),
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -503,6 +507,13 @@ async def run_rpc_prompt_command(
 
     with cancel_scope:
         try:
+            # Reject a bad attachment before the run records anything. Prompts
+            # without images skip the worker thread, keeping their event timing.
+            images = (
+                await anyio.to_thread.run_sync(decode_rpc_images, encoded_images)
+                if encoded_images
+                else ()
+            )
             agent.trusted = await trust_gate.resolve()
             operation_context = (
                 tool_context_factory() if tool_context_factory is not None else tool_context
@@ -513,6 +524,7 @@ async def run_rpc_prompt_command(
             agent_events = (
                 agent.run(
                     prompt,
+                    images=images,
                     session=session,
                     history=committed_history,
                     operation_id=command_id,
@@ -524,6 +536,7 @@ async def run_rpc_prompt_command(
                 if operation_context is None
                 else agent.run(
                     prompt,
+                    images=images,
                     session=session,
                     history=committed_history,
                     operation_id=command_id,

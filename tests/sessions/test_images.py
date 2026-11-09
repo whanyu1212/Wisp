@@ -255,3 +255,45 @@ def test_every_store_syncs_both_directories(
     images.store(PNG)
 
     assert synced == [images.directory, tmp_path] * 2
+
+
+def test_fork_returns_selected_images(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+
+    async def fork() -> tuple[ImagePart, tuple[ImagePart, ...]]:
+        image = await source.store_image(PNG)
+        selected = await source.append_message(_image_message(image))
+        active = await source.append_message(Message(role="assistant", content="a square"))
+        result = await store.fork_from_user_message(
+            source, selected.id, expected_active_leaf_id=active.id
+        )
+        return image, result.selected_images
+
+    image, selected_images = anyio.run(fork)
+
+    assert selected_images == (image,)
+
+
+def test_fork_copies_selected_images(tmp_path: Path) -> None:
+    """Forking a session from another directory brings the edited message's images."""
+
+    outside = JsonlSessionStore(tmp_path / "outside").create()
+
+    async def seed() -> tuple[ImagePart, str]:
+        image = await outside.store_image(PNG)
+        selected = await outside.append_message(_image_message(image))
+        return image, selected.id
+
+    image, selected_id = anyio.run(seed)
+    store = JsonlSessionStore(tmp_path / "store")
+    source = store.load(outside.path)
+
+    result = anyio.run(
+        lambda: store.fork_from_user_message(
+            source, selected_id, expected_active_leaf_id=selected_id
+        )
+    )
+
+    assert result.selected_images == (image,)
+    assert anyio.run(result.session.read_image, image) == PNG

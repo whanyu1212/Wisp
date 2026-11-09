@@ -612,6 +612,20 @@
           ],
           "title": "Id"
         },
+        "images": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RpcImageData"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "description": "Base64-encoded image files attached to this user message, in order.",
+          "title": "Images"
+        },
         "type": {
           "const": "follow_up",
           "default": "follow_up",
@@ -1467,6 +1481,20 @@
           ],
           "title": "Id"
         },
+        "images": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RpcImageData"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "description": "Base64-encoded image files attached to this user message, in order.",
+          "title": "Images"
+        },
         "prompt": {
           "title": "Prompt",
           "type": "string"
@@ -1545,6 +1573,11 @@
       ],
       "title": "RemoveMcpServerCommand",
       "type": "object"
+    },
+    "RpcImageData": {
+      "maxLength": 10000000,
+      "minLength": 1,
+      "type": "string"
     },
     "RpcMcpHeaderFrom": {
       "additionalProperties": false,
@@ -1897,6 +1930,20 @@
             }
           ],
           "title": "Id"
+        },
+        "images": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RpcImageData"
+              },
+              "maxItems": 6,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "description": "Base64-encoded image files attached to this user message, in order.",
+          "title": "Images"
         },
         "type": {
           "const": "steer",

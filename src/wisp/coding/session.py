@@ -81,6 +81,7 @@ from wisp.events import (
     ContextObservation,
     ContextOverflow,
     ErrorEvent,
+    ImagePart,
     MessageCompleted,
     QueueKind,
     QueueMessageInjected,
@@ -197,6 +198,16 @@ class _RetainedQueueState:
     messages: QueuedMessages
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
+
+
+async def _store_images(session: JsonlSession, images: Sequence[bytes]) -> tuple[ImagePart, ...]:
+    """Make each image durable in the session's store, in order.
+
+    Storing comes before the message that references the images exists, so no
+    later append can point at an image that was not written.
+    """
+
+    return tuple([await session.store_image(image) for image in images])
 
 
 def _retained_queue_state(harness: AgentHarness) -> _RetainedQueueState:
@@ -461,23 +472,56 @@ class CodingSession:
         self._last_session_id = None
         self._retained_queues.clear()
 
-    async def follow_up(self, content: str) -> QueueUpdated:
-        """Queue user text for the active run's next completed-turn boundary."""
+    async def follow_up(self, content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
+        """Queue a user message for the active run's next completed-turn boundary.
 
+        Args:
+            content (str): The message text.
+            images (Sequence[bytes], optional): Image files attached to the
+                message, stored in the active session before it is queued.
+                Defaults to ().
+
+        Returns:
+            QueueUpdated: The queue state after the message was added.
+
+        Raises:
+            RuntimeError: No run accepts queued messages, or it changed meanwhile.
+            ImageRejectedError: An image fails Wisp's image checks.
+        """
+
+        return await self._queue_user_message("follow_up", content, images)
+
+    async def steer(self, content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
+        """Queue a user message after the active run's current assistant/tool batch.
+
+        Args:
+            content (str): The message text.
+            images (Sequence[bytes], optional): Image files attached to the
+                message, stored in the active session before it is queued.
+                Defaults to ().
+
+        Returns:
+            QueueUpdated: The queue state after the message was added.
+
+        Raises:
+            RuntimeError: No run accepts queued messages, or it changed meanwhile.
+            ImageRejectedError: An image fails Wisp's image checks.
+        """
+
+        return await self._queue_user_message("steering", content, images)
+
+    async def _queue_user_message(
+        self, kind: QueueKind, content: str, images: Sequence[bytes]
+    ) -> QueueUpdated:
         harness = self._active_queue_harness()
-        message = await self._prepare_user_message(content)
+        stored_images = await _store_images(self._active_run_session(), images) if images else ()
+        message = await self._prepare_user_message(content, images=stored_images)
+        # Storing and skill expansion await, so the run may have ended meanwhile.
         if harness is not self._active_queue_harness():
             raise RuntimeError("CodingSession active agent run changed")
+        if kind == "steering":
+            return harness.steer_message(message)
         return harness.follow_up_message(message)
-
-    async def steer(self, content: str) -> QueueUpdated:
-        """Queue user text after the active run's current assistant/tool batch."""
-
-        harness = self._active_queue_harness()
-        message = await self._prepare_user_message(content)
-        if harness is not self._active_queue_harness():
-            raise RuntimeError("CodingSession active agent run changed")
-        return harness.steer_message(message)
 
     @staticmethod
     def queued_message_rejection(queued_messages: int) -> str | None:
@@ -605,10 +649,17 @@ class CodingSession:
             raise RuntimeError("CodingSession has no active agent run")
         return harness
 
+    def _active_run_session(self) -> JsonlSession:
+        persistence = self._active_persistence
+        if persistence is None:
+            raise RuntimeError("CodingSession has no active agent run")
+        return persistence.session
+
     async def _prepare_user_message(
         self,
         content: str,
         *,
+        images: tuple[ImagePart, ...] = (),
         context: ToolContext | None = None,
     ) -> Message:
         expanded, evidence = await expand_skill_invocation(
@@ -616,7 +667,12 @@ class CodingSession:
             catalog=self.skill_catalog,
             context=context or self.tool_context,
         )
-        return Message(role="user", content=expanded, skill_invocation=evidence)
+        return Message(
+            role="user",
+            content=expanded,
+            images=images or None,
+            skill_invocation=evidence,
+        )
 
     @staticmethod
     def _queue_updated_from_snapshot(queued: _RetainedQueueState | None) -> QueueUpdated:
@@ -649,6 +705,7 @@ class CodingSession:
         self,
         prompt: str,
         *,
+        images: Sequence[bytes] = (),
         session: JsonlSession | None = None,
         history: Sequence[Message] = (),
         operation_id: str | None = None,
@@ -670,6 +727,9 @@ class CodingSession:
 
         Args:
             prompt (str): User prompt for this run.
+            images (Sequence[bytes], optional): Image files attached to the
+                prompt, stored in the session before the prompt is recorded.
+                Defaults to ().
             session (JsonlSession | None, optional): Session to append to. A new
                 session is created when omitted. Defaults to None.
             history (Sequence[Message], optional): History to resume when the
@@ -702,6 +762,8 @@ class CodingSession:
         Raises:
             ContextOverflowError: The prompt cannot fit the provider's context, or
                 overflow recovery failed; raised after `AgentCompleted(failed)`.
+            ImageRejectedError: An attached image fails Wisp's image checks;
+                raised before any event.
             Exception: A failure inside the agent loop propagates after the open
                 turn is completed as failed and `AgentCompleted(failed)` is
                 published. A failure while preparing the run propagates without
@@ -712,6 +774,7 @@ class CodingSession:
             self._operation_active = True
             events = self._run(
                 prompt,
+                images=images,
                 session=session,
                 history=history,
                 operation_id=operation_id,
@@ -745,6 +808,7 @@ class CodingSession:
         self,
         prompt: str,
         *,
+        images: Sequence[bytes] = (),
         session: JsonlSession | None = None,
         history: Sequence[Message] = (),
         operation_id: str | None = None,
@@ -755,9 +819,13 @@ class CodingSession:
         live_event_sink: LiveEventSink | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         operation_context = tool_context or self.tool_context
-        user_message = await self._prepare_user_message(prompt, context=operation_context)
         session = session or self.sessions.create()
         assert session is not None
+        user_message = await self._prepare_user_message(
+            prompt,
+            images=await _store_images(session, images),
+            context=operation_context,
+        )
         self._active_session_id = session.session_id
         self._last_session_id = session.session_id
         if operation_context.seen_files is not None:
@@ -1560,6 +1628,7 @@ class CodingSession:
             Message(
                 role="user",
                 content=event.content,
+                images=event.images or None,
                 skill_invocation=event.skill_invocation,
                 created_at=event.timestamp,
             ),
