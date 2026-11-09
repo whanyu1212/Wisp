@@ -316,9 +316,17 @@ while the terminal is in the background, Wisp sends a desktop notification (OSC 
 WezTerm). It notifies only after the terminal has reported losing focus, so in tmux turn on
 `focus-events`; tmux also drops OSC 9 unless passthrough is allowed. Set `WISP_TUI_NOTIFY=bell` to
 ring the terminal bell instead, which macOS Terminal.app and tmux turn into a badge or an alert, or
-`WISP_TUI_NOTIFY=off` to stop notifications. While an approval or trust decision waits, its border
-breathes slowly on truecolor terminals; it stays solid in the background, under `NO_COLOR`, at lower
-colour depths, or with `WISP_TUI_MOTION=off`.
+`WISP_TUI_NOTIFY=off` to stop notifications.
+
+A little motion marks what is live. While a run works, the indicator beside "Working" breathes slowly
+(a 2-second cycle) next to its spinner, and a tool card whose call just finished glows faintly for
+under a second, a folded group of cards for its latest member. While an approval or trust decision
+waits, its border breathes. On truecolor terminals the breathing blends colour. At 256 or 16
+colours the indicator steps between bold and dim instead, and the glow and the border stay still; a
+theme that draws on the terminal's own background also steps the indicator and shows no glow. All
+of it stops in the background, under
+`NO_COLOR`, and with `WISP_TUI_MOTION=off`, and none of it redraws an idle screen once a glow has
+faded.
 
 ## Modes {#modes}
 

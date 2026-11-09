@@ -67,6 +67,10 @@ this policy.
   card's line: a read's start, a search's first match, or the top of an edited or written file.
 - Links in replies and the file path on read, edit and write cards are OSC 8 hyperlinks, so
   terminals that support them make them clickable. Only `http` and `https` reply links are linked.
+- While a run works, the indicator beside "Working" breathes, and a tool card whose call just
+  finished glows briefly. The breath blends colour on truecolor terminals and steps between bold and
+  dim at lower colour depths; the glow needs truecolor. `WISP_TUI_MOTION=off`, `NO_COLOR`, and a
+  terminal in the background keep everything still.
 
 ### Prompt
 

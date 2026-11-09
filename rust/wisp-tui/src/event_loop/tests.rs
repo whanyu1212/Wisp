@@ -4,6 +4,7 @@ use crate::{
     color_depth::ColorDepth,
     external_editor::EditorRequest,
     reducer::{ActiveCommand, ActiveCommandType, InteractionStatus, MessageContentKind},
+    theme::{self, MotionMode},
     tool_detail::ToolDetailSource,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1610,5 +1611,137 @@ async fn card_opens_exact_path() {
             panic!("{name} {path}: no file request, notice {:?}", ui.notice);
         };
         assert_eq!(target.path(), dir.0.join(&path), "{name}");
+    }
+}
+
+fn screen(ui: &mut LiveUi) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    ui.draw(&mut terminal, &connection()).unwrap();
+    terminal.backend().buffer().clone()
+}
+
+/// The status line's indicator cell: the spinner glyph left of "Working".
+fn working_indicator(buffer: &ratatui::buffer::Buffer) -> ratatui::buffer::Cell {
+    for y in 0..buffer.area.height {
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        if let Some(byte) = row.find("Working") {
+            let column = row[..byte].chars().count();
+            let x = u16::try_from(column).unwrap() - 2;
+            return buffer[(x, y)].clone();
+        }
+    }
+    panic!("no Working row in {buffer:?}");
+}
+
+#[test]
+fn working_indicator_breathes() {
+    let style_at = |ui: &mut LiveUi, frame: u8| {
+        ui.activity_frame = frame;
+        // Frames 0 and 8 show the same spinner glyph, so only the breath differs.
+        let cell = working_indicator(&screen(ui));
+        assert_eq!(cell.symbol(), "◐");
+        (cell.fg, cell.modifier)
+    };
+    let mut ui = active_ui();
+    assert_ne!(style_at(&mut ui, 0).0, style_at(&mut ui, 8).0);
+
+    // Stepped motion keeps the colour and changes only the weight.
+    ui.color_depth = ColorDepth::Ansi256;
+    let (peak, trough) = (style_at(&mut ui, 0), style_at(&mut ui, 8));
+    assert_eq!(peak.0, trough.0);
+    assert_ne!(peak.1, trough.1);
+
+    // No motion at all without colour, with motion off, or in the background.
+    let mut still = [active_ui(), active_ui(), active_ui()];
+    still[0].no_color = true;
+    still[1].motion_allowed = false;
+    still[2].attention.set_focus(false);
+    for ui in &mut still {
+        assert_eq!(style_at(ui, 0), style_at(ui, 8));
+    }
+}
+
+/// A UI that has run one call per id, each finishing as `results` says.
+async fn finished_calls(results: &[(&str, bool)]) -> LiveUi {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = LiveUi::default();
+    for (call_id, is_error) in results {
+        for event in [
+            json!({"type": "tool.call", "call_id": call_id, "name": "read",
+                   "arguments": {"path": "notes.md"}}),
+            json!({"type": "tool.result", "message_entry_id": null, "call_id": call_id,
+                   "name": "read", "output": "notes", "is_error": is_error}),
+        ] {
+            let event = BackendEvent::from_projection_value(&event).unwrap();
+            ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+                .await
+                .unwrap();
+        }
+    }
+    ui
+}
+
+#[tokio::test]
+async fn finished_card_glows_then_rests() {
+    let glow = LiveUi::default()
+        .palette()
+        .finish_glow(MotionMode::Smooth, 0)
+        .unwrap();
+    let glowing_rows = |buffer: &ratatui::buffer::Buffer| {
+        (0..buffer.area.height)
+            .filter(|&y| (0..buffer.area.width).any(|x| buffer[(x, y)].bg == glow))
+            .count()
+    };
+    // A failed call does not glow: its card already shows the error.
+    let mut failed = finished_calls(&[("bad", true)]).await;
+    assert!(failed.finished_cards.is_empty());
+    assert_eq!(glowing_rows(&screen(&mut failed)), 0);
+    // Calls finishing in the same tick all glow; folded into one group row, it glows.
+    let mut ui = finished_calls(&[("one", false), ("two", false), ("bad", true)]).await;
+    assert_eq!(ui.finished_cards.len(), 2);
+    let buffer = screen(&mut ui);
+    assert_eq!(glowing_rows(&buffer), 1, "{buffer:?}");
+    let mut single = finished_calls(&[("one", false)]).await;
+    assert_eq!(glowing_rows(&screen(&mut single)), 1);
+
+    // The glow keeps the tick going after the run, then fades and lets it rest, so an
+    // idle TUI does no extra redraws.
+    assert!(ui.activity_animation_active());
+    for _ in 0..theme::FINISH_GLOW_FRAMES {
+        assert!(ui.advance_activity_animation());
+    }
+    assert!(ui.finished_cards.is_empty());
+    assert!(!ui.activity_animation_active());
+    let buffer = screen(&mut ui);
+    assert!(!buffer.content.iter().any(|cell| cell.bg == glow));
+}
+
+#[tokio::test]
+async fn finished_card_needs_smooth_motion() {
+    let (writer, _commands) = mpsc::channel(16);
+    for setup in [
+        |ui: &mut LiveUi| ui.color_depth = ColorDepth::Ansi256,
+        |ui: &mut LiveUi| ui.motion_allowed = false,
+        |ui: &mut LiveUi| ui.no_color = true,
+        // A theme on the terminal's own background has nothing to blend toward.
+        |ui: &mut LiveUi| ui.theme.active = theme::resolve("glass").unwrap(),
+    ] {
+        let mut ui = LiveUi::default();
+        setup(&mut ui);
+        for event in [
+            json!({"type": "tool.call", "call_id": "one", "name": "read",
+                   "arguments": {"path": "notes.md"}}),
+            json!({"type": "tool.result", "message_entry_id": null, "call_id": "one",
+                   "name": "read", "output": "notes", "is_error": false}),
+        ] {
+            let event = BackendEvent::from_projection_value(&event).unwrap();
+            ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+                .await
+                .unwrap();
+        }
+        assert!(ui.finished_cards.is_empty());
+        assert!(!ui.activity_animation_active());
     }
 }

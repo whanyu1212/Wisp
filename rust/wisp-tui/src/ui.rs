@@ -8,7 +8,7 @@ use crate::reducer::{UiState, ViewStatus};
 use crate::side_panel::{self, SidePanel};
 use crate::startup_logo::{self, LogoChoice};
 use crate::syntax::SyntaxClass;
-use crate::theme::Palette;
+use crate::theme::{MotionMode, Palette};
 use crate::tool_cards::{ProcessDisplayState, ToolStatus};
 use crate::tool_detail::{DetailAvailability, DetailRowKind, ToolDetailPresentation};
 use crate::transcript::{TranscriptEntry, TranscriptEntryId, TranscriptRole};
@@ -226,7 +226,7 @@ pub fn render(
         &Bindings::default(),
         LogoChoice::AdalBraille,
         None,
-        false,
+        Motion::default(),
         None,
         None,
     );
@@ -250,7 +250,7 @@ pub fn render_interactive(
     bindings: &Bindings,
     startup_logo: LogoChoice,
     decision_choice: Option<usize>,
-    decision_pulse: bool,
+    motion: Motion<'_>,
     activity_elapsed: Option<std::time::Duration>,
     side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
@@ -288,7 +288,7 @@ pub fn render_interactive(
                 state,
                 notice.map(|notice| notice.text),
                 decision_choice,
-                decision_pulse.then_some(activity_frame),
+                motion.decision_pulse().then_some(activity_frame),
                 palette,
             );
             return mouse::Conversation::default();
@@ -314,6 +314,7 @@ pub fn render_interactive(
             palette,
             bindings,
             startup_logo,
+            motion,
         );
         render_decision_panel(
             frame,
@@ -321,7 +322,7 @@ pub fn render_interactive(
             state,
             notice.map(|notice| notice.text),
             decision_choice,
-            decision_pulse.then_some(activity_frame),
+            motion.decision_pulse().then_some(activity_frame),
             palette,
         );
         let notice_scrolls = render_footer(
@@ -377,6 +378,7 @@ pub fn render_interactive(
         palette,
         bindings,
         startup_logo,
+        motion,
     );
     let completion_rows = completion
         .filter(|_| completion_height > 0)
@@ -388,6 +390,7 @@ pub fn render_interactive(
             content_area(chunks[2]),
             state,
             activity_frame,
+            motion.mode,
             activity_elapsed,
             column.width < frame.area().width,
             palette,
@@ -763,6 +766,7 @@ fn render_transcript(
     palette: Palette,
     bindings: &Bindings,
     startup_logo: LogoChoice,
+    motion: Motion<'_>,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
@@ -972,6 +976,8 @@ fn render_transcript(
                 .filter(|_| row.live_timer)
                 .and_then(|_| state.transcript.entry(row.anchor.entry_id))
                 .and_then(TranscriptEntry::running_elapsed);
+            let glow = finished_age(state, row, motion, activity_frame)
+                .and_then(|age| palette.finish_glow(motion.mode, age));
             render_transcript_row(
                 frame,
                 area,
@@ -982,6 +988,7 @@ fn render_transcript(
                 pulse,
                 live_elapsed,
                 turn_rail(state, row, prompts, palette),
+                glow,
                 &mut links,
             );
         }
@@ -1126,11 +1133,13 @@ fn status_line_height(state: &UiState) -> u16 {
 /// right. The running item's text is clipped first, then the turn details drop.
 /// Beside a docked side panel, which shows the context, the context appears here
 /// only once the window is mostly full.
+#[allow(clippy::too_many_arguments)]
 fn render_status_line(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     activity_frame: u8,
+    motion: MotionMode,
     run_elapsed: Option<std::time::Duration>,
     panel_docked: bool,
     palette: Palette,
@@ -1167,10 +1176,15 @@ fn render_status_line(
     let right = Line::from(right);
 
     let activity = run_activity(state);
-    let mut lead = vec![Span::styled(
-        format!("{} ", spinner_frame(activity_frame)),
-        running,
-    )];
+    // The indicator breathes beside its spinner; the label beside it stays solid,
+    // so it keeps its contrast.
+    let mut lead = vec![
+        Span::styled(
+            spinner_frame(activity_frame),
+            palette.breathe(running, motion, activity_frame),
+        ),
+        Span::raw(" "),
+    ];
     let mut detail = String::new();
     let mut timer = None;
     match activity.item {
@@ -1476,6 +1490,7 @@ fn render_transcript_row(
     pulse: Option<u8>,
     live_elapsed: Option<std::time::Duration>,
     rail: Option<(&'static str, Color)>,
+    glow: Option<Color>,
     links: &mut Vec<crate::hyperlink::PaintedLink>,
 ) {
     // A selected row looks like any other; its fold hint is the only cue.
@@ -1490,6 +1505,8 @@ fn render_transcript_row(
     } else {
         palette.base()
     };
+    // A card whose call just finished glows briefly under its action row.
+    let base = glow.map_or(base, |glow| base.bg(glow));
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
     // Use the existing inset: decoration must not shift wrapping, copied text, or
@@ -1644,6 +1661,52 @@ fn render_transcript_row(
             Paragraph::new(Span::styled(text.to_owned(), base.fg(color))),
             Rect::new(content.right() - columns, content.y, columns, 1),
         );
+    }
+}
+
+/// How a frame moves: the motion the terminal and settings allow, and the tool cards
+/// still glowing after their call finished.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Motion<'a> {
+    pub mode: MotionMode,
+    /// Cards whose call finished lately, each with the activity frame it finished on.
+    pub finished: &'a [(TranscriptEntryId, u8)],
+}
+
+impl Motion<'_> {
+    /// Whether a pending decision's border breathes, which needs a smooth blend.
+    fn decision_pulse(self) -> bool {
+        self.mode == MotionMode::Smooth
+    }
+
+    /// How many frames ago `entry`'s call finished, while it still glows.
+    fn finished_age(self, entry: TranscriptEntryId, frame: u8) -> Option<u8> {
+        self.finished
+            .iter()
+            .find(|(id, _)| *id == entry)
+            .map(|(_, finished)| frame.wrapping_sub(*finished))
+    }
+}
+
+/// How many frames ago the call a card row shows finished, while it still glows. A
+/// folded group row glows for its most recent member.
+fn finished_age(state: &UiState, row: &TranscriptRow, motion: Motion<'_>, frame: u8) -> Option<u8> {
+    if motion.finished.is_empty() {
+        return None;
+    }
+    match row.kind {
+        TranscriptRowKind::CardAction => motion.finished_age(row.anchor.entry_id, frame),
+        TranscriptRowKind::CardGroup => {
+            crate::transcript_view::card_run(&state.transcript, row.anchor.entry_id).and_then(
+                |(_, members)| {
+                    members
+                        .iter()
+                        .filter_map(|member| motion.finished_age(*member, frame))
+                        .min()
+                },
+            )
+        }
+        _ => None,
     }
 }
 
@@ -3991,7 +4054,7 @@ mod tests {
                     bindings,
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -4030,7 +4093,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -4325,7 +4388,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -4561,6 +4624,7 @@ mod tests {
                     frame.area(),
                     state,
                     0,
+                    MotionMode::Still,
                     elapsed.map(std::time::Duration::from_secs),
                     panel_docked,
                     Palette::default(),
@@ -4694,7 +4758,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -5484,7 +5548,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -5735,7 +5799,7 @@ mod tests {
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
                         None,
-                        false,
+                        Motion::default(),
                         None,
                         None,
                     );
@@ -5814,7 +5878,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -7071,7 +7135,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -7299,7 +7363,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -7358,7 +7422,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -7436,6 +7500,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            None,
                             &mut Vec::new(),
                         );
                     }
@@ -7448,6 +7513,7 @@ mod tests {
                         selected,
                         false,
                         palette,
+                        None,
                         None,
                         None,
                         None,
@@ -7523,6 +7589,7 @@ mod tests {
                             selected,
                             false,
                             palette,
+                            None,
                             None,
                             None,
                             None,
@@ -7953,7 +8020,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    Motion::default(),
                     None,
                     None,
                 );
@@ -8275,7 +8342,7 @@ mod tests {
                         &Bindings::default(),
                         LogoChoice::AdalBraille,
                         None,
-                        false,
+                        Motion::default(),
                         None,
                         None,
                     );

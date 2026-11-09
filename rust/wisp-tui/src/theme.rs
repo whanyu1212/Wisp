@@ -259,10 +259,38 @@ impl Palette {
     /// Starting at full strength keeps a still frame identical to the solid colour, and a
     /// cycle that divides 256 keeps the `u8` frame counter's wrap seamless.
     pub fn breathing(self, color: Color, frame: u8) -> Color {
-        const CYCLE: u8 = 16;
-        let phase = f64::from(frame % CYCLE) / f64::from(CYCLE);
-        let level = (1.0 + (std::f64::consts::TAU * phase).cos()) / 2.0;
-        mix(color, self.surface, 0.4 + 0.6 * level)
+        mix(color, self.surface, 0.4 + 0.6 * breath_level(frame))
+    }
+
+    /// `style` breathing at `frame` as `motion` allows, over the row's own backdrop.
+    ///
+    /// Smooth motion blends the foreground toward the backdrop as [`Palette::breathing`]
+    /// does. Where colours cannot blend, the foreground stays put and the text steps
+    /// between bold at the peak and dim at the trough instead: a blend downconverted to
+    /// a smaller palette would flicker between neighbouring entries. A theme that draws
+    /// on the terminal's own background has no known backdrop to blend toward, so it
+    /// steps too.
+    pub fn breathe(self, style: Style, motion: MotionMode, frame: u8) -> Style {
+        let level = breath_level(frame);
+        let smooth = motion == MotionMode::Smooth && !self.terminal_background;
+        match (motion, style.fg) {
+            (MotionMode::Still, _) => style,
+            (_, Some(color)) if smooth => style.fg(mix(color, self.background, 0.4 + 0.6 * level)),
+            _ if level > 2.0 / 3.0 => style.add_modifier(Modifier::BOLD),
+            _ if level < 1.0 / 3.0 => style.add_modifier(Modifier::DIM),
+            _ => style,
+        }
+    }
+
+    /// The background of a card row `age` frames after its call finished: the success
+    /// colour faded into the transcript background over [`FINISH_GLOW_FRAMES`], or
+    /// `None` once it has faded or where colours cannot blend.
+    pub fn finish_glow(self, motion: MotionMode, age: u8) -> Option<Color> {
+        if motion != MotionMode::Smooth || self.terminal_background || age >= FINISH_GLOW_FRAMES {
+            return None;
+        }
+        let remaining = f64::from(FINISH_GLOW_FRAMES - age) / f64::from(FINISH_GLOW_FRAMES);
+        Some(mix(self.success, self.background, 0.22 * remaining))
     }
 
     pub fn composer(self) -> Style {
@@ -377,6 +405,29 @@ pub(crate) fn contrast_ratio(foreground: Color, background: Color) -> f64 {
     let a = luminance(foreground);
     let b = luminance(background);
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// How live indicators move in a frame. Smooth motion blends colours, which needs
+/// truecolor; stepped motion changes only weight, for 256- and 16-colour terminals.
+/// Still is for `NO_COLOR`, `WISP_TUI_MOTION=off`, and a terminal in the background.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MotionMode {
+    #[default]
+    Still,
+    Smooth,
+    Stepped,
+}
+
+/// How many activity frames a finished card glows for: 0.75 s at the 125 ms tick.
+pub const FINISH_GLOW_FRAMES: u8 = 6;
+
+/// Where a breath is at `frame`: 1 at frame 0, easing to 0 halfway through a 16-frame
+/// cycle (2 s at the activity tick) and back. A cycle that divides 256 keeps the `u8`
+/// frame counter's wrap seamless.
+fn breath_level(frame: u8) -> f64 {
+    const CYCLE: u8 = 16;
+    let phase = f64::from(frame % CYCLE) / f64::from(CYCLE);
+    (1.0 + (std::f64::consts::TAU * phase).cos()) / 2.0
 }
 
 /// Blend `share` of `color` into `base`. Colours other than RGB come back unchanged.
