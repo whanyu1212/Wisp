@@ -15,6 +15,7 @@ from uuid import uuid4
 import anyio
 
 from wisp.events import (
+    ImagePart,
     JsonObject,
     KnownWispEvent,
     WispEvent,
@@ -64,6 +65,7 @@ from wisp.sessions.file_io import (
     unlink_if_same_file,
     write_all,
 )
+from wisp.sessions.images import IMAGE_DIRECTORY_NAME, SessionImageError, SessionImageStore
 from wisp.sessions.pagination import (
     DEFAULT_SESSION_MESSAGE_PAGE_LIMIT,
     DEFAULT_SESSION_TREE_PAGE_LIMIT,
@@ -328,7 +330,9 @@ class JsonlSessionStore:
         if selected_leaf_id is None:
             raise SessionError("Cannot clone an empty session")
         projection = project_session_path(entries, leaf_id=selected_leaf_id)
-        return self._persist_projection(projection, name=_session_name_from_entries(entries))
+        return self._persist_projection(
+            projection, source=source, name=_session_name_from_entries(entries)
+        )
 
     def _fork_from_user_message_once(
         self,
@@ -340,7 +344,7 @@ class JsonlSessionStore:
             expected_active_leaf_id
         )
         projection = project_fork_from_user_message(entries, entry_id=entry_id)
-        target = self._persist_projection(projection, name=None)
+        target = self._persist_projection(projection, source=source, name=None)
         assert projection.selected_entry_id is not None
         assert projection.selected_prompt is not None
         return SessionForkResult(
@@ -357,11 +361,18 @@ class JsonlSessionStore:
         self,
         projection: SessionBranchProjection,
         *,
+        source: JsonlSession,
         name: str | None,
     ) -> JsonlSession:
         target = self.create()
         if not projection.entries and name is None:
             return target
+        # A session opened by path from outside this store has its own image
+        # directory; copy what the projected entries reference so they resolve here.
+        # Storing is idempotent and replaces a damaged copy already in the target.
+        if source.images.directory != target.images.directory:
+            for image in _referenced_images(projection.entries):
+                target.images.store(source.images.read(image))
         copied_tree_entries = tuple(
             entry.model_copy(update={"session_id": target.session_id})
             for entry in projection.entries
@@ -437,6 +448,38 @@ class JsonlSession:
         self._entry_index_generation: int | None = None
         self._entry_index_signature: FileSignature | None = None
         self._message_page_index: MessagePageIndex | None = None
+        self.images = SessionImageStore(path.parent / IMAGE_DIRECTORY_NAME)
+
+    async def store_image(self, data: bytes) -> ImagePart:
+        """Validate an image and make it durable before a message references it.
+
+        Args:
+            data (bytes): The complete image file.
+
+        Returns:
+            ImagePart: The reference to attach to a user message.
+
+        Raises:
+            ImageRejectedError: The bytes fail Wisp's image checks.
+            SessionError: The image could not be written.
+        """
+
+        return await anyio.to_thread.run_sync(self.images.store, data)
+
+    async def read_image(self, image: ImagePart) -> bytes:
+        """Return the stored bytes of an image a message references.
+
+        Args:
+            image (ImagePart): A reference recorded on one of this session's messages.
+
+        Returns:
+            bytes: Exactly the bytes that were stored.
+
+        Raises:
+            SessionImageError: The image is missing or no longer matches its digest.
+        """
+
+        return await anyio.to_thread.run_sync(self.images.read, image)
 
     async def append_message(
         self,
@@ -882,6 +925,7 @@ class JsonlSession:
         # Validate both the tree and provider-visible compaction semantics before
         # making the target path discoverable.
         replay_session_entries(entries)
+        self._require_stored_images(entries)
         lines = tuple(session_entry_to_json(entry) for entry in entries)
 
         ensure_private_directory(self.path.parent)
@@ -1215,6 +1259,7 @@ class JsonlSession:
         )
         if isinstance(persisted, CompactionSessionEntry):
             replay_session_entries((*self._entry_index.values(), persisted))
+        self._require_stored_images((persisted,))
 
         try:
             self._append_line(session_entry_to_json(persisted))
@@ -1235,6 +1280,16 @@ class JsonlSession:
         self._entry_index_signature = session_file_signature(info)
         self._invalidate_message_page_index()
         return persisted
+
+    def _require_stored_images(self, entries: Sequence[SessionEntry]) -> None:
+        """Refuse to persist a reference to an image that is not stored yet."""
+
+        for image in _referenced_images(entries):
+            if not self.images.contains(image):
+                raise SessionImageError(
+                    f"Session {self.session_id} cannot reference image {image.sha256}: "
+                    f"it is not stored in {self.images.directory}"
+                )
 
     def _persisted_entry_locked(self, entry: SessionEntry) -> SessionEntry | None:
         assert self._entry_index is not None
@@ -1428,6 +1483,15 @@ def _active_leaf_id(entry_index: dict[str, SessionEntry]) -> str | None:
         if isinstance(entry, ActiveLeafSessionEntry):
             return entry.active_leaf_id
     return None
+
+
+def _referenced_images(entries: Sequence[SessionEntry]) -> tuple[ImagePart, ...]:
+    return tuple(
+        image
+        for entry in entries
+        if isinstance(entry, MessageSessionEntry)
+        for image in entry.message.images or ()
+    )
 
 
 def _session_name_from_entries(entries: Sequence[SessionEntry]) -> str | None:

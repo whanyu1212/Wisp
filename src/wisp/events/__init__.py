@@ -26,6 +26,8 @@ from pydantic import Field, TypeAdapter
 from wisp.events._base import (
     CompactionReason,
     FinishReason,
+    ImageMediaType,
+    ImagePart,
     JsonObject,
     ManagedProcessState,
     MessageRole,
@@ -236,6 +238,8 @@ __all__ = [
     "EditLocation",
     "ErrorEvent",
     "FinishReason",
+    "ImageMediaType",
+    "ImagePart",
     "JsonObject",
     "JsonObjectAdapter",
     "KnownWispEvent",

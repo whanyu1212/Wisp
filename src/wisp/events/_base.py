@@ -17,6 +17,7 @@ QueueMode = Literal["one_at_a_time", "all"]
 QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+ImageMediaType = Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 
 def utc_now() -> datetime:
@@ -48,6 +49,22 @@ class ToolCallSnapshot(BaseModel):
     # exchange. It is intentionally absent from persisted/public events.
     provider_call_id: str | None = Field(default=None, exclude=True, repr=False)
     parse_error: str | None = None
+
+
+class ImagePart(BaseModel):
+    """A reference to one validated image held in a session's image store.
+
+    The bytes live outside the transcript, addressed by their SHA-256 digest, so
+    messages and events carry only this description of them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    media_type: ImageMediaType
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(gt=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
 
 
 class _MessageOriginEvent(WispEvent):

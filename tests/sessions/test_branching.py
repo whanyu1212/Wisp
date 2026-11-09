@@ -526,11 +526,12 @@ def test_clone_snapshot_ignores_later_source_appends(
     def pause_after_snapshot(
         projection: SessionBranchProjection,
         *,
+        source: JsonlSession,
         name: str | None,
     ) -> JsonlSession:
         snapshot_taken.set()
         assert continue_clone.wait(timeout=5)
-        return persist_projection(projection, name=name)
+        return persist_projection(projection, source=source, name=name)
 
     monkeypatch.setattr(store, "_persist_projection", pause_after_snapshot)
     cloned: JsonlSession | None = None

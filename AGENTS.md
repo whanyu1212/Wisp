@@ -141,6 +141,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `pagination.py` projects bounded message and tree pages; `summaries.py` scans listing metadata
   without replaying transcripts. `entries.py`, `replay.py`, and `branching.py` define the records
   and tree semantics they all share. Tests that patch a helper must target its defining module.
+  `images.py` is the content-addressed image store beside the session files; an image is stored
+  there before any message references it. `src/wisp/images.py` validates image bytes (format,
+  dimensions, limits) from their headers without decoding them; `ImagePart` lives in `wisp.events`.
 - For runtime configuration, start with `src/wisp/config/runtime.py`: `WispConfig` and its
   defaults. `config/settings.py` resolves layered user and project settings. `wisp.config` (the
   package root) eagerly re-exports only the SDK-facing runtime surface so
