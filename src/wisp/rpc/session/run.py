@@ -18,6 +18,7 @@ from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentStarted,
     ErrorEvent,
+    ImagePart,
     MessageCompleted,
     RpcCommandFinished,
     SessionStatsReported,
@@ -469,7 +470,7 @@ async def run_rpc_prompt_command(
     event_observer: Callable[[WispEvent], None] | None = None,
     completion_error: Callable[[], str | None] | None = None,
     after_run: Callable[[], Awaitable[str | None]] | None = None,
-    encoded_images: tuple[str, ...] = (),
+    encoded_images: tuple[str | ImagePart, ...] = (),
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -510,7 +511,9 @@ async def run_rpc_prompt_command(
             # Reject a bad attachment before the run records anything. Prompts
             # without images skip the worker thread, keeping their event timing.
             images = (
-                await anyio.to_thread.run_sync(decode_rpc_images, encoded_images)
+                await anyio.to_thread.run_sync(
+                    partial(decode_rpc_images, encoded_images, session=session)
+                )
                 if encoded_images
                 else ()
             )

@@ -25,6 +25,7 @@ from wisp.events import (
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
+    ImagePart,
     PermissionMode,
     QueueKind,
     QueueMode,
@@ -145,12 +146,15 @@ class PromptCommand(RpcCommandModel):
     type: Literal["prompt"] = "prompt"
     prompt: str
     # Omitted rather than empty when nothing is attached, like Message.images.
-    images: tuple[RpcImageData, ...] | None = Field(
+    images: tuple[RpcImageData | ImagePart, ...] | None = Field(
         default=None,
         min_length=1,
         max_length=MAX_RPC_MESSAGE_IMAGES,
         repr=False,
-        description="Base64-encoded image files attached to this user message, in order.",
+        description=(
+            "Images attached to this user message, in order: each a base64-encoded image "
+            "file, or a reference to an image already in the session's store."
+        ),
     )
 
 
@@ -511,12 +515,15 @@ class SteerCommand(RpcCommandModel):
     type: Literal["steer"] = "steer"
     content: str
     # Omitted rather than empty when nothing is attached, like Message.images.
-    images: tuple[RpcImageData, ...] | None = Field(
+    images: tuple[RpcImageData | ImagePart, ...] | None = Field(
         default=None,
         min_length=1,
         max_length=MAX_RPC_MESSAGE_IMAGES,
         repr=False,
-        description="Base64-encoded image files attached to this user message, in order.",
+        description=(
+            "Images attached to this user message, in order: each a base64-encoded image "
+            "file, or a reference to an image already in the session's store."
+        ),
     )
 
 
@@ -526,12 +533,15 @@ class FollowUpCommand(RpcCommandModel):
     type: Literal["follow_up"] = "follow_up"
     content: str
     # Omitted rather than empty when nothing is attached, like Message.images.
-    images: tuple[RpcImageData, ...] | None = Field(
+    images: tuple[RpcImageData | ImagePart, ...] | None = Field(
         default=None,
         min_length=1,
         max_length=MAX_RPC_MESSAGE_IMAGES,
         repr=False,
-        description="Base64-encoded image files attached to this user message, in order.",
+        description=(
+            "Images attached to this user message, in order: each a base64-encoded image "
+            "file, or a reference to an image already in the session's store."
+        ),
     )
 
 

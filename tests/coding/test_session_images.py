@@ -6,8 +6,8 @@ import anyio
 import pytest
 
 from wisp.coding.session import CodingSession, ImageInputUnsupportedError
-from wisp.events import QueueMessageInjected, WispEvent
-from wisp.images import ImageRejectedError
+from wisp.events import QueueMessageInjected, QueueUpdated, WispEvent
+from wisp.images import ImageRejectedError, inspect_image
 from wisp.messages import Message
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted
@@ -38,8 +38,10 @@ def test_steering_keeps_its_images(tmp_path: Path) -> None:
     event_bus = EventBus()
     agent = CodingSession(provider=_answers(2), sessions=store, events=event_bus)
 
+    queued: list[QueueUpdated] = []
+
     async def steer_with_image(event: WispEvent) -> None:
-        await agent.steer("and this one?", images=[JPEG])
+        queued.append(await agent.steer("and this one?", images=[JPEG]))
 
     event_bus.on("agent.started", steer_with_image)
 
@@ -56,6 +58,8 @@ def test_steering_keeps_its_images(tmp_path: Path) -> None:
     ]
     (injected,) = [event for event in events if isinstance(event, QueueMessageInjected)]
     assert injected.images == steered.images
+    (update,) = queued
+    assert update.steering_images == (steered.images,)
     assert anyio.run(session.read_image, steered.images[0]) == JPEG
 
 
@@ -248,7 +252,9 @@ def test_queued_images_follow_model(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="provider failed"):
         anyio.run(run, "look")
-    assert agent.queue_state(session).follow_up == ("later",)
+    retained = agent.queue_state(session)
+    assert retained.follow_up == ("later",)
+    assert [image.sha256 for (image,) in retained.follow_up_images] == [inspect_image(PNG).sha256]
     agent.models = _registry(image_models=())
     anyio.run(run, "next")
 

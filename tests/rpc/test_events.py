@@ -9,9 +9,11 @@ from pydantic import ValidationError
 
 from tests.support.paths import REPO_ROOT
 from wisp.events import (
+    ImagePart,
     ProjectConfigApplied,
     ProviderRetrying,
     QueueItemsRemoved,
+    QueueUpdated,
     RpcCommandArgument,
     RpcCommandDescriptor,
     RpcCommandsReported,
@@ -678,3 +680,18 @@ def test_wisp_event_from_json_rejects_per_event_schema_version() -> None:
 
     with pytest.raises(ValidationError, match="schema_version"):
         wisp_event_from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("event_type", [QueueUpdated, QueueItemsRemoved])
+def test_queue_images_must_align(event_type: type[QueueUpdated] | type[QueueItemsRemoved]) -> None:
+    """Queue image lists are empty or hold one entry per message."""
+
+    image = ImagePart(media_type="image/png", sha256="a" * 64, byte_size=84, width=3, height=2)
+    extra = {"command_id": "c", "operation": "clear"} if event_type is QueueItemsRemoved else {}
+
+    with pytest.raises(ValidationError, match="one entry per message"):
+        event_type(steering=("one", "two"), steering_images=((image,),), **extra)
+
+    aligned = event_type(steering=("one", "two"), steering_images=((image,), ()), **extra)
+    assert aligned.steering_images == ((image,), ())
+    assert event_type(steering=("one",), **extra).steering_images == ()

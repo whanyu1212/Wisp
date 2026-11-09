@@ -119,16 +119,17 @@ from wisp.messages import (
     Message,
     completion_event_has_history,
     message_from_completion_event,
+    queued_message_images,
 )
 from wisp.messages.history import active_turn_start
 from wisp.providers.base import (
     ContextOverflowError,
     Provider,
     ToolSpec,
+    model_accepts_images,
     prepare_provider_history,
     provider_image_request_byte_budget,
     provider_native_output,
-    provider_supports_image_input,
     provider_supports_web_search,
 )
 from wisp.providers.catalog import ModelRegistry
@@ -723,12 +724,7 @@ class CodingSession:
         list the model; without one the adapter's declaration decides.
         """
 
-        if not provider_supports_image_input(self.provider):
-            return False
-        if self.models is None:
-            return True
-        model = self.model or self.provider.default_model
-        return model is not None and self.models.supports_image_input(self.provider.name, model)
+        return model_accepts_images(self.provider, self.model, self.models)
 
     def _require_image_input(self, images: Sequence[bytes]) -> None:
         """Refuse new images before anything is stored when no request could carry them.
@@ -801,6 +797,8 @@ class CodingSession:
         return QueueUpdated(
             steering=tuple(message.user_visible_content for message in queued.messages.steering),
             follow_up=tuple(message.user_visible_content for message in queued.messages.follow_up),
+            steering_images=queued_message_images(queued.messages.steering),
+            follow_up_images=queued_message_images(queued.messages.follow_up),
             steering_mode=queued.steering_mode,
             follow_up_mode=queued.follow_up_mode,
         )

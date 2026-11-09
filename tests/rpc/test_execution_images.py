@@ -10,9 +10,11 @@ from pytest import MonkeyPatch
 
 from tests.rpc.execution_support import dispatch_parsed
 from tests.support.rpc import build_rpc_executor_fixture, guard_rpc_command_serialization
-from wisp.events import AgentStarted, QueueUpdated, RpcCommandFinished
+from wisp.agent.harness import QueuedMessages
+from wisp.events import AgentStarted, QueueItemsRemoved, QueueUpdated, RpcCommandFinished
+from wisp.messages import Message
 from wisp.rpc.coordinator import _RpcCommandCompleted, _RpcRunningCommand
-from wisp.sessions.jsonl import JsonlSession
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures" / "images"
 PNG = (_FIXTURES / "pixel.png").read_bytes()
@@ -24,7 +26,7 @@ def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
 
 
 async def _run_prompt(
-    tmp_path: Path, images: list[str]
+    tmp_path: Path, images: list[object]
 ) -> tuple[_RpcCommandCompleted, JsonlSession, list[object]]:
     fixture = await build_rpc_executor_fixture(tmp_path)
     send, receive = anyio.create_memory_object_stream(10)
@@ -126,3 +128,131 @@ def test_queued_message_decodes_images(
     assert finished["good"].ok is True
     assert finished["bad"].ok is False
     assert (finished["bad"].error or "").startswith("Image 1 rejected (invalid_base64)")
+
+
+def _stored_reference(tmp_path: Path, **overrides: object) -> dict[str, object]:
+    """Store PNG in the sessions directory's shared image store and reference it."""
+
+    image = anyio.run(JsonlSessionStore(tmp_path).create().store_image, PNG)
+    return {**image.model_dump(mode="json"), **overrides}
+
+
+def test_prompt_reattaches_stored_image(tmp_path: Path) -> None:
+    """A reference, such as a forked message's selected image, re-attaches it."""
+
+    reference = _stored_reference(tmp_path)
+
+    completed, session, _ = anyio.run(_run_prompt, tmp_path, [reference])
+
+    assert completed.ok is True
+    user = next(message for message in session.read_messages() if message.role == "user")
+    assert user.images is not None
+    assert user.images[0].sha256 == reference["sha256"]
+
+
+def test_reference_metadata_is_rederived(tmp_path: Path) -> None:
+    """Only a reference's digest is trusted; format and size come from the bytes."""
+
+    reference = _stored_reference(tmp_path, width=7999, height=7999)
+
+    completed, session, _ = anyio.run(_run_prompt, tmp_path, [reference])
+
+    assert completed.ok is True
+    user = next(message for message in session.read_messages() if message.role == "user")
+    assert user.images is not None
+    assert (user.images[0].width, user.images[0].height) == (3, 2)
+
+
+def test_unknown_reference_fails_before_run(tmp_path: Path) -> None:
+    reference = {
+        "media_type": "image/png",
+        "sha256": "0" * 64,
+        "byte_size": len(PNG),
+        "width": 3,
+        "height": 2,
+    }
+
+    completed, session, events = anyio.run(_run_prompt, tmp_path, [reference])
+
+    assert completed.ok is False
+    (finished,) = [event for event in events if isinstance(event, RpcCommandFinished)]
+    assert (finished.error or "").startswith("Image 1 rejected (not_stored)")
+    assert not any(isinstance(event, AgentStarted) for event in events)
+    assert not session.path.exists()
+
+
+def test_queue_removal_returns_images(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """Pop and clear report the removed messages' images for re-attaching."""
+
+    image = anyio.run(JsonlSessionStore(tmp_path).create().store_image, PNG)
+    with_image = Message(role="user", content="look", images=(image,))
+    text_only = Message(role="user", content="later")
+
+    async def scenario() -> list[object]:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        monkeypatch.setattr(fixture.agent, "pop_queue", lambda kind: (with_image, QueueUpdated()))
+        monkeypatch.setattr(
+            fixture.agent,
+            "clear_queue",
+            lambda kind: (
+                QueuedMessages(steering=(with_image,), follow_up=(text_only,)),
+                QueueUpdated(),
+            ),
+        )
+        running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            await dispatch_parsed(
+                executor, {"id": "pop", "type": "pop_queue", "kind": "steering"}, running
+            )
+            await dispatch_parsed(executor, {"id": "clear", "type": "clear_queue"}, running)
+        return list(fixture.events)
+
+    removed = [event for event in anyio.run(scenario) if isinstance(event, QueueItemsRemoved)]
+
+    assert [(event.steering, event.steering_images) for event in removed] == [
+        (("look",), ((image,),)),
+        (("look",), ((image,),)),
+    ]
+    assert removed[1].follow_up == ("later",)
+    assert removed[1].follow_up_images == ()
+
+
+@pytest.mark.parametrize("selected", [True, False], ids=["selected-session", "no-session"])
+def test_steer_resolves_reference(tmp_path: Path, monkeypatch: MonkeyPatch, selected: bool) -> None:
+    """A queued message's reference is read from the selected session's store."""
+
+    reference = _stored_reference(tmp_path)
+    received: list[tuple[bytes, ...]] = []
+
+    async def steer(content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
+        received.append(tuple(images))
+        return QueueUpdated()
+
+    async def scenario() -> list[object]:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        if selected:
+            fixture.session_state.session = fixture.sessions.create()
+        monkeypatch.setattr(fixture.agent, "steer", steer)
+        running = _RpcRunningCommand("active", "prompt", anyio.CancelScope())
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            await dispatch_parsed(
+                executor,
+                {"id": "steer", "type": "steer", "content": "again", "images": [reference]},
+                running,
+            )
+        return list(fixture.events)
+
+    events = anyio.run(scenario)
+
+    (finished,) = [event for event in events if isinstance(event, RpcCommandFinished)]
+    if selected:
+        assert finished.ok is True
+        assert received == [(PNG,)]
+    else:
+        assert finished.ok is False
+        assert (finished.error or "").startswith("Image 1 rejected (not_stored)")
+        assert received == []

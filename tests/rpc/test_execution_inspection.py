@@ -28,6 +28,7 @@ from wisp.events import (
     RpcWorkspaceReported,
     WispEvent,
 )
+from wisp.providers.base import DEFAULT_MAX_REQUEST_IMAGE_BYTES
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.fake import FakeProvider
 from wisp.rpc.commands import (
@@ -524,3 +525,49 @@ def test_workspace_report_abandons_hung_git(tmp_path: Path, monkeypatch: MonkeyP
         release.set()
 
     assert report.git_branch is None
+
+
+@pytest.mark.parametrize(
+    ("model", "image_input", "budget"),
+    [(None, True, DEFAULT_MAX_REQUEST_IMAGE_BYTES), ("plain", False, 0)],
+    ids=["listed-default-model", "unlisted-model"],
+)
+def test_model_catalog_reports_image_input(
+    model: str | None, image_input: bool, budget: int
+) -> None:
+    """The selection says whether the model takes images, as the session enforces it."""
+
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    models = ModelRegistry(
+        ModelCatalog(
+            schema_version=2,
+            providers=(
+                ModelCatalogProviderEntry(
+                    name="fake",
+                    display_name="Fake",
+                    default_model="fake",
+                    docs_url="https://example.test/fake",
+                    models=("fake", "plain"),
+                    image_input_models=("fake",),
+                ),
+            ),
+        )
+    )
+    tools = ToolRegistry()
+    events = EventBus()
+    runtime = WispRuntime(
+        providers=providers,
+        tools=tools,
+        events=events,
+        api=ExtensionAPI(providers=providers, tools=tools, events=events),
+        models=models,
+    )
+
+    snapshot = rpc_inspection_module.rpc_model_catalog_snapshot(
+        runtime=runtime, provider=provider, model=model, effort=None
+    )
+
+    assert snapshot.selection.image_input is image_input
+    assert snapshot.selection.max_request_image_bytes == budget

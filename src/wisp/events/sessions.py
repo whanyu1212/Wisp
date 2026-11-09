@@ -359,6 +359,10 @@ class QueueUpdated(WispEvent):
     type: Literal["queue.updated"] = "queue.updated"
     steering: tuple[str, ...] = ()
     follow_up: tuple[str, ...] = ()
+    # Each queued message's images, aligned with `steering` / `follow_up`; empty
+    # when no queued message of that kind carries images.
+    steering_images: tuple[tuple[ImagePart, ...], ...] = ()
+    follow_up_images: tuple[tuple[ImagePart, ...], ...] = ()
     steering_mode: QueueMode = "one_at_a_time"
     follow_up_mode: QueueMode = "one_at_a_time"
     token: str | None = Field(
@@ -372,9 +376,19 @@ class QueueUpdated(WispEvent):
         description="Originating RPC command for a solicited snapshot; absent for run events.",
     )
 
+    @model_validator(mode="after")
+    def _validate_images(self) -> Self:
+        for texts, images, kind in (
+            (self.steering, self.steering_images, "steering"),
+            (self.follow_up, self.follow_up_images, "follow_up"),
+        ):
+            if images and len(images) != len(texts):
+                raise ValueError(f"{kind}_images must be empty or hold one entry per message")
+        return self
+
 
 class QueueItemsRemoved(WispEvent):
-    """Queued text removed by an RPC pop or clear operation."""
+    """Queued messages removed by an RPC pop or clear operation."""
 
     type: Literal["queue.items.removed"] = "queue.items.removed"
     command_id: str
@@ -382,9 +396,19 @@ class QueueItemsRemoved(WispEvent):
     kind: QueueKind | None = None
     steering: tuple[str, ...] = ()
     follow_up: tuple[str, ...] = ()
+    # The removed messages' images, aligned like `QueueUpdated`'s, so a frontend
+    # that restores a popped message to its composer can re-attach them by reference.
+    steering_images: tuple[tuple[ImagePart, ...], ...] = ()
+    follow_up_images: tuple[tuple[ImagePart, ...], ...] = ()
 
     @model_validator(mode="after")
     def _validate_removal(self) -> Self:
+        for texts, images, kind in (
+            (self.steering, self.steering_images, "steering"),
+            (self.follow_up, self.follow_up_images, "follow_up"),
+        ):
+            if images and len(images) != len(texts):
+                raise ValueError(f"{kind}_images must be empty or hold one entry per message")
         if self.operation == "pop" and self.kind is None:
             raise ValueError("queue pop results require a queue kind")
         if self.kind == "steering" and self.follow_up:

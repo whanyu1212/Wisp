@@ -1016,6 +1016,8 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
                         "kind": {"not": {"type": "null"}},
                         "steering": {"maxItems": 1},
                         "follow_up": {"maxItems": 1},
+                        "steering_images": {"maxItems": 1},
+                        "follow_up_images": {"maxItems": 1},
                     },
                     "not": {
                         "properties": {
@@ -1027,11 +1029,21 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
             },
             {
                 "if": {"properties": {"kind": {"const": "steering"}}},
-                "then": {"properties": {"follow_up": {"maxItems": 0}}},
+                "then": {
+                    "properties": {
+                        "follow_up": {"maxItems": 0},
+                        "follow_up_images": {"maxItems": 0},
+                    }
+                },
             },
             {
                 "if": {"properties": {"kind": {"const": "follow_up"}}},
-                "then": {"properties": {"steering": {"maxItems": 0}}},
+                "then": {
+                    "properties": {
+                        "steering": {"maxItems": 0},
+                        "steering_images": {"maxItems": 0},
+                    }
+                },
             },
         ],
     )

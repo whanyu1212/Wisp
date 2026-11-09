@@ -497,14 +497,21 @@
           "anyOf": [
             {
               "items": {
-                "$ref": "#/$defs/RpcImageData"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RpcImageData"
+                  },
+                  {
+                    "$ref": "#/$defs/ImagePart"
+                  }
+                ]
               },
               "maxItems": 6,
               "minItems": 1,
               "type": "array"
             }
           ],
-          "description": "Base64-encoded image files attached to this user message, in order.",
+          "description": "Images attached to this user message, in order: each a base64-encoded image file, or a reference to an image already in the session's store.",
           "title": "FollowUpCommandImages"
         },
         "type": {
@@ -1049,6 +1056,51 @@
       "title": "GetStateCommand",
       "type": "object"
     },
+    "ImagePart": {
+      "additionalProperties": false,
+      "description": "A reference to one validated image held in a session's image store.\n\nThe bytes live outside the transcript, addressed by their SHA-256 digest, so\nmessages and events carry only this description of them.",
+      "properties": {
+        "byte_size": {
+          "exclusiveMinimum": 0,
+          "title": "ImagePartByteSize",
+          "type": "integer"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "ImagePartHeight",
+          "type": "integer"
+        },
+        "media_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/gif",
+            "image/webp"
+          ],
+          "title": "ImagePartMediaType",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "ImagePartSha256",
+          "type": "string"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "ImagePartWidth",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "media_type",
+        "sha256",
+        "byte_size",
+        "width",
+        "height"
+      ],
+      "title": "ImagePart",
+      "type": "object"
+    },
     "InitCommand": {
       "additionalProperties": false,
       "description": "Inspect the active project and create its root AGENTS.md.",
@@ -1309,14 +1361,21 @@
           "anyOf": [
             {
               "items": {
-                "$ref": "#/$defs/RpcImageData"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RpcImageData"
+                  },
+                  {
+                    "$ref": "#/$defs/ImagePart"
+                  }
+                ]
               },
               "maxItems": 6,
               "minItems": 1,
               "type": "array"
             }
           ],
-          "description": "Base64-encoded image files attached to this user message, in order.",
+          "description": "Images attached to this user message, in order: each a base64-encoded image file, or a reference to an image already in the session's store.",
           "title": "PromptCommandImages"
         },
         "prompt": {
@@ -1761,14 +1820,21 @@
           "anyOf": [
             {
               "items": {
-                "$ref": "#/$defs/RpcImageData"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/RpcImageData"
+                  },
+                  {
+                    "$ref": "#/$defs/ImagePart"
+                  }
+                ]
               },
               "maxItems": 6,
               "minItems": 1,
               "type": "array"
             }
           ],
-          "description": "Base64-encoded image files attached to this user message, in order.",
+          "description": "Images attached to this user message, in order: each a base64-encoded image file, or a reference to an image already in the session's store.",
           "title": "SteerCommandImages"
         },
         "type": {

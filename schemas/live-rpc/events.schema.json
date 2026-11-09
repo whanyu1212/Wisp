@@ -1776,12 +1776,18 @@
               "follow_up": {
                 "maxItems": 1
               },
+              "follow_up_images": {
+                "maxItems": 1
+              },
               "kind": {
                 "not": {
                   "type": "null"
                 }
               },
               "steering": {
+                "maxItems": 1
+              },
+              "steering_images": {
                 "maxItems": 1
               }
             }
@@ -1799,6 +1805,9 @@
             "properties": {
               "follow_up": {
                 "maxItems": 0
+              },
+              "follow_up_images": {
+                "maxItems": 0
               }
             }
           }
@@ -1815,12 +1824,15 @@
             "properties": {
               "steering": {
                 "maxItems": 0
+              },
+              "steering_images": {
+                "maxItems": 0
               }
             }
           }
         }
       ],
-      "description": "Queued text removed by an RPC pop or clear operation.",
+      "description": "Queued messages removed by an RPC pop or clear operation.",
       "properties": {
         "command_id": {
           "title": "Command Id",
@@ -1832,6 +1844,17 @@
             "type": "string"
           },
           "title": "Follow Up",
+          "type": "array"
+        },
+        "follow_up_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "Follow Up Images",
           "type": "array"
         },
         "kind": {
@@ -1866,6 +1889,17 @@
           "title": "Steering",
           "type": "array"
         },
+        "steering_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "Steering Images",
+          "type": "array"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -1885,7 +1919,9 @@
         "operation",
         "kind",
         "steering",
-        "follow_up"
+        "follow_up",
+        "steering_images",
+        "follow_up_images"
       ],
       "title": "QueueItemsRemoved",
       "type": "object"
@@ -1988,6 +2024,17 @@
           "title": "Follow Up",
           "type": "array"
         },
+        "follow_up_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "Follow Up Images",
+          "type": "array"
+        },
         "follow_up_mode": {
           "default": "one_at_a_time",
           "enum": [
@@ -2003,6 +2050,17 @@
             "type": "string"
           },
           "title": "Steering",
+          "type": "array"
+        },
+        "steering_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "Steering Images",
           "type": "array"
         },
         "steering_mode": {
@@ -2046,6 +2104,8 @@
         "timestamp",
         "steering",
         "follow_up",
+        "steering_images",
+        "follow_up_images",
         "steering_mode",
         "follow_up_mode",
         "token",
@@ -3908,6 +3968,17 @@
           "default": null,
           "title": "Effort"
         },
+        "image_input": {
+          "default": false,
+          "title": "Image Input",
+          "type": "boolean"
+        },
+        "max_request_image_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Request Image Bytes",
+          "type": "integer"
+        },
         "model": {
           "anyOf": [
             {
@@ -3934,7 +4005,9 @@
         "model",
         "effective_model",
         "catalog_model",
-        "effort"
+        "effort",
+        "image_input",
+        "max_request_image_bytes"
       ],
       "title": "RpcModelSelectionSnapshot",
       "type": "object"
@@ -8100,9 +8173,11 @@
     "queue.items.removed": {
       "command_id": "command-1",
       "follow_up": [],
+      "follow_up_images": [],
       "kind": null,
       "operation": "clear",
       "steering": [],
+      "steering_images": [],
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "queue.items.removed"
     },
@@ -8118,8 +8193,10 @@
     "queue.updated": {
       "command_id": null,
       "follow_up": [],
+      "follow_up_images": [],
       "follow_up_mode": "one_at_a_time",
       "steering": [],
+      "steering_images": [],
       "steering_mode": "one_at_a_time",
       "timestamp": "2026-01-02T03:04:05Z",
       "token": null,
@@ -8284,6 +8361,8 @@
           "catalog_model": "fixture-model",
           "effective_model": "fixture-model",
           "effort": "high",
+          "image_input": false,
+          "max_request_image_bytes": 0,
           "model": "fixture-model",
           "provider": "fixture"
         }

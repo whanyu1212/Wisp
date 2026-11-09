@@ -62,6 +62,8 @@ def test_configure_model_auto_switches_provider_when_unambiguous(
         "effective_model": "gpt-5.5-pro",
         "catalog_model": "gpt-5.5-pro",
         "effort": None,
+        "image_input": True,
+        "max_request_image_bytes": 24_000_000,
     }
     assert catalog_index < records.index(configure_finished)
     assert any(

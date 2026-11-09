@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal, Self
 
@@ -131,6 +132,24 @@ class CompactionRecord(BaseModel):
         return self
 
 
+def queued_message_images(messages: Sequence[Message]) -> tuple[tuple[ImagePart, ...], ...]:
+    """Return each queued message's images, or nothing when none carries images.
+
+    Queue events align this with their message texts and leave it empty for
+    text-only queues, so their existing payloads stay unchanged.
+
+    Args:
+        messages (Sequence[Message]): Queued messages, in queue order.
+
+    Returns:
+        tuple[tuple[ImagePart, ...], ...]: One entry per message, or ().
+    """
+
+    if not any(message.images for message in messages):
+        return ()
+    return tuple(message.images or () for message in messages)
+
+
 def completion_event_has_history(
     event: MessageCompleted | ToolExecutionEnded,
 ) -> bool:
@@ -184,5 +203,6 @@ __all__ = [
     "NativeOutput",
     "Role",
     "completion_event_has_history",
+    "queued_message_images",
     "message_from_completion_event",
 ]

@@ -33,7 +33,11 @@ from wisp.events import (
     RpcStateSnapshot,
     RpcWorkspaceReported,
 )
-from wisp.providers.base import Provider
+from wisp.providers.base import (
+    Provider,
+    model_accepts_images,
+    provider_image_request_byte_budget,
+)
 from wisp.rpc.commands import (
     ClearQueueCommand,
     FollowUpCommand,
@@ -162,6 +166,7 @@ def rpc_model_catalog_snapshot(
         for entry in runtime.models.providers()
     )
     effective_model = model or provider.default_model
+    image_input = model_accepts_images(provider, model, runtime.models)
     return RpcModelCatalogSnapshot(
         selection=RpcModelSelectionSnapshot(
             provider=provider.name,
@@ -173,6 +178,12 @@ def rpc_model_catalog_snapshot(
                 else None
             ),
             effort=effort,
+            # Computed as the session enforces it, so a composer can refuse an
+            # attachment the run would reject.
+            image_input=image_input,
+            max_request_image_bytes=(
+                provider_image_request_byte_budget(provider) if image_input else 0
+            ),
         ),
         providers=providers,
     )
