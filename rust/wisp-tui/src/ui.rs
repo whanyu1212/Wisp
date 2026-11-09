@@ -75,7 +75,9 @@ fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>)
     if editable(state) {
         u16::try_from(
             layout
-                .map_or(1, |layout| layout.rows.len())
+                .map_or(1, |layout| {
+                    layout.rows.len() + usize::from(!layout.chips.is_empty())
+                })
                 // A framed composer adds its borders and the identity row, and on a
                 // tall screen a blank row between the draft and the identity.
                 .saturating_add(if framed { 3 + usize::from(gap) } else { 0 }),
@@ -2020,6 +2022,34 @@ fn paint_composer_accent(frame: &mut Frame<'_>, area: Rect, color: Color) {
     }
 }
 
+/// Draw the draft's attached images as one row of chips, eliding what does not fit.
+fn render_composer_chips(frame: &mut Frame<'_>, area: Rect, chips: &[String], palette: Palette) {
+    let chip_style = Style::default().fg(palette.secondary);
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    let width = usize::from(area.width);
+    for (index, chip) in chips.iter().enumerate() {
+        let text = format!("[{}]", sanitize_for_terminal(chip));
+        let separator = usize::from(index > 0);
+        if used + separator + text.width() > width {
+            let more = format!(" +{}", chips.len() - index);
+            if used + more.width() <= width {
+                spans.push(Span::styled(more, Style::default().fg(palette.muted)));
+            }
+            break;
+        }
+        if separator == 1 {
+            spans.push(Span::raw(" "));
+        }
+        used += separator + text.width();
+        spans.push(Span::styled(text, chip_style));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(palette.base()),
+        area,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_composer(
     frame: &mut Frame<'_>,
@@ -2080,7 +2110,20 @@ fn render_composer(
                 palette,
             );
         }
+        let layout = layout.expect("editable composer requires a visual layout");
         let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
+        if !layout.chips.is_empty() && inner.height >= 2 {
+            // Indented past the prompt prefix so the chips line up with the draft.
+            let chips_area = Rect {
+                x: inner.x.saturating_add(prefix_width).min(inner.right()),
+                y: inner.y,
+                width: inner.width.saturating_sub(prefix_width),
+                height: 1,
+            };
+            render_composer_chips(frame, chips_area, &layout.chips, palette);
+            inner.y += 1;
+            inner.height -= 1;
+        }
         let prefix_area = Rect {
             x: inner.x,
             y: inner.y,
@@ -2099,7 +2142,6 @@ fn render_composer(
             width: inner.width.saturating_sub(prefix_width),
             height: inner.height,
         };
-        let layout = layout.expect("editable composer requires a visual layout");
         let vertical_scroll = layout
             .cursor_row
             .saturating_sub(usize::from(editor_area.height.saturating_sub(1)));
@@ -2224,6 +2266,8 @@ struct ComposerLogicalLine {
 struct ComposerLayout {
     revision: u64,
     is_empty: bool,
+    /// Labels of the images attached to the draft, drawn as one row above it.
+    chips: Vec<String>,
     raw_line_count: usize,
     lines: Vec<ComposerLogicalLine>,
     rows: Vec<ComposerVisualRow>,
@@ -2237,11 +2281,17 @@ pub(crate) struct ComposerLayoutCache {
     revision: Option<u64>,
     width: usize,
     layout: Option<ComposerLayout>,
+    chips: Vec<String>,
     #[cfg(test)]
     rebuilds: usize,
 }
 
 impl ComposerLayoutCache {
+    /// Show these image chips above the draft; the draft's own layout is kept.
+    pub(crate) fn set_chips(&mut self, chips: Vec<String>) {
+        self.chips = chips;
+    }
+
     fn layout(&mut self, editor: &PromptEditor, width: usize) -> &ComposerLayout {
         let width = width.max(1);
         if self.revision != Some(editor.revision()) || self.width != width {
@@ -2253,7 +2303,11 @@ impl ComposerLayoutCache {
                 self.rebuilds += 1;
             }
         }
-        self.layout.as_ref().expect("composer layout was cached")
+        let layout = self.layout.as_mut().expect("composer layout was cached");
+        if layout.chips != self.chips {
+            layout.chips.clone_from(&self.chips);
+        }
+        layout
     }
 
     #[cfg(test)]
@@ -2387,6 +2441,7 @@ fn composer_layout(editor: &PromptEditor, width: usize) -> ComposerLayout {
     ComposerLayout {
         revision: editor.revision(),
         is_empty: editor.text().is_empty(),
+        chips: Vec::new(),
         raw_line_count: editor.line_count(),
         lines,
         rows,

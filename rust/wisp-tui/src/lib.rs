@@ -9,6 +9,7 @@ mod color_depth;
 #[cfg(test)]
 mod command_tests;
 mod commands;
+pub mod composer_images;
 mod connection_panel;
 mod context_split;
 mod context_view;
@@ -24,6 +25,8 @@ mod git_diff_view;
 pub mod history;
 mod hydration_profile;
 mod hyperlink;
+#[cfg(test)]
+mod image_paste_tests;
 mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
@@ -84,6 +87,7 @@ use color_depth::ColorDepth;
 #[cfg(test)]
 use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
+use composer_images::{AttachError, AttachedImage, ComposerImages, ImageSupport};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use detail_view::DetailView;
@@ -107,8 +111,8 @@ use ratatui::Terminal;
 #[cfg(test)]
 use ratatui::backend::Backend;
 use reducer::{
-    BackendEvent, CommandIdSource, CommandKind, InteractionStatus, PendingApproval, UiAction,
-    UiEffect, UiState, ViewStatus,
+    BackendEvent, CommandIdSource, CommandKind, ImageMessageTarget, InteractionStatus,
+    PendingApproval, UiAction, UiEffect, UiState, ViewStatus,
 };
 use session_picker::{SessionPicker, SessionPickerAction};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
@@ -595,6 +599,8 @@ struct LiveUi {
     detail_view: DetailView,
     browse_selected: Option<BrowseTarget>,
     editor: PromptEditor,
+    /// Images attached to the draft, sent with it and cleared when it is sent.
+    images: ComposerImages,
     clipboard: Box<dyn ClipboardBackend>,
     composer_layout_cache: ComposerLayoutCache,
     prompt_history: PromptHistory,
@@ -668,6 +674,7 @@ impl Default for LiveUi {
             detail_view: DetailView::default(),
             browse_selected: None,
             editor: PromptEditor::default(),
+            images: ComposerImages::default(),
             clipboard: Box::new(SystemClipboard::default()),
             composer_layout_cache: ComposerLayoutCache::default(),
             prompt_history: PromptHistory::default(),
@@ -1384,7 +1391,13 @@ impl LiveUi {
         let blocked_context = self.unsendable_response_context.clone();
         let follow_after_update = matches!(
             &action,
-            UiAction::Init | UiAction::Submit(_) | UiAction::SubmitPresented { .. }
+            UiAction::Init
+                | UiAction::Submit(_)
+                | UiAction::SubmitPresented { .. }
+                | UiAction::SendWithImages {
+                    target: ImageMessageTarget::Prompt,
+                    ..
+                }
         );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
@@ -2411,13 +2424,8 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
-        let clear_editor = matches!(
-            &action,
-            UiAction::Steer(_)
-                | UiAction::FollowUp(_)
-                | UiAction::SteerPresented { .. }
-                | UiAction::FollowUpPresented { .. }
-        );
+        let queued = queued_message(&action);
+        let clear_editor = queued.is_some();
         if clear_editor
             && !self.deferred_queue_recovery.is_empty()
             && !self.recovered_queue_recovery
@@ -2440,33 +2448,37 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         let command = match &action {
-            UiAction::Steer(content) | UiAction::SteerPresented { content, .. } => {
-                if let Err(error) = self.state.queue_submission_preflight(content) {
+            _ if queued.is_some() => {
+                let (kind, content, images) = queued.expect("checked queued message");
+                let has_images = images.is_some_and(|images| !images.is_empty());
+                if let Err(error) = self.state.queue_submission_preflight(content, has_images) {
                     self.notice = Some(error.notice().into());
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
                 }
-                Some((
-                    "Steering",
-                    WispTypedClientRpcCommands::steer(
-                        &self.ids.peek_id(CommandKind::Steer),
-                        content,
-                    )?,
-                ))
-            }
-            UiAction::FollowUp(content) | UiAction::FollowUpPresented { content, .. } => {
-                if let Err(error) = self.state.queue_submission_preflight(content) {
-                    self.notice = Some(error.notice().into());
-                    self.render_pending = true;
-                    return Ok(LoopControl::Continue);
-                }
-                Some((
-                    "Follow-up",
-                    WispTypedClientRpcCommands::follow_up(
-                        &self.ids.peek_id(CommandKind::FollowUp),
-                        content,
-                    )?,
-                ))
+                // Built with the images the reducer will send, so the frame check
+                // below measures the real payload.
+                let encoded = images
+                    .map(ComposerImages::base64_images)
+                    .unwrap_or_default();
+                Some(match kind {
+                    QueueKind::Steering => (
+                        "Steering",
+                        WispTypedClientRpcCommands::steer_with_images(
+                            &self.ids.peek_id(CommandKind::Steer),
+                            content,
+                            &encoded,
+                        )?,
+                    ),
+                    QueueKind::FollowUp => (
+                        "Follow-up",
+                        WispTypedClientRpcCommands::follow_up_with_images(
+                            &self.ids.peek_id(CommandKind::FollowUp),
+                            content,
+                            &encoded,
+                        )?,
+                    ),
+                })
             }
             UiAction::RestoreNewestQueueDraft => {
                 if !self
@@ -2572,6 +2584,7 @@ impl LiveUi {
         let control = self.apply_effects(effects, writer, limit).await?;
         if clear_editor && self.notice.is_none() {
             self.editor.clear();
+            self.clear_images();
             self.recovered_queue_recovery = false;
         }
         Ok(control)
@@ -2637,22 +2650,98 @@ impl LiveUi {
                 self.notice = Some(format!("{verb} {characters} chars to clipboard."));
                 self.render_pending = true;
             }
-            ClipboardAction::Paste => match self.clipboard.paste() {
-                Ok(pasted) => {
-                    let outcome = self.editor.insert_paste(&pasted);
-                    let notice_changed = self.update_edit_notice(outcome);
-                    self.completion.sync(&self.editor);
-                    self.file_picker.sync_editor(&self.editor);
-                    if outcome.changed || notice_changed {
-                        self.render_pending = true;
-                    }
-                }
-                Err(error) => {
-                    self.notice = Some(format!("Could not paste: {error}."));
+            ClipboardAction::Paste => {
+                // A clipboard holding an image (a screenshot, or a browser copy that
+                // also carries text) attaches the image; text-only clipboards paste text.
+                let Ok(image) = self.clipboard.paste_image() else {
+                    self.paste_clipboard_text();
+                    return;
+                };
+                let attached = AttachedImage::from_rgba(image.width, image.height, &image.rgba)
+                    .and_then(|image| self.attach_image(image));
+                if let Err(error) = attached {
+                    // A clipboard that also carries text still pastes it.
+                    self.notice = Some(match self.clipboard.paste() {
+                        Ok(text) => {
+                            self.insert_clipboard_text(&text);
+                            format!(
+                                "Pasted the clipboard text; its image was not attached: {error}."
+                            )
+                        }
+                        Err(_) => format!("Could not attach the image: {error}."),
+                    });
                     self.render_pending = true;
                 }
-            },
+            }
         }
+    }
+
+    fn paste_clipboard_text(&mut self) {
+        match self.clipboard.paste() {
+            Ok(pasted) => self.insert_clipboard_text(&pasted),
+            Err(error) => {
+                self.notice = Some(format!("Could not paste: {error}."));
+                self.render_pending = true;
+            }
+        }
+    }
+
+    fn insert_clipboard_text(&mut self, pasted: &str) {
+        let outcome = self.editor.insert_paste(pasted);
+        let notice_changed = self.update_edit_notice(outcome);
+        self.completion.sync(&self.editor);
+        self.file_picker.sync_editor(&self.editor);
+        if outcome.changed || notice_changed {
+            self.render_pending = true;
+        }
+    }
+
+    /// Attach an image to the draft and say so; the caller reports a refusal.
+    fn attach_image(&mut self, image: AttachedImage) -> Result<(), AttachError> {
+        let label = image.chip_label(self.images.len() + 1);
+        self.images.attach(image, image_support(&self.state))?;
+        self.notice = Some(format!(
+            "Attached {label}. Backspace on an empty draft removes it."
+        ));
+        self.sync_image_chips();
+        Ok(())
+    }
+
+    /// Re-check attached images against the model selected since they were attached.
+    fn images_still_accepted(&mut self) -> bool {
+        match self.images.check(image_support(&self.state)) {
+            Ok(()) => true,
+            Err(error) => {
+                self.notice = Some(format!(
+                    "Cannot send the attached images: {error}. Remove them with Backspace."
+                ));
+                self.render_pending = true;
+                false
+            }
+        }
+    }
+
+    /// Remove the newest attached image when the draft has no text to delete.
+    fn remove_last_image(&mut self) -> bool {
+        if !self.editor.text().is_empty() || self.images.remove_last().is_none() {
+            return false;
+        }
+        self.notice = Some("Removed the last attached image.".into());
+        self.sync_image_chips();
+        true
+    }
+
+    fn clear_images(&mut self) {
+        if !self.images.is_empty() {
+            self.images.clear();
+            self.sync_image_chips();
+        }
+    }
+
+    fn sync_image_chips(&mut self) {
+        self.composer_layout_cache
+            .set_chips(self.images.chip_labels());
+        self.render_pending = true;
     }
 
     fn update_edit_notice(&mut self, outcome: EditOutcome) -> bool {
@@ -2685,7 +2774,11 @@ impl LiveUi {
         limit: usize,
     ) -> Result<Option<String>, Error> {
         let id = self.ids.peek_id(CommandKind::Prompt);
-        let command = WispTypedClientRpcCommands::prompt(&id, prompt)?;
+        let command = WispTypedClientRpcCommands::prompt_with_images(
+            &id,
+            prompt,
+            &self.images.base64_images(),
+        )?;
         let encoded_len = serde_json::to_vec(&command)?.len();
         if encoded_len <= limit {
             let cancel_id = self.ids.peek_following_prefixed_id("cancel");
@@ -4324,9 +4417,12 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let prompt = self.editor.text().to_owned();
-        if prompt.trim().is_empty() {
+        if prompt.trim().is_empty() && self.images.is_empty() {
             self.notice = Some("Enter a non-empty prompt before sending.".into());
             self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if !self.images.is_empty() && !self.images_still_accepted() {
             return Ok(LoopControl::Continue);
         }
         if let Some(notice) = self.prompt_frame_limit_notice(&prompt, limit)? {
@@ -4335,10 +4431,18 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         self.notice = None;
-        let action = if self.editor.has_folds() {
+        let presentation = self.editor.has_folds().then(|| self.editor.compact_text());
+        let action = if !self.images.is_empty() {
+            UiAction::SendWithImages {
+                target: ImageMessageTarget::Prompt,
+                content: prompt,
+                presentation,
+                images: self.images.clone(),
+            }
+        } else if let Some(presentation) = presentation {
             UiAction::SubmitPresented {
                 content: prompt,
-                presentation: self.editor.compact_text(),
+                presentation,
             }
         } else {
             UiAction::Submit(prompt)
@@ -4346,6 +4450,7 @@ impl LiveUi {
         let control = self.dispatch(action, writer, limit).await?;
         if self.notice.is_none() {
             self.editor.clear();
+            self.clear_images();
         }
         Ok(control)
     }
@@ -5199,17 +5304,33 @@ impl LiveUi {
                 let alternate = self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
                 // Enter queues a follow-up, so a stray Enter waits for the run
                 // instead of redirecting it; Alt+Enter steers the run now.
-                let action = match (alternate, self.editor.has_folds()) {
-                    (false, true) => UiAction::FollowUpPresented {
+                let action = if self.images.is_empty() {
+                    match (alternate, self.editor.has_folds()) {
+                        (false, true) => UiAction::FollowUpPresented {
+                            content,
+                            presentation: self.editor.compact_text(),
+                        },
+                        (true, true) => UiAction::SteerPresented {
+                            content,
+                            presentation: self.editor.compact_text(),
+                        },
+                        (false, false) => UiAction::FollowUp(content),
+                        (true, false) => UiAction::Steer(content),
+                    }
+                } else {
+                    if !self.images_still_accepted() {
+                        return Ok(LoopControl::Continue);
+                    }
+                    UiAction::SendWithImages {
+                        target: if alternate {
+                            ImageMessageTarget::Steer
+                        } else {
+                            ImageMessageTarget::FollowUp
+                        },
                         content,
-                        presentation: self.editor.compact_text(),
-                    },
-                    (true, true) => UiAction::SteerPresented {
-                        content,
-                        presentation: self.editor.compact_text(),
-                    },
-                    (false, false) => UiAction::FollowUp(content),
-                    (true, false) => UiAction::Steer(content),
+                        presentation: self.editor.has_folds().then(|| self.editor.compact_text()),
+                        images: self.images.clone(),
+                    }
                 };
                 self.dispatch_queue_action(action, writer, limit).await
             }
@@ -5230,6 +5351,12 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             None => {
+                if key.code == KeyCode::Backspace
+                    && key.modifiers == KeyModifiers::NONE
+                    && self.remove_last_image()
+                {
+                    return Ok(LoopControl::Continue);
+                }
                 if let EditorAction::Edit(outcome) = self.editor.handle_key(key) {
                     let changed = self.update_edit_notice(outcome);
                     if outcome.changed || changed {
@@ -5246,9 +5373,29 @@ impl LiveUi {
             return LoopControl::Continue;
         }
         if self.editor_editable() {
+            // A dropped or pasted image file attaches the image instead of its path.
+            // Anything that is not an attachable image pastes as the path text it is.
+            let mut refused = None;
+            if let Some(path) = composer_images::pasted_file_path(pasted) {
+                match AttachedImage::from_file(&path)
+                    .map(|image| image.map(|image| self.attach_image(image)))
+                {
+                    Ok(Some(Ok(()))) => return LoopControl::Continue,
+                    Ok(Some(Err(error))) | Err(error @ AttachError::TooLarge(_)) => {
+                        refused = Some(error);
+                    }
+                    Ok(None) | Err(_) => {}
+                }
+            }
             let outcome = self.editor.insert_paste(pasted);
             let notice_changed = self.update_edit_notice(outcome);
             if outcome.changed || notice_changed {
+                self.render_pending = true;
+            }
+            if let Some(error) = refused {
+                self.notice = Some(format!(
+                    "Pasted the path as text; the image was not attached: {error}."
+                ));
                 self.render_pending = true;
             }
             return LoopControl::Continue;
@@ -5300,6 +5447,42 @@ fn retained_detail(
         return None;
     };
     Some(presentation)
+}
+
+/// The queue kind, text and images of a steering or follow-up submission.
+fn queued_message(action: &UiAction) -> Option<(QueueKind, &str, Option<&ComposerImages>)> {
+    match action {
+        UiAction::Steer(content) | UiAction::SteerPresented { content, .. } => {
+            Some((QueueKind::Steering, content, None))
+        }
+        UiAction::FollowUp(content) | UiAction::FollowUpPresented { content, .. } => {
+            Some((QueueKind::FollowUp, content, None))
+        }
+        UiAction::SendWithImages {
+            target,
+            content,
+            images,
+            ..
+        } => match target {
+            ImageMessageTarget::Prompt => None,
+            ImageMessageTarget::Steer => Some((QueueKind::Steering, content, Some(images))),
+            ImageMessageTarget::FollowUp => Some((QueueKind::FollowUp, content, Some(images))),
+        },
+        _ => None,
+    }
+}
+
+/// What the selected model accepts, once the backend has reported the selection.
+fn image_support(state: &UiState) -> Option<ImageSupport<'_>> {
+    let selection = &state.model_catalog.as_ref()?.selection;
+    Some(ImageSupport {
+        model: selection
+            .effective_model
+            .as_deref()
+            .unwrap_or(selection.provider.as_str()),
+        accepts_images: selection.image_input,
+        max_request_bytes: selection.max_request_image_bytes,
+    })
 }
 
 fn is_ctrl_c(key: KeyEvent) -> bool {

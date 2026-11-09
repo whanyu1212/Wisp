@@ -604,6 +604,16 @@ pub mod commands {
         }
     }
 
+    /// Attach base64 images to a command, leaving the field out when there are none.
+    ///
+    /// The schema requires at least one image when `images` is present.
+    fn with_images(mut command: serde_json::Value, images: &[String]) -> serde_json::Value {
+        if !images.is_empty() {
+            command["images"] = serde_json::json!(images);
+        }
+        command
+    }
+
     impl WispTypedClientRpcCommands {
         pub fn permissions(
             id: &str,
@@ -708,7 +718,19 @@ pub mod commands {
 
         /// Construct one agent-turn request.
         pub fn prompt(id: &str, prompt: &str) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}))
+            Self::prompt_with_images(id, prompt, &[])
+        }
+
+        /// Construct one agent-turn request with base64-encoded image files attached.
+        pub fn prompt_with_images(
+            id: &str,
+            prompt: &str,
+            images: &[String],
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(with_images(
+                serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}),
+                images,
+            ))
         }
 
         /// Initialize project guidance through the backend-owned workflow.
@@ -718,12 +740,36 @@ pub mod commands {
 
         /// Queue text after the active run's current assistant/tool batch.
         pub fn steer(id: &str, content: &str) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(serde_json::json!({"type": "steer", "id": id, "content": content}))
+            Self::steer_with_images(id, content, &[])
+        }
+
+        /// Queue a steering message with base64-encoded image files attached.
+        pub fn steer_with_images(
+            id: &str,
+            content: &str,
+            images: &[String],
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(with_images(
+                serde_json::json!({"type": "steer", "id": id, "content": content}),
+                images,
+            ))
         }
 
         /// Queue text for when the active run would otherwise stop.
         pub fn follow_up(id: &str, content: &str) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(serde_json::json!({"type": "follow_up", "id": id, "content": content}))
+            Self::follow_up_with_images(id, content, &[])
+        }
+
+        /// Queue a follow-up message with base64-encoded image files attached.
+        pub fn follow_up_with_images(
+            id: &str,
+            content: &str,
+            images: &[String],
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(with_images(
+                serde_json::json!({"type": "follow_up", "id": id, "content": content}),
+                images,
+            ))
         }
 
         /// Construct a response to one pending tool approval request.
@@ -1351,6 +1397,12 @@ pub mod events {
         pub effective_model: Option<String>,
         pub catalog_model: Option<String>,
         pub effort: Option<String>,
+        /// Whether the selected model takes images, as the backend enforces it.
+        #[serde(default)]
+        pub image_input: bool,
+        /// Raw image bytes one request may carry; zero without image input.
+        #[serde(default)]
+        pub max_request_image_bytes: u64,
     }
 
     /// Bounded picker-relevant model catalog snapshot.

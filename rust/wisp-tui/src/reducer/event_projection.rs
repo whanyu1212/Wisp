@@ -9,6 +9,7 @@ use super::{
     SessionMessages, SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode,
     SessionTreeNodeKind, SessionTreePage, SessionTreeUnrevert,
 };
+use crate::composer_images;
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolProgressInput,
@@ -686,6 +687,7 @@ impl BackendEvent {
                 Self::QueueMessageInjected {
                     kind: queue_kind_field(value, &event_type, "kind")?,
                     content: visible_content,
+                    images: composer_images::reported_image_lines(value.get("images")),
                 }
             }
             "rpc.sessions" => Self::SessionsReported {
