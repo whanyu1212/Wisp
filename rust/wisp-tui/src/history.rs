@@ -10,7 +10,9 @@ use crate::tool_cards::{
     ToolCallInput, ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
     identity_for_display, process_call_identity, proxied_arguments,
 };
-use crate::tool_detail::{DetailUnavailableReason, ToolDetailSource, project_tool_detail_source};
+use crate::tool_detail::{
+    DetailUnavailableReason, ToolDetailSource, parse_edit_locations, project_tool_detail_source,
+};
 use crate::transcript::{SharedTranscript, TranscriptEntryId};
 
 pub const HISTORY_MESSAGE_LIMIT: usize = 200;
@@ -508,6 +510,13 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         started_at_ms,
         process_started_at_ms: process_time("process_started_at"),
         process_ended_at_ms: process_time("process_ended_at"),
+        edit_locations: parse_edit_locations(
+            result.and_then(|result| result.get("edit_locations")),
+        )
+        .map_err(|()| HistoryProjectionError::InvalidField {
+            index,
+            field: "tool_result.edit_locations",
+        })?,
     })
 }
 
@@ -1062,6 +1071,29 @@ mod tests {
             assert_eq!(card.status.as_str(), "done");
             assert_eq!(card.action(), action);
         }
+    }
+
+    #[test]
+    fn replays_saved_edit_lines() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "edit",
+            "name": "edit",
+            "arguments": {"path": "/repo/a.txt", "edits": [{"oldText": "old\n", "newText": "new\n"}]}
+        }]);
+        let mut result = message("tool", "Applied 1 edit(s) to a.txt");
+        result["tool_call_id"] = json!("edit");
+        result["tool_name"] = json!("edit");
+        result["tool_result"] =
+            json!({"status": "done", "edit_locations": [{"old_line": 7, "new_line": 7}]});
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+        let card = transcript.entries()[0].tool_card().unwrap();
+        let crate::tool_detail::DetailAvailability::LiveRetained(detail) = &card.structured_detail
+        else {
+            panic!("edit detail expected");
+        };
+        assert_eq!(detail.rows[0].text, "@@ edit 1 · line 7 @@");
+        assert_eq!(detail.rows[1].old_line, Some(7));
     }
 
     #[test]

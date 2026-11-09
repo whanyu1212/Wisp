@@ -3980,6 +3980,7 @@ mod tests {
             started_at_ms: None,
             process_started_at_ms: None,
             process_ended_at_ms: None,
+            edit_locations: Vec::new(),
         }
     }
 

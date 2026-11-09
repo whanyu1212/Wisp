@@ -131,6 +131,7 @@ def test_projection_keeps_complete_wire_payload() -> None:
         "output_has_exit_status": True,
         "before_text": "before\n",
         "created": True,
+        "edit_locations": (),
         "summary": "summary",
         "truncated": True,
         "duration_ms": 1250,

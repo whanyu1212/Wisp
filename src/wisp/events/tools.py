@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wisp.events._base import JsonObject, ManagedProcessState, WispEvent, _MessageOriginEvent
 from wisp.tool_types import ToolFailureCode
@@ -122,6 +122,27 @@ class ProjectConfigApplied(WispEvent):
     auth_path: Path
 
 
+# The most edit locations one result carries; a call with more edits reports none.
+MAX_EDIT_LOCATIONS = 256
+# The highest line an edit location may name, within every reader's 64-bit range.
+MAX_EDIT_LINE = (1 << 63) - 1
+
+
+class EditLocation(BaseModel):
+    """Where one edit of an `edit` call landed, as 1-based first lines.
+
+    Attributes:
+        old_line (int): The edit's first line in the file before the call's edits.
+        new_line (int): Its first line in the file the call produced, after the
+            lines every edit above it added or removed.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    old_line: int = Field(ge=1, le=MAX_EDIT_LINE)
+    new_line: int = Field(ge=1, le=MAX_EDIT_LINE)
+
+
 class _ToolResultEvent(_MessageOriginEvent):
     """Shared bounded result contract for distinct tool lifecycle events."""
 
@@ -149,6 +170,9 @@ class _ToolResultEvent(_MessageOriginEvent):
     before_text: str | None = None
     # Distinguishes a new file from an overwrite with no usable snapshot.
     created: bool = False
+    # Where each of an `edit` call's edits landed, in call order, so a diff of the
+    # edit can show real line numbers. Empty for other tools and failed edits.
+    edit_locations: tuple[EditLocation, ...] = Field(default=(), max_length=MAX_EDIT_LOCATIONS)
     # A bounded one-line summary for successful read-type tools.
     summary: str | None = None
     # Whether the tool itself capped output before constructing this event.

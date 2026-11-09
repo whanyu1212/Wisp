@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import cast
 
+from pydantic import ValidationError
+
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
     ToolExecutionEvent,
@@ -14,6 +16,8 @@ from wisp.agent.tool_contracts import (
 )
 from wisp.coding.tool_progress import LiveEventSink, run_with_progress
 from wisp.events import (
+    MAX_EDIT_LOCATIONS,
+    EditLocation,
     ManagedProcessState,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -86,6 +90,7 @@ _RESULT_DATA_KEYS = {
         "process_ended_at",
     ),
     "write": ("before_text", "created"),
+    "edit": ("locations",),
     "read": ("line_count", "selected_count", "path"),
     "grep": ("count",),
     "find": ("count",),
@@ -123,6 +128,7 @@ class _ToolRunOutcome:
     output_has_exit_status: bool = False
     before_text: str | None = None
     created: bool = False
+    edit_locations: tuple[EditLocation, ...] = ()
     summary: str | None = None
     truncated: bool = False
     process_id: str | None = None
@@ -431,6 +437,7 @@ class ConfiguredToolExecutor:
                 ),
                 before_text=_promote_before_text(tool_name, snapshot.data),
                 created=_promote_created(tool_name, snapshot.data),
+                edit_locations=_promote_edit_locations(tool_name, snapshot.data),
                 summary=summarize_tool_result(
                     tool_name,
                     snapshot.data,
@@ -525,6 +532,7 @@ def _execution_ended(
         output_has_exit_status=outcome.output_has_exit_status,
         before_text=outcome.before_text,
         created=outcome.created,
+        edit_locations=outcome.edit_locations,
         summary=outcome.summary,
         truncated=outcome.truncated,
         process_id=outcome.process_id,
@@ -625,6 +633,10 @@ def _snapshot_result_data(
             if not bounded_before.truncated:
                 snapshot["before_text"] = bounded_before.text
         _copy_exact(data, snapshot, "created", bool)
+    elif tool_name == "edit":
+        locations = _edit_locations(data.get("locations"))
+        if locations:
+            snapshot["locations"] = locations
     elif tool_name == "read":
         _copy_result_count(data, snapshot, "line_count")
         _copy_result_count(data, snapshot, "selected_count")
@@ -992,6 +1004,34 @@ def _promote_before_text(name: str, data: Mapping[str, object]) -> str | None:
         return None
     before_text = data.get("before_text")
     return before_text if isinstance(before_text, str) else None
+
+
+def _edit_locations(value: object) -> tuple[EditLocation, ...]:
+    """Validate an edit tool's reported locations; any malformed entry drops them all.
+
+    A call with more than ``MAX_EDIT_LOCATIONS`` edits reports none, rather than
+    numbering only some of its diff.
+    """
+
+    if type(value) is not list or not 0 < len(value) <= MAX_EDIT_LOCATIONS:
+        return ()
+    try:
+        return tuple(EditLocation.model_validate(location, strict=True) for location in value)
+    except ValidationError:
+        return ()
+
+
+def _promote_edit_locations(name: str, data: Mapping[str, object]) -> tuple[EditLocation, ...]:
+    """Where each edit landed, for the built-in edit tool only.
+
+    Gated by name, like ``before_text``, so another tool's ``locations`` cannot
+    renumber a diff.
+    """
+
+    if name != "edit":
+        return ()
+    locations = data.get("locations")
+    return locations if type(locations) is tuple else ()
 
 
 def _promote_created(name: str, data: Mapping[str, object]) -> bool:

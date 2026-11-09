@@ -15,7 +15,7 @@ use crate::tool_cards::{
     ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
     proxied_arguments,
 };
-use crate::tool_detail::{capture_write_before, project_tool_detail_source};
+use crate::tool_detail::{capture_write_before, parse_edit_locations, project_tool_detail_source};
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::MAX_APPLICATION_FRAME_BYTES;
@@ -611,6 +611,12 @@ impl BackendEvent {
                         value,
                         &event_type,
                         "process_ended_at",
+                    )?,
+                    edit_locations: parse_edit_locations(value.get("edit_locations")).map_err(
+                        |()| EventProjectionError::InvalidField {
+                            event_type: event_type.clone(),
+                            field: "edit_locations",
+                        },
                     )?,
                 }))
             }

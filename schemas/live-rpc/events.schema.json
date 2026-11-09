@@ -1158,6 +1158,30 @@
       "title": "ContextTurnGrowth",
       "type": "object"
     },
+    "EditLocation": {
+      "additionalProperties": false,
+      "description": "Where one edit of an `edit` call landed, as 1-based first lines.\n\nAttributes:\n    old_line (int): The edit's first line in the file before the call's edits.\n    new_line (int): Its first line in the file the call produced, after the\n        lines every edit above it added or removed.",
+      "properties": {
+        "new_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "New Line",
+          "type": "integer"
+        },
+        "old_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "Old Line",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_line",
+        "new_line"
+      ],
+      "title": "EditLocation",
+      "type": "object"
+    },
     "ErrorEvent": {
       "additionalProperties": false,
       "properties": {
@@ -3341,6 +3365,22 @@
           "default": null,
           "title": "Duration Ms"
         },
+        "edit_locations": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EditLocation"
+              },
+              "maxItems": 256,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edit Locations"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -3443,7 +3483,8 @@
         "duration_ms",
         "process_started_at",
         "process_ended_at",
-        "target"
+        "target",
+        "edit_locations"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -6289,6 +6330,15 @@
           "default": null,
           "title": "Duration Ms"
         },
+        "edit_locations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EditLocation"
+          },
+          "maxItems": 256,
+          "title": "Edit Locations",
+          "type": "array"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -6560,6 +6610,7 @@
         "output_has_exit_status",
         "before_text",
         "created",
+        "edit_locations",
         "summary",
         "truncated",
         "duration_ms",
@@ -6779,6 +6830,15 @@
           ],
           "default": null,
           "title": "Duration Ms"
+        },
+        "edit_locations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EditLocation"
+          },
+          "maxItems": 256,
+          "title": "Edit Locations",
+          "type": "array"
         },
         "exit_code": {
           "anyOf": [
@@ -7051,6 +7111,7 @@
         "output_has_exit_status",
         "before_text",
         "created",
+        "edit_locations",
         "summary",
         "truncated",
         "duration_ms",
@@ -8456,6 +8517,7 @@
       "call_id": "call-1",
       "created": false,
       "duration_ms": null,
+      "edit_locations": [],
       "exit_code": null,
       "failure_code": null,
       "is_error": false,
@@ -8508,6 +8570,7 @@
       "call_id": "call-1",
       "created": false,
       "duration_ms": null,
+      "edit_locations": [],
       "exit_code": null,
       "failure_code": null,
       "is_error": false,

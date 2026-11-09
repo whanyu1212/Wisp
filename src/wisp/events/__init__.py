@@ -143,8 +143,11 @@ from wisp.events.sessions import (
     _RpcSessionDerived,
 )
 from wisp.events.tools import (
+    MAX_EDIT_LINE,
+    MAX_EDIT_LOCATIONS,
     TOOL_PROGRESS_TAIL_MAX_BYTES,
     TOOL_PROGRESS_TAIL_MAX_LINES,
+    EditLocation,
     ProjectConfigApplied,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -186,6 +189,8 @@ from wisp.events.usage import (
 )
 
 __all__ = [
+    "MAX_EDIT_LINE",
+    "MAX_EDIT_LOCATIONS",
     "TOOL_PROGRESS_TAIL_MAX_BYTES",
     "TOOL_PROGRESS_TAIL_MAX_LINES",
     "DEFAULT_AGENT_MODE",
@@ -228,6 +233,7 @@ __all__ = [
     "ContextSourceUsage",
     "ContextTurnGrowth",
     "CostUnavailableReason",
+    "EditLocation",
     "ErrorEvent",
     "FinishReason",
     "JsonObject",

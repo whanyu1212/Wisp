@@ -70,6 +70,7 @@ fn fixture(scenario: &str) -> LiveUi {
         started_at_ms: None,
         process_started_at_ms: None,
         process_ended_at_ms: None,
+        edit_locations: Vec::new(),
     };
     ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);
@@ -611,6 +612,7 @@ fn showcase_state(worked: bool) -> UiState {
             started_at_ms: None,
             process_started_at_ms: None,
             process_ended_at_ms: None,
+            edit_locations: Vec::new(),
         });
     }
     state.transcript.complete_message(

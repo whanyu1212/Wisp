@@ -1854,6 +1854,7 @@ fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
             started_at_ms: None,
             process_started_at_ms: None,
             process_ended_at_ms: None,
+            edit_locations: Vec::new(),
         });
 }
 

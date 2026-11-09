@@ -6950,6 +6950,29 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_projects_edit_locations() {
+        let event = |locations: Value| {
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "tool.result", "call_id": "edit", "name": "edit",
+                "is_error": false, "output": "ok", "edit_locations": locations
+            }))
+        };
+        let Ok(BackendEvent::ToolResult(result)) =
+            event(serde_json::json!([{"old_line": 3, "new_line": 4}]))
+        else {
+            panic!("tool result expected");
+        };
+        assert_eq!(
+            result.edit_locations,
+            [crate::tool_detail::EditLocation {
+                old_line: 3,
+                new_line: 4
+            }]
+        );
+        assert!(event(serde_json::json!([{"old_line": 0, "new_line": 4}])).is_err());
+    }
+
+    #[test]
     fn proxied_card_shows_its_target() {
         // The model's call names `mcp_call` while the approval and result name the MCP
         // tool it runs; the card must show that tool throughout, not flag a conflict.

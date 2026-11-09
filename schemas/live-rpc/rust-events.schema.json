@@ -1068,6 +1068,30 @@
       "title": "ContextTurnGrowth",
       "type": "object"
     },
+    "EditLocation": {
+      "additionalProperties": false,
+      "description": "Where one edit of an `edit` call landed, as 1-based first lines.\n\nAttributes:\n    old_line (int): The edit's first line in the file before the call's edits.\n    new_line (int): Its first line in the file the call produced, after the\n        lines every edit above it added or removed.",
+      "properties": {
+        "new_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "EditLocationNewLine",
+          "type": "integer"
+        },
+        "old_line": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "title": "EditLocationOldLine",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_line",
+        "new_line"
+      ],
+      "title": "EditLocation",
+      "type": "object"
+    },
     "ErrorEvent": {
       "additionalProperties": false,
       "properties": {
@@ -3143,6 +3167,22 @@
           "default": null,
           "title": "RpcMessageToolResultSnapshotDurationMs"
         },
+        "edit_locations": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EditLocation"
+              },
+              "maxItems": 256,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotEditLocations"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -3245,7 +3285,8 @@
         "duration_ms",
         "process_started_at",
         "process_ended_at",
-        "target"
+        "target",
+        "edit_locations"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"
@@ -5847,6 +5888,15 @@
           "default": null,
           "title": "ToolExecutionEndedDurationMs"
         },
+        "edit_locations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EditLocation"
+          },
+          "maxItems": 256,
+          "title": "ToolExecutionEndedEditLocations",
+          "type": "array"
+        },
         "exit_code": {
           "anyOf": [
             {
@@ -6118,6 +6168,7 @@
         "output_has_exit_status",
         "before_text",
         "created",
+        "edit_locations",
         "summary",
         "truncated",
         "duration_ms",
@@ -6294,6 +6345,15 @@
           ],
           "default": null,
           "title": "ToolResultReadyDurationMs"
+        },
+        "edit_locations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EditLocation"
+          },
+          "maxItems": 256,
+          "title": "ToolResultReadyEditLocations",
+          "type": "array"
         },
         "exit_code": {
           "anyOf": [
@@ -6566,6 +6626,7 @@
         "output_has_exit_status",
         "before_text",
         "created",
+        "edit_locations",
         "summary",
         "truncated",
         "duration_ms",

@@ -257,6 +257,22 @@ class _WriteOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _EditedText:
+    text: str
+    lines: tuple[tuple[int, int], ...]
+    """Each edit's first line, 1-based and in call order: in the file before the
+    call's edits, and in the file they produce."""
+
+
+@dataclass(frozen=True, slots=True)
+class _EditOutcome:
+    version: FileVersion | None
+    """The edited file's version, or None when it could not be verified as this edit's."""
+    lines: tuple[tuple[int, int], ...]
+    """Each edit's first line before and after the call, as in `_EditedText`."""
+
+
+@dataclass(frozen=True, slots=True)
 class _ReplacementMetadata:
     mode: int
     uid: int
@@ -729,8 +745,9 @@ def _atomic_write(
 
 def _atomic_edit(
     path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
-) -> FileVersion | None:
-    """Apply ``edits`` and return the version they produced, if it could be verified."""
+) -> _EditOutcome:
+    """Apply ``edits``; return the version they produced, if it could be verified,
+    and where each edit landed."""
 
     if os.name == "nt":
         return _atomic_edit_windows(path, edits, seen_files)
@@ -758,14 +775,20 @@ def _atomic_edit(
         finally:
             os.close(descriptor)
 
-        replacement = _apply_edits(original, edits)
+        edited = _apply_edits(original, edits)
+        replacement = edited.text
         if link_count > 1:
-            return _write_existing_in_place(parent, replacement, expected=version)
+            return _EditOutcome(
+                _write_existing_in_place(parent, replacement, expected=version), edited.lines
+            )
         try:
             temporary, written = _write_temporary(parent, replacement, metadata=metadata)
         except ToolError as exc:
             if isinstance(exc.__cause__, PermissionError):
-                return _write_existing_in_place(parent, replacement, expected=version)
+                return _EditOutcome(
+                    _write_existing_in_place(parent, replacement, expected=version),
+                    edited.lines,
+                )
             raise
         published = False
         try:
@@ -786,7 +809,7 @@ def _atomic_edit(
         finally:
             _cleanup_temporary(parent, temporary, published=published)
         _sync_directory(parent)
-        return _published_version(stat_leaf(parent), written)
+        return _EditOutcome(_published_version(stat_leaf(parent), written), edited.lines)
 
 
 def _windows_leaf_info(path: SecureToolPath) -> os.stat_result | None:
@@ -917,7 +940,7 @@ def _atomic_write_windows(
 
 def _atomic_edit_windows(
     path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
-) -> FileVersion:
+) -> _EditOutcome:
     with open_windows_parent(path):
         initial = _windows_leaf_info(path)
         if initial is None:
@@ -939,16 +962,19 @@ def _atomic_edit_windows(
                 original = _read_descriptor(descriptor, path)
             except UnicodeDecodeError as exc:
                 raise ToolError(f"File is not valid UTF-8: {path.display}") from exc
-        replacement = _apply_edits(original, edits)
-        return _write_path_existing_in_place(
-            path,
-            replacement,
-            expected=version,
-            operation="editing",
+        edited = _apply_edits(original, edits)
+        return _EditOutcome(
+            _write_path_existing_in_place(
+                path,
+                edited.text,
+                expected=version,
+                operation="editing",
+            ),
+            edited.lines,
         )
 
 
-def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
+def _apply_edits(original: str, edits: list[tuple[str, str]]) -> _EditedText:
     """Replace each edit's ``oldText``, matched once in the original text.
 
     Edits are matched against the original rather than each other's results. An
@@ -963,7 +989,9 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
         edits (list[tuple[str, str]]): ``(oldText, newText)`` pairs in call order.
 
     Returns:
-        str: The edited text.
+        _EditedText: The edited text, and each edit's first line before and after,
+        in call order. An edit's line after counts the lines every edit above it
+        added or removed.
 
     Raises:
         ToolError: When an ``oldText`` is missing or ambiguous, two edits overlap,
@@ -981,9 +1009,17 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
             first, second = sorted((previous[3], current[3]))
             raise ToolArgumentError(f"edits[{first}] and edits[{second}] overlap")
     parts: list[str] = []
+    lines: list[tuple[int, int]] = [(0, 0)] * len(edits)
     cursor = 0
-    for start, end, new_text, _index in replacements:
+    line = 1
+    added_lines = 0
+    for start, end, new_text, index in replacements:
         parts.extend((original[cursor:start], new_text))
+        line += original.count("\n", cursor, start)
+        lines[index] = (line, line + added_lines)
+        removed = original.count("\n", start, end)
+        line += removed
+        added_lines += new_text.count("\n") - removed
         cursor = end
     parts.append(original[cursor:])
     edited = "".join(parts)
@@ -994,7 +1030,7 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> str:
             retryable=True,
             recovery_hint="Make newText differ from oldText, or skip the edit.",
         )
-    return edited
+    return _EditedText(edited, tuple(lines))
 
 
 def _locate_edit(original: str, old_text: str, new_text: str, index: int) -> tuple[int, int, str]:
@@ -1160,14 +1196,22 @@ class EditTool:
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         path = secure_tool_path(_required_string(arguments, "path"), context, write=True)
         edits = _parse_edits(arguments)
-        version = await anyio.to_thread.run_sync(
+        outcome = await anyio.to_thread.run_sync(
             lambda: _atomic_edit(path, edits, context.seen_files)
         )
-        if context.seen_files is not None and version is not None:
-            context.seen_files.record(path.path, version)
+        if context.seen_files is not None and outcome.version is not None:
+            context.seen_files.record(path.path, outcome.version)
         return ToolResult(
             text=f"Applied {len(edits)} edit(s) to {path.display}",
-            data={"path": path.display, "edits": len(edits)},
+            data={
+                "path": path.display,
+                "edits": len(edits),
+                # Where each edit landed, so a diff of it can show real line numbers.
+                "locations": [
+                    {"old_line": old_line, "new_line": new_line}
+                    for old_line, new_line in outcome.lines
+                ],
+            },
         )
 
 

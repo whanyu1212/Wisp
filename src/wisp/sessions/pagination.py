@@ -426,6 +426,7 @@ def _rpc_tool_result_snapshot(
             process_started_at=tool_result.process_started_at,
             process_ended_at=tool_result.process_ended_at,
             target=tool_result.target,
+            edit_locations=tool_result.edit_locations,
         ),
         projection_truncated,
     )

@@ -275,12 +275,52 @@ impl DetailAvailability {
 pub struct DetailResult<'a> {
     pub output: &'a str,
     pub before_text: Option<&'a str>,
+    /// Where each of an edit call's edits landed, in call order; empty when the
+    /// result did not say.
+    pub edit_locations: &'a [EditLocation],
     pub created: bool,
     pub summary: Option<&'a str>,
     pub truncated: bool,
     pub projection_omitted_bytes: u64,
     pub projection_omitted_rows: u64,
     pub projection_cut_mid_line: bool,
+}
+
+/// Where one edit landed: its first line in the file before the call's edits and
+/// in the file they produced, both 1-based.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditLocation {
+    pub old_line: u64,
+    pub new_line: u64,
+}
+
+/// Reads an edit result's `edit_locations`, from a live event or a saved result.
+/// Absent or null is no locations; anything malformed, or more locations than an
+/// edit card shows hunks, is an error.
+pub fn parse_edit_locations(value: Option<&Value>) -> Result<Vec<EditLocation>, ()> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(Vec::new());
+    };
+    let locations = value.as_array().ok_or(())?;
+    if locations.len() > DETAIL_EDIT_MAX_HUNKS {
+        return Err(());
+    }
+    locations
+        .iter()
+        .map(|location| {
+            let line = |field| {
+                location
+                    .get(field)
+                    .and_then(Value::as_u64)
+                    .filter(|line| *line >= 1)
+                    .ok_or(())
+            };
+            Ok(EditLocation {
+                old_line: line("old_line")?,
+                new_line: line("new_line")?,
+            })
+        })
+        .collect()
 }
 
 pub fn project_tool_detail_source(name: &str, arguments: &Map<String, Value>) -> ToolDetailSource {
@@ -351,7 +391,7 @@ pub fn build_tool_detail(
     match source {
         ToolDetailSource::None => DetailAvailability::None,
         ToolDetailSource::Unavailable(reason) => DetailAvailability::Unavailable(*reason),
-        ToolDetailSource::Edit(source) => build_edit_presentation(source),
+        ToolDetailSource::Edit(source) => build_edit_presentation(source, result.edit_locations),
         ToolDetailSource::Write(source) => build_write_presentation(source, result),
         ToolDetailSource::Read(source) => build_read_presentation(source, result),
         ToolDetailSource::Grep(source) => build_grep_presentation(source, result),
@@ -434,7 +474,14 @@ fn capture_text(source: &str) -> Result<DetailText, DetailUnavailableReason> {
     })
 }
 
-fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
+/// An edit's diff, built from the call's own `oldText`/`newText` pairs. With a
+/// location for every edit its rows carry the file's line numbers; otherwise, as for
+/// results saved before locations were kept, each fragment is numbered from 1.
+fn build_edit_presentation(
+    source: &EditDetailSource,
+    locations: &[EditLocation],
+) -> DetailAvailability {
+    let locations = (locations.len() == source.hunks.len()).then_some(locations);
     let mut rows = Vec::new();
     let mut additions = 0u64;
     let mut deletions = 0u64;
@@ -442,10 +489,15 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
         if hunk.old_text == hunk.new_text {
             continue;
         }
+        let location = locations.map(|locations| locations[index]);
         rows.push(row(
             DetailRowKind::Hunk,
-            format!("@@ edit {} · fragment lines @@", index + 1),
+            match location {
+                Some(location) => format!("@@ edit {} · line {} @@", index + 1, location.old_line),
+                None => format!("@@ edit {} · fragment lines @@", index + 1),
+            },
         ));
+        let first = rows.len();
         append_diff_rows(
             &mut rows,
             &hunk.old_text,
@@ -454,6 +506,18 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
             &mut additions,
             &mut deletions,
         );
+        if let Some(location) = location {
+            // The fragment's own numbering starts at 1; shift it to where it landed.
+            // Saturating, so a saved result with an absurd line cannot overflow.
+            for row in &mut rows[first..] {
+                row.old_line = row
+                    .old_line
+                    .map(|line| (line - 1).saturating_add(location.old_line));
+                row.new_line = row
+                    .new_line
+                    .map(|line| (line - 1).saturating_add(location.new_line));
+            }
+        }
     }
     if rows.is_empty() {
         return DetailAvailability::None;
@@ -461,7 +525,11 @@ fn build_edit_presentation(source: &EditDetailSource) -> DetailAvailability {
     DetailAvailability::LiveRetained(finalize_presentation(
         DetailPresentationKind::DiffModify,
         format!("M {}", display_path(&source.path)),
-        format!("+{additions} -{deletions} · fragment lines"),
+        if locations.is_some() {
+            format!("+{additions} -{deletions}")
+        } else {
+            format!("+{additions} -{deletions} · fragment lines")
+        },
         additions,
         deletions,
         rows,
@@ -1311,6 +1379,7 @@ mod tests {
     fn result<'a>(output: &'a str, summary: Option<&'a str>) -> DetailResult<'a> {
         DetailResult {
             output,
+            edit_locations: &[],
             before_text: None,
             created: false,
             summary,
@@ -1345,6 +1414,127 @@ mod tests {
         let debug = format!("{source:?}");
         assert!(!debug.contains("old\n"));
         assert!(!debug.contains("new\n"));
+    }
+
+    #[test]
+    fn edit_rows_carry_file_lines() {
+        let arguments = serde_json::json!({
+            "path": "src/main.rs",
+            "edits": [
+                {"oldText": "keep\nold\n", "newText": "keep\nnew\nadded\n"},
+                {"oldText": "tail\n", "newText": "TAIL\n"}
+            ]
+        });
+        let source = project_tool_detail_source("edit", arguments.as_object().unwrap());
+        let locations = [
+            EditLocation {
+                old_line: 10,
+                new_line: 10,
+            },
+            EditLocation {
+                old_line: 40,
+                new_line: 41,
+            },
+        ];
+        let rows = |locations: &[EditLocation]| {
+            let DetailAvailability::LiveRetained(detail) = build_tool_detail(
+                &source,
+                DetailResult {
+                    edit_locations: locations,
+                    ..result("ok", None)
+                },
+            ) else {
+                panic!("edit detail expected");
+            };
+            let rows = detail
+                .rows
+                .iter()
+                .map(|row| (row.text.clone(), row.old_line, row.new_line))
+                .collect::<Vec<_>>();
+            (detail.summary, rows)
+        };
+
+        let (summary, numbered) = rows(&locations);
+        assert_eq!(summary, "+3 -2");
+        assert_eq!(
+            numbered,
+            [
+                ("@@ edit 1 · line 10 @@".into(), None, None),
+                ("keep".into(), Some(10), Some(10)),
+                ("old".into(), Some(11), None),
+                ("new".into(), None, Some(11)),
+                ("added".into(), None, Some(12)),
+                ("@@ edit 2 · line 40 @@".into(), None, None),
+                ("tail".into(), Some(40), None),
+                ("TAIL".into(), None, Some(41)),
+            ]
+        );
+        // Without a location for every edit, each fragment is numbered from 1.
+        let (summary, fragment) = rows(&locations[..1]);
+        assert!(summary.ends_with("fragment lines"));
+        assert_eq!(fragment[0].0, "@@ edit 1 · fragment lines @@");
+        assert_eq!(fragment[1], ("keep".into(), Some(1), Some(1)));
+    }
+
+    #[test]
+    fn edit_lines_skip_unchanged_hunks() {
+        // A no-op edit keeps its place in the call, so the next edit uses its own
+        // location; an absurd saved line saturates instead of overflowing.
+        let arguments = serde_json::json!({
+            "path": "a.txt",
+            "edits": [
+                {"oldText": "same\n", "newText": "same\n"},
+                {"oldText": "x\ny\n", "newText": "x\nY\n"}
+            ]
+        });
+        let source = project_tool_detail_source("edit", arguments.as_object().unwrap());
+        let location = |line| EditLocation {
+            old_line: line,
+            new_line: line,
+        };
+        for (second, expected) in [(30, Some(31)), (u64::MAX, Some(u64::MAX))] {
+            let DetailAvailability::LiveRetained(detail) = build_tool_detail(
+                &source,
+                DetailResult {
+                    edit_locations: &[location(5), location(second)],
+                    ..result("ok", None)
+                },
+            ) else {
+                panic!("edit detail expected");
+            };
+            assert_eq!(detail.rows[0].text, format!("@@ edit 2 · line {second} @@"));
+            let deleted = detail
+                .rows
+                .iter()
+                .find(|row| row.kind == DetailRowKind::Deletion);
+            assert_eq!(deleted.and_then(|row| row.old_line), expected);
+        }
+    }
+
+    #[test]
+    fn edit_locations_parse_strictly() {
+        let parse = |value: serde_json::Value| parse_edit_locations(Some(&value));
+        assert_eq!(parse(serde_json::Value::Null), Ok(Vec::new()));
+        assert_eq!(parse_edit_locations(None), Ok(Vec::new()));
+        assert_eq!(
+            parse(serde_json::json!([{"old_line": 4, "new_line": 5}])),
+            Ok(vec![EditLocation {
+                old_line: 4,
+                new_line: 5
+            }])
+        );
+        for malformed in [
+            serde_json::json!({"old_line": 4, "new_line": 5}),
+            serde_json::json!([{"old_line": 0, "new_line": 5}]),
+            serde_json::json!([{"old_line": 4}]),
+            serde_json::json!([{"old_line": "4", "new_line": 5}]),
+            serde_json::json!(vec![
+                serde_json::json!({"old_line": 1, "new_line": 1});
+                DETAIL_EDIT_MAX_HUNKS + 1
+            ]),
+        ] {
+            assert_eq!(parse(malformed), Err(()));
+        }
     }
 
     #[test]

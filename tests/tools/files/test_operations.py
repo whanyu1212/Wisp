@@ -550,6 +550,40 @@ def _edit(tmp_path: Path, content: bytes, *edits: tuple[str, str]) -> bytes:
     return path.read_bytes()
 
 
+@pytest.mark.parametrize(
+    ("content", "edits", "locations"),
+    [
+        # Call order, not file order; the line edit 2 adds moves edit 1 down by one.
+        (b"a\nb\nc\nd\ne\n", [("d", "D"), ("b", "B1\nB2")], [(4, 5), (2, 2)]),
+        # Two lines removed above move a later edit up by two.
+        (b"a\nb\nc\nd\n", [("a\nb\n", ""), ("d", "D")], [(1, 1), (4, 2)]),
+        (b"a\r\nb\r\nc\r\n", [("c", "C")], [(3, 3)]),
+        # oldText starting mid-line lands on that line.
+        (b"one two\nthree\n", [("two\nthree", "2\n3")], [(1, 1)]),
+        # Matched only when trailing whitespace is ignored.
+        (b"first\nx  \ny\n", [("x\ny", "X\nY")], [(2, 2)]),
+    ],
+    ids=["call-order", "lines-removed", "crlf", "mid-line", "trailing-whitespace"],
+)
+def test_edit_reports_locations(
+    tmp_path: Path,
+    content: bytes,
+    edits: list[tuple[str, str]],
+    locations: list[tuple[int, int]],
+) -> None:
+    (tmp_path / "file.txt").write_bytes(content)
+
+    result = run_tool(
+        EditTool(),
+        {"path": "file.txt", "edits": [{"oldText": old, "newText": new} for old, new in edits]},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert result.data["locations"] == [
+        {"old_line": old_line, "new_line": new_line} for old_line, new_line in locations
+    ]
+
+
 def test_edit_crlf_multiline(tmp_path: Path) -> None:
     edited = _edit(tmp_path, b"a\r\nb\r\nc\r\n", ("a\nb", "x\ny"))
 
