@@ -179,7 +179,7 @@ def test_chat_parts(content: str, loaded: bool, expected: list[object]) -> None:
     ids=["images-then-text", "bytes-not-loaded"],
 )
 def test_google_parts(content: str, loaded: bool, expected: list[genai_types.Part]) -> None:
-    assert _messages_to_google([_message(content, loaded=loaded)]) == [
+    assert _messages_to_google([_message(content, loaded=loaded)], model="gemini-3.8-flash") == [
         genai_types.Content(role="user", parts=expected)
     ]
 

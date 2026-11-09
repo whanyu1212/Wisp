@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import MISSING, fields
 from typing import cast
 
@@ -15,7 +16,7 @@ from wisp.agent.harness.config import _build_loop_config
 from wisp.agent.loop import AgentLoopConfig
 from wisp.agent.request_boundary import RequestBoundaryDecision, RequestBoundarySnapshot
 from wisp.events import TokenUsage, UsageCost
-from wisp.providers.base import ToolSpec
+from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.fake import ScriptedProvider
 
 # Loop fields that describe one invocation rather than the harness configuration.
@@ -93,6 +94,10 @@ def test_accepts_runtime_limits_at_bounds() -> None:
     assert config.max_tool_iterations == 0
 
 
+async def _load_images(results: Sequence[ToolCallResult]) -> tuple[ToolCallResult, ...]:
+    return tuple(results)
+
+
 def test_loop_config_forwards_every_field() -> None:
     harness_config = AgentHarnessConfig(
         provider=ScriptedProvider([]),
@@ -107,6 +112,7 @@ def test_loop_config_forwards_every_field() -> None:
         cost_estimator=_estimate_cost,
         prompt_cache_key="cache",
         web_search=True,
+        tool_result_image_loader=_load_images,
     )
     loop_config = _build_loop_config(
         harness_config,

@@ -426,7 +426,15 @@ async def run_agent_loop(
                 tool_outcome = tool_batch.outcome
                 if tool_outcome is None:
                     raise RuntimeError("Tool round ended without a typed outcome")
-                state.continuation.complete_tool_round(tool_outcome.results)
+                results = tool_outcome.results
+                # A cancelled batch ends the run, so no request would carry its images.
+                if (
+                    config.tool_result_image_loader is not None
+                    and not isinstance(tool_outcome, CancelledToolBatch)
+                    and any(result.images for result in results)
+                ):
+                    results = await config.tool_result_image_loader(results)
+                state.continuation.complete_tool_round(results)
                 if isinstance(tool_outcome, CancelledToolBatch):
                     for event in lifecycle.cancelled_events():
                         yield event

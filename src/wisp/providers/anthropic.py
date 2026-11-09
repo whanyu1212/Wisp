@@ -49,6 +49,8 @@ from wisp.providers.base import (
     is_context_overflow_message,
     message_image_inputs,
     strip_or_none,
+    tool_call_result_from_message,
+    tool_result_image_inputs,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
@@ -899,13 +901,7 @@ def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
                 result = messages[index]
                 if result.role != "tool" or not result.tool_call_id:
                     break
-                results.append(
-                    ToolCallResult(
-                        call_id=result.tool_call_id,
-                        output=result.content,
-                        is_error=result.is_error is True,
-                    )
-                )
+                results.append(tool_call_result_from_message(result))
                 index += 1
             anthropic_messages.append(_tool_results_to_message(results))
             continue
@@ -968,12 +964,43 @@ def _tool_results_to_message(tool_results: Sequence[ToolCallResult]) -> MessageP
         {
             "type": "tool_result",
             "tool_use_id": result.call_id,
-            "content": result.output,
+            "content": _tool_result_content(result),
             "is_error": result.is_error,
         }
         for result in tool_results
     ]
     return cast(MessageParam, {"role": "user", "content": blocks})
+
+
+def _tool_result_content(
+    result: ToolCallResult,
+) -> str | list[TextBlockParam | ImageBlockParam]:
+    """Encode a tool result as its text, or as text and image blocks when it has images.
+
+    A result without images keeps the plain string every earlier request used.
+    Anthropic rejects empty text blocks, so empty output adds none.
+    """
+
+    if not result.images:
+        return result.output
+    blocks: list[TextBlockParam | ImageBlockParam] = []
+    if result.output:
+        blocks.append({"type": "text", "text": result.output})
+    for image, data in tool_result_image_inputs(result):
+        if data is None:
+            blocks.append({"type": "text", "text": image_placeholder_text(image)})
+            continue
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image.media_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                },
+            }
+        )
+    return blocks
 
 
 def _tool_specs_to_anthropic_tools(tools: Sequence[ToolSpec]) -> list[ToolParam]:

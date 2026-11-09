@@ -29,6 +29,7 @@ from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
     is_context_overflow_message,
+    tool_call_result_from_message,
 )
 from wisp.providers.continuations import ContinuationStore, replayable_native_items
 from wisp.providers.events import (
@@ -45,7 +46,7 @@ from wisp.providers.events import (
     ToolCall,
     parse_tool_call,
 )
-from wisp.providers.openai import responses_user_content
+from wisp.providers.openai import responses_tool_output, responses_user_content
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
@@ -742,7 +743,7 @@ def _messages_to_codex_input(
                 {
                     "type": "function_call_output",
                     "call_id": message.tool_call_id,
-                    "output": message.content,
+                    "output": responses_tool_output(tool_call_result_from_message(message)),
                 }
             )
             continue
@@ -777,7 +778,7 @@ def _tool_results_to_codex_input(tool_results: Sequence[ToolCallResult]) -> list
         {
             "type": "function_call_output",
             "call_id": result.call_id,
-            "output": result.output,
+            "output": responses_tool_output(result),
         }
         for result in tool_results
     ]

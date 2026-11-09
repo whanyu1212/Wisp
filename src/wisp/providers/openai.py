@@ -45,6 +45,8 @@ from wisp.providers.base import (
     is_context_overflow_message,
     message_image_inputs,
     strip_or_none,
+    tool_call_result_from_message,
+    tool_result_image_inputs,
 )
 from wisp.providers.continuations import ContinuationStore, replayable_native_items
 from wisp.providers.events import (
@@ -558,7 +560,7 @@ def _messages_to_response_input(
                     {
                         "type": "function_call_output",
                         "call_id": message.tool_call_id,
-                        "output": message.content,
+                        "output": responses_tool_output(tool_call_result_from_message(message)),
                     },
                 )
             )
@@ -653,13 +655,43 @@ def _tool_results_to_response_input(tool_results: Sequence[ToolCallResult]) -> R
     response_input: ResponseInputParam = []
     for result in tool_results:
         response_input.append(
-            {
-                "type": "function_call_output",
-                "call_id": result.call_id,
-                "output": result.output,
-            }
+            cast(
+                ResponseInputItemParam,
+                {
+                    "type": "function_call_output",
+                    "call_id": result.call_id,
+                    "output": responses_tool_output(result),
+                },
+            )
         )
     return response_input
+
+
+def responses_tool_output(result: ToolCallResult) -> str | list[dict[str, object]]:
+    """Encode a tool result's ``function_call_output.output`` for the Responses API.
+
+    Shared with the Codex adapter. A result without images keeps the plain string
+    output; one with images becomes its text followed by ``input_image`` parts, or
+    placeholder ``input_text`` parts for images whose bytes are absent.
+
+    Args:
+        result (ToolCallResult): The result to encode.
+
+    Returns:
+        str | list[dict[str, object]]: The output string, or the output parts.
+    """
+
+    if not result.images:
+        return result.output
+    parts: list[dict[str, object]] = []
+    if result.output:
+        parts.append({"type": "input_text", "text": result.output})
+    for image, data in tool_result_image_inputs(result):
+        if data is None:
+            parts.append({"type": "input_text", "text": image_placeholder_text(image)})
+        else:
+            parts.append({"type": "input_image", "image_url": image_data_url(image, data)})
+    return parts
 
 
 def _web_search_from_openai(item: ResponseFunctionWebSearch) -> ProviderWebSearch:
