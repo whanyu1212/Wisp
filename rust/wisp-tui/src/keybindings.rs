@@ -31,10 +31,11 @@ pub(crate) enum Action {
     TogglePanel,
     FocusPanel,
     SessionTree,
+    ExternalEditor,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 17] = [
+    pub(crate) const ALL: [Self; 18] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -52,6 +53,7 @@ impl Action {
         Self::TogglePanel,
         Self::FocusPanel,
         Self::SessionTree,
+        Self::ExternalEditor,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -64,6 +66,7 @@ impl Action {
             Self::TogglePanel => "panel.toggle",
             Self::FocusPanel => "panel.focus",
             Self::SessionTree => "session.tree",
+            Self::ExternalEditor => "prompt.external_editor",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -86,6 +89,7 @@ impl Action {
             Self::TogglePanel => "Show or hide the side panel",
             Self::FocusPanel => "Focus the side panel (Esc returns to the composer)",
             Self::SessionTree => "Open the session tree to switch branches (/tree)",
+            Self::ExternalEditor => "Edit the draft in $VISUAL or $EDITOR",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",
@@ -253,6 +257,11 @@ impl Default for Bindings {
             KeyCode::Char('t'),
             KeyModifiers::CONTROL,
             "Ctrl+T",
+        )];
+        chords[ExternalEditor.index()] = vec![Chord::exact(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+            "Ctrl+O",
         )];
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
         chords[FocusPanel.index()] = vec![Chord::exact(KeyCode::F(8), KeyModifiers::NONE, "F8")];
@@ -673,6 +682,12 @@ mod tests {
                 KeyCode::Char('t'),
                 KeyModifiers::CONTROL,
                 "Ctrl+T",
+            ),
+            (
+                Action::ExternalEditor,
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL,
+                "Ctrl+O",
             ),
             (Action::Browse, KeyCode::F(6), KeyModifiers::NONE, "F6"),
             (Action::PageUp, KeyCode::PageUp, KeyModifiers::NONE, "PgUp"),
