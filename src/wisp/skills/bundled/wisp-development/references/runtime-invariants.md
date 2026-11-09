@@ -35,7 +35,7 @@ Later slices must preserve:
   either one start → deltas/tool calls → one completed/failed, or a startless
   `ProviderResponseFailed` when the request never opened. OpenAI's
   request-creation path can yield that failure with no `ProviderResponseStarted`;
-  `_ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
+  `ProviderResponseLifecycle.complete()` accepts it. Deltas, tool calls, and
   successful completion still require a prior start.
 - Tool-call IDs are unique within one response: `ProviderResponseLifecycle`
   rejects a repeat as `ProviderProtocolError` before any call runs. IDs may be

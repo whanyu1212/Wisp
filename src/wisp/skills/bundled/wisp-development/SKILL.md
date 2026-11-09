@@ -5,7 +5,7 @@ license: MIT
 compatibility: Wisp source checkouts and installed wisp-ai packages.
 metadata:
   author: Wisp
-  version: "1.5"
+  version: "1.6"
 ---
 
 # Wisp Development
@@ -37,10 +37,10 @@ results for its current head commit.
 
 Load only the supporting resource needed for the task:
 
-- `references/architecture.md` — layers, events, persistence, and frontend boundaries.
+- `references/architecture.md` — layers, where code lives, events, persistence, and frontend boundaries.
 - `references/runtime-invariants.md` — compatibility contracts vs incidental internals for the agent loop and harness.
-- `references/extension-api.md` — currently implemented extension registration and limitations.
-- `references/safety.md` — trust, protected paths, approvals, and extension constraints.
+- `references/extension-api.md` — extension registration, MCP servers, and current limitations.
+- `references/safety.md` — trust, approvals and modes, protected paths, stale writes, and extension constraints.
 - `references/authoring.md` — source-checkout and installed-package workflows.
 - `references/verification.md` — deterministic tests and release-quality checks.
 

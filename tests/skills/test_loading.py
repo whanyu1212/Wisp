@@ -103,7 +103,7 @@ def test_bundled_wisp_guidance_tracks_runtime_and_renderer_contracts(tmp_path: P
 
     development_entry = catalog.get("wisp-development")
     assert development_entry is not None
-    assert dict(development_entry.metadata)["version"] == "1.5"
+    assert dict(development_entry.metadata)["version"] == "1.6"
     for method in (
         "register_provider",
         "register_provider_factory",

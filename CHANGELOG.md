@@ -88,6 +88,13 @@ this policy.
   Polls of started processes and timeouts keep showing the end. The result's `stdout` and `stderr`
   data fields and the `ToolResultReady` event are unchanged.
 
+### Skills
+
+- The bundled `wisp-development` skill, now version 1.6, covers MCP servers (user-only settings,
+  default `command` safety, on-demand exposure, and confirmed proposals), the `ask`/`yolo`
+  permission modes and plan mode, the stale-write check, the full set of always-protected files,
+  and where each layer's code lives. It also names `ProviderResponseLifecycle` by its current name.
+
 <!-- Keeps links to the pre-release "0.6.1 — Unreleased" heading working. -->
 <a id="061--unreleased"></a>
 
