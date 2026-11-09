@@ -120,7 +120,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use terminal::{FrameBackend, PanicHookGuard, TerminalGuard};
-use theme::Palette;
+use theme::{MotionMode, Palette};
 use theme_picker::{ThemePicker, ThemePickerAction};
 use theme_preferences::{ThemePreferences, ThemeSelection};
 use thiserror::Error;
@@ -603,6 +603,9 @@ struct LiveUi {
     notice: Option<String>,
     render_pending: bool,
     activity_frame: u8,
+    /// Tool cards whose call finished lately, each with the activity frame it finished
+    /// on, which glow until they fade.
+    finished_cards: Vec<(TranscriptEntryId, u8)>,
     /// The command whose run the working row times, and when it was first drawn.
     activity_clock: Option<(String, std::time::Instant)>,
     /// The footer notice as first drawn, and when, which paces its ticker.
@@ -673,6 +676,7 @@ impl Default for LiveUi {
             notice: None,
             render_pending: true,
             activity_frame: 0,
+            finished_cards: Vec::new(),
             activity_clock: None,
             notice_clock: None,
             notice_scrolling: false,
@@ -710,6 +714,7 @@ impl LiveUi {
         self.mouse_frame = None;
         self.transcript_selection = None;
         self.transcript_viewport = TranscriptViewport::default();
+        self.finished_cards.clear();
         self.transcript_row_cache = TranscriptRowCache::default();
         self.pending_history_navigation = None;
         self.detail_view = DetailView::default();
@@ -1383,7 +1388,16 @@ impl LiveUi {
         );
         let transcript_generation = self.state.transcript.generation();
         let previous_decision = self.current_decision_context();
+        let finished_call = match &action {
+            UiAction::BackendEvent(BackendEvent::ToolResult(result)) => {
+                Some(result.call_id.clone())
+            }
+            _ => None,
+        };
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if let Some(call_id) = finished_call {
+            self.note_finished_card(&call_id);
+        }
         // The reducer can reject a selection report before its terminal event.
         // Follow the authoritative phase exit, not a particular wire event; a
         // committed selection instead replaces the transcript and closes the picker.
@@ -1774,7 +1788,7 @@ impl LiveUi {
         }
         let activity_elapsed = self.activity_elapsed();
         let notice_shown_for = self.notice_shown_for();
-        let decision_pulse = self.decision_pulse();
+        let motion_mode = self.motion_mode();
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
@@ -1817,7 +1831,10 @@ impl LiveUi {
                 &self.bindings,
                 self.startup_logo,
                 self.decision_choice,
-                decision_pulse,
+                ui::Motion {
+                    mode: motion_mode,
+                    finished: &self.finished_cards,
+                },
                 activity_elapsed,
                 Some(&self.side_panel),
             );
@@ -2122,18 +2139,50 @@ impl LiveUi {
                 // The side panel times how long an approval has waited.
                 || (self.state.view_status == ViewStatus::WaitingForApproval
                     && self.state.side_panel_visible)
-                || (decision_pending && self.decision_pulse()))
+                || (decision_pending && self.decision_pulse())
+                // A finished card's glow fades on its own, even after the run ends.
+                || !self.finished_cards.is_empty())
     }
 
-    /// Whether a pending decision's border breathes. It needs truecolor for a smooth
-    /// blend, colour at all, and motion left on; otherwise the border stays solid. It
-    /// rests while the terminal is in the background, where nobody sees it and its
-    /// redraws would only stream output.
+    /// How live indicators move. Motion needs colour and to be left on, and it rests
+    /// while the terminal is in the background, where nobody sees it and its redraws
+    /// would only stream output. A smooth blend needs truecolor; other depths step.
+    fn motion_mode(&self) -> MotionMode {
+        if !self.motion_allowed || self.no_color || self.attention.focus_lost() {
+            MotionMode::Still
+        } else if self.color_depth == ColorDepth::TrueColor {
+            MotionMode::Smooth
+        } else {
+            MotionMode::Stepped
+        }
+    }
+
+    /// Whether a pending decision's border breathes, which needs a smooth blend;
+    /// otherwise the border stays solid.
     fn decision_pulse(&self) -> bool {
-        self.motion_allowed
-            && !self.no_color
-            && self.color_depth == ColorDepth::TrueColor
-            && !self.attention.focus_lost()
+        self.motion_mode() == MotionMode::Smooth
+    }
+
+    /// Lets the card for `call_id` glow if its call just finished well. An error or a
+    /// denial already shows in its own colour. A glow needs a smooth blend over a known
+    /// background, and one that could not show would only keep the tick running.
+    fn note_finished_card(&mut self, call_id: &str) {
+        if self.palette().finish_glow(self.motion_mode(), 0).is_none() {
+            return;
+        }
+        let Some(entry_id) = self.state.transcript.tool_entry_for_call(call_id) else {
+            return;
+        };
+        let done = self
+            .state
+            .transcript
+            .entry(entry_id)
+            .and_then(|entry| entry.tool_card())
+            .is_some_and(|card| card.status == tool_cards::ToolStatus::Done);
+        if done {
+            self.finished_cards.retain(|(id, _)| *id != entry_id);
+            self.finished_cards.push((entry_id, self.activity_frame));
+        }
     }
 
     /// How long the current command has run, for the working row. The clock restarts
@@ -2202,6 +2251,9 @@ impl LiveUi {
             return false;
         }
         self.activity_frame = self.activity_frame.wrapping_add(1);
+        let frame = self.activity_frame;
+        self.finished_cards
+            .retain(|(_, finished)| frame.wrapping_sub(*finished) < theme::FINISH_GLOW_FRAMES);
         self.render_pending = true;
         true
     }

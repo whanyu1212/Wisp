@@ -1544,7 +1544,7 @@ mod tests {
                     &Bindings::default(),
                     LogoChoice::AdalBraille,
                     None,
-                    false,
+                    ui::Motion::default(),
                     None,
                     Some(panel),
                 );

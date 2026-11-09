@@ -907,3 +907,61 @@ fn breathing_cycle() {
     assert!(distance(palette.breathing(warning, 4)) > distance(quietest));
     assert!(distance(warning) > distance(palette.breathing(warning, 4)));
 }
+
+#[test]
+fn breathe_by_motion() {
+    use theme::MotionMode::{Smooth, Stepped, Still};
+    let palette = theme::default_theme().palette(false);
+    let style = Style::default().fg(palette.secondary);
+    // Smooth motion blends the colour toward the background and back.
+    assert_eq!(palette.breathe(style, Smooth, 0), style);
+    let quietest = palette.breathe(style, Smooth, 8);
+    assert_ne!(quietest.fg, style.fg);
+    assert_eq!(quietest.add_modifier, Modifier::empty());
+    // Still motion never changes the style.
+    for frame in [0, 4, 8, 12] {
+        assert_eq!(palette.breathe(style, Still, frame), style);
+    }
+    // Stepped motion keeps the colour and steps the weight: bold at the peak, plain
+    // between, dim at the trough.
+    let stepped = [0, 4, 8].map(|frame| palette.breathe(style, Stepped, frame));
+    assert!(stepped.iter().all(|stepped| stepped.fg == style.fg));
+    assert_eq!(stepped[0], style.add_modifier(Modifier::BOLD));
+    assert_eq!(stepped[1], style);
+    assert_eq!(stepped[2], style.add_modifier(Modifier::DIM));
+    // A theme on the terminal's own background has no backdrop to blend toward.
+    let glass = theme::resolve("glass").unwrap().palette(false);
+    let style = Style::default().fg(glass.secondary);
+    assert_eq!(
+        glass.breathe(style, Smooth, 8),
+        style.add_modifier(Modifier::DIM)
+    );
+    assert_eq!(glass.finish_glow(Smooth, 0), None);
+}
+
+#[test]
+fn finish_glow_fades() {
+    use theme::{FINISH_GLOW_FRAMES, MotionMode};
+    let palette = theme::default_theme().palette(false);
+    let glows: Vec<_> = (0..FINISH_GLOW_FRAMES)
+        .map(|age| palette.finish_glow(MotionMode::Smooth, age).unwrap())
+        .collect();
+    let distance = |color| match (color, palette.background) {
+        (Color::Rgb(r, g, b), Color::Rgb(br, bg, bb)) => {
+            u32::from(r.abs_diff(br)) + u32::from(g.abs_diff(bg)) + u32::from(b.abs_diff(bb))
+        }
+        _ => panic!("RGB palette"),
+    };
+    // Each frame is closer to the background than the last, and then it is gone.
+    assert!(
+        glows
+            .windows(2)
+            .all(|pair| distance(pair[0]) > distance(pair[1]))
+    );
+    assert_eq!(
+        palette.finish_glow(MotionMode::Smooth, FINISH_GLOW_FRAMES),
+        None
+    );
+    assert_eq!(palette.finish_glow(MotionMode::Stepped, 0), None);
+    assert_eq!(palette.finish_glow(MotionMode::Still, 0), None);
+}
